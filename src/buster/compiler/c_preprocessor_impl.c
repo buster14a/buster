@@ -143,6 +143,9 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
     }
 }
 
+// The line marker's note that a location in range `range` is in (#1954), defined below; the history's include stacks
+// read it.
+static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location);
 #include "buster/compiler/c_preprocessor_history_impl.c"
 
 // Room for `more` tokens in a stack, or a fatal error.

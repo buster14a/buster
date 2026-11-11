@@ -1752,7 +1752,6 @@ struct PPDiagnosticNote
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
-static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location);
 
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
 
