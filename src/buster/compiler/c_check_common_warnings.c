@@ -10027,7 +10027,7 @@ static void check_common_type_safety(const Parser* parser, Preprocessor* pp, con
                 // The argument's type as written where it is the argument's own (its spelling's typedef), its conversion's
                 // canonical one otherwise; the tag's as its attribute names it.
                 const TypeId shown = stripped || conversion.type == 0 ? source : argument;
-                const uint32_t spelling = shown == source ? check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
+                const uint32_t spelling = shown == source ? check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
                 const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, shown, spelling);
                 const String8 wanted = layout ? (String8){ "", 0 } : check_common_type_text(parser, pp, input, types, spell, scratch, required, datatype->spelling);
                 const char* message = layout ? check_warning_text(scratch, "argument type %.*s doesn't match specified '%.*s' type tag ", (int)actual.length, actual.pointer,
