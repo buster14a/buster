@@ -266,12 +266,13 @@ build/costs --self-test --root .
   without the line, from its caller's one configuration), and its shard from its
   report, which must be the item's; a candidate that took no item has no
   report, and `costs.sh` skips it.
-- **Seed.** A row without logs yet, such as the vector sanitizer rows (#2033)
-  before their first full run, takes another row's measurements: `build/costs
+- **Seed.** A row without logs yet takes another row's measurements: `build/costs
   seed --tests tools/ci/correctness.tests --costs tools/ci/costs --row
   vector-address-O3 --from native-address-O3`. Its `#: seeded ROW` line, first
   among the provenance lines, says whose they are; a collect over the row's own
-  logs replaces the table, and a seeded table seeds no other.
+  logs replaces the table, and a seeded table seeds no other. The vector
+  sanitizer rows (#2033) ran their first full run (43027989712) on the native
+  rows' seeded tables, and their tables are that run's draws' logs since.
 - **Refresh.** A pull request that adds, renames or removes a heading runs
   `build/costs refresh --tests tools/ci/correctness.tests --costs
   tools/ci/costs`. It keeps every measurement, estimates the new commands and
