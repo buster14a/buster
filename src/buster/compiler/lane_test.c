@@ -78,8 +78,13 @@
 //     of several refused where they would create a thread; and a child forked
 //     from lane 0, which forgets the session and runs as one lane. Then sessions whose third lane fails to start
 //     (LaneProcess.fail_at), eagerly and lazily, and a lazy one whose second does: the lanes created joined, the flow on
-//     lane 0 alone; sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eagerly, lazily and lazily with
-//     a flow of rounds that lane 0 begins before it settles, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
+//     lane 0 alone; on-demand sessions (BUSTER_LANE_SESSION_ON_DEMAND, #1444) of 3 and 8 lanes, whose lane 0 runs on the
+//     capacity with no lane created until it starts them (lane_session_start, which a second call and a call after the
+//     session settled ignore): one that starts them, its flow's rounds on every lane, one that settles first, which
+//     creates no thread and runs its rounds on lane 0 alone, asking for one lane, and ones whose lane 1 and third lane
+//     fail as it starts them, the lanes created joined, the rounds on lane 0 alone; sessions of a lane per core at most
+//     (BUSTER_LANE_SESSION_PER_CORE), eagerly, lazily, lazily with a flow of rounds that lane 0 begins before it settles
+//     and on demand, started in such a flow, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
 //     of this process's CPUs in pairs, in fours and all one core: as many lanes as the capacity and the cores allow, each
 //     round on them, each lane's lane_session_asked as many, a lazy session's lane 1 created though it runs on one,
 //     where one core leaves it no other lane; a lazy session of three lanes on one CPU, whose flow of rounds lane 0 begins
@@ -3258,6 +3263,11 @@ struct LaneSessionTest
     // Whether the lanes of a narrowed group or a round must read their group as sharing the CPUs they run on
     // (LaneGroup.shares_cpus), as the session's lanes do: true for a session of more lanes than the CPUs it may run on.
     bool shares_cpus;
+    // An on-demand session's (BUSTER_LANE_SESSION_ON_DEMAND, lane_test_session_demand_flow): its capacity, the threads
+    // the process had created as it started, and whether lane 0 starts its lanes before it settles.
+    uint32_t capacity;
+    uint64_t threads_before;
+    bool starts;
 };
 
 // The thread that handled the sessions check's signal.
@@ -3370,6 +3380,62 @@ static void lane_test_session_early_flow(void* argument)
             failures += test->round_calls[0][lane] != (lane < test->expected ? 1u : 0u) ? 1 : 0;
         }
         lane_flow_end(&test->flow);
+    }
+    else
+    {
+        void* operation = NULL;
+        for (uint32_t kind = lane_flow_next(&test->flow, &operation); kind != 0; kind = lane_flow_next(&test->flow, &operation))
+        {
+            if (operation != NULL)
+            {
+                lane_test_session_round(operation, kind);
+            }
+            lane_widen();
+        }
+    }
+    failures += lane_count() != test->expected || lane_session_asked() != test->asked ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[index] += 1;
+        test->failures[index] += failures;
+    }
+}
+
+// An on-demand session's flow (BUSTER_LANE_SESSION_ON_DEMAND, #1444): lane 0 runs on the capacity with no lane created,
+// begins a flow of rounds and, where the test says, starts its lanes (lane_session_start, twice: the second does
+// nothing), after which its two rounds run on the lanes the session settles at; where it doesn't, its first round
+// settles the session on lane 0 alone, which asks for one lane, and both rounds run there. A start after the session
+// settled does nothing. The others, which exist only once lane 0 starts them, follow its rounds.
+static void lane_test_session_demand_flow(void* argument)
+{
+    LaneSessionTest* test = argument;
+    const uint32_t index = lane_index();
+    uint64_t failures = 0;
+    if (index == 0)
+    {
+        failures += lane_count() != test->capacity || lane_process.threads_created != test->threads_before ? 1 : 0;
+        lane_flow_begin(&test->flow);
+        if (test->starts)
+        {
+            lane_session_start();
+            lane_session_start();
+        }
+        memset(test->round_calls, 0, sizeof(test->round_calls));
+        for (uint32_t kind = 1; kind <= 2; kind += 1)
+        {
+            lane_flow_round_begin(&test->flow, kind, test, BUSTER_LANE_TEST_MAX_LANES + 9);
+            lane_test_session_round(test, kind);
+            lane_flow_round_end(&test->flow);
+            lane_session_start();
+        }
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            const uint32_t once = lane < test->expected ? 1u : 0u;
+            failures += test->round_calls[0][lane] != once || test->round_calls[1][lane] != once ? 1 : 0;
+        }
+        lane_flow_end(&test->flow);
+        // No lane started after the session settled.
+        failures += !test->starts && lane_process.threads_created != test->threads_before ? 1 : 0;
     }
     else
     {
@@ -3705,10 +3771,45 @@ static uint64_t lane_test_sessions(void)
         const bool restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
         failures += worker != 0 || failed.calls[0] != 0 || failed.calls[1] != 0 || !restored || !lane_test_threads_stopped(threads_before) ? 1 : 0;
     }
-    // Sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eager, lazy and lazy with a flow begun before
-    // lane 0 settles, of 2 and 8 lanes, on test topologies of this process's CPUs in pairs, in fours and all in one core:
-    // as many lanes as the capacity and the cores allow, asked for as many, and a lazy session's lane 1 created even
-    // where it runs on one.
+    // On-demand sessions (BUSTER_LANE_SESSION_ON_DEMAND, #1444) of 3 and 8 lanes: one whose lane 0 starts its lanes, each
+    // lane running the flow once and its rounds on every lane, and one whose lane 0 settles first, which creates no thread
+    // and runs its flow on lane 0 alone, asking for one lane; then ones whose lane 1, and whose third lane, fail to start
+    // as lane 0 starts them: the lanes created joined, the flow on lane 0 alone, asking for the capacity.
+    static const uint32_t demand[] = { 3, BUSTER_LANE_TEST_MAX_LANES };
+    static const uint32_t demand_failing[] = { 1, 3 };
+    for (uint32_t i = 0; handled && i < 2 * BUSTER_ARRAY_LENGTH(demand) + BUSTER_ARRAY_LENGTH(demand_failing); i += 1)
+    {
+        const bool failing_start = i >= 2 * BUSTER_ARRAY_LENGTH(demand);
+        const uint32_t capacity = failing_start ? BUSTER_LANE_TEST_MAX_LANES : demand[i / 2];
+        const bool starts = failing_start || i % 2 == 0;
+        const uint32_t fail_at = failing_start ? demand_failing[i - 2 * BUSTER_ARRAY_LENGTH(demand)] : UINT32_MAX;
+        const uint32_t expected = starts && !failing_start ? capacity : 1;
+        LaneSessionTest test = {
+            .caller = caller,
+            .expected = expected,
+            .asked = starts ? capacity : 1,
+            .shares_cpus = lane_group_shares_cpus(expected, false),
+            .capacity = capacity,
+            .threads_before = lane_process.threads_created,
+            .starts = starts,
+        };
+        lane_process.fail_at = fail_at;
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_ON_DEMAND;
+        const uint32_t ran = lane_session_run(&session, capacity, 0, lane_test_session_demand_flow, &test, flags);
+        lane_process.fail_at = UINT32_MAX;
+        const uint64_t threads = failing_start ? fail_at - 1 : starts ? capacity - 1 : 0;
+        failures += ran != expected || lane_process.threads_created != test.threads_before + threads ? 1 : 0;
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += test.calls[lane] != (lane < expected ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+        }
+        failures += lane_session_current() != 0 ? 1 : 0;
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    }
+    // Sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eager, lazy, lazy with a flow begun before lane
+    // 0 settles and on demand, its lanes started in such a flow, of 2 and 8 lanes, on test topologies of this process's
+    // CPUs in pairs, in fours and all in one core: as many lanes as the capacity and the cores allow, asked for as many,
+    // and a lazy session's lane 1 created even where it runs on one.
     uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0;
     failures += known ? 0 : 1;
@@ -3722,21 +3823,26 @@ static uint64_t lane_test_sessions(void)
         failures += cores != 0 ? 0 : 1;
         lane_process.topology = root;
         static const uint32_t per_core[] = { 2, BUSTER_LANE_TEST_MAX_LANES };
-        for (uint32_t i = 0; cores != 0 && i < 3 * BUSTER_ARRAY_LENGTH(per_core); i += 1)
+        for (uint32_t i = 0; cores != 0 && i < 4 * BUSTER_ARRAY_LENGTH(per_core); i += 1)
         {
-            const uint32_t capacity = per_core[i / 3];
-            const bool lazy = i % 3 != 0;
-            const bool early = i % 3 == 2;
+            const uint32_t capacity = per_core[i / 4];
+            const bool lazy = i % 4 != 0;
+            const bool early = i % 4 == 2;
+            const bool on_demand = i % 4 == 3;
             const uint32_t expected = cores < capacity ? cores : capacity;
             LaneSessionTest test = {
                 .caller = caller,
                 .expected = expected,
                 .asked = expected,
                 .shares_cpus = lane_group_shares_cpus(expected, false),
+                .capacity = capacity,
+                .threads_before = lane_process.threads_created,
+                .starts = true,
             };
             const uint64_t created = lane_process.threads_created;
-            const uint32_t flags = BUSTER_LANE_SESSION_PER_CORE | (lazy ? BUSTER_LANE_SESSION_LAZY : 0);
-            const uint32_t ran = lane_session_run(&session, capacity, 0, early ? lane_test_session_early_flow : lane_test_session_main, &test, flags);
+            const uint32_t flags = BUSTER_LANE_SESSION_PER_CORE | (lazy ? BUSTER_LANE_SESSION_LAZY : 0) | (on_demand ? BUSTER_LANE_SESSION_ON_DEMAND : 0);
+            void (*flow)(void* argument) = on_demand ? lane_test_session_demand_flow : early ? lane_test_session_early_flow : lane_test_session_main;
+            const uint32_t ran = lane_session_run(&session, capacity, 0, flow, &test, flags);
             const uint64_t threads = lazy && expected == 1 ? 1 : expected - 1;
             failures += ran != expected || lane_process.threads_created != created + threads ? 1 : 0;
             for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
@@ -3810,8 +3916,9 @@ static uint64_t lane_test_sessions(void)
         sigaction(SIGUSR1, &previous_action, 0);
     }
     failures += lane_test_unwatch() ? 0 : 1;
-    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies, one of three "
-           "lanes on one CPU whose flow began before lane 0 settled and one parked at its end, %lu wrong\n",
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, four on demand, started and not, and two whose lanes "
+           "didn't start on demand, twenty-four of a lane per core on three topologies, one of three lanes on one CPU whose flow began before lane 0 settled "
+           "and one parked at its end, %lu wrong\n",
            BUSTER_LANE_TEST_MAX_LANES, (unsigned long)failures);
     return failures;
 }

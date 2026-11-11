@@ -26,10 +26,11 @@
 //
 // The compiler's commands (the C driver's and link-foreign's) run on a session (#905): the process's lanes, created once,
 // right after the command's options and before any of its inputs is read, the calling thread lane 0, with as many lanes
-// as the command may take (one creates no thread). Every lane runs the command's flow (lane_session_run's entry), lane
-// 0 its serial parts while the others park (lane_park), and each wide part on as many lanes as it pays for and the
-// worker budget gives (lane_narrow), so that nothing in the command creates or joins a thread after its start. Each
-// part declares its interface first, then defines it. In this order:
+// as the command may take (one creates no thread), or for the C driver's one source file once it is preprocessed, if it
+// is large enough for a second lane to pay (#1444, BUSTER_LANE_SESSION_ON_DEMAND). Every lane runs the command's flow
+// (lane_session_run's entry), lane 0 its serial parts while the others park (lane_park), and each wide part on as many
+// lanes as it pays for and the worker budget gives (lane_narrow), so that nothing in the command creates or joins a
+// thread after its start. Each part declares its interface first, then defines it. In this order:
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves inaccessible address space up front, committing its prefix as pushes need it. A
 //     push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated. arena_poison
@@ -46,8 +47,9 @@
 //   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
 //     team or a session, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
-//   - Sessions: lane_session_run, lane_session_current, lane_session_settle, and a command's flow of rounds: LaneFlow,
-//     lane_flow_begin, lane_flow_lanes, lane_flow_round_begin, lane_flow_round_end, lane_flow_next and lane_flow_end.
+//   - Sessions: lane_session_run, lane_session_start, lane_session_current, lane_session_settle, and a command's flow of
+//     rounds: LaneFlow, lane_flow_begin, lane_flow_lanes, lane_flow_round_begin, lane_flow_round_end, lane_flow_next and
+//     lane_flow_end.
 //
 // The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
@@ -1463,12 +1465,14 @@ struct LaneSession
     void* argument;
     // Whether the lanes stay parked when the flow ends, for the process's exit to end (a terminal command's), rather than
     // being joined; whether lane 1 creates the lanes after it while lane 0 runs (BUSTER_LANE_SESSION_LAZY); whether the
-    // session runs on a lane per core at most (BUSTER_LANE_SESSION_PER_CORE); and whether lane 0 knows how its lanes'
-    // start went (lane_session_settle), which only lane 0 reads and writes.
+    // session runs on a lane per core at most (BUSTER_LANE_SESSION_PER_CORE); whether lane 0 knows how its lanes' start
+    // went (lane_session_settle), and whether it has yet to start them (BUSTER_LANE_SESSION_ON_DEMAND,
+    // lane_session_start), which only lane 0 reads and writes: no other lane exists until it starts them.
     bool park_at_end;
     bool lazy;
     bool per_core;
     bool settled;
+    bool pending;
     bool has_cpus;
     // Lane 0's thread, the one that settles.
     pthread_t owner;
@@ -2109,31 +2113,44 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 // list, lane 0 creates every lane before the flow. PER_CORE: the session asks for no more lanes than the cores of the
 // CPUs the process may run on (lane_core_count), as two lanes on one core's SMT siblings share its pipes, caches and
 // power: lazily, from 2 lanes on, lane 1 counts them while lane 0 runs, before it creates the lanes after it, and an
-// eager session's lane 0 counts them before it creates any. Ignored with a CPU list.
+// eager session's lane 0 counts them before it creates any. Ignored with a CPU list. ON_DEMAND, of a lazy session
+// (#1444): lane 0 creates no lane as the session starts, but as it calls lane_session_start, from which the lanes start
+// as LAZY's do. Lane 0 runs on the capacity until then, as LAZY's does until it settles, and must start them before it
+// first settles or asks for lanes (lane_session_settle, lane_session_asked), which otherwise leave the session on lane 0
+// alone, asking for one lane: a flow that doesn't call it creates no thread, for a command whose input may not pay for
+// its lanes (the C driver's one source file).
 #define BUSTER_LANE_SESSION_PARK_AT_END 1u
 #define BUSTER_LANE_SESSION_LAZY 2u
 #define BUSTER_LANE_SESSION_PER_CORE 4u
 #define BUSTER_LANE_SESSION_REQUIRE_START 8u
+#define BUSTER_LANE_SESSION_ON_DEMAND 16u
 
 // Runs entry(argument) on every lane of a new session of `capacity` lanes (#905), the process's outer flow: the calling
 // thread is lane 0, and the session creates capacity - 1 threads (none for one; with BUSTER_LANE_SESSION_PER_CORE, one
 // fewer than the lanes it asks for, but lazily lane 1 where one core leaves it none) with the asynchronous signals
 // blocked, so that a signal sent to the process reaches lane 0, and an explicit stack size. With `cpus`, each lane pins
 // itself to its CPU, and lane 0 waits for the pins; without, it waits for nothing but each thread's creation, or with
-// BUSTER_LANE_SESSION_LAZY for lane 1's alone. A failed creation or pin cancels every lane created, which the session
-// joins, and runs the flow on lane 0 alone: one lane, never a retry. Returns how many lanes ran it (0 if a session of
-// the calling thread's is live: sessions don't nest). With REQUIRE_START, a failed start returns 0 without running the
-// flow, rather than falling back to one lane. The lanes are joined when the flow ends, but with
-// BUSTER_LANE_SESSION_PARK_AT_END (`flags`).
+// BUSTER_LANE_SESSION_LAZY for lane 1's alone, and with BUSTER_LANE_SESSION_ON_DEMAND for none until lane_session_start.
+// A failed creation or pin cancels every lane created, which the session joins, and runs the flow on lane 0 alone: one
+// lane, never a retry. Returns how many lanes ran it (0 if a session of the calling thread's is live: sessions don't
+// nest). With REQUIRE_START, a failed start returns 0 without running the flow, rather than falling back to one lane. The
+// lanes are joined when the flow ends, but with BUSTER_LANE_SESSION_PARK_AT_END (`flags`).
 static __attribute__((unused)) uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument),
                                                          void* argument, uint32_t flags);
+// On lane 0 of an on-demand session (BUSTER_LANE_SESSION_ON_DEMAND) that it hasn't settled or asked for lanes yet, starts
+// its lanes as a lazy session's start does: lane 0 creates lane 1, which counts the cores, creates the lanes after it and
+// opens the gate while lane 0 goes on, which learns how their start went as it settles (lane_session_settle). Its first
+// call alone does this; elsewhere, and after, it does nothing.
+static __attribute__((unused)) void lane_session_start(void);
 // The lanes the calling thread's session runs on: for lane 0 of a lazy session, once lane 1 has said how their start
 // went, which it waits for the first time; lane 0's lane in the session's group then counts them, and on a failed start
-// becomes a lane alone, the session's count 1. 1 outside a session.
+// becomes a lane alone, the session's count 1. 1 outside a session, and for an on-demand session that lane 0 settles
+// before it starts its lanes, which then stays on lane 0 alone.
 static __attribute__((unused)) uint32_t lane_session_settle(void);
 // The lanes the calling thread's session asks for: its capacity, at most one per core with BUSTER_LANE_SESSION_PER_CORE.
 // Lane 0 of a lazy session waits only for lane 1 to have counted the cores, not for their lanes' start
-// (lane_session_settle), which may still leave it on one. 1 outside a session.
+// (lane_session_settle), which may still leave it on one. 1 outside a session, and for an on-demand session that lane 0
+// asks before it starts its lanes, which then stays on lane 0 alone.
 static __attribute__((unused)) uint32_t lane_session_asked(void);
 // The cores of the CPUs in `mask`, `words` 64-bit words of a sched_getaffinity mask, at least 1: each CPU's core is the
 // set of its siblings that `topology`'s cpuN/topology/core_cpus_list gives ("0,8", "0-1" or "5", sysfs' format), read
@@ -2146,6 +2163,17 @@ static __attribute__((unused)) uint32_t lane_core_count(void);
 // The session the calling thread is a lane of, or 0. A child forked from a lane of a session forgets it here, and runs as
 // one lane: its other lanes don't exist in the child.
 static __attribute__((unused)) LaneSession* lane_session_current(void);
+// A terminal command's exit (#1444), called last before the process exits, by a process that created no thread
+// (LaneProcess.threads_created): the C library's streams flushed and every descriptor closed, it starts a helper, a
+// process that shares the address space and holds nothing else, which ends as soon as the caller has, so that the
+// caller's exit leaves the address space's teardown to it rather than run it before its parent's wait returns. By
+// default only where orphans are reaped (lane_exit_reaped); BUSTER_EXIT_HELPER=1 starts it wherever it can, =0 never.
+// Never in a sanitizer build. What the caller writes after it reaches no descriptor it had.
+static __attribute__((unused)) void lane_exit_helper_start(void);
+// Whether this process's PID namespace reaps orphans, by its PID 1, which takes them where no subreaper does first:
+// whether it blocks, ignores or catches SIGCHLD (/proc/1/stat), as an init that waits does (systemd's signalfd, tini's
+// sigwait, a shell's handler), or the kernel does for it (ignored).
+static __attribute__((unused)) bool lane_exit_reaped(void);
 
 // A command's flow of rounds (#905), which every lane of a session's group runs: lane 0 runs the command alone from
 // lane_flow_begin, and each of its wide parts is a round, which lane 0 announces with its kind (the command's own,
@@ -2707,6 +2735,28 @@ static uint32_t lane_session_create(LaneSession* session, uint32_t first, uint32
     return created;
 }
 
+// lane_session_create's lanes, created with every asynchronous signal blocked, which they keep, so that a signal sent to
+// the process reaches lane 0; the synchronous ones stay as they are, for the handlers of tests that fault on purpose.
+// The calling thread's mask is its own again after.
+static uint32_t lane_session_spawn(LaneSession* session, uint32_t first, uint32_t end)
+{
+    sigset_t blocked;
+    sigset_t previous;
+    sigfillset(&blocked);
+    const int synchronous[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS };
+    for (uint32_t i = 0; i < sizeof(synchronous) / sizeof(synchronous[0]); i += 1)
+    {
+        sigdelset(&blocked, synchronous[i]);
+    }
+    const bool masked = pthread_sigmask(SIG_BLOCK, &blocked, &previous) == 0;
+    const uint32_t created = masked ? lane_session_create(session, first, end) : 0;
+    if (masked)
+    {
+        pthread_sigmask(SIG_SETMASK, &previous, 0);
+    }
+    return created;
+}
+
 // A created lane: it pins itself if asked, waits at the gate until lane 0 (or, in a lazy session, lane 1) knows every
 // lane exists, and runs the flow. A lazy session's lane 1 creates the lanes after it first, and opens the gate: with
 // BUSTER_LANE_SESSION_PER_CORE, once it has counted the cores and published the lanes it asks for, which may leave it
@@ -2778,8 +2828,9 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         session->argument = argument;
         session->park_at_end = (flags & BUSTER_LANE_SESSION_PARK_AT_END) != 0 && !BUSTER_SANITIZER_RESOURCES;
         session->per_core = (flags & BUSTER_LANE_SESSION_PER_CORE) != 0 && cpus == 0 && lanes > 1;
-        // Lazily from 3 lanes, or from 2 counting the cores, which lane 1 then does.
+        // Lazily from 3 lanes, or from 2 counting the cores, which lane 1 then does; on demand, once lane 0 starts them.
         session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && (flags & BUSTER_LANE_SESSION_REQUIRE_START) == 0 && cpus == 0 && (lanes > 2 || session->per_core);
+        session->pending = (flags & BUSTER_LANE_SESSION_ON_DEMAND) != 0 && session->lazy;
         if (session->per_core && !session->lazy)
         {
             const uint32_t cores = lane_core_count();
@@ -2796,27 +2847,12 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         const bool saved = cpus != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
         bool valid = cpus == 0 || (saved && lane_pin(cpus[0]));
         uint32_t created = 1;
-        if (lanes > 1)
+        if (lanes > 1 && !session->pending)
         {
-            // The lanes start with every asynchronous signal blocked, which they keep; the synchronous ones stay as they
-            // are, for the handlers of tests that fault on purpose. Lazily, lane 0 creates lane 1 alone, which creates
-            // the others while lane 0 goes on, and decides the gate.
-            sigset_t blocked;
-            sigset_t previous;
-            sigfillset(&blocked);
-            const int synchronous[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS };
-            for (uint32_t i = 0; i < sizeof(synchronous) / sizeof(synchronous[0]); i += 1)
-            {
-                sigdelset(&blocked, synchronous[i]);
-            }
-            const bool masked = pthread_sigmask(SIG_BLOCK, &blocked, &previous) == 0;
-            // Lazily, the session's count is the lanes asked for until lane 1 opens the gate.
+            // Lazily, lane 0 creates lane 1 alone, which creates the others while lane 0 goes on, and decides the gate;
+            // the session's count is the lanes asked for until lane 1 opens it.
             session->count = lanes;
-            created += masked && valid ? lane_session_create(session, 1, session->lazy ? 2 : lanes) : 0;
-            if (masked)
-            {
-                pthread_sigmask(SIG_SETMASK, &previous, 0);
-            }
+            created += valid ? lane_session_spawn(session, 1, session->lazy ? 2 : lanes) : 0;
             for (uint32_t i = 1; cpus != 0 && i < created; i += 1)
             {
                 lane_wait(&session->starts[i].ready, 0);
@@ -2824,7 +2860,14 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
             }
         }
         bool started = valid && created == lanes;
-        if (session->lazy && created == 2)
+        if (session->pending)
+        {
+            // No lane but lane 0 until it starts them (lane_session_start), which runs on the capacity meanwhile.
+            session->count = 1;
+            session->created = 1;
+            started = true;
+        }
+        else if (session->lazy && created == 2)
         {
             // Lane 1 opens the gate; lane 0 runs on the capacity until it settles (lane_session_settle).
             started = true;
@@ -2863,7 +2906,8 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         {
             entry(argument);
         }
-        // A lazy flow that never met its lanes: they are lane 1's to start, and the session's to end.
+        // A lazy flow that never met its lanes: they are lane 1's to start, and the session's to end; an on-demand one's
+        // that lane 0 never started stays on it alone.
         lane_session_settle();
         thread_context.running = false;
         thread_context.taken = taken;
@@ -2882,6 +2926,33 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
     return result;
 }
 
+// An on-demand session that lane 0 settles or asks before it has started its lanes: it never will, and stays on lane 0
+// alone, which asked for one lane. Lane 0 settles it as a lazy session whose lane 1 didn't start: its gate cancelled, its
+// count 1 and no lane created but lane 0's, as they are until lane_session_start.
+static void lane_session_forgo(LaneSession* session)
+{
+    session->pending = false;
+    session->asked = 1u << 1;
+    lane_publish(&session->gate, BUSTER_LANE_GATE_CANCEL);
+}
+
+static void lane_session_start(void)
+{
+    LaneSession* session = lane_session_current();
+    if (session != 0 && pthread_equal(session->owner, pthread_self()) && session->pending)
+    {
+        session->pending = false;
+        // Lane 1 counts the cores, creates the lanes after it and publishes the count, the lanes it created and the
+        // gate's state (lane_session_thread_main): the session's start, as lane_session_run's lazy one, from here. If it
+        // doesn't start, the session runs on lane 0 alone, which never counted the cores: it asked for its capacity.
+        if (lane_session_spawn(session, 1, 2) == 0)
+        {
+            session->asked = session->capacity << 1;
+            lane_publish(&session->gate, BUSTER_LANE_GATE_CANCEL);
+        }
+    }
+}
+
 static uint32_t lane_session_settle(void)
 {
     LaneSession* session = lane_session_current();
@@ -2889,6 +2960,10 @@ static uint32_t lane_session_settle(void)
     // `settled` is lane 0's alone, which it writes while the other lanes run: they never read it.
     if (session != 0 && pthread_equal(session->owner, pthread_self()) && !session->settled)
     {
+        if (session->pending)
+        {
+            lane_session_forgo(session);
+        }
         // Lane 1 publishes the count and the lanes it created before it opens the gate.
         const bool run = lane_sleep(&session->gate, 0) == BUSTER_LANE_GATE_RUN;
         session->settled = true;
@@ -2913,6 +2988,10 @@ static uint32_t lane_session_settle(void)
 static uint32_t lane_session_asked(void)
 {
     LaneSession* session = lane_session_current();
+    if (session != 0 && pthread_equal(session->owner, pthread_self()) && session->pending)
+    {
+        lane_session_forgo(session);
+    }
     // A lazy session's lane 1 publishes it before it creates the lanes after it, which read it after the gate.
     return session != 0 ? lane_sleep(&session->asked, 0) >> 1 : 1;
 }
@@ -2980,5 +3059,158 @@ static void lane_flow_end(LaneFlow* flow)
     {
         lane_restore(group);
         lane_park_broadcast(0, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A terminal command's exit (#1444)
+//
+// A process tears its address space down in its exit (exit_mmap) before its parent's wait4 returns, unless another task
+// still holds it: on the 9700X 90 µs of a one-line -c's 1.1 ms, 130 µs of a #include <stdio.h> file's. Linux 6.18 leaves
+// it to a kworker when the process has 6 threads or more (measured, not documented), which a command whose session
+// started its lanes has, but not one that runs on lane 0 alone. lane_exit_helper_start gives such a process's teardown to
+// a helper: a process (CLONE_VM without CLONE_THREAD) that shares the address space and nothing else, started as the
+// command exits so that only a process that would tear down in its exit pays for its start. The helper ends with the
+// caller (PR_SET_PDEATHSIG's SIGKILL, or at once if the caller has already gone), and its exit tears the address space
+// down while the caller's parent goes on. Its CPU time moves rather than disappears: it is the helper's, an orphan's
+// that the nearest subreaper or init reaps, outside the caller's resource use.
+//
+// The caller flushes the C library's streams and closes every descriptor first, so that the helper holds none: a
+// reader of the caller's output, or a jobserver, sees its end as the caller exits, not as the helper does. The helper
+// runs on a stack of its own, its signal handlers cleared (CLONE_CLEAR_SIGHAND) and every signal blocked, and makes only
+// raw system calls: the C library's state, the caller's stack and its heap are the caller's. A kernel without clone3,
+// CLONE_CLEAR_SIGHAND or close_range leaves the caller to exit as before.
+//
+// An orphan stays a zombie, a process ID, until its new parent waits for it: a PID 1 that never does (a container's or
+// a virtual machine's agent run as init) would keep one per compile, and a build of tens of thousands of compiles would
+// run out of process IDs. So by default the helper starts only where PID 1 handles SIGCHLD (lane_exit_reaped): about
+// 3 µs, a read of /proc/1/stat. Without a helper, everything happens as before it.
+
+// clone3's arguments, its first version (CLONE_ARGS_SIZE_VER0), and the flags the helper takes: CLONE_VM and
+// CLONE_CLEAR_SIGHAND (Linux 5.5), no exit signal.
+typedef struct LaneExitCloneArguments LaneExitCloneArguments;
+struct LaneExitCloneArguments
+{
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+};
+#define BUSTER_LANE_EXIT_CLONE_VM UINT64_C(0x100)
+#define BUSTER_LANE_EXIT_CLONE_CLEAR_SIGHAND (UINT64_C(1) << 32)
+#define BUSTER_LANE_EXIT_SYS_CLONE3 435
+#define BUSTER_LANE_EXIT_SYS_CLOSE_RANGE 436
+
+// The helper's stack, which only it touches, and its caller's process ID, which the caller writes before it starts it.
+static _Alignas(64) uint8_t lane_exit_stack[4096];
+static pid_t lane_exit_caller;
+
+// A raw system call of up to four arguments, the helper's only way into the kernel.
+static __attribute__((unused)) long lane_exit_syscall(long number, long first, long second, long third, long fourth)
+{
+    long result = number;
+    register long fourth_register __asm__("r10") = fourth;
+    __asm__ volatile("syscall" : "+a"(result) : "D"(first), "S"(second), "d"(third), "r"(fourth_register) : "rcx", "r11", "memory");
+    return result;
+}
+
+// The helper: every signal blocked, it ends with its caller, by the SIGKILL PR_SET_PDEATHSIG sends as the caller exits,
+// or at once where the caller had gone before the request took (its parent no longer the caller).
+static __attribute__((noreturn, unused)) void lane_exit_helper_main(void)
+{
+    const uint64_t blocked = UINT64_MAX;
+    lane_exit_syscall(SYS_rt_sigprocmask, SIG_SETMASK, (long)&blocked, 0, sizeof(blocked));
+    lane_exit_syscall(SYS_prctl, PR_SET_PDEATHSIG, SIGKILL, 0, 0);
+    while (lane_exit_syscall(SYS_getppid, 0, 0, 0, 0) == lane_exit_caller)
+    {
+        lane_exit_syscall(SYS_pause, 0, 0, 0, 0);
+    }
+    while (true)
+    {
+        lane_exit_syscall(SYS_exit, 0, 0, 0, 0);
+    }
+}
+
+// clone3 of `arguments`: in the caller, the helper's process ID or a negative error; the helper starts in `entry`, on the
+// arguments' stack, which it never returns from.
+static __attribute__((unused)) long lane_exit_clone(const LaneExitCloneArguments* arguments, void (*entry)(void))
+{
+    long result = BUSTER_LANE_EXIT_SYS_CLONE3;
+    __asm__ volatile("syscall\n\t"
+                     "testq %%rax, %%rax\n\t"
+                     "jnz 1f\n\t"
+                     "callq *%%rdx\n\t"
+                     "ud2\n"
+                     "1:"
+                     : "+a"(result)
+                     : "D"(arguments), "S"(sizeof(*arguments)), "d"(entry)
+                     : "rcx", "r11", "memory");
+    return result;
+}
+
+// /proc/1/stat's fields 32 to 34, the signals PID 1 blocks, ignores and catches, in decimal, after its command's
+// parenthesis (which may hold spaces) and its state (field 3, a letter).
+static bool lane_exit_reaped(void)
+{
+    char text[1024];
+    const int fd = open("/proc/1/stat", O_RDONLY | O_CLOEXEC);
+    const ssize_t length = fd >= 0 ? read(fd, text, sizeof(text) - 1) : -1;
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    text[length > 0 ? length : 0] = 0;
+    const char* parenthesis = length > 0 ? strrchr(text, ')') : 0;
+    const char* at = parenthesis != 0 ? parenthesis + 1 : 0;
+    uint64_t handled = 0;
+    uint32_t parsed = 0;
+    // Each field from 3 on follows one space: past a number's digits, or for the state, at the next space.
+    for (uint32_t field = 3; at != 0 && *at == ' ' && field <= 34; field += 1)
+    {
+        at += 1;
+        char* after = 0;
+        const unsigned long long value = strtoull(at, &after, 10);
+        const bool number = after != at;
+        handled |= field >= 32 && number ? (uint64_t)value : 0;
+        parsed += field >= 32 && number ? 1 : 0;
+        at = number ? after : strchr(at, ' ');
+    }
+    return parsed == 3 && (handled & (UINT64_C(1) << (SIGCHLD - 1))) != 0;
+}
+
+static void lane_exit_helper_start(void)
+{
+    const char* setting = getenv("BUSTER_EXIT_HELPER");
+    const bool forced = setting != 0 && strcmp(setting, "1") == 0;
+    const bool refused = setting != 0 && strcmp(setting, "0") == 0;
+    const bool wanted = !BUSTER_SANITIZER_RESOURCES && __atomic_load_n(&lane_process.threads_created, __ATOMIC_RELAXED) == 0 && !refused &&
+                        (forced || lane_exit_reaped());
+    if (wanted)
+    {
+        fflush(0);
+        const bool closed = syscall(BUSTER_LANE_EXIT_SYS_CLOSE_RANGE, 0u, ~0u, 0u) == 0;
+        lane_exit_caller = getpid();
+        const LaneExitCloneArguments arguments = {
+            .flags = BUSTER_LANE_EXIT_CLONE_VM | BUSTER_LANE_EXIT_CLONE_CLEAR_SIGHAND,
+            .stack = (uint64_t)(uintptr_t)lane_exit_stack,
+            .stack_size = sizeof(lane_exit_stack),
+        };
+        const long helper = closed ? lane_exit_clone(&arguments, lane_exit_helper_main) : -1;
+        // A test's hook (test-check-lanes): the caller waits this many milliseconds after the helper's start, so that a
+        // reader of its output can see that output end while both still run.
+        const char* pause = helper > 0 ? getenv("BUSTER_TEST_EXIT_HELPER_PAUSE") : 0;
+        const long milliseconds = pause != 0 ? strtol(pause, 0, 10) : 0;
+        if (milliseconds > 0)
+        {
+            const struct timespec wait = {
+                .tv_sec = milliseconds / 1000,
+                .tv_nsec = (milliseconds % 1000) * 1000000,
+            };
+            nanosleep(&wait, 0);
+        }
     }
 }
