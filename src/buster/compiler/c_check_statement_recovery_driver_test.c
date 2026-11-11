@@ -220,6 +220,17 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
         "void n(void) { P: Q: P: ; goto Q; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // A file-scope array initialized by a compound literal whose body holds a value that is no constant (#1812): the
+        // literal's error once at its place, and no mismatch of the array's type with the literal's, which clang's invalid
+        // literal leaves out; a valid body's mismatch is still given.
+        "int a[] = (int[2]){\"x\", 1};\n"
+        "int g;\n"
+        "int b[] = (int[2]){&g, 1};\n"
+        "const int q[] = (int[2]){\"x\", 1};\n"
+        "int h;\n"
+        "long u[] = (int[2]){h, 1};\n"
+        "long s[] = (int[2]){\"x\", 1};\n"
+        "const int t[] = (int[2]){2, 1};\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
