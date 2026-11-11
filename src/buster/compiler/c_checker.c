@@ -1587,7 +1587,7 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     if (result && state->vectors < graph->vector_member_count && graph->vector_members[state->vectors].node <= node)
     {
         const CheckVectorCall* vector = graph->vector_members + state->vectors;
-        result = vector->node == node && op == CHECK_OP_MEMBER && vector->member.kind <= CHECK_VECTOR_MEMBER_ODD &&
+        result = vector->node == node && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && vector->member.kind <= CHECK_VECTOR_MEMBER_ODD &&
                  vector->member.count <= (1u << 30) && (vector->member.count == 0 || vector->member.lanes != NULL);
         state->vectors += 1;
     }
@@ -1902,7 +1902,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
         .node = node,
         .context = check_graph_context(graph, node, stream->constant_evaluated != NULL && __builtin_expect(stream->constant_evaluated[node] != 0, 0)),
     };
-    if (__builtin_expect(action->op == CHECK_OP_MEMBER, 0) && graph->vector_member_count != 0)
+    if (__builtin_expect(action->op == CHECK_OP_MEMBER || action->op == CHECK_OP_ARROW, 0) && graph->vector_member_count != 0)
     {
         uint32_t first = 0;
         uint32_t last = graph->vector_member_count;

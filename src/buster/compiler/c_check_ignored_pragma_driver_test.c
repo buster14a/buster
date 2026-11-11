@@ -611,6 +611,67 @@ static void check_test_driver_symbol_pragma_objects(CheckTest* test, const char*
     unlink(binary);
 }
 
+// An inclusion that changes the `#pragma pack` value (#1849): clang's -Wpragma-pack warning at the include's file name with
+// its note at the directive that set the value, where the file ends, whole output on both paths, at -fsyntax-only and -c;
+// a header that leaves the value as it found it, or sets a struct's layout under the includer's value, has none.
+static void check_test_driver_pack_includes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* contents;
+    } headers[] = {
+        { "pack-changes.h", "#pragma pack(push, 1)\nstruct H { char c; int i; };\n" },
+        { "pack-keeps.h", "#pragma pack(push, 1)\nstruct K { char c; int i; };\n#pragma pack(pop)\n" },
+        { "pack-pops.h", "#pragma pack(pop)\n" },
+        { "pack-nested.h", "struct N { char c; int i; };\n#include \"pack-changes.h\"\n" },
+    };
+    bool written = true;
+    char path[PATH_MAX];
+    for (uint32_t h = 0; h < BUSTER_ARRAY_LENGTH(headers); h += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, headers[h].name);
+        written &= parse_test_write(path, headers[h].contents, strlen(headers[h].contents));
+    }
+    static const char source[] =
+        "#pragma pack(push, 2)\n#include \"pack-keeps.h\"\n#include \"pack-pops.h\"\n#pragma pack(4)\n#include \"pack-nested.h\"\n#pragma pack(pop)\n"
+        "#pragma pack(pop)\nint main(void) { return sizeof(struct H) != 5; }\n";
+    char main_path[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(main_path, sizeof(main_path), "%s/pack-includes.c", directory);
+    snprintf(object, sizeof(object), "%s/pack-includes.o", directory);
+    written = written && parse_test_write(main_path, source, sizeof(source) - 1);
+    check_test_expect(test, written, "pack inclusion fixtures are written");
+    for (uint32_t mode = 0; written && mode < 2; mode += 1)
+    {
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", mode == 0 ? "-fsyntax-only" : "-c", main_path, "-o", object, NULL, NULL };
+        char* expected = NULL;
+        const int oracle = check_test_driver_spawn(arguments, &expected);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[7] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = expected != NULL && actual != NULL && status == oracle && strstr(expected, "modified in the included file") != NULL &&
+                              strcmp(actual, expected) == 0;
+            char description[8192];
+            snprintf(description, sizeof(description), "pack inclusions (%s, %s): %s\nagainst clang's\n%s", mode == 0 ? "-fsyntax-only" : "-c",
+                     scalar != 0 ? "scalar" : "vector", actual != NULL ? actual : "", expected != NULL ? expected : "");
+            check_test_expect(test, same, description);
+            free(actual);
+        }
+        free(expected);
+    }
+    unlink(object);
+    unlink(main_path);
+    for (uint32_t h = 0; h < BUSTER_ARRAY_LENGTH(headers); h += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, headers[h].name);
+        unlink(path);
+    }
+}
+
 static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char target_ignored[] =

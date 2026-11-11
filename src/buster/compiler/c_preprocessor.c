@@ -5554,6 +5554,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
     { "maybe_unused", 202106 },
+    { "nodiscard", 202003 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
@@ -6853,13 +6854,14 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             result = predefined != PREDEFINES_PARSE_ERROR;
             i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
         }
-        else if (match.exact == C_OPTION_XLINKER)
+        else if (match.exact == C_OPTION_XLINKER || match.exact == C_OPTION_RPATH)
         {
+            // -Xlinker VALUE and -rpath DIRECTORY (clang's and GCC's linker option, #1854): no linker runs for -E.
             result = next != NULL;
             i += result;
             if (!result)
             {
-                fprintf(stderr, "error: missing argument to linker option '-Xlinker'\n");
+                fprintf(stderr, "error: missing argument to linker option '%s'\n", argument);
             }
         }
         else if (argument[1] == 'W' && argument[2] == 'l' && argument[3] == ',')
@@ -7371,6 +7373,7 @@ static bool pp_option_id_takes_value(COption option)
         C_OPTION_MT,
         C_OPTION_MQ,
         C_OPTION_XLINKER,
+        C_OPTION_RPATH,
     };
     bool result = pp_own_option_id_with_value(option);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)

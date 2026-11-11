@@ -8087,17 +8087,17 @@ static bool pp_test_implemented_features(const char* directory)
         "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n"
         // A version, not 1, as clang answers it (pp_implemented_builtin_query).
         "J __has_builtin(__builtin_operator_new)\n"
-        "K __has_c_attribute(deprecated) __has_c_attribute(__deprecated__) __has_c_attribute(maybe_unused) __has_c_attribute(__maybe_unused__)\n"
+        "K __has_c_attribute(deprecated) __has_c_attribute(__deprecated__) __has_c_attribute(maybe_unused) __has_c_attribute(__maybe_unused__) __has_c_attribute(__nodiscard__)\n"
         "L __has_c_attribute(deprecated_typo) __has_c_attribute(other::maybe_unused)\n"
-        "#if __has_c_attribute(deprecated) == 201904L && __has_c_attribute(maybe_unused) == 202106L\n"
+        "#if __has_c_attribute(deprecated) == 201904L && __has_c_attribute(maybe_unused) == 202106L && __has_c_attribute(nodiscard) == 202003L\n"
         "diagnostic_attributes_available\n#else\n#error implemented diagnostic attributes unavailable\n#endif\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\nJ 201802L\n"
-        "K 201904L 201904L 202106L 202106L L 0 0 diagnostic_attributes_available\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 1 H 0 0\nJ 201802L\n"
+        "K 201904L 201904L 202106L 202106L 202003L L 0 0 diagnostic_attributes_available\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
         "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\nJ 201802L\n"
-        "K 201904L 201904L 202106L 202106L L 0 0 diagnostic_attributes_available\n",
+        "K 201904L 201904L 202106L 202106L 202003L L 0 0 diagnostic_attributes_available\n",
     };
     static const uint32_t standards[] =
     {

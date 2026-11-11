@@ -36,7 +36,8 @@ Like the other classes past `F80`, a mask's frame object and machine operations
 without rows or objects through it against their native code.
 
 Dynamic-stack text uses `alloca.ptr %size`, `stack_save.i64` and
-`stack_restore.void %position` with no extra metadata. A slot's lifetime marker
+`stack_restore.void %position` with no extra metadata, and a frame address
+`stack_save.i64 frame` (#1847). A slot's lifetime marker
 is `lifetime.void $N start` or `lifetime.void $N end` (#177), and a fence
 `fence.void ORDER` or `fence.void ORDER signal` (#1059: `relaxed`, `consume`,
 `acquire`, `release`, `acq_rel` or `seq_cst`); both interpreters

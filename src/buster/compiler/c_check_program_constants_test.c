@@ -141,8 +141,8 @@ static const struct
       "__builtin_signbit(-0.0q),__builtin_isfpclass(0x1p-16494q,0x0080),__builtin_isinf(1e5000q),(int)0.1q};"
       "__float128 g(int n){switch(n&3){case 0:return 0.1q;case 1:return -0x1p-16494q;case 2:return __builtin_nansf128(\"0x123456789abcdef0123\");"
       "default:return (__float128)(unsigned __int128)-1;}}"
-      // A _Complex __float128 constant's parts stay exact long doubles until complex constants keep bits: a part that
-      // isn't one is computed at run time, and an exact one's part folds with its bits.
+      // A _Complex __float128 constant's parts are its bits: two that a long double can't tell apart compare unequal, and
+      // a part folds with its bits.
       "static int z[]={(_Complex __float128)1.5q==(_Complex __float128)1.25q,(_Complex __float128)1.5q!=0};"
       "int cz(void){return (_Complex __float128)0x1.0000000000000000000000001p0q==(_Complex __float128)0x1.00000000000000000000000008p0q;}"
       "__float128 cr(int n){return n?__real__(_Complex __float128)0.1q:__real__(_Complex __float128)1.5q+__imag__ 1.5qi;}"
@@ -205,6 +205,36 @@ static const struct
       "__builtin_constant_p(1.0q/3)*8+__builtin_constant_p(1.0q/4)*16+"
       "__builtin_constant_p(0x1.0000000000000000000000000001p0q*0x1.0000000000000000000000000001p0q)*32+"
       "__builtin_constant_p(0x1.8p0q*0x1.8p0q)*64+__builtin_constant_p(1e4932q*10)*128);}" },
+    // _Complex __float128 constants of their parts' bits (#1250): __builtin_complex, conversions from and to real and complex
+    // types, imaginary q literals, + - * / with real and complex operands, Annex G's recoveries as clang's evaluator makes them in
+    // static data and as clang -O0's code computes them (its complex / and two-NaN * by __divtc3 and __multc3), == and truth.
+    { "float-constants-complex-quad",
+      BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
+      "static _Complex __float128 s[]={__builtin_complex(1.0q,2.0q),1.0q,0.1q,0.1qi,__builtin_complex(0.1q,-0.0q)+__builtin"
+      "_complex(0.2q,0.3q),__builtin_complex(0.1q,0.2q)-0.1q,0.1q-__builtin_complex(0.1q,0.2q),-__builtin_complex(0.1q,__bu"
+      "iltin_nansf128(\"0x123\")),~__builtin_complex(0.1q,0.2q),(_Complex double)__builtin_complex(0.1q,0.2q),(_Complex dou"
+      "ble)0.1+0.1qi,3,__builtin_complex(0.1q,0.2q)*__builtin_complex(0.3q,0.4q),__builtin_complex(0.1q,0.2q)/__builtin_com"
+      "plex(0.3q,0.4q),__builtin_complex(0.1q,0.2q)*3,__builtin_complex(0.1q,0.2q)/3,3*__builtin_complex(0.1q,0.2q),3/__bui"
+      "ltin_complex(0.1q,0.2q),__builtin_complex(1e4000q,1e-4000q)/__builtin_complex(3e4000q,7e3999q),__builtin_complex(1.0"
+      "q,1.0q)/__builtin_complex(0x1p-16490q,0x1p-16494q),__builtin_complex(-0.0q,0.0q)*__builtin_complex(0.0q,-0.0q),__bui"
+      "ltin_complex(1.0q,2.0q)/__builtin_complex(4.0q,0.0q),__builtin_complex(__builtin_inff128(),0.0q)*__builtin_complex(1"
+      ".0q,0.0q),__builtin_complex(1.0q,2.0q)/__builtin_complex(0.0q,0.0q),__builtin_complex(__builtin_nanf128(\"1\"),1.0q)"
+      "*__builtin_complex(2.0q,3.0q),__builtin_complex(-__builtin_inff128(),1.0q)*__builtin_complex(__builtin_nanf128(\"5\""
+      "),0x1p-16494q),__builtin_complex(1e4932q,1e4932q)/__builtin_complex(0x1p16383q,0x1p16383q),__builtin_complex(1.0q,1."
+      "0q)/__builtin_complex(__builtin_inff128(),2.0q),__builtin_complex(-__builtin_inff128(),1e4932q)*-0.0q};static int k["
+      "]={__builtin_complex(0.1q,0.2q)==__builtin_complex(0.1q,0.2q),__builtin_complex(0.1q,0.2q)!=0.1q,(_Bool)__builtin_co"
+      "mplex(0.0q,0x1p-16494q),(_Bool)__builtin_complex(-0.0q,-0.0q),__builtin_complex(0.0q,__builtin_nanf128(\"\"))==__bui"
+      "ltin_complex(0.0q,__builtin_nanf128(\"\")),__builtin_complex(-0.0q,0.0q)==0,(int)__imag__ __builtin_complex(1.5q,3.5"
+      "q)};static __float128 r[]={__real__ __builtin_complex(0.1q,0.2q),__imag__ (__builtin_complex(0.1q,0.2q)+1),__imag__ "
+      "0.1qi,__real__ 0.1qi};_Complex __float128 g(int n){switch(n&15){case 0:return __builtin_complex(0.1q,0.2q)*__builtin"
+      "_complex(0.3q,0.4q);case 1:return __builtin_complex(__builtin_inff128(),0.0q)*__builtin_complex(1.0q,0.0q);case 2:re"
+      "turn __builtin_complex(1.0q,2.0q)/__builtin_complex(0.0q,0.0q);case 3:return __builtin_complex(__builtin_nanf128(\"1"
+      "\"),1.0q)/__builtin_complex(2.0q,3.0q);case 4:return 0.1qi;case 5:return 3/__builtin_complex(0.1q,0.2q);case 6:retur"
+      "n __builtin_complex(1e4932q,1e4932q)/__builtin_complex(0x1p16383q,0x1p16383q);case 7:return __builtin_complex(-__bui"
+      "ltin_inff128(),1.0q)*__builtin_complex(__builtin_nanf128(\"5\"),0x1p-16494q);default:return __builtin_complex(-__bui"
+      "ltin_inff128(),1e4932q)*-0.0q;}}int tested(int n){unsigned x=2166136261u;x=hash(x,s,sizeof s);x=hash(x,k,sizeof k);x"
+      "=hash(x,r,sizeof r);_Complex __float128 v=g(n);x=hash(x,&v,32);_Complex __float128 w=__builtin_complex(0.1q,0.2q);x="
+      "hash(x,&w,32);__float128 t=__imag__ w;x=hash(x,&t,16);return (int)(x^(unsigned)n);}" },
     // A narrow NaN converted at run time. Runtime conversion must still
     // quiet signaling inputs and put their payloads in the target format's high fraction bits.
     { "float-constants-narrow-nan-to-quad-runtime",

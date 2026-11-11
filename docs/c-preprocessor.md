@@ -1357,8 +1357,8 @@ decisions in #154 and on #117's configuration):
   and `weak`. Paired underscores are normalized. C attribute queries accept
   the corresponding `gnu::` names (`ext_vector_type` and `overloadable` use
   `clang::`) and return **201910** for standard `fallthrough`. Standard
-  `deprecated` and `maybe_unused` return **201904** and **202106** now that
-  the checker implements their diagnostics (#1475), including their paired
+  `deprecated`, `maybe_unused` and `nodiscard` return **201904**, **202106**
+  and **202003** now that the checker implements their diagnostics (#1475), including their paired
   underscore spellings and their extension use in earlier C modes.
   `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
   and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
@@ -1428,12 +1428,12 @@ tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
 these implemented paths does not remove their argument, subject or ABI limits.
 
-Standard `nodiscard` still answers zero. Its discarded-result diagnostics now
-exist (#1447, `c_check_ignored_result.c`: a discarded call of a `nodiscard`
-function, or of one returning a `nodiscard` type, warns as clang's does; the
-[checker guide](c-checker.md) has the rules), but the query does not advertise
-them yet, and #1475's `nodiscard` request remains open. The `deprecated` and
-`maybe_unused` query fix does not enable other attribute spellings.
+Standard `nodiscard` answers **202003**, as clang does (#1475), now that its
+discarded-result diagnostics exist (#1447, `c_check_ignored_result.c`: a
+discarded call of a `nodiscard` function, or of one returning a `nodiscard`
+type, warns as clang's does; the [checker guide](c-checker.md) has the rules).
+The `deprecated`, `maybe_unused` and `nodiscard` query fix does not enable
+other attribute spellings.
 Generic GNU atomic load/store/exchange/compare-exchange, GNU lock-free queries
 and test-and-set/clear remain unadvertised; scalar GNU atomics and implemented
 C11 atomics are advertised.
@@ -1581,7 +1581,8 @@ flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
   - `-m80387` is `-mx87`;
   - `-mgeneral-regs-only` is `-mno-x87 -mno-mmx -mno-sse` in its place;
   - `-mapxf` turns on APX's features but `cf`, and `-mapx-features=` and
-    `-mno-apx-features=` name them one by one;
+    `-mno-apx-features=` name them one by one; a target attribute's `apxf`
+    and `no-apxf` stand for the same list (#1919);
   - `-mapx-inline-asm-use-gpr32` comes after the others.
 - Each feature has its own macros (`avx512f` has `__AVX512F__`, `sse2` has
   `__SSE2__`, `__SSE2_MATH__` and the `__FLT16_*` macros, `cx16` has
