@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-
-//
+// Private fixtures belong to the executable unit; the checker shares the file and runtime helpers in place.
+// Standalone source preprocessing, without a unity-unit selector, keeps the whole file.
 // The foreign inputs' tests (foreign.c), for the test-foreign command:
 //
 //   build/compiler test-foreign [--seed N] [--functions N] [--directory PATH] [--cross-check] [--keep]
@@ -62,6 +62,7 @@
 #define BUSTER_FOREIGN_TEST_ARENA_BYTES (1ull << 34)
 #define BUSTER_FOREIGN_TEST_MAX_ARGUMENTS 4096
 typedef char ForeignTestPath[BUSTER_FOREIGN_TEST_PATH_BYTES];
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The lane counts every resolution runs with.
 static const uint32_t foreign_test_lanes[] = {
     1,
@@ -361,7 +362,7 @@ static uint32_t foreign_test_name(const Foreign* foreign, const char* text)
 // writes it, long names in "//", and for a thin archive, the members' headers alone with their paths as names.
 
 #define BUSTER_FOREIGN_TEST_MAX_MEMBERS 1024
-
+#endif
 static String8 foreign_test_read(Arena* arena, const char* path)
 {
     return object_test_read_file(arena, path);
@@ -371,7 +372,7 @@ static bool foreign_test_write(const char* path, const void* bytes, uint64_t siz
 {
     return object_write_file(path, bytes, size) == OBJECT_ERROR_NONE;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The global symbols an object defines, as GNU ar indexes them: their names' offsets in `names` (a copy, NUL after each).
 static uint32_t foreign_test_defined(String8 bytes, char* names, uint64_t capacity, uint64_t* used)
 {
@@ -1182,6 +1183,7 @@ static void foreign_test_against(ForeignTestTally* tally, const char* what, cons
 // loaded where an archive holds it and something refers to it, and with --cross-check, the linkers must agree: the
 // static programs linked -static -e _start, those that call libc as a PIE against the system's crt objects and libc.
 
+#endif
 typedef struct ForeignTestSystem ForeignTestSystem;
 struct ForeignTestSystem
 {
@@ -1275,6 +1277,7 @@ static void foreign_test_pie_end(ForeignTestLine* line, ForeignTestSystem* syste
     }
 }
 
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Writes each unit's object of a generated program into `directory` as <name>_u<unit>.o.
 static bool foreign_test_write_program(const Link* link, uint32_t unit_count, const char* directory, const char* name, ForeignTestPath* paths, Arena* arena)
 {
@@ -2988,3 +2991,4 @@ static int run_foreign_tests(int argc, char** argv)
     arena_release(&arena);
     return passed ? 0 : 1;
 }
+#endif

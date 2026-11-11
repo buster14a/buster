@@ -59,7 +59,8 @@ requirements. [Command index](README.md).
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
   natively against the IR's interpreter; Tier 0's mask programs, every `_k*`
   builtin's row and every comparison into a mask (#1623) through the IR, SSA and
-  the optimizer to Tier 1's native code) for bounded typed-stream/native
+  the optimizer to Tier 1's native code; comparisons ANDed with a mask, which
+  selection folds into one compare under that writemask, #1847) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
@@ -210,14 +211,22 @@ establish that gate.
 
 `test-checker-driver`'s table-loop object oracle checks the one table-base LEA
 and its exact PC32 relocation, the adjacent MOVSXD/ADD/indirect-JMP dispatch,
-and an entry prefix that no direct or resolved table target can reenter. It
-resolves all four switch entries using their PC32 symbol, addend and slot
-offset, and requires each target to be an instruction boundary after the LEA.
-This covers placement where the loop closes through backward table entries
-and the dispatch follows the last backward direct branch. The semantic Clang
-comparison and all four scalar/rematerialization configurations remain checked.
-Controls reject repeated LEAs, a LEA after an initial branch, direct reentry,
-and indirect reentry from the second table entry, whose slot offset is nonzero.
+and a decoded CFG proof that every path to dispatch executes the table-base
+LEA exactly once. A zero-trip guard may branch directly to the return before
+the LEA. The proof resolves all four switch entries using their PC32 symbol,
+addend and slot offset, checks all direct targets at instruction boundaries,
+requires indirect targets strictly after the LEA and propagates entry/after-LEA
+states through both direct and table edges. This covers placement where the
+loop closes through backward table entries and dispatch follows the last
+backward direct branch. The semantic Clang comparison and all four scalar/
+rematerialization configurations remain checked. Controls reject repeated
+LEAs, bypass to dispatch before the LEA, direct reentry, and indirect reentry
+from the second table entry, whose slot offset is nonzero.
+The checker-driver's own process needs its x86 control-effects tables for this
+object proof. TSan's and MSan's PIE executables cannot bake those tables,
+even though their compiler child processes initialize their own. The test
+initializes the effects on demand and asserts jump, conditional-branch and
+return classification before applying the table-base proof (#1829).
 
 ## Address-arithmetic selection regressions
 

@@ -153,6 +153,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Winvalid-unevaluated-string", NULL, "encoding prefix on an unevaluated string literal has no effect" },
     { "-Wpedantic", NULL, "use of non-standard escape character" },
     { "-Wdelimited-escape-sequence-extension", "-Wpedantic", "delimited escape sequences are a C2y extension" },
+    // (#1838: its ID assigned past the ones other pull requests take, which their rows fill.)
+    [CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS] = { "-Wtarget-clones-mixed-specifiers", "-Wfunction-multiversion", "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility" },
+    // (#1843: its ID assigned past the ones other pull requests take, which their rows fill.)
+    [CHECK_WARNING_ID_INVALID_CPU_SUPPORTS] = { NULL, NULL, "invalid cpu feature string for builtin" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -216,6 +220,54 @@ static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* 
         {
             const CheckInputDiagnosticPragma* record = history->records + state;
             matched = check_warning_option(index, record->option);
+            if (matched)
+            {
+                severity = record->operation == CHECK_DIAGNOSTIC_IGNORED ? CHECK_WARNING_IGNORE :
+                           record->operation == CHECK_DIAGNOSTIC_ERROR ? CHECK_WARNING_ERROR :
+                           record->operation == CHECK_DIAGNOSTIC_FATAL ? CHECK_WARNING_FATAL : CHECK_WARNING_WARNING;
+            }
+            state = record->state_before;
+        }
+    }
+    return severity;
+}
+
+// check_diagnostic_severity_id_from for a grouped diagnose_if (#1447): the source pragma in force at the event that names
+// warning group `group` (its index in pp_features_warning) or a group that holds it replaces `severity`.
+static __attribute__((unused)) CheckWarningSeverity check_diagnostic_group_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t group, CheckWarningSeverity severity)
+{
+    const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
+    if (history != NULL)
+    {
+        uint32_t low = 0;
+        uint32_t high = history->count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const CheckInputDiagnosticPragma* record = history->records + middle;
+            if (record->token < token || (record->token == token && record->source_begin < source))
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        uint32_t state = low != 0 ? history->records[low - 1].state_after : BUSTER_CHECK_NONE;
+        bool matched = false;
+        for (uint32_t visited = 0; !matched && state < history->count && visited < history->count; visited += 1)
+        {
+            const CheckInputDiagnosticPragma* record = history->records + state;
+            char name[128];
+            const bool fits = record->option.length >= 2 && record->option.length - 2 < sizeof(name) && record->option.pointer[0] == '-' && record->option.pointer[1] == 'W';
+            if (fits)
+            {
+                memcpy(name, record->option.pointer + 2, record->option.length - 2);
+                name[record->option.length - 2] = 0;
+            }
+            const uint32_t holder = fits ? pp_warning_group_index(name) : UINT32_MAX;
+            matched = holder != UINT32_MAX && pp_warning_group_holds(holder, group);
             if (matched)
             {
                 severity = record->operation == CHECK_DIAGNOSTIC_IGNORED ? CHECK_WARNING_IGNORE :

@@ -57,6 +57,10 @@
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
 
+// Keep the frontend's fixtures out of the other unity units. The Clang release checks also serve the checker,
+// and the process helpers below serve its corpus; standalone preprocessing still reads the complete file.
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
+
 // The Clang release the library-builtin table is pinned to (c_builtin_library.c's BUSTER_CLANG_REFERENCE_VERSION), read
 // from `clang --version` by test-preprocessor --clang and test-checker-driver: a clang that isn't an official build of
 // that release can answer some plain names' __has_builtin and implicit-declaration diagnostics differently, which those
@@ -290,6 +294,9 @@ static bool pp_test_clang_reference(void)
     printf("clang reference: version comparison and mismatch reporting %s\n", result ? "as expected" : "WRONG");
     return result;
 }
+
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 // The clang executable the oracle runs: "clang", or a fixture's wrapper that reports another release
 // (pp_test_builtin_release). The release `clang --version` named, which the library-builtin checks read for the
@@ -916,6 +923,8 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     return result;
 }
 
+#endif
+
 typedef enum PPClangStatus
 {
     PP_CLANG_ERROR,
@@ -1027,6 +1036,8 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
     free(environment);
     return result;
 }
+
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 // Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
 // inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
@@ -8011,6 +8022,11 @@ static bool pp_test_asm_flag_predefine(const char* directory)
 }
 
 #include "c_preprocessor_feature_test.c"
+#else
+// The feature fixtures first include this shared metadata; retain that definition order in the other units.
+#include "c_builtin_intrinsic_catalog.c"
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 static bool pp_test_implemented_features(const char* directory)
 {
@@ -8746,7 +8762,11 @@ static bool predefines_test_print_tables(const char* directory);
 static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
 
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 #include "c_preprocessor_history_test.c"
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 #include "c_preprocessor_print_test.c"
 #include "c_preprocessor_system_warning_test.c"
 #include "c_preprocessor_directives_test.c"
@@ -9367,3 +9387,5 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     free(files);
     return passed_all ? 0 : 1;
 }
+
+#endif
