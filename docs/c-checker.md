@@ -752,8 +752,15 @@ A cast's or an `_Alignof`'s variable type name at file scope (`(int(*)[n])0`,
 as clang folds both (#1852): its `CheckInputVla` is not evaluated and captures
 no bound.
 
-Differences left: these errors stop the reader, where clang marks the
-declaration invalid and goes on. In a body, a cast to a variably modified
+These errors recover, as clang marks the declaration invalid and goes on
+(#1447): a file-scope declarator's like a negative bound's
+(`check_input_declarator_recover`), but keeping its group's later declarators,
+as Sema's `CheckVariableDeclarationType` gives it after the declarator
+(`CheckDeclaratorRun.parameter_invalid`); a block's `static` or `extern` one's
+at the declaration, a stand-in `int` (one with an initializer still stops).
+
+Differences left: a member's error still stops the reader, where clang marks
+the field and its record invalid. In a body, a cast to a variably modified
 type (`(void)((int (*)[n])0)`, in `sizeof` too) is still "construct is not yet
 supported", though clang accepts it: the cast's captured bound is a second
 operand the graph's cast doesn't take.

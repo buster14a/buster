@@ -7112,8 +7112,8 @@ struct CheckDeclaratorRun
     // whether it did: its type then has a stand-in where clang's has its error, and its declaration is invalid.
     bool recover;
     bool invalid;
-    // A parameter of the declared function's own list was in error (CheckDeclaratorPart.invalid_parameter): the
-    // declaration is invalid, but its group goes on.
+    // A parameter of the declared function's own list was in error (CheckDeclaratorPart.invalid_parameter), or its own bound
+    // was misplaced (a file-scope VLA's): the declaration is invalid, but its group goes on.
     bool parameter_invalid;
 };
 
@@ -7902,11 +7902,20 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                               &part.kind, &part.extent);
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
                 // A negative constant bound (#1447), or one of another type than an integer's (#2170): an invalid
-                // declaration, its array a stand-in of no element.
-                if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 &&
-                    (reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE || reader->output->reports[before].message == CHECK_INPUT_ARRAY_NON_INTEGER) &&
+                // declaration, its array a stand-in of no element. So is a variable bound where none can be, a file-scope
+                // declarator's (#1447: clang marks it invalid and goes on).
+                const CheckInputMessage bound_error = __builtin_expect(!valid, 0) && reader->output->report_count == before + 1 ? reader->output->reports[before].message :
+                                                      CHECK_INPUT_UNSUPPORTED;
+                const bool was_invalid = run->invalid;
+                const bool bound_invalid = bound_error == CHECK_INPUT_ARRAY_NEGATIVE || bound_error == CHECK_INPUT_ARRAY_NON_INTEGER;
+                if (__builtin_expect(!valid, 0) && (bound_invalid || bound_error == CHECK_INPUT_VLA_FILE_SCOPE || bound_error == CHECK_INPUT_VM_FILE_SCOPE) &&
                     check_input_declarator_recover(reader, run, frame, before))
                 {
+                    // (A misplaced one's error is Sema's CheckVariableDeclarationType's, not the declarator's: the group goes on,
+                    // CheckDeclaratorRun.parameter_invalid.)
+                    const bool placement = !bound_invalid && !frame->parameter_context;
+                    run->parameter_invalid |= placement;
+                    run->invalid = placement ? was_invalid : run->invalid;
                     valid = true;
                     part.kind = BUSTER_TYPE_KIND_ARRAY;
                     part.extent = 0;
@@ -10882,7 +10891,21 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 valid = false;
             }
             reader->vla_initializer_dropped = false;
-            valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            const uint32_t vla_reports = reader->output->report_count;
+            const bool placed = check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            // A block's static or extern variable-length array or variably modified object (#1447): clang's error at its name,
+            // the declaration invalid, a stand-in int, and the reader goes on. (One with an initializer still stops.)
+            const CheckInputMessage vla_error = !placed && reader->output->report_count == vla_reports + 1 ? reader->output->reports[vla_reports].message :
+                                                CHECK_INPUT_UNSUPPORTED;
+            const bool vla_recovered = valid && !placed && !initialized && !reader->lane &&
+                                       (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN || vla_error == CHECK_INPUT_VM_EXTERN) &&
+                                       check_input_recover_reports(reader, vla_reports);
+            check_input_lane_refuse(reader, valid && !placed && reader->lane && (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN ||
+                                                                                 vla_error == CHECK_INPUT_VM_EXTERN),
+                                    "an invalid declaration's uses are quiet in source order");
+            type = vla_recovered ? BUSTER_TYPE_INT : type;
+            invalid |= vla_recovered;
+            valid &= placed || vla_recovered;
             if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
             {
                 // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
