@@ -999,8 +999,12 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   snippet's label does, stays admitted. The assembler takes these instructions
   in `.s` files and file-scope assembly;
 - in a naked function, statements other than `asm` statements, which clang
-  rejects, operands other than integer constants, and a body of no
-  instructions.
+  rejects, and operands other than integer constants and static objects'
+  symbols (#1845: `"m"(g)` prints `g(%rip)`, `"i"(&g)` prints `$g`, bare
+  with `c`, `p` or `P`, and `g(%rip)` with `a`; a block-scope static's or a
+  literal's, whose names the emission makes, stays refused). A naked function
+  of no instructions is clang's function of no bytes, with an FDE of no
+  range.
 
 ## Why it is scalar
 
@@ -1245,8 +1249,8 @@ What the lowering still refuses of what GCC and clang take:
 - a template that returns and has a named label, or keeps its helper for
   another of the reasons above (a reference, a directive), which the helper
   design refuses by name;
-- naked functions of no instructions, and naked functions' operands other than
-  integer constants (clang's `"m"(global)`, printed RIP-relative);
+- naked functions' operands other than integer constants and static objects'
+  symbols (a register's, a block-scope static's);
 - the matcher's gaps: the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);

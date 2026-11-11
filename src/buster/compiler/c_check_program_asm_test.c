@@ -1378,9 +1378,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-naked-vla-register", true, false, 0, 0, "statements other than asm statements in naked functions");
     // A constant with a register constraint reaches the planner without a forbidden parameter reference.
     check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\" : : \"r\"(1));}int tested(int n){return n;}",
-                                       "asm-naked-operand", true, false, 0, 0, "naked functions' inline assembly operands other than integer constants");
-    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){}int tested(int n){return n;}",
-                                       "asm-naked-empty", true, false, 0, 0, "naked functions of no instructions");
+                                       "asm-naked-operand", true, false, 0, 0,
+                                       "naked functions' inline assembly operands other than integer constants or static objects' symbols");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"twice: nop\");__asm__(\"twice: nop\");return n;}",
                                        "asm-label-twice", true, false, 0, 0, "inline assembly labels another template defines too");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"jmp .Lnowhere\");return n;}",
