@@ -3995,8 +3995,16 @@ What the lowering covers past scalars (#145's programs):
   declaration where clang must emit it, deferred bodies and data at the
   unit's end; a body's reference names the latest declaration before it,
   static data's the latest where it is emitted). Where only deferred code
-  refers to the object and its references disagree, clang's order of
-  deferred emission decides, which isn't modeled: that is refused by name.
+  refers to the object, clang's order of deferred emission decides, which
+  `check_program_weak_deferred` replays: a deferred function or deferred
+  data is scheduled at the first eager reference to it, or at its definition
+  if that comes later (`GetOrCreateLLVMFunction`, `EmitGlobal`); at the unit's
+  end each one is emitted in that order and the definitions its own
+  references reach first are emitted right after it, depth first
+  (`EmitDeferred`), so `main` calling `g()` before `f()` makes the reference
+  `g`'s. A body's references are taken by token, data's in initializer order.
+  The refusal by name remains only where the replay's record of references
+  ran out of room.
   A defined function's constructor and destructor
   each give an entry of the init or fini array: an atom of a pointer to the
   function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
