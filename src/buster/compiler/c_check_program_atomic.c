@@ -118,7 +118,7 @@ static void check_lower_atomic_call(CheckLowerWriter* writer, const CheckLowerAt
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, bits, plan->expected);
         check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, bits, kept);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, bits, plan->desired);
-        check_lower_emit(writer, BUSTER_TYPED_ATOMIC_CAS, bits, BUSTER_TYPED_FENCE_SEQ_CST | (uint64_t)plan->address << BUSTER_TYPED_CAS_LOCAL_SHIFT);
+        check_lower_emit(writer, BUSTER_TYPED_ATOMIC_CAS, bits, BUSTER_TYPED_FENCE_SEQ_CST | (uint64_t)plan->address << BUSTER_TYPED_CAS_LOCAL_SHIFT | plan->segment);
         check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, bits, plan->expected);
         if (narrow)
         {
@@ -134,7 +134,7 @@ static void check_lower_atomic_call(CheckLowerWriter* writer, const CheckLowerAt
     else if (direct)
     {
         const uint8_t bits = check_lower_piece_class((uint32_t)plan->size);
-        const uint64_t marker = BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST;
+        const uint64_t marker = BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST | plan->segment;
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->address);
         if (load)
         {
@@ -487,7 +487,7 @@ static void check_lower_atomic_update_direct(CheckLowerWriter* writer, const Che
         check_lower_emit(writer, BUSTER_TYPED_NEG, computed, 0);
         check_lower_conversion(writer, arithmetic, object);
     }
-    check_lower_emit(writer, BUSTER_TYPED_ATOMIC_RMW, class, BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST);
+    check_lower_emit(writer, BUSTER_TYPED_ATOMIC_RMW, class, BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST | plan->segment);
     check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, class, plan->expected);
     check_lower_conversion(writer, object, arithmetic);
     check_lower_atomic_update_operand(writer, plan, increment);
@@ -738,7 +738,11 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         .desired = check_lower_object(writer, bytes, alignment > 3 ? alignment : 3),
         .expected = check_lower_object(writer, bytes, alignment > 3 ? alignment : 3),
         .result = check_lower_object(writer, bytes, alignment > 3 ? alignment : 3),
+        // An _Atomic lvalue's segment (#1447); an atomic builtin's object in one is refused by name before this
+        // (check_lower_segment_access) but where a direct plan takes it (check_lower_atomic_direct).
+        .segment = !builtin && __builtin_expect(writer->segments, 0) ? check_lower_segment_override(types, object) : 0,
     };
+    writer->segment_entries = writer->segment_entries || plan->segment != 0;
     const uint32_t walked = !builtin ? check_graph_atomic_address_alignment(types, graph, stream, target, NULL, true, true) : UINT32_MAX;
     const bool aligned = builtin ? effect != NULL && effect->alignment_known && effect->minimum_alignment >= size
                                  : walked < 64 && (UINT64_C(1) << walked) >= size;
