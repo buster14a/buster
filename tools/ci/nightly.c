@@ -817,10 +817,24 @@ static const NightlyJob* nightly_find_job(const NightlyFacts* facts, uint64_t ru
     return found;
 }
 
-// A hosted test row's job name, `Tests on ... (Clang V, ARCH, SANITIZER, OLEVEL[, shard K of N])`: its architecture (0
-// x86-64, 1 native), shard and shard count, and whether it is a plain row (no sanitizer, -O3). False for other jobs.
-static bool nightly_test_job(const char* name, uint32_t* architecture, uint32_t* shard, uint32_t* shards, bool* plain)
+// A job's own name: a called workflow's job is named `CALLER / JOB` (each hosted row is hosted-correctness.yml, #2032),
+// and its own is the part after the last ` / `.
+static const char* nightly_job_own_name(const char* name)
 {
+    const char* own = name;
+    for (const char* at = strstr(name, " / "); at != NULL; at = strstr(at + 3, " / "))
+    {
+        own = at + 3;
+    }
+    return own;
+}
+
+// A hosted test row's job name, `Tests on ... (Clang V, ARCH, SANITIZER, OLEVEL[, shard K of N])`, its own name whatever
+// its caller's: its architecture (0 x86-64, 1 native), shard and shard count, and whether it is a plain row (no
+// sanitizer, -O3). False for other jobs, such as the job that builds a row's compiler once for its shards.
+static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t* shard, uint32_t* shards, bool* plain)
+{
+    const char* name = nightly_job_own_name(full);
     const size_t length = strlen(name);
     const char* open = strrchr(name, '(');
     bool valid = strncmp(name, "Tests on ", 9) == 0 && open != NULL && length != 0 && name[length - 1] == ')';
@@ -1565,7 +1579,8 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
         for (uint32_t i = 0; i < facts->job_count; i += 1)
         {
             const NightlyJob* job = &facts->jobs[i];
-            const bool hosted = strncmp(job->name, "Tests on ", 9) == 0 || strncmp(job->name, "libFuzzer ", 10) == 0;
+            const char* own = nightly_job_own_name(job->name);
+            const bool hosted = strncmp(job->name, "Tests on ", 9) == 0 || strncmp(own, "Tests on ", 9) == 0 || strncmp(job->name, "libFuzzer ", 10) == 0;
             hosted_failed |= job->run == run->id && hosted && job->completed && (job->conclusion == NIGHTLY_CONCLUSION_FAILURE || job->conclusion == NIGHTLY_CONCLUSION_TIMED_OUT);
         }
         const bool trusted = !run->nightly && hardware_success;
@@ -2805,6 +2820,34 @@ static void nightly_test_facts(NightlyTest* test)
     nightly_expect(test, nightly_plain_verdict(&facts, 8) == NIGHTLY_PLAIN_NONE, "shards that disagree on N: none");
     nightly_expect(test, nightly_plain_verdict(&facts, 9) == NIGHTLY_PLAIN_OK, "unsharded plain rows: ok");
     nightly_facts_free(&facts);
+
+    // Each row is a called workflow (hosted-correctness.yml, #2032): its jobs' names follow the caller's (the test job's
+    // name, or its id with the matrix's values), and the job that builds a portable row's compiler once is no shard.
+    // Its failure fails the row through its shards, which fail without the product.
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        const bool named = variant < 2;
+        const bool built = variant % 2 != 0;
+        buffer->length = 0;
+        nightly_test_run(buffer, 16, "push", "completed", built ? "success" : "failure", sha, 1, 2, "x");
+        for (uint32_t a = 0; a < 2; a += 1)
+        {
+            const char* architecture = a == 0 ? "x86-64" : "native";
+            const char* build = a == 0 ? (built ? "success" : "failure") : "skipped";
+            const char* caller = named ? "Tests on Ubuntu 26.04" : "test";
+            nightly_append(buffer, "job\t16\tcompleted\t%s\t%s (%s, none, 3) / Build the compiler once for the row's shards\n", build, caller, architecture);
+            for (uint32_t k = 1; k <= 4; k += 1)
+            {
+                const char* shard = a == 0 && !built ? "failure" : "success";
+                nightly_append(buffer, "job\t16\tcompleted\t%s\t%s (%s, none, 3) / Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %u of 4)\n", shard, caller, architecture, architecture, k);
+            }
+        }
+        facts = nightly_facts_new();
+        nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)), "a called row's facts parse");
+        const NightlyPlain verdict = nightly_plain_verdict(&facts, 16);
+        nightly_expect(test, built ? verdict == NIGHTLY_PLAIN_OK : verdict == NIGHTLY_PLAIN_FAILED, built ? "a called row's shards: ok, its build no shard" : "a called row whose build failed: failed, by its shards");
+        nightly_facts_free(&facts);
+    }
 
     // Invalid facts are refused whole.
     static const char* const invalid[] = {

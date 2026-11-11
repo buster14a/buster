@@ -3318,9 +3318,9 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
 // (its section names are the source's bytes). Its labels and references join the templates' names
 // (check_program_asm_names), so that its labels define symbols C declares and its references reach C's symbols, and
 // the emission publishes its atoms before the functions' (check_program_emit_asm_unit). Refused by name, which the
-// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take, CFI,
-// whose frames the emission's unwind table doesn't merge, and a section of a class C's definitions don't have, or of
-// another type than its class's (an init array's, a note). False only for an arena without room.
+// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take, and
+// section groups, which the units' merge doesn't carry.
+// False only for an arena without room.
 static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckProgram* program, const X86MatchIndex* index, bool scalar, Arena* output)
 {
     const CheckInput* input = program->input;
@@ -3350,21 +3350,10 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
                                               (AsmResult){ 0 };
     const Link* link = &assembled.link;
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
-    // A section of a class C's definitions have, of its type (or with bytes, PROGBITS), as the object writer takes it:
-    // not an init array's (.init_array is one in a data class), a note's or a group's. CFI's frames are an EH_FRAME atom.
-    // A common symbol's atom is in no section.
-    for (AtomId atom = 1; source != 0 && refused == NULL && atom < link->atoms.count; atom += 1)
-    {
-        const uint8_t class = link->atoms.class[atom];
-        const uint32_t type = assembled.object_options.atom_sections[atom].name.length != 0 ? assembled.object_options.atom_sections[atom].type :
-                                                                                               object_class_sections[class].type;
-        const bool kind = class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_DATA ||
-                          class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_BSS || class == BUSTER_LINK_CLASS_TDATA ||
-                          class == BUSTER_LINK_CLASS_TBSS;
-        refused = class == BUSTER_LINK_CLASS_EH_FRAME ? "file-scope assembly's CFI directives" :
-                  kind && (type == object_class_sections[class].type || (!link_class_is_zero_fill(class) && type == SHT_PROGBITS)) ? NULL :
-                                                                                                                                   "file-scope assembly's section of this kind";
-    }
+    // A group's sections (COMDAT) are a group the units' merge doesn't carry. Every other section is published as the
+    // assembler made it: notes, the arrays of constructors and destructors in their classes, merged strings, custom flags,
+    // and CFI's frames, an EH_FRAME atom of their own beside the functions' (#1848).
+    refused = refused == NULL && source != 0 && link->groups.count > 1 ? "file-scope assembly's section groups" : refused;
     result->file_unit = refused == NULL ? assembled : (AsmResult){ 0 };
     result->file_assembled = source != 0 && refused == NULL;
     result->file_reason = refused;
