@@ -238,7 +238,7 @@ static char* x86_disassembly_write_memory(char* output, const X86Decoded* decode
     const uint32_t segment = x86_form_segment(instruction->form);
     if (segment != 0)
     {
-        memcpy(output, segment == 1 ? "fs:" : "gs:", 3);
+        memcpy(output, segment == BUSTER_X86_SEGMENT_FS ? "fs:" : segment == BUSTER_X86_SEGMENT_GS ? "gs:" : "ss:", 3);
         output += 3;
     }
     const bool hidden_index = (plan->flags & BUSTER_X86_TEXT_SIB) && instruction->index == 4;

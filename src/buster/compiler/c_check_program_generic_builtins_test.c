@@ -55,8 +55,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: verbose_trap of a dollar", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a$b\", \"x\");\n}\n", .rejected = true },
         // A const array's string (#1917's review): a known one's, an automatic array's, a const record's member array's and a
-        // const pointer's pointee's too, with a `$` is clang's error; one through a cast is refused by name, which clang
-        // rejects through void *.
+        // const pointer's pointee's too, with a `$` is clang's error; through a cast to void * clang's evaluator loses the
+        // array's designator, its error too, and through casts between pointers to char it reads it (#1843).
         { .name = "generic: verbose_trap of a const array's dollar", .source =
           "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of a const array", .source =
@@ -72,8 +72,11 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: verbose_trap of a const pointer's value", .source =
           "static const char m[] = \"abc\";\nstatic const char* const p = m + 1;\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", p);\n}\n" },
         { .name = "generic: verbose_trap of a const array through void *", .source =
-          "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true,
-          .unsupported = true, .undecided = true },
+          "static const char m[] = \"abc\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true },
+        { .name = "generic: verbose_trap of a const array through char pointers", .source =
+          "static const char m[] = \"abc\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(char*)m + 1);\n}\n" },
+        { .name = "generic: verbose_trap of a literal through void *", .source =
+          "void f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)\"abc\" + 1);\n}\n" },
         { .name = "generic: verbose_trap of a dollar under a cast", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a\", (const char*)(\"x$\"));\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of one argument", .source = "void f(void)\n{\n__builtin_verbose_trap(\"a\");\n}\n", .rejected = true },
@@ -294,6 +297,14 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "static const void* p = __builtin___CFStringMakeConstantString(\"x\");\nstatic long l = (long)__builtin___CFStringMakeConstantString(\"y\");\n"
           "static const char* q = (const char*)__builtin___CFStringMakeConstantString(\"w\") + 1;\n"
           "const void* f(void)\n{\nstatic const void* s = __builtin___NSStringMakeConstantString(\"v\");\n(void)p;\n(void)l;\n(void)q;\nreturn s;\n}\n" },
+        // clang's evaluator takes any NSString call as an address constant, of no literal too (#1785), whose static data -c
+        // refuses by name (c_checker_driver_test.c's code generation refusals).
+        { .name = "generic: NSString of no literal in static initializers", .source =
+          "static const char m[] = \"x\";\nconst char* g(void);\nstatic const void* p = __builtin___NSStringMakeConstantString(m);\n"
+          "static long l = (long)__builtin___NSStringMakeConstantString(m + 1) + 2;\nstatic const void* c = __builtin___NSStringMakeConstantString(g());\n"
+          "const void* f(const char* s)\n{\nstatic const void* t = __builtin___NSStringMakeConstantString(s);\n(void)p;\n(void)l;\n(void)c;\nreturn t;\n}\n" },
+        { .name = "generic: NSStrings compared in a static initializer", .source =
+          "static const char m[] = \"x\";\nint d = __builtin___NSStringMakeConstantString(m) == __builtin___NSStringMakeConstantString(m);\n", .rejected = true },
         { .name = "generic: eh_return of one", .source = "void f(void)\n{\n__builtin_eh_return(1);\n}\n", .rejected = true },
         { .name = "generic: eh_return of a pointer offset", .source = "void f(void)\n{\n__builtin_eh_return((void*)0, 0);\n}\n", .rejected = true },
         { .name = "generic: eh_return's value", .source = "int f(void)\n{\nreturn __builtin_eh_return(1, 0);\n}\n", .rejected = true },
