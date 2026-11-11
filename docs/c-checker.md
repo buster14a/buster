@@ -5309,7 +5309,20 @@ The later phases are left:
   A file-scope const object's initializer with an error is left out alone,
   so the declaration stays bound with an unknown value (`const int c;`), as
   clang's stays valid, and the bodies that use it keep their warnings
-  (#1447). A file-scope declaration's error that no smaller part holds (its
+  (#1447). A static initializer whose only error is that it is no constant
+  (`const int d = 1 / 0;`, `CHECK_INIT_NON_CONSTANT`) is kept instead: clang
+  builds it and gives its warnings. The first reading's such errors go to the
+  rounds (`check_driver_rejected_common`'s `nonconstant`), whose editor keeps
+  the initializer and marks its declaration (`CheckDriverEditor.skipped`), and
+  the reading's initializer run takes it as uninitialized, so its error isn't
+  given again. A file-scope division by zero publishes at the declarator's end
+  (`check_driver_file_initializer_end`, `PP_DIAGNOSTIC_RUNTIME`), as a comma's
+  left operand and a shift count do, after the error, as clang's queued
+  runtime warnings do. A unit of no body takes the rounds for such an
+  initializer alone. Difference left: where the initializer's top is a comma
+  (`int z = (1 / 0, 3);`, `int w = (1 << 40, 1 / 0);`), its runtime warnings
+  publish at the comma's position, before the error, which completes at the
+  initializer's end; clang gives the error first. A file-scope declaration's error that no smaller part holds (its
   specifiers', its declarator's, an invalid type's or an unsized array's
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
@@ -5324,8 +5337,7 @@ The later phases are left:
   keeps such a declaration bound and invalid, its uses quiet: the reader does
   so for the declarator errors (invalid declarations, above), whose uses are
   known errors of their own; for the others the bodies that name it lose their
-  warnings here, and so does the declaration's own initializer
-  (`const int d = 1 / 0;`'s division). An unsized array's
+  warnings here, and so does the declaration's own initializer. An unsized array's
   (`int y[] = undeclared;`) isn't left out alone: the first reading leaves
   out the events of the bodies that use the array, which a later reading
   doesn't give again. A file-scope use of a left-out declaration's name

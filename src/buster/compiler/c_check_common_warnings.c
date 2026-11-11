@@ -1934,9 +1934,22 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
             bool sign = false;
             if (check_common_integer(emission->types, check_stream_type(emission->stream, graph->operand0[node]), &width, &sign))
             {
-                check_common_report_deferred(emission->parser, emission->pp, emission->input, graph->tokens[node], CHECK_WARNING_ID_DIVISION_BY_ZERO,
-                                             false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined",
-                                             NULL, 0, emission->scratch);
+                // In a file-scope initializer clang's DiagRuntimeBehavior queues it to the declarator's end, after the
+                // initializer's own errors (`const int d = 1 / 0;`'s "not a compile-time constant", #1447), as a comma's left
+                // operand (check_common_report_comma_left).
+                const Parser* parser = emission->parser;
+                const uint32_t token = graph->tokens[node];
+                const uint32_t boundary = check_common_function_boundary(parser, token);
+                const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
+                const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
+                check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                              declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
+                                              false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined", NULL, 0,
+                                              emission->scratch);
+                if (declarator != BUSTER_CHECK_NONE && node < emission->input->graph.count && emission->input->graph.source_positions != NULL)
+                {
+                    pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);
+                }
             }
         }
     }

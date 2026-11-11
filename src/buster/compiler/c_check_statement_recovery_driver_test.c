@@ -272,6 +272,13 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "    x = g(s.b) + (1, 2);\n    x = p[s.b] + p[(1, 2)];\n    x = x ? (3, 4) : s.b;\n    x = sizeof(s.b + (1, 2));\n"
         "    x = u + s.b;\n    x = (1, 2), s.b;\n    for (;;) x = s.b + (1, 2);\n    return (1, 2) + s.b;\n}\n"
         "int h(int x) { x = undeclared + (1, 2); return x << 40; }\n",
+        // A static initializer that is only no constant keeps its warnings (#1447): the view keeps it, its error first and
+        // then its division's at the declarator's end, in a unit of no body too, a later declarator's, a record's and an
+        // array's.
+        "const int d = 1 / 0;\nconst int a = 2, b = 1 / 0, c = 3;\nstruct S { int a, b; } s = { 1 / 0, 2 };\nint arr[2] = { 1, 1 / 0 };\n",
+        // Its uses stay bound, a block's static's too, and an undeclared name's body is another error.
+        "const int d = 1 / 0;\nint use(void) { int u; return d; }\nint f(void) { return undeclared; }\nint e = 1 % 0;\n"
+        "void g(void) { static int r = (1, 2) + 1 / 0; int w; (void)r; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.

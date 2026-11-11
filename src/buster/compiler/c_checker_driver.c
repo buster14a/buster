@@ -5498,6 +5498,10 @@ struct CheckDriverEditor
     uint32_t* log;
     uint32_t log_count;
     uint32_t log_capacity;
+    // The first reading's non-constant static initializers' errors (#1447, CHECK_INIT_NON_CONSTANT), by token, or NULL; and
+    // the declarations whose initializers the view keeps for them, which the reading's initializer run skips.
+    const uint8_t* nonconstant;
+    uint8_t* skipped;
 };
 
 // Whether the tag definition whose `{` is `open`, inside [begin, last], declares no name used outside that region: its
@@ -5863,8 +5867,15 @@ static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
             // its uses warning as before, its value unknown (`const int c;`). (An array of unknown size's isn't: the first
             // reading leaves out the events of the bodies that use it, which a later reading doesn't give again.)
             const bool alone = !function && constant && !unsized;
-            done = token < end && end <= count && type != 0 && ((!unsized && (!constant || replaced)) || alone) && at + 1 < end;
-            valid = !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
+            // A static initializer that is only no constant (#1447, `const int d = 1 / 0;`) is kept: clang builds it and
+            // gives its warnings, then its error, which the reading's initializer run doesn't give again (`skipped`).
+            const bool kept = editor->nonconstant != NULL && editor->nonconstant[token] != 0 && token < end && end <= count;
+            if (kept)
+            {
+                editor->skipped[declaration] = 1;
+            }
+            done = kept || (token < end && end <= count && type != 0 && ((!unsized && (!constant || replaced)) || alone) && at + 1 < end);
+            valid = kept || !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
         }
         else if (role == PARSE_ROLE_TERMINATOR)
         {
@@ -6314,7 +6325,7 @@ static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_c
 static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input,
                                                    const uint32_t* errors, uint32_t error_count,
                                                    const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits,
-                                                   const uint8_t* casts, bool whole, bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                                   const uint8_t* casts, const uint8_t* skipped, bool whole, bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
                                                    const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
                                                    uint32_t publication_end, uint32_t* found, uint32_t found_capacity, uint32_t* found_count,
                                                    const uint8_t* quiet, Arena* arena, Arena* scratch)
@@ -6433,6 +6444,16 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     bool errored_reading = valid && (reader_errors || stream.report_count != 0);
     valid = valid && (errored_reading || (check_input_packed_finalize(&input, parser, &types, &stream, scratch) &&
                                           check_input_warning_graph(&input, parser, &types, &stream, arena, scratch)));
+    // The initializers the first reading found no constant, which the view keeps for their warnings (#1447): their errors
+    // are the unit's already, so this run reads their declarations as uninitialized.
+    for (uint32_t t = 0; valid && !errored_reading && skipped != NULL && t < view_count; t += 1)
+    {
+        const uint32_t at = edited ? view.to_original[t] : t;
+        if (at < count && skipped[at] != 0 && check_sparse_get(input.initializer_begins, t) != BUSTER_CHECK_NONE)
+        {
+            check_sparse_set(input.sparse_pool, input.initializer_begins, t, BUSTER_CHECK_NONE);
+        }
+    }
     CheckAsms asms = { 0 };
     CheckInitializers initializers = { 0 };
     valid = valid && (errored_reading || (check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
@@ -6678,7 +6699,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
 
 static void check_driver_rejected_common(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input, const TypeTable* first_types,
                                          const uint32_t* errors, uint32_t error_count, const CheckDriverConversionSite* sites, uint32_t site_count,
-                                         bool scalar, bool return_warning,
+                                         const uint8_t* nonconstant, bool scalar, bool return_warning,
                                          CheckWarningSeverity return_baseline,
                                          CheckCommonShiftWarnings* shifts, const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
                                          uint32_t publication_end, Arena* arena, Arena* scratch)
@@ -6690,10 +6711,12 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     {
         body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
     }
+    // (A unit of no body reads its file-scope initializers' warnings only for an initializer that is no constant, #1447.)
     CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
-    uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint8_t* mask = ranges != NULL || (body_count == 0 && nonconstant != NULL) ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t found = 0;
-    bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
+    bool valid = mask != NULL && error_count != 0 &&
+                 (body_count == 0 || (c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count));
     // What the view leaves out of the bodies (check_driver_rejected_edit): the part around each error it can, else its
     // whole body, which the mask leaves out. Its editor's columns: each initializer's `=`'s declaration, the work list
     // and the undo log, each bounded by the tokens (a token is queued once a declaration, and logged at most twice).
@@ -6800,7 +6823,12 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         .work_capacity = count + 1,
         .log = log,
         .log_capacity = (uint32_t)(valid ? log_capacity : 0),
+        .nonconstant = nonconstant,
     };
+    // The declarations whose non-constant initializers the view keeps (CheckDriverEditor.skipped), each round's.
+    uint8_t* skipped = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    valid = skipped != NULL;
+    editor.skipped = skipped;
     // The bodies of every error, the mask where the view can't be made; and whether each error has one.
     uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
     // The fallback's view and mask, where the view's reading isn't valid: each error's body left out whole, and each
@@ -6842,6 +6870,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         memset(bodies, 0, (uint64_t)count + 1);
         memset(fallback_edits, 0, (uint64_t)count + 1);
         memset(fallback_mask, 0, (uint64_t)count + 1);
+        memset(skipped, 0, (uint64_t)count + 1);
         memset(casts, 0, (uint64_t)count + 1);
         bool edited = false;
         bool fallback_ready = true;
@@ -6953,7 +6982,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             error_marks[known[e] < count ? known[e] : count] = 1;
         }
         const bool operands = ready && edited && check_driver_rejected_operands(parser, edits, error_marks, known, known_count, casts);
-        round = ready && edited ? check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, casts, false,
+        round = ready && edited ? check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, casts, skipped, false,
                                                              scalar,
                                                              return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh,
                                                              fresh_capacity, &added, quiet, arena, scratch) :
@@ -6965,7 +6994,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 casts[token] &= (uint8_t)~(CHECK_DRIVER_CAST_OPERAND | CHECK_DRIVER_CAST_OPERAND_FIRST | CHECK_DRIVER_CAST_OPERAND_LAST);
             }
             added = 0;
-            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, casts, false, scalar,
+            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, casts, skipped, false, scalar,
                                                return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added,
                                                quiet, arena, scratch);
         }
@@ -6996,7 +7025,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         }
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, fallback, fallback_view, NULL, whole,
+            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, fallback, fallback_view, NULL, NULL, whole,
                                                scalar,
                                                return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity,
                                                &added, quiet, arena, scratch);
@@ -9595,6 +9624,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         CheckDriverConversionSite* sites = error_tokens != NULL && site_room != 0 ?
                             BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverConversionSite, site_room) : NULL;
                         uint32_t site_count = 0;
+                        uint8_t* nonconstant = NULL;
+                        bool nonconstant_fresh = true;
                         for (uint32_t i = 0; error_tokens != NULL && i < stream.report_count; i += 1)
                         {
                             uint32_t source = BUSTER_CHECK_NONE;
@@ -9623,6 +9654,21 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 error_tokens[error_count++] = additional[i].token;
                                 error_tokens[error_count++] = additional[i].position;
                             }
+                            // A static initializer's non-constant error (#1447), whose initializer the view keeps.
+                            const char* nonconstant_message = check_driver_initializer_message(CHECK_INIT_NON_CONSTANT);
+                            if (additional[i].message != NULL && strcmp(additional[i].message, nonconstant_message) == 0 && additional[i].token < tokens)
+                            {
+                                nonconstant = nonconstant != NULL ? nonconstant : BUSTER_ARENA_PUSH_ARRAY(output_arena, uint8_t, tokens);
+                                if (nonconstant != NULL && nonconstant_fresh)
+                                {
+                                    memset(nonconstant, 0, tokens);
+                                    nonconstant_fresh = false;
+                                }
+                                if (nonconstant != NULL)
+                                {
+                                    nonconstant[additional[i].token] = 1;
+                                }
+                            }
                         }
                         for (uint32_t i = 0; error_tokens != NULL && i < control.constraint_count; i += 1)
                         {
@@ -9640,7 +9686,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
-                            check_driver_rejected_common(checking, recovered, pp, &input, &types, error_tokens, error_count, sites, site_count, scalar, return_warning, baseline,
+                            check_driver_rejected_common(checking, recovered, pp, &input, &types, error_tokens, error_count, sites, site_count, nonconstant, scalar,
+                                                         return_warning, baseline,
                                                          &shift_warnings,
                                                          &input.warning_events, &stream.warning_events,
                                                          input.walk_end != 0 && input.diagnostic_limits == NULL ? input.walk_end : tokens, publication_end, arena,
