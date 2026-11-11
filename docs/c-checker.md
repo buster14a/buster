@@ -1094,8 +1094,9 @@ type. Eight contiguous bucket keys are compared together, with an exact scalar
 twin; collisions still undergo the original signature and compatibility checks.
 
 Validated redeclarations carry accumulated attributes, definition state and
-canonical object identity. Identical type representatives can then be replaced
-in the transient index. Ordinary declarations recorded before a name becomes
+canonical object identity. Identical type representatives of the same function
+can then be replaced in the transient index; another function of the identical
+type, an overload whose enable_if conditions differ (#1447), stays. Ordinary declarations recorded before a name becomes
 overloaded must first have their complete history checked. Merely compatible
 return types cannot end that history walk: compatibility of old-style function
 pointers is not transitive. The immutable source candidate chains and captured
@@ -2501,6 +2502,39 @@ What the lowering covers past scalars (#145's programs):
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
   `test-checker-driver` links and runs glibc's socket calls with `_GNU_SOURCE`
   by both paths against clang's build (`c_check_transparent_driver_test.c`).
+- **Casts to a union (#2301).** GCC's cast to a union from a member's type is
+  clang's `CK_ToUnion`. `check_action_cast` takes the operand after its lvalue
+  conversion, an array's or a function's decay included, and finds the union's
+  first member of its unqualified type that is no unnamed bit-field
+  (`check_action_union_cast_member`, clang's `getTargetFieldForToUnionCast`).
+  The operand converts to that member (`BUSTER_CHECK_CONVERT_TO_UNION`), and
+  the cast's value is an rvalue of the union, never a constant of the member.
+  A vector operand's cast to a union is this cast, not a vector cast. The
+  lowering (`check_lower_union_cast`) makes a frame object of the union, stores
+  the member's value into its first bytes (copies an aggregate's), and gives
+  the object's address as the cast's value. The batch and template fast paths
+  leave such a cast to it. The union's other bytes stay as they are, as clang's
+  code leaves them. A static object's initializer (`check_init_value`) clears
+  the union, then initializes its member from the operand, as clang's constant
+  evaluator folds the cast. `-Wgnu-union-cast`
+  (`check_warning_graph_union_cast`) is at the cast's `(`, off by default and
+  given by `-pedantic`, `-Wpedantic`, `-Wgnu` and itself. A union cast from no
+  member's type gets clang's "cast to union type from type 'T' not present in
+  union", and a cast to a struct from another type its "used type 'T' where
+  arithmetic or pointer type is required", both at the `(`
+  (`check_semantic_expression`). Differences left:
+  - a function designator's decayed type in that error drops its parameters'
+    typedef names, as buster's other diagnostics of a decayed function do;
+  - clang's `-Wpedantic` "C99 forbids casting nonscalar type 'T' to the same
+    type" isn't given;
+  - a cast to a scalar from a record keeps the generic error, where clang says
+    "operand of type 'T' where arithmetic or pointer type is required" at the
+    operand.
+
+  `test-checker`'s programs (`c_check_program_union_cast_test.c`) run each
+  kind of member, static initializers and a transparent union's cast against
+  clang -O0's build. `test-checker-driver`'s default-warning sweep compares the
+  diagnostics with clang's under `-pedantic`.
 - **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
   aggregate-returning body's control graph removes unreachable transfers
   without renumbering labels. A reachable implicit return supplies an address
@@ -3997,8 +4031,16 @@ What the lowering covers past scalars (#145's programs):
   declaration where clang must emit it, deferred bodies and data at the
   unit's end; a body's reference names the latest declaration before it,
   static data's the latest where it is emitted). Where only deferred code
-  refers to the object and its references disagree, clang's order of
-  deferred emission decides, which isn't modeled: that is refused by name.
+  refers to the object, clang's order of deferred emission decides, which
+  `check_program_weak_deferred` replays: a deferred function or deferred
+  data is scheduled at the first eager reference to it, or at its definition
+  if that comes later (`GetOrCreateLLVMFunction`, `EmitGlobal`); at the unit's
+  end each one is emitted in that order and the definitions its own
+  references reach first are emitted right after it, depth first
+  (`EmitDeferred`), so `main` calling `g()` before `f()` makes the reference
+  `g`'s. A body's references are taken by token, data's in initializer order.
+  The refusal by name remains only where the replay's record of references
+  ran out of room.
   A defined function's constructor and destructor
   each give an entry of the init or fini array: an atom of a pointer to the
   function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
@@ -9872,7 +9914,9 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
   redeclarations inherit attributes. A use reads the list of the declaration
-  its lookup found.
+  its lookup found. The conditions and lists are data
+  (`c_check_condition_eval.c`, `CheckConditionTable`), which the graph keeps
+  (`CheckGraph.conditions`) for overload resolution.
 - **Uses.** A diagnose_if condition that names no parameter and holds is
   diagnosed at each use of the name, sizeof's, typeof's and `_Generic`'s
   operands included (clang's DiagnoseUseOfDecl): its message as a
@@ -9913,6 +9957,66 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   is "no matching function for call to 'f'" at the callee, its note
   "candidate disabled: M" at the declaration the call found; otherwise the
   diagnose_if conditions that hold are given at the call's `)`.
+- **Overloadable functions** (`c_check_overload.c`). An overloadable
+  function's conditions take part in its overload resolution, as clang's do:
+  - *Viability.* After a candidate's argument count and conversions, its
+    enable_ifs are checked as at a call (`check_overload_enabled`), each
+    parameter bound to its argument's checked value converted to the
+    parameter's type. One that doesn't admit the call, or is unknown (an
+    argument that isn't a constant), makes the candidate not viable.
+  - *Ranking.* Between candidates whose conversions are equally good,
+    clang's `compareEnableIfAttrs` decides
+    (`check_condition_compare_enable`), before `pass_object_size`'s rule: the
+    one whose enable_ifs are the other's, in declaration order, followed by
+    more is better; ones that differ make neither better. Conditions are the
+    same as clang's profile of the expression says
+    (`check_condition_same`, kept as `CheckCondition.profile`): token for
+    token, a literal by its value and type (`0x1` is `1`, a macro is what it
+    expands to, `1L` isn't `1`), a parameter by its place and type, and
+    parentheses count (`(1)` isn't `1`).
+  - *Identity.* As clang's `IsOverload`, two overloadable declarations of
+    one signature whose enable_ifs differ, or come in another order, are two
+    functions (`check_overload_enables_same`, in the declaration chains and
+    the index's compaction, `check_overload_index_previous`). A
+    redeclaration's enable_ifs are therefore its own again: it inherits only
+    its previous declaration's (the latest of the same signature and
+    enable_ifs, `check_condition_overload_prior`) other conditions, its
+    diagnose_ifs, which accumulate.
+  - *diagnose_if.* At a call, the selected candidate's list is the one read
+    (`check_input_condition_call` finds it in `CheckStream.overloads`): its
+    diagnose_ifs that name no parameter at the callee's name, then those that
+    hold with the arguments at the `)`. A use other than a call gives none,
+    as clang's doesn't, and no "cannot take address" error.
+  - *Addresses.* An overload set's address, resolved against a function
+    pointer type, doesn't take a candidate with an enable_if that isn't
+    always true (clang's "made ineligible by enable_if").
+  - *Names.* An overloadable function's enable_ifs are in its Itanium name,
+    as clang mangles them (`Ua9enable_ifI`, each condition's argument, `E`,
+    after the name: `_Z1hUa9enable_ifIXgtfL0p_Li0EEEi`), which is what names
+    two overloads of one signature apart. Each argument is made where the
+    reader builds the condition (`c_check_condition_mangle.c`,
+    `CheckCondition.mangled`), from the parse tree: a lone literal or
+    enumerator is its `L<type><value>E`, anything else `X<expression>E` in
+    prefix order, a parameter `fL0p<cv><n>_`, parentheses dropped, an
+    operator's code before its operands, a cast to an arithmetic type
+    `cv<type>`, an enumerator and a sizeof or an alignof folded to their
+    values' literals, a float's, a double's and a long double's bits in
+    hexadecimal. A function with an enable_if of another shape (a call, a
+    subscript, a member, a cast to a pointer) isn't emitted: the mangler
+    refuses it as it refuses other signatures it can't name.
+  - *Errors.* A call no candidate is viable for is "no matching function for
+    call to 'f'" at the callee, and one several are viable for "call to 'f'
+    is ambiguous" (`check_semantic_overload_call`, which repeats the
+    selection, `check_overload_explain`). Their notes are clang's, in its
+    display order: "candidate disabled: M" (`<no message provided>` for an
+    empty one), "candidate function not viable: requires 2 arguments, but 1
+    was provided" or "requires single argument 'a', but no arguments were
+    provided" (`at least` for a variadic one); and an ambiguous call's
+    "candidate function" for each of clang's best (its closure from the
+    first best of the candidates not worse). This also gives clang's
+    errors for overload calls of the wrong argument count without
+    conditions. A candidate that fails by an argument's conversion keeps the
+    checker's own error.
 - **Several at once.** Of the conditions that hold at one use or call, an
   error of no warning group is given alone, the first in source order;
   otherwise every warning, in source order, each with its note, and every
@@ -9950,9 +10054,14 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
 
-What isn't clang's yet: an overloadable function's conditions, which take
-part in its overload resolution, are "not yet supported" in user code (a
-tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
+What isn't clang's yet: an overload call whose candidates fail by an
+argument's conversion has the checker's error, not clang's "no known
+conversion" notes ([#2384](https://github.com/buster14a/buster/issues/2384));
+a condition that reads a `volatile` parameter is accepted, where clang's is
+"never produces a constant expression"
+([#2383](https://github.com/buster14a/buster/issues/2383)); an overload set's address that no candidate matches has
+the checker's error, not clang's "<overloaded function type>" with its
+candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
 above (a cast to void or to `void *` in a condition gives none of clang's
 "never produces a constant expression" errors, nor
 `-Wint-to-void-pointer-cast`); the comma warnings of the constant reader's
@@ -10238,6 +10347,17 @@ enables, which this checker doesn't all give.
   error after the conversion's, where clang gives it first.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
+  A failed conversion's source and target print the typedefs a function
+  type's parameters write (#1447 item 5, `check_driver_placed_type`), with
+  clang's a.k.a.: `void (*q)(I)` is `'void (*)(I)' (aka 'void (*)(int)')`.
+  They come by place, from the operand's declaration (through `&`, `*` and
+  subscripts, `check_driver_operand_declaration`), an initialized declarator,
+  or a call's parameter. The places are the declaration's own specifiers,
+  then each nested parameter's, in order (`check_driver_places`, as
+  `__builtin_dump_struct`'s `check_lower_dump_places` reads them;
+  `TypeNames.alias_order`). Where the specifiers the printer prints don't
+  match them, the type prints as before. Only rendering reads them: a clean
+  compile does no work for this.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - A failed static assertion's requirement prints a character constant by its
   value, as clang's `CharacterLiteral::print` does (#1999,
@@ -10253,12 +10373,12 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
-  - A typedef written in a function type's parameters prints canonically:
-    clang prints `void (*fp)(I)` as `'void (*)(I)' (aka 'void (*)(int)')`,
-    this `'void (*)(int)'`. The warning renderer takes one typedef, by type;
-    the `__builtin_dump_struct` printer's places (`check_lower_dump_places`,
-    `TypeNames.alias_order`) spell each parameter's own and would serve here
-    once they read the parser and input rather than a `CheckProgram`.
+  - A typedef written in a function type's parameters prints only in a
+    failed conversion's source and target (below); other warnings print
+    those parameters canonically. A parameter's top-level qualifier, which
+    the function type drops (`void (*pp)(volatile I)`), and a variable
+    array's bound inside a parameter (`int (*)[n]`) print in neither the
+    type nor its a.k.a., where clang's sugar keeps both.
   - An initializer subobject's null pointer warning (`{ .lp = 1-1 }`) prints
     its target canonically: the initializer walk that gives it keeps neither
     the declaration nor its subobject's member.

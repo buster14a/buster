@@ -78,7 +78,7 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
                 candidate.object = result.object;
                 candidate.flags = result.flags;
                 candidates[i] = candidate;
-                index.lexical_next[i] = check_overload_index_previous(candidates, candidate.type, false, head, index.lexical_next);
+                index.lexical_next[i] = check_overload_index_previous(candidates, candidate.type, false, candidate.canonical, head, index.lexical_next);
                 index.checked[i] = 1;
                 check_overload_index_publish(&index, slot, key, 1, 1, i);
                 uint32_t length = 0;
@@ -133,9 +133,17 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
         size_variants[2].object_sizes = object_sizes;
         size_variants[2].object_size_count = 1;
         const uint32_t size_next[] = { UINT32_MAX, 0, 1 };
-        check_test_expect(test, check_overload_index_previous(size_variants, size_variants[0].type, true, 2, size_next) == 0 &&
-                                check_overload_index_previous(size_variants, size_variants[0].type, false, 2, size_next) == 2,
+        check_test_expect(test, check_overload_index_previous(size_variants, size_variants[0].type, true, size_variants[0].canonical, 2, size_next) == 0 &&
+                                check_overload_index_previous(size_variants, size_variants[0].type, false, size_variants[0].canonical, 2, size_next) == 2,
                           "colliding ordinary and object-size identities survive signature compaction");
+        // Two functions of the identical type are two overloads where their enable_if conditions differ (#1447): a
+        // redeclaration of the latest replaces it alone, and a third function keeps both.
+        CheckOverloadCandidate enabled[2] = { candidates[0], candidates[0] };
+        enabled[1].canonical = enabled[0].canonical + 1;
+        const uint32_t enabled_next[] = { UINT32_MAX, 0 };
+        check_test_expect(test, check_overload_index_previous(enabled, enabled[0].type, false, enabled[1].canonical, 1, enabled_next) == 0 &&
+                                check_overload_index_previous(enabled, enabled[0].type, false, enabled[0].canonical + 2, 1, enabled_next) == 1,
+                          "identical types of different functions survive signature compaction");
 
         // Two exact-size vector buckets against a guard page, all keys deliberately colliding. Include wraparound
         // and full-table refusal, with independent expected slots rather than only agreement between the twins.

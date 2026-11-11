@@ -76,10 +76,14 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
             {
                 bucket = (bucket + 1) & (capacity - 1);
             }
+            // A candidate with an enable_if that isn't always true is made ineligible by it (#1447), as clang's address
+            // resolution makes it.
+            const CheckConditionDeclaration* conditions = context->conditions != NULL && context->conditions->declaration_count != 0 ?
+                                                          check_condition_find(context->conditions, candidate->declaration) : NULL;
             if (candidate->object_sizes == NULL && seen[bucket] == UINT32_MAX)
             {
                 seen[bucket] = candidate->canonical;
-                const TypeAnswer same = type_same_canonical(table, candidate->type, function);
+                const TypeAnswer same = conditions == NULL || !conditions->restricted ? type_same_canonical(table, candidate->type, function) : TYPE_ANSWER_NO;
                 full = same == TYPE_ANSWER_FULL;
                 if (same == TYPE_ANSWER_YES)
                 {

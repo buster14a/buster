@@ -14,12 +14,31 @@
 // point among the eager references in `first` (BUSTER_CHECK_NONE before one, 0 for an object that isn't watched); and
 // with weak's walk (#1849), the token of the first of the eager references at that point in `use`, and in `deferred`
 // what the deferred ones found: 1 where a late weak declaration applies to one, 2 where none applies to another.
+// With `records`, every reference to a watched object or to a deferred definition (`nodes`, its node plus one) is
+// listed too, with its source's node (`source`: BUSTER_CHECK_NONE for eager code) and emission point, for weak's
+// replay of clang's deferred emission (check_program_weak_deferred).
+typedef struct CheckProgramUseRecord CheckProgramUseRecord;
+struct CheckProgramUseRecord
+{
+    uint32_t source;
+    uint32_t point;
+    uint32_t token;
+    uint32_t object;
+};
+
 typedef struct CheckProgramUses CheckProgramUses;
 struct CheckProgramUses
 {
     uint32_t* first;
     uint32_t* use;
     uint8_t* deferred;
+    const uint32_t* nodes;
+    CheckProgramUseRecord* records;
+    uint32_t record_count;
+    uint32_t record_capacity;
+    uint32_t source;
+    // A reference past `record_capacity`, which leaves the replay to the deferred bits.
+    bool records_full;
 };
 
 static bool check_program_weak_named(const CheckProgram* program, uint32_t object, uint32_t use, uint32_t point);
@@ -28,6 +47,15 @@ static bool check_program_weak_named(const CheckProgram* program, uint32_t objec
 static void check_program_symbol_reference(const CheckProgram* program, CheckProgramUses* uses, uint32_t object, uint32_t point, uint32_t token)
 {
     uint32_t* first = uses->first;
+    const bool listed = uses->records != NULL && object < program->object_count && (first[object] != 0 || uses->nodes[object] != 0);
+    if (listed && uses->record_count < uses->record_capacity)
+    {
+        uses->records[uses->record_count++] = (CheckProgramUseRecord){ .source = uses->source, .point = point, .token = token, .object = object };
+    }
+    else if (listed)
+    {
+        uses->records_full = true;
+    }
     if (object < program->object_count && first[object] != 0 && point != BUSTER_CHECK_NONE)
     {
         const bool earlier = point < first[object] || (uses->use != NULL && point == first[object] && token < uses->use[object]);
@@ -121,7 +149,7 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
         for (uint32_t r = 0; (eager || uses->deferred != NULL) && !candidate && r < body->reference_count; r += 1)
         {
             const uint32_t object = program->references[body->reference_first + r];
-            candidate = object < program->object_count && first[object] != 0;
+            candidate = object < program->object_count && (first[object] != 0 || (uses->nodes != NULL && uses->nodes[object] != 0));
         }
         if (candidate && walk.seen == NULL)
         {
@@ -160,6 +188,7 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
             const uint64_t body_mark = scratch->length;
             CheckTargetFeatureEmitted emitted = input->cleanup_count != 0 ? check_target_feature_emitted_reserve(scratch, body->count) : (CheckTargetFeatureEmitted){ 0 };
             const uint32_t point = eager ? program->parser->tree.parents[body->opening] + 1 : BUSTER_CHECK_NONE;
+            uses->source = eager ? BUSTER_CHECK_NONE : b;
             walk.body = body;
             walk.tag = 0;
             walk.call_count = 0;
