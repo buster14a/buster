@@ -855,6 +855,23 @@ static uint32_t check_driver_vla_bounds(const Parser* parser, Preprocessor* pp, 
     return count;
 }
 
+// Whether `alias` is the value type of one of `type`'s _Atomic levels, through pointers, arrays and functions' results.
+static bool check_driver_atomic_value(const TypeTable* types, TypeId type, TypeId alias)
+{
+    const TypeId wanted = type_unqualified(type_strip_aligned(types, alias));
+    bool found = false;
+    TypeId level = type;
+    for (uint32_t depth = 0; !found && depth < 64 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        const TypeId base = types->types.base[type_index(bare)];
+        found = kind == BUSTER_TYPE_KIND_ATOMIC && type_unqualified(type_strip_aligned(types, base)) == wanted;
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? base : 0;
+    }
+    return found;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
@@ -1007,6 +1024,12 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
+                // clang's desugarForDiagnostic doesn't look inside an _Atomic (#1447): a typedef that is an atomic's value
+                // type stays in the a.k.a. (`_Atomic(I) *` has none).
+                const bool atomic_value = vector_name == 0 && alias_type != 0 && !typeof_spelling && check_driver_atomic_value(types, type, alias_type);
+                expand.alias_count = atomic_value ? 1 : expand.alias_count;
+                expand.alias_types = atomic_value ? &alias_type : expand.alias_types;
+                expand.alias_names = atomic_value ? &alias_name : expand.alias_names;
                 expand.parenthesis_count = 0;
                 // desugarForDiagnostic strips a macro's name too: the a.k.a. spells the space out.
                 expand.space_macro_count = 0;
@@ -1676,6 +1699,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_INDEPENDENT_POINTER:
         case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
         case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
+        case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN:
         case CHECK_WARNING_EVENT_OBJC_UNSUPPORTED:
         case CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS:
         case CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS:
@@ -1721,6 +1745,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const uint32_t shown = offset <= whole.length ? (piece < whole.length - offset ? piece : (uint32_t)whole.length - offset) : 0u;
             static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
             static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
+            // An identifier's or a keyword's spelling as written, which swift_newtype's warning quotes (#1447).
+            const uint32_t word = event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN && payload->token < count ? parser->tokens.names[payload->token] : 0;
+            const String8 token_word = word != 0 ? check_driver_warning_name(pp, word) : (String8){ "", 0 };
+            char token_text[160] = "(null)";
+            if (word != 0)
+            {
+                snprintf(token_text, sizeof(token_text), "'%.*s'", (int)token_word.length, token_word.pointer);
+            }
             // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
             const String8 plain = check_warning_attribute_normalized(name);
             const String8 variable = event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER && payload->token < count ?
@@ -1753,6 +1785,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 check_warning_text(scratch, event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ? "'%.*s%s%.*s' attribute argument not supported: %s" :
                                                                                                      "'%.*s%s%.*s' attribute argument not supported: '%s'",
                                    (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute argument not supported: %s", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, token_text) :
                 event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ?
                 check_warning_text(scratch, "'lifetime_capture_by(%s)' is deprecated; use 'lifetime_capture_by_%s' instead", argument, argument) :
                 event->kind == CHECK_WARNING_EVENT_MIG_ROUTINE ? "'mig_server_routine' attribute only applies to routines that return a kern_return_t" :
