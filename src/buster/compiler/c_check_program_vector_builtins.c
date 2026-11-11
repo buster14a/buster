@@ -1533,7 +1533,7 @@ static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId 
 // MAXSS or MINSS of y and x, or y where x is a NaN (CMPUNORDSS, then PAND, PANDN and POR). maximum and minimum, and
 // their _num forms, take AVX's non-destructive forms and VBLENDVPS: MAXSS or MINSS of x and y, its sign bit then
 // cleared by x's (maximum) or set (minimum), x where x is a NaN (for the _num forms, y where x is one, then x where y
-// is); without AVX they need more records than a row has and are refused by name.
+// is); without AVX they take two rows (check_vector_floating_scalar_row's, #1834).
 static const char* check_vector_baseline_scalar_row(const X86Target* target, CBuiltinId builtin, uint8_t class, Tier0Operation* row,
                                                     CheckVectorConstants* constants)
 {
@@ -1743,9 +1743,45 @@ static const char* check_vector_floating_scalar_row(const X86Target* target, CBu
     memset(tail, 0, sizeof(*tail));
     const bool extreme = builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM || builtin == CBUILTIN_ELEMENTWISE_MAXIMUMNUM ||
                          builtin == CBUILTIN_ELEMENTWISE_MINIMUMNUM;
+    const bool ieee = builtin == CBUILTIN_ELEMENTWISE_MAXIMUM || builtin == CBUILTIN_ELEMENTWISE_MINIMUM;
     if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0 && extreme)
     {
         check_vector_extreme_scalar_rows(target, builtin, class, row, constants, tail);
+    }
+    else if ((target->features & (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX))) == 0 && ieee)
+    {
+        // IEEE maximum and minimum without AVX (#1834), clang's SSE2 sequence in two rows: `row` MAXSS or MINSS of x and y
+        // (y where either is a NaN), its sign bit cleared where x's is clear (POR of x and the magnitude mask, then PAND)
+        // or set where x's is set (PAND of x and the sign mask, then POR); `tail`, of that, y and x, x where x is a NaN
+        // (CMPUNORDSS, then PAND, PANDN and POR), unquieted, as clang's is.
+        const bool maximum = builtin == CBUILTIN_ELEMENTWISE_MAXIMUM;
+        const uint8_t t1 = BUSTER_TIER0_ROLE_VECTOR(1);
+        const uint32_t move = X86_FORM_MOVAPS_X_XM;
+        uint32_t r = 0;
+        check_vector_constant(row, constants, maximum ? sign - 1 : sign, d ? 8 : 4, class, 0);
+        row->records[r++] = check_vector_lower_record(move, t, 0, f0);
+        row->records[r++] = check_vector_lower_record(maximum ? (d ? X86_FORM_MAXSD_X_XM64 : X86_FORM_MAXSS_X_XM32) :
+                                                                (d ? X86_FORM_MINSD_X_XM64 : X86_FORM_MINSS_X_XM32), t, 0, f1);
+        row->records[r++] = check_vector_lower_record(maximum ? X86_FORM_POR_X_XM128 : X86_FORM_PAND_X_XM128, f2, 0, f0);
+        row->records[r++] = check_vector_lower_record(maximum ? X86_FORM_PAND_X_XM128 : X86_FORM_POR_X_XM128, t, 0, f2);
+        row->records[r++] = check_vector_lower_record(move, fr, 0, t);
+        row->record_count = (uint8_t)r;
+        tail->result_class = class;
+        tail->operand_count = 3;
+        for (uint32_t j = 0; j < 3; j += 1)
+        {
+            tail->operand_classes[j] = class;
+        }
+        uint32_t k = 0;
+        tail->records[k++] = check_vector_lower_record(move, t, 0, f2);
+        tail->records[k] = check_vector_lower_record(d ? X86_FORM_CMPSD_X_XM64_IMM8 : X86_FORM_CMPSS_X_XM32_IMM8, t, 0, t);
+        tail->records[k++].immediate = 3;
+        tail->records[k++] = check_vector_lower_record(move, t1, 0, t);
+        tail->records[k++] = check_vector_lower_record(X86_FORM_PAND_X_XM128, t1, 0, f2);
+        tail->records[k++] = check_vector_lower_record(X86_FORM_PANDN_X_XM128, t, 0, f0);
+        tail->records[k++] = check_vector_lower_record(X86_FORM_POR_X_XM128, t, 0, t1);
+        tail->records[k++] = check_vector_lower_record(move, fr, 0, t);
+        tail->record_count = (uint8_t)k;
     }
     else if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0 && builtin <= CBUILTIN_ELEMENTWISE_ROUND && (target->features & BUSTER_X86_FEATURE(SSE41)) != 0)
     {
