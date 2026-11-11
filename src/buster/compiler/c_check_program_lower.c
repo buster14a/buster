@@ -1978,12 +1978,14 @@ static TypeId check_lower_transparent(const CheckLowerWriter* writer, TypeId typ
     return first;
 }
 
-// The type an argument, a parameter or va_arg's operand of a struct or a union passes as: a transparent union's first
-// member (check_lower_transparent), or the type itself.
+// The type an argument or a parameter of a struct or a union passes as: a transparent union's first member
+// (check_lower_transparent), or the type itself, a transparent union's too where its stack slot is its own
+// (AbiTable.transparent, #1844), which the calling convention classifies as its member but for its byval slot.
 static TypeId check_lower_passed_as(const CheckLowerWriter* writer, TypeId type)
 {
     const TypeId first = check_lower_transparent(writer, type);
-    return first != 0 ? first : type;
+    const bool own_slot = first != 0 && writer->abi_table->transparent[type_index(type)] != 0;
+    return first != 0 && !own_slot ? first : type;
 }
 
 // The class a transparent union's first member passes in: an integer's or a pointer's (an enum's, _Bool's), or UINT8_MAX
@@ -2070,22 +2072,30 @@ static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
 }
 
 // Why a struct or a union can't pass as a transparent union's first member (check_lower_passed_as), or NULL (another's
-// passes as itself). A transparent union passes so where it has that member's size and alignment, as it does but by an
-// aligned or packed attribute of its own: clang's code takes such a union's registers from the member and its stack slot
-// from the union (getIndirectResult), which differ. And where the union was made transparent after clang's code may have
-// classified a function's type (check_lower_transparent_late) and its first member passes otherwise than it (its
-// registers, its stack or its extension), clang's code may pass it as either. Out of line: only aggregates ask.
+// passes as itself). A transparent union passes so where it has that member's size and alignment; one that an aligned
+// or packed attribute of its own sizes or aligns otherwise passes as clang's code passes it, its registers the member's
+// and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), where the member is a scalar of
+// eightbytes, and is refused for another member (an aggregate, a pair, a vector, a value in memory). And where the union
+// was made transparent after clang's code may have classified a function's type (check_lower_transparent_late) and its
+// first member passes otherwise than it (its registers, its stack or its extension), clang's code may pass it as either.
+// Out of line: only aggregates ask.
 static __attribute__((noinline)) const char* check_lower_transparent_passed(CheckLowerWriter* writer, TypeId type)
 {
     const AbiTable* table = writer->abi_table;
     const uint32_t places = BUSTER_ABI_PASS_REGISTER_CLASSES | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_UNCOUNTED |
                             BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO | BUSTER_ABI_PASS_LOW_GENERAL;
     const uint32_t own = type_index(type);
-    const uint32_t first = type_index(check_lower_passed_as(writer, type));
+    const TypeId member = check_lower_transparent(writer, type);
+    const uint32_t first = member != 0 ? type_index(member) : own;
+    const bool own_slot = table->transparent[own] != 0;
     const char* feature = NULL;
-    if (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first])
+    if (!own_slot && (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first]))
     {
-        feature = "transparent unions sized or aligned otherwise than their first member";
+        feature = "transparent unions sized or aligned otherwise than their first member, an aggregate, a pair, a vector or a value in memory";
+    }
+    else if (own_slot && check_lower_transparent_late(writer, type))
+    {
+        feature = "unions made transparent after a function definition or an initializer naming a function, of a stack slot of their own";
     }
     else if (first != own && ((table->pass[own] ^ table->pass[first]) & places) != 0 && check_lower_transparent_late(writer, type))
     {
@@ -6497,7 +6507,11 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             if (member != 0)
             {
                 const uint8_t member_class = check_lower_transparent_class(writer, member);
-                passed_type = member;
+                // The union itself where its stack slot is its own (check_lower_passed_as), its value the member's.
+                const TypeId transparent_union = (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 && a < parameters ? parameter_types[a] : argument;
+                passed_type = check_lower_passed_as(writer, transparent_union) == transparent_union ? transparent_union : member;
+                // Its locations reach the IR's call, whose slots its own one may move (ir_typed_aggregate_call).
+                writer->aggregates |= passed_type == transparent_union;
                 aggregate = member_class == UINT8_MAX;
                 vector = 0;
                 wide = false;
@@ -8635,8 +8649,17 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
             // whole eightbytes), or read in the overflow area; its value is their address.
             const bool aggregate = check_lower_aggregate(writer, requested);
             const uint64_t size = aggregate || bytes ? type_size(types, requested) : 0;
-            // A transparent union's as its first member's (check_lower_passed_as), into the union's object.
-            call->plan = abi_va_arg(writer->abi_table, types, aggregate ? check_lower_passed_as(writer, requested) : requested);
+            // A transparent union's as its first member's (check_lower_transparent), into the union's object; one of a slot
+            // of its own (AbiTable.transparent, #1844) from the overflow area as the union, its alignment and its bytes, as
+            // clang's EmitX86_64VAArgFromMemory reads it.
+            const TypeId first = aggregate ? check_lower_transparent(writer, requested) : 0;
+            call->plan = abi_va_arg(writer->abi_table, types, first != 0 ? first : requested);
+            if (first != 0 && writer->abi_table->transparent[type_index(requested)] != 0)
+            {
+                const uint32_t own_log2 = type_alignment_log2(types, requested);
+                call->plan.overflow_alignment_log2 = (uint8_t)(own_log2 > BUSTER_ABI_SLOT_LOG2 ? own_log2 : BUSTER_ABI_SLOT_LOG2);
+                call->plan.stack_bytes = (uint32_t)((size + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1));
+            }
             call->result_class = bytes ? BUSTER_TYPED_CLASS_U64 : check_lower_storage_class(writer, requested);
             // (An empty one, which the call ignores, still names its object: 1 byte, as its frame object takes.)
             call->size = aggregate && size == 0 ? 1 : (uint32_t)size;
