@@ -326,6 +326,10 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             sizes.extra_count += (uint64_t)c * 2 + 1;
             sizes.constant_count += c;
         }
+        else if (ir_ternary_instruction(source, old))
+        {
+            sizes.extra_count += 1;
+        }
     }
     IrFunction candidate = { 0 };
     sizes.parameter_count = owners ? source->parameter_count : 0;
@@ -401,6 +405,14 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             {
                 candidate.c[i] = address;
                 candidate.addresses[address++] = source->addresses[c];
+            }
+            else if (ir_ternary_instruction(source, old))
+            {
+                // A ternary intrinsic's third operand (#1840), in the extra array.
+                const uint32_t value = ir_rebuild_value(source, plan, value_map, ir_intrinsic_third(source, old));
+                candidate.c[i] = ir_intrinsic_ternary_c(c, extra);
+                candidate.extra[extra++] = value;
+                check.error = value != BUSTER_IR_NONE ? IR_OK : IR_ERROR_OPERAND;
             }
             else if (op == IR_CALL || op == IR_CALL_INDIRECT)
             {

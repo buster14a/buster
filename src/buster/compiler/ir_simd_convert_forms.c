@@ -154,5 +154,22 @@ static const uint16_t ir_simd_shift_immediate_forms[3][3][3] = {
         { X86_FORM_VPSRAQ_X_XM128_IMM8, X86_FORM_VPSRAQ_Y_YM256_IMM8, X86_FORM_VPSRAQ_Z_ZM512_IMM8 },
     },
 };
+// The permutes of two tables (#1840, BUSTER_IR_INTRINSIC_PERMUTE2), by their lanes' bytes' log2 and width (16, 32 or 64
+// bytes): vpermt2b to vpermt2q, whose destination is the first table and which read the indices from vvvv and the second
+// table from rm.
+static const uint16_t ir_simd_permute2_forms[4][3] = {
+    { X86_FORM_VPERMT2B_X_X_XM128, X86_FORM_VPERMT2B_Y_Y_YM256, X86_FORM_VPERMT2B_Z_Z_ZM512 },
+    { X86_FORM_VPERMT2W_X_X_XM128, X86_FORM_VPERMT2W_Y_Y_YM256, X86_FORM_VPERMT2W_Z_Z_ZM512 },
+    { X86_FORM_VPERMT2D_X_X_XM128, X86_FORM_VPERMT2D_Y_Y_YM256, X86_FORM_VPERMT2D_Z_Z_ZM512 },
+    { X86_FORM_VPERMT2Q_X_X_XM128, X86_FORM_VPERMT2Q_Y_Y_YM256, X86_FORM_VPERMT2Q_Z_Z_ZM512 },
+};
+// vpermi2b to vpermi2q, the same permutes whose destination is the indices, the first table in vvvv and the second in rm
+// (Tier 1's where the destination's register holds the indices).
+static const uint16_t ir_simd_permute2_index_forms[4][3] = {
+    { X86_FORM_VPERMI2B_X_X_XM128, X86_FORM_VPERMI2B_Y_Y_YM256, X86_FORM_VPERMI2B_Z_Z_ZM512 },
+    { X86_FORM_VPERMI2W_X_X_XM128, X86_FORM_VPERMI2W_Y_Y_YM256, X86_FORM_VPERMI2W_Z_Z_ZM512 },
+    { X86_FORM_VPERMI2D_X_X_XM128, X86_FORM_VPERMI2D_Y_Y_YM256, X86_FORM_VPERMI2D_Z_Z_ZM512 },
+    { X86_FORM_VPERMI2Q_X_X_XM128, X86_FORM_VPERMI2Q_Y_Y_YM256, X86_FORM_VPERMI2Q_Z_Z_ZM512 },
+};
 
 #endif

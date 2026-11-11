@@ -1470,6 +1470,127 @@ static void ir_simd_typed_test_lane_ops(IrTestTally* tally)
     printf("  IR SIMD rows: the front end's %u elementwise minima, maxima and saturations decode to the IR's lane_op\n", decoded_rows);
 }
 
+// The permutes of two tables (#1840): vpermt2b to vpermt2q at each width, the indices in vvvv and the second table in rm
+// (the permutex2var builtins' rows) or the other way around (__builtin_shufflevector's), decode as the IR's permute2 of
+// their lanes, its operands in the order the row names them, at exactly the features written out; refused without each
+// and under 6 changes.
+static void ir_simd_typed_test_permute2s(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512VBMI) };
+    const uint64_t all = UINT64_MAX;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t size = 0; tables && size < 4; size += 1)
+    {
+        for (uint32_t swapped = 0; swapped < 2; swapped += 1)
+        {
+            for (uint32_t width = 0; width < 3; width += 1)
+            {
+                const uint32_t bytes = 16u << width;
+                Tier0Operation row;
+                memset(&row, 0, sizeof(row));
+                row.records[0] = check_vector_lower_record(ir_simd_permute2_forms[size][width], v0, swapped != 0 ? v2 : v1, swapped != 0 ? v1 : v2);
+                row.record_count = 1;
+                row.operand_count = 3;
+                for (uint32_t o = 0; o < 3; o += 1)
+                {
+                    row.operand_classes[o] = BUSTER_TYPED_CLASS_VECTOR;
+                    row.operand_bytes[o] = (uint8_t)bytes;
+                }
+                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+                row.result_bytes = (uint8_t)bytes;
+                // Written out: AVX512F, VL below 64 bytes, BW for bytes and words and VBMI for bytes.
+                const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (size <= 1 ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
+                                          (size == 0 ? BUSTER_X86_FEATURE(AVX512VBMI) : 0);
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+                char description[160];
+                snprintf(description, sizeof(description), "vpermt2 of %u-byte lanes (swapped %u) at %u bytes: the IR's permute2 at exactly its features", 1u << size, swapped, bytes);
+                ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.permute2 && decoded.permute2_indices == (swapped != 0 ? 2 : 1) && decoded.permute2_table == (swapped != 0 ? 1 : 2) && decoded.immediate == size &&
+                                          decoded.permute == 0 && !decoded.lane_op && !decoded.shift && decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.operand_count == 3 &&
+                                          (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                               description);
+                decoded_rows += status == IR_SIMD_TYPED_OK && decoded.permute2;
+                for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+                {
+                    IrSimdTypedOperation without;
+                    memset(&without, 0x5a, sizeof(without));
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                    const bool required = (expected & features[f]) != 0;
+                    ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.permute2,
+                                   "a permute of two tables without a feature it needs stays the machine row, and needs no other");
+                }
+                for (uint32_t m = 0; m < 6; m += 1)
+                {
+                    Tier0Operation changed = row;
+                    X86Instruction* record = &changed.records[0];
+                    switch (m)
+                    {
+                    case 0: record->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+                    case 1: record->mode = BUSTER_X86_MEMORY_BASE; break;
+                    case 2: record->vvvv = v0; break;
+                    case 3: changed.operand_bytes[swapped != 0 ? 2 : 1] = (uint8_t)(bytes == 64 ? 32 : 64); break;
+                    case 4:
+                        changed.records[1] = changed.records[0];
+                        changed.record_count = 2;
+                        break;
+                    case 5: record->reg = v1; break;
+                    }
+                    memset(&decoded, 0xa5, sizeof(decoded));
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                    ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), "a changed permute of two tables' row is not the IR's permute2");
+                }
+            }
+        }
+    }
+    // __builtin_shufflevector's of narrower vectors: one 16-byte table twice (the indices VECTOR(1), the table VECTOR(0)
+    // again), and two tables of half the result's width (the indices VECTOR(2)), each table widened; a table wider than
+    // the result, or indices narrower, stays a machine row.
+    uint32_t narrow_rows = 0;
+    for (uint32_t size = 0; tables && size < 4; size += 1)
+    {
+        for (uint32_t width = 1; width < 3; width += 1)
+        {
+            for (uint32_t shape = 0; shape < 4; shape += 1)
+            {
+                const uint32_t bytes = 16u << width;
+                const bool one = shape == 0 || shape == 2;
+                Tier0Operation row;
+                memset(&row, 0, sizeof(row));
+                row.records[0] = check_vector_lower_record(ir_simd_permute2_forms[size][width], v0, one ? v1 : v2, one ? v0 : v1);
+                row.record_count = 1;
+                row.operand_count = one ? 2 : 3;
+                for (uint32_t o = 0; o < row.operand_count; o += 1)
+                {
+                    const bool indices = o == (one ? 1u : 2u);
+                    row.operand_classes[o] = BUSTER_TYPED_CLASS_VECTOR;
+                    // 0 and 1 admitted; 2: a 64-byte table, wider than a 32-byte result (admitted at 64); 3: indices narrower.
+                    row.operand_bytes[o] = (uint8_t)(indices ? (shape == 3 ? bytes / 2 : bytes) : shape == 0 ? 16 : shape == 2 ? 64 : bytes / 2);
+                }
+                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+                row.result_bytes = (uint8_t)bytes;
+                const bool admitted = shape <= 1 || (shape == 2 && width == 2);
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+                ir_test_expect(tally,
+                               admitted ? status == IR_SIMD_TYPED_OK && decoded.permute2 && decoded.permute2_indices == (one ? 1 : 2) && decoded.permute2_table == (one ? 0 : 1) &&
+                                              decoded.operand_count == row.operand_count && decoded.immediate == size :
+                                          ir_simd_typed_test_undecoded(status, &decoded),
+                               "a permute of narrower tables decodes as the IR's permute2 of them widened, and of wider ones stays a machine row");
+                narrow_rows += admitted && status == IR_SIMD_TYPED_OK;
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 4 * 2 * 3 && narrow_rows == 4 * (2 * 2 + 1), "every permute of two tables decodes");
+    printf("  IR SIMD rows: %u permutes of two tables decode to the IR's permute2\n", decoded_rows);
+}
+
 // The masks to vectors and back (#1840): every MASK_VECTOR rule's row (`__builtin_ia32_cvtmask2b` to `_cvtmask2q`) and
 // every VECTOR_MASK rule's (`_cvtb2mask` to `_cvtq2mask`), at each width, as the opmask conversion leaves them, decodes
 // as the IR's select of all ones and zeros or its comparison of signed lanes less than zero, at the elements' lanes and
@@ -1672,6 +1793,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_shifts(tally);
     ir_simd_typed_test_mask_vectors(tally);
     ir_simd_typed_test_lane_ops(tally);
+    ir_simd_typed_test_permute2s(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);

@@ -82,6 +82,9 @@ typedef enum IrSimdOperation
     // operation in the action's `index`: the unsigned or signed minimum or maximum, and the unsigned or signed saturating
     // sum or difference a - b.
     IR_SIMD_LANE_OP,
+    // A permute of two tables (#1840, ir.c's BUSTER_IR_INTRINSIC_PERMUTE2), its lanes' bytes' log2 the action's `index`:
+    // lane i is, of a's lanes followed by c's, the one that b's lane i's low bits name, as many as name twice the lanes.
+    IR_SIMD_PERMUTE2,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -226,7 +229,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT || action->operation == IR_SIMD_PERMUTE ||
                           action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
                           action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT ||
-                          action->operation == IR_SIMD_LANE_OP);
+                          action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -263,6 +266,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                         action->index < ir_simd_bits(type) / ir_simd_bits(b) && c == IR_SIMD_NONE;
                 break;
             case IR_SIMD_PERMUTE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
+            case IR_SIMD_PERMUTE2: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && action->index <= 3; break;
             case IR_SIMD_SHUFFLE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE; break;
             case IR_SIMD_ALIGN:
                 valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && (action->index >> 4 == 2 || action->index >> 4 == 3) &&
@@ -601,6 +605,24 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         {
             const uint64_t a = ir_simd_lane_read(values[0], lane_bits, lane);
             ir_simd_lane_write(&staged, lane_bits, lane, ir_simd_integer_operation((IrSimdOperation)shifts[(action->index >> 2) & 3], a, count, lane_bits));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_PERMUTE2)
+    {
+        // Byte by byte: each result byte is a byte of the lane of a, or of c past a's lanes, that b's lane names.
+        const uint8_t* a = (const uint8_t*)values[0]->words;
+        const uint8_t* b = (const uint8_t*)values[1]->words;
+        const uint8_t* c = (const uint8_t*)values[2]->words;
+        uint8_t* out = (uint8_t*)staged.words;
+        const uint32_t bytes = ir_simd_bits(action->result) / 8;
+        const uint32_t size = 1u << action->index;
+        const uint32_t lanes = bytes / size;
+        for (uint32_t byte = 0; byte < bytes; byte += 1)
+        {
+            uint64_t index = 0;
+            memcpy(&index, b + (byte / size) * size, size);
+            const uint32_t selected = (uint32_t)(index & (2 * lanes - 1));
+            out[byte] = (selected < lanes ? a : c)[(selected & (lanes - 1)) * size + byte % size];
         }
     }
     else if (valid && action->operation >= IR_SIMD_PERMUTE && action->operation <= IR_SIMD_SHUFFLE_LANES)
