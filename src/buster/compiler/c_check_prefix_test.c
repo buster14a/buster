@@ -226,7 +226,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                 bool same_roles = true;
                 for (uint32_t token = 0; token < count; token += 1)
                 {
-                    same_roles &= parse_test_canonical_role(view->tree.roles[token]) == parse_test_canonical_role(reference.tree.roles[token]);
+                    same_roles &= view->tree.roles[token] == reference.tree.roles[token];
                 }
                 const bool same[] =
                 {

@@ -772,6 +772,58 @@ static void ir_optimize_test_simd_shifts(IrOptimizeTest* test, Arena* input, Are
     }
 }
 
+// The lane operations (#1840): each operation of two constant vectors at each lanes' size it takes and each width,
+// compared with another constant: folded by both SCCP paths alike and to the interpreter's value of the original
+// (ir_optimize_test_simd_rewrite), and to a constant.
+static void ir_optimize_test_simd_lane_ops(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 32; flags += 1)
+        {
+            if (((flags >> 2) & 7) >= 4 && (flags & 3) > 1)
+            {
+                continue;
+            }
+            const uint64_t mark = input->length;
+            const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .vector_constant_count = 3 };
+            IrFunction f = { 0 };
+            if (ir_create(input, &sizes, &f) != IR_OK)
+            {
+                ir_optimize_test_expect(test, false, "constant lane operation optimizer fixture allocation");
+                continue;
+            }
+            const IrType type = (IrType)(IR_V4I32 + width);
+            const uint32_t mask = ir_lane_mask(type, IR_SIMD_LANE_I8);
+            f.result_type = (uint8_t)mask;
+            f.block_offsets[1] = 6;
+            for (uint32_t w = 0; w < (2u << width); w += 1)
+            {
+                f.vector_constants[0].words[w] = UINT64_C(0x8796a5b4c3d2e1f0) * (w + 1);
+                f.vector_constants[1].words[w] = UINT64_C(0x0f1e2d3c4b5a6978) ^ (w * UINT64_C(0x0101010101010101));
+                f.vector_constants[2].words[w] = UINT64_C(0x5555aaaa3333cccc) + w;
+            }
+            ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 1, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_LANE_OP);
+            f.flags[2] = (uint8_t)flags;
+            ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
+            f.flags[4] = IR_SIMD_LANE_I8;
+            ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            IrOptimizeResult result = { 0 };
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
+                                    "a constant lane operation folds through a comparison");
+            arena_pop_to(vector, 0);
+            arena_pop_to(input, mark);
+        }
+    }
+}
+
 static void ir_optimize_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -790,6 +842,7 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
         ir_optimize_test_simd_widths(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_permutes(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_shifts(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_simd_lane_ops(test, &input, &vector, &scalar, &scratch);
     }
     arena_release(&input);
     arena_release(&vector);

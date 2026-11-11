@@ -343,6 +343,8 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
     const bool brain = element_type == BUSTER_TYPE_BF16;
     const bool negation = op == CHECK_OP_NEGATIVE && element.floating && !brain;
     const uint32_t operands = unary ? 1 : 2;
+    // Integer division and remainder, element by element (check_lower_vector_divide's, #2216).
+    const bool divide = bits == NULL && (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !element.floating && !brain;
     Tier0Operation rows[2];
     uint32_t main_row = BUSTER_CHECK_NONE;
     uint32_t not_row = BUSTER_CHECK_NONE;
@@ -357,7 +359,7 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
             not_row = check_lower_transport_row(writer, CHECK_OP_BIT_NOT, element, piece, 0, rows + 1);
         }
     }
-    else
+    else if (!divide)
     {
         // `<=` and `>=` of qwords without SSE4.2 are their complements' rows and a complement (#1834).
         const uint32_t complement = brain ? 0 : check_vector_baseline_complement(&writer->target, op, element);
@@ -378,7 +380,38 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
             locals[j] = j == 0 && left != BUSTER_CHECK_NONE ? left :
                         scalars[j] ? check_lower_transport_splat_temporary(writer, piece) : check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         }
-        for (uint32_t p = bytes / piece; p-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        const uint8_t computed = element.bytes == 8 ? (element.is_signed ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64) :
+                                                      (element.is_signed ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U32);
+        const uint8_t stored = element.bytes == 1 ? (element.is_signed ? BUSTER_TYPED_CLASS_I8 : BUSTER_TYPED_CLASS_U8) :
+                               element.bytes == 2 ? (element.is_signed ? BUSTER_TYPED_CLASS_I16 : BUSTER_TYPED_CLASS_U16) : computed;
+        for (uint32_t i = divide ? check_builtin_vector_lanes(types, type_conversion_operand(types, vector)) : 0; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const uint32_t offset = i * element.bytes;
+            check_lower_instruction(writer, BUSTER_TYPED_SET, stored, 0);
+            if (stored != computed)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
+            }
+            check_lower_instruction(writer, op == CHECK_OP_DIVIDE ? BUSTER_TYPED_DIV : BUSTER_TYPED_MOD, computed, 0);
+            for (uint32_t j = operands; j-- > 0;)
+            {
+                if (stored != computed)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computed, 0);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored, 0);
+                if (scalars[j])
+                {
+                    check_lower_element_address(writer, locals[j], offset % piece);
+                }
+                else
+                {
+                    check_lower_transport_at(writer, locals[j], offset);
+                }
+            }
+            check_lower_element_address(writer, result, offset);
+        }
+        for (uint32_t p = divide ? 0 : bytes / piece; p-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const uint64_t offset = (uint64_t)p * piece;
             check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, piece);
@@ -1236,7 +1269,12 @@ static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLow
         Tier0Operation* row = rows;
         uint32_t count = 1;
         CheckVectorConstants constants = { 0 };
-        const char* reason = ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, row) :
+        // Qwords' minimum and maximum without SSE4.2 are a chain of two rows too: a mask's and a blend's of it and the
+        // piece's x and y (check_vector_baseline_extreme_pair, #1834).
+        const bool pair = arguments == 2 && !ldexp && !floating && check_vector_baseline_extreme_pair(&writer->target, builtin, piece, rows);
+        count = pair ? 2 : count;
+        const char* reason = pair ? NULL :
+                             ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, row) :
                              floating ? check_vector_floating_rows(&writer->target, builtin, piece, rows, &count, &constants) :
                                         check_vector_elementwise_shape_row(&writer->target, builtin, piece, arguments, negated, row, &constants);
         if (reason != NULL)

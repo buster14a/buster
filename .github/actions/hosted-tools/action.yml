@@ -1,5 +1,5 @@
 name: Verified hosted release inputs
-description: Restore exact inputs or use the preparation job's run-scoped handoff. Only a single-job workflow (empty artifact-name) acquires missing inputs itself.
+description: Restore exact inputs or use the preparation job's run-scoped handoff, and its offline inputs (apt closure, downloads, mirrors), which every later step reads with no network. Only a single-job workflow (empty artifact-name) acquires missing inputs itself.
 inputs:
   artifact-name:
     description: Immutable handoff produced by the successful preparation attempt; empty makes this job its workflow's only acquisition.
@@ -40,3 +40,47 @@ runs:
         set -euo pipefail
         bash tools/ci/hosted-release.sh verify "$RUNNER_TEMP/hosted-release-inputs"
         printf 'BUSTER_HOSTED_RELEASES=%s\n' "$RUNNER_TEMP/hosted-release-inputs" >> "$GITHUB_ENV"
+    # The run's offline inputs (#2275; docs/hosted-toolchain.md, "Offline inputs"): the preparation job's companion
+    # artifact, which holds this run's apt closure, so that every job installs the same versions. A single-job workflow
+    # is its own preparation: it restores the caches the preparation job keeps, and acquires what they lack.
+    - name: Name the offline inputs' caches for this single-job workflow
+      id: offline
+      if: inputs.artifact-name == ''
+      shell: bash
+      run: bash tools/ci/hosted-offline.sh keys >> "$GITHUB_OUTPUT"
+    - name: Restore the apt closure resolved on this runner image
+      if: inputs.artifact-name == ''
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      continue-on-error: true
+      with:
+        path: ${{ runner.temp }}/hosted-offline/apt
+        key: ${{ steps.offline.outputs.apt-key }}
+    - name: Restore the pinned downloads and mirrors
+      if: inputs.artifact-name == ''
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      continue-on-error: true
+      with:
+        path: ${{ runner.temp }}/hosted-offline/ci
+        key: ${{ steps.offline.outputs.ci-key }}
+    - name: Acquire missing offline inputs once for this single-job workflow
+      if: inputs.artifact-name == ''
+      shell: bash
+      run: bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline"
+    - name: Restore this run's offline inputs
+      if: inputs.artifact-name != ''
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: ${{ inputs.artifact-name }}-offline
+        path: ${{ runner.temp }}/hosted-offline
+    # From here on, setup-hosted.sh installs the apt closure with no download, and cached-download.sh and the fetch
+    # scripts read the bundle alone (BUSTER_CI_OFFLINE): a missing or altered input fails, and is never fetched again.
+    - name: Verify the offline inputs and read every later one from them alone
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash tools/ci/hosted-offline.sh verify "$RUNNER_TEMP/hosted-offline"
+        {
+            printf 'BUSTER_HOSTED_OFFLINE=%s\n' "$RUNNER_TEMP/hosted-offline"
+            printf 'BUSTER_CI_CACHE=%s\n' "$RUNNER_TEMP/hosted-offline/ci"
+            printf 'BUSTER_CI_OFFLINE=1\n'
+        } >> "$GITHUB_ENV"

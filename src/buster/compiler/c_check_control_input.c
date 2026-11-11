@@ -96,6 +96,39 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
     return valid;
 }
 
+// The opening of the outermost statement expression a jump from `source` to `target` enters, which clang's jump scope
+// checker notes ("jump enters a statement expression"), else BUSTER_CHECK_NONE: check_input_region_transfer's walk from the
+// target, on to the regions' common ancestor, which reads the region that refuses the jump last. Only a refused jump's
+// report asks it (#1942).
+static uint32_t check_input_region_entered(const CheckInputReader* reader, uint32_t source, uint32_t target)
+{
+    const Parser* parser = reader->parser;
+    uint32_t entered = BUSTER_CHECK_NONE;
+    for (uint32_t ancestor = target, steps = 0; ancestor < parser->tokens.count && steps < parser->tokens.count; ancestor = parser->tree.parents[ancestor], steps += 1)
+    {
+        const uint32_t selected = reader->output->expression_regions[ancestor];
+        const CheckInputRegion* region = selected != 0 ? &reader->output->regions[selected - 1] : NULL;
+        entered = region != NULL && !(source > region->opening && source < region->closing) ? region->opening : entered;
+    }
+    return entered;
+}
+
+// A jump's report that enters a statement expression (#1942): clang's "cannot jump from this goto statement to its label",
+// or "cannot jump from switch statement to this case label", at `token`, with its note at the expression's `(`.
+static void check_input_report_jump(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t source, uint32_t target)
+{
+    CheckInput* input = reader->output;
+    const uint32_t before = input->report_count;
+    check_input_report(reader, token, message);
+    const uint32_t entered = check_input_region_entered(reader, source, target);
+    if (input->report_count > before && entered != BUSTER_CHECK_NONE)
+    {
+        input->reports[before].note_kind = CHECK_INPUT_NOTE_JUMP;
+        input->reports[before].note_token = entered;
+    }
+    check_input_jump_completion(reader, before);
+}
+
 // A musttail return statement's record (CheckInput.musttails), in source order.
 static bool check_input_musttail_record(CheckInputReader* reader, CheckInputMusttail musttail)
 {
@@ -925,6 +958,75 @@ static void check_input_asm_statement_attributes(CheckInputReader* reader, uint3
 // return's musttail for c_check_musttail.c and check_program. GNU attributes right after a named label are the label's
 // (check_input_label_attributes); C23's there are the statement's. At file scope an attribute-only null declaration
 // remains for check_input_declaration, which ignores GNU lists and checks C23 subjects.
+// Whether a block item's attributes, from `first` to `after`, are GNU ones alone, each a suppress whose arguments clang's
+// parser drops it for (#1844): each argument a string literal's tokens, or one in parentheses any number deep, separated
+// by commas, as clang's parser reads them; anything else is its "expected string literal" or "expected ')'" (the
+// attribute's own error, the checker's or the parser's). With none of them left, clang's ParseStatementOrDeclaration
+// parses the statement after them as a declaration. A name alone and `()` are fine, and an empty item is none.
+static bool check_input_suppress_dropped(CheckInputReader* reader, uint32_t first, uint32_t after)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    bool all = true;
+    uint32_t dropped = 0;
+    uint32_t token = first;
+    while (all && token < after)
+    {
+        const bool specifier = parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && token + 2 < after && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN &&
+                               parser->tokens.kinds[token + 2] == PARSE_KIND_L_PAREN;
+        const uint32_t close = specifier ? parser->tree.parents[token + 1] : count;
+        all = specifier && close < after && close > token + 3 && parser->tokens.kinds[close - 1] == PARSE_KIND_R_PAREN;
+        uint32_t item = token + 3;
+        while (all && item < close - 1)
+        {
+            uint32_t end = item;
+            uint32_t depth = 0;
+            while (end < close - 1 && !(depth == 0 && parser->tokens.kinds[end] == PARSE_KIND_COMMA))
+            {
+                const uint8_t kind = parser->tokens.kinds[end];
+                depth = kind == PARSE_KIND_L_PAREN ? depth + 1 : kind == PARSE_KIND_R_PAREN && depth != 0 ? depth - 1 : depth;
+                end += 1;
+            }
+            if (end != item)
+            {
+                const String8 name = check_input_attribute_name(reader, parser->tokens.names[item]);
+                const bool suppress = check_input_attribute_equal(name, "suppress") || check_input_attribute_equal(name, "__suppress__");
+                bool malformed = false;
+                uint32_t at = item + 2;
+                bool done = suppress && (end == item + 1 || (at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN));
+                while (suppress && !done && !malformed && at < end)
+                {
+                    uint32_t level = 0;
+                    while (at < end && parser->tokens.kinds[at] == PARSE_KIND_L_PAREN)
+                    {
+                        level += 1;
+                        at += 1;
+                    }
+                    const bool string = at < end && parser->tokens.kinds[at] == PARSE_KIND_STRING;
+                    while (at < end && parser->tokens.kinds[at] == PARSE_KIND_STRING)
+                    {
+                        at += 1;
+                    }
+                    while (string && level != 0 && at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN)
+                    {
+                        level -= 1;
+                        at += 1;
+                    }
+                    const uint8_t next = at < end ? parser->tokens.kinds[at] : PARSE_KIND_END;
+                    malformed = !string || level != 0 || (next != PARSE_KIND_COMMA && next != PARSE_KIND_R_PAREN);
+                    done = next == PARSE_KIND_R_PAREN;
+                    at += 1;
+                }
+                all = suppress && malformed && parser->tokens.kinds[item + 1] == PARSE_KIND_L_PAREN;
+                dropped += all ? 1 : 0;
+            }
+            item = end + 1;
+        }
+        token = close + 1;
+    }
+    return all && dropped != 0;
+}
+
 static void check_input_statement_attributes(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -1004,6 +1106,13 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         reader->statement_attributes = true;
         bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
         reader->statement_attributes = false;
+        // GNU suppresses that clang's parser drops, all of them (#1844): it parses the statement as a declaration, whose
+        // first token here, no `(` nor `*` that a declarator could start with, is its second error. (A `(` or a `*` makes
+        // an implicit int's declarator, whose errors and Sema's that follow are left out.)
+        if (expression && gnu && !head && next != PARSE_KIND_L_PAREN && next != PARSE_KIND_STAR && check_input_suppress_dropped(reader, first, after))
+        {
+            check_input_report(reader, after, CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION);
+        }
         uint32_t musttail = BUSTER_CHECK_NONE;
         valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);
         bool fallthrough = false;
@@ -1082,10 +1191,37 @@ struct CheckLocalLabels
     uint32_t* shadowed;
     uint32_t* tokens;
     uint32_t* ends;
-    // Per token: 1 + a label definition's or use's scope, or 0 for its body.
+    // Per token: 1 + a label definition's or use's scope, or 0 for its body; BUSTER_CHECK_NONE for an ambiguous use.
     uint32_t* scopes;
+    // Per name, the labels of the function's own scope that clang's lookup made (check_input_label_lookup): their count,
+    // 1 + the name token of the first where a reference that was no ambiguity made it (or 0), and 1 + the function body
+    // they are of, whose change empties them.
+    uint32_t* function_counts;
+    uint32_t* function_firsts;
+    uint32_t* function_bodies;
+    // Per name, 1 + the reference (its label's or its goto's or address's token) that made the first of them.
+    uint32_t* function_ones;
     uint32_t count;
 };
+
+// What a label's reference finds (check_input_label_lookup): whether it is ambiguous, and its candidates for clang's
+// notes: the name token of the innermost list's entry in scope of its name (or BUSTER_CHECK_NONE); whether the function's
+// own labels of its name are among them; and the first of those, where a reference that was no ambiguity made it.
+typedef struct CheckLabelLookup CheckLabelLookup;
+struct CheckLabelLookup
+{
+    uint32_t local;
+    uint32_t first;
+    // The reference that made the function's own label it finds, where it finds that one alone, or BUSTER_CHECK_NONE.
+    uint32_t one;
+    bool function;
+    bool ambiguous;
+};
+
+// A goto's or an address's CheckLocalLabels.scopes where its reference was ambiguous, and where a later definition
+// found the label it made, which is then defined (check_input_label_lookup).
+#define BUSTER_CHECK_LABEL_AMBIGUOUS BUSTER_CHECK_NONE
+#define BUSTER_CHECK_LABEL_AMBIGUOUS_DEFINED (BUSTER_CHECK_NONE - 1)
 
 // A label definition's or use's scope (CheckLocalLabels).
 static uint32_t check_input_label_scope(const CheckInputReader* reader, const CheckLocalLabels* locals, uint32_t token)
@@ -1121,10 +1257,9 @@ static uint32_t check_input_find_label(const CheckInputReader* reader, const Che
     return result;
 }
 
-// Pushes a `__label__` list's names (check_input_local_labels marked it), whose block ends at its statement's parent's
-// parent: the block's closing brace, after the list's `;`. Makes the columns on a unit's first list: the heads per name,
+// Makes the local labels' columns (CheckLocalLabels) on a unit's first list: the heads and the function's labels per name,
 // the entries and scopes per token, each of which takes at most one.
-static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t keyword)
+static void check_input_local_labels_make(CheckInputReader* reader, CheckLocalLabels* locals)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
@@ -1137,13 +1272,19 @@ static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLab
         locals->tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
         locals->ends = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
         locals->scopes = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        locals->function_counts = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->function_firsts = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->function_bodies = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->function_ones = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
         const bool made = locals->heads != NULL && locals->names != NULL && locals->shadowed != NULL && locals->tokens != NULL && locals->ends != NULL &&
-                          locals->scopes != NULL;
+                          locals->scopes != NULL && locals->function_counts != NULL && locals->function_firsts != NULL && locals->function_bodies != NULL &&
+                          locals->function_ones != NULL;
         reader->output->resource |= !made;
         if (made)
         {
             memset(locals->heads, 0, ((uint64_t)names + 1) * sizeof(uint32_t));
             memset(locals->scopes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(locals->function_bodies, 0, ((uint64_t)names + 1) * sizeof(uint32_t));
         }
         else
         {
@@ -1151,6 +1292,17 @@ static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLab
             locals->scopes = NULL;
         }
     }
+}
+
+// Pushes a `__label__` list's names (check_input_local_labels marked it), whose block ends at its statement's parent's
+// parent: the block's closing brace, after the list's `;`, making the columns on a unit's first list
+// (check_input_local_labels_make).
+static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t names = reader->pp->table->count;
+    check_input_local_labels_make(reader, locals);
     const uint32_t statement = parser->tree.parents[keyword];
     const uint32_t end = statement < count ? parser->tree.parents[statement] : count;
     for (uint32_t token = keyword + 1; locals->heads != NULL && end < count && token < statement; token += 1)
@@ -1182,18 +1334,97 @@ static bool check_input_local_label_ambiguous(const CheckLocalLabels* locals, ui
     return shadowed != 0 && locals->ends[shadowed - 1] == locals->ends[entry];
 }
 
+// clang's lookup of a label's name at reference `name_token` (a definition's, a goto's or an address's) in function body
+// `body`, whose closing brace is `close` (#1844): LookupSingleName's declarations of the first one's scope, then
+// LookupOrCreateLabel's. The innermost list in scope with the name decides where its block isn't the body: ambiguous
+// where it names it twice. Otherwise its candidates are the body's list's entries (none, one, or two and more) and the
+// labels of the function's own scope, which is the body's: each reference that found no label made one, and so does each
+// ambiguous reference, wherever it is (a later reference that finds that one alone takes it). Two and more are ambiguous.
+// Makes the label the reference makes. Without lists in the unit, a name is never ambiguous.
+static CheckLabelLookup check_input_label_lookup(const CheckInputReader* reader, CheckLocalLabels* locals, uint32_t reference, uint32_t name_token, uint32_t body,
+                                                 uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t name = parser->tokens.names[name_token];
+    CheckLabelLookup result = { .local = BUSTER_CHECK_NONE, .first = BUSTER_CHECK_NONE, .one = BUSTER_CHECK_NONE };
+    if (locals->heads != NULL && name < reader->pp->table->count && body != BUSTER_CHECK_NONE)
+    {
+        if (locals->function_bodies[name] != body + 1)
+        {
+            locals->function_bodies[name] = body + 1;
+            locals->function_counts[name] = 0;
+            locals->function_firsts[name] = 0;
+            locals->function_ones[name] = 0;
+        }
+        const uint32_t local = check_input_local_label(reader, locals, name);
+        const bool top = local == BUSTER_CHECK_NONE || locals->ends[local] == close;
+        const uint32_t made = locals->function_counts[name];
+        const uint32_t entries = local == BUSTER_CHECK_NONE ? 0 : check_input_local_label_ambiguous(locals, local) ? 2 : 1;
+        result.local = local != BUSTER_CHECK_NONE ? locals->tokens[local] : BUSTER_CHECK_NONE;
+        result.function = top && made != 0;
+        result.first = top && locals->function_firsts[name] != 0 ? locals->function_firsts[name] - 1 : BUSTER_CHECK_NONE;
+        result.ambiguous = top ? entries + made >= 2 : entries >= 2;
+        const bool makes = result.ambiguous || (local == BUSTER_CHECK_NONE && made == 0);
+        result.one = !result.ambiguous && local == BUSTER_CHECK_NONE && made == 1 ? locals->function_ones[name] - 1 : BUSTER_CHECK_NONE;
+        locals->function_firsts[name] = !result.ambiguous && makes ? name_token + 1 : locals->function_firsts[name];
+        locals->function_ones[name] = made == 0 && makes ? reference + 1 : locals->function_ones[name];
+        locals->function_counts[name] = made + (makes ? 1 : 0);
+    }
+    return result;
+}
+
+// The lookups of the references in function body `body` (whose closing brace is `close`) before the unit's first list,
+// at `keyword`, which made no columns for them when they met them (#1844): each name's first, a label's definition, a
+// goto's or an address's, made the function's label a later ambiguity counts. No reference before a list is ambiguous.
+static void check_input_label_lookups_before(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t body, uint32_t close, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t token = body + 1; token < keyword; token += 1)
+    {
+        const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0;
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool definition = parser->tree.roles[token] == PARSE_ROLE_LABEL;
+        const bool jump = kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0 && !check_input_indirect_goto(parser, token);
+        const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
+        const uint32_t name = deferred ? count : definition ? check_input_label_name(reader, token) : jump || address ? reader->first_child[token] : count;
+        if (name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER)
+        {
+            (void)check_input_label_lookup(reader, locals, token, name, body, close);
+        }
+    }
+}
+
+// Reports clang's "reference to 'X' is ambiguous" at a label's name, with what its notes name (the driver's): the
+// innermost list's entry of the name in the candidates' scope (`note_token`, whose list's earlier entries of the name the
+// driver adds), and where the function's own labels are among them, `detail` 1 and the first of them that a reference
+// that was no ambiguity made (`attribute`), before the earlier ambiguous references' (each of which made one).
+static void check_input_report_label_ambiguous(CheckInputReader* reader, uint32_t name_token, const CheckLabelLookup* lookup)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_report(reader, name_token, CHECK_INPUT_LABEL_AMBIGUOUS);
+    if (reader->output->report_count > before)
+    {
+        CheckInputReport* report = reader->output->reports + before;
+        report->note_token = lookup->local;
+        report->detail = lookup->function ? 1 : 0;
+        report->attribute = lookup->first;
+    }
+}
+
 // clang's "use of undeclared label" at `token`, a label's name, given where clang gives it: as the scope that declares the
 // label pops, at `close` (a block's closing brace for a local label's list, the function body's for a label of the
 // function's own), after the errors before it. A function's label (`function`) is reported once: clang's function scope
 // creates a name's label at its first reference, which the later ones find (CheckInputReport.detail marks it, and a later
-// one of the same name at the same close is none). An error's path alone.
-static void check_input_report_label_undeclared(CheckInputReader* reader, uint32_t token, uint32_t close, bool function)
+// one of the same name at the same close is none), but an ambiguous reference's (`own`) is a label of its own, which
+// clang's lookup made (check_input_label_lookup). An error's path alone.
+static void check_input_report_label_undeclared(CheckInputReader* reader, uint32_t token, uint32_t close, bool function, bool own)
 {
     const CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t name = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[token] : BUSTER_CHECK_NONE;
     bool reported = false;
-    for (uint32_t r = input->report_count; !reported && name != BUSTER_CHECK_NONE && close != 0 && r-- > 0;)
+    for (uint32_t r = input->report_count; !own && !reported && name != BUSTER_CHECK_NONE && close != 0 && r-- > 0;)
     {
         const CheckInputReport* report = input->reports + r;
         reported = function && report->message == CHECK_INPUT_LABEL_UNDECLARED && report->detail == 1 && report->sort == close && report->token < parser->tokens.count &&
@@ -1231,7 +1462,7 @@ static void check_input_local_label_pop(CheckInputReader* reader, CheckLocalLabe
             const uint32_t name_token = locals->tokens[entry];
             if (check_input_find_label(reader, locals, labels, capacity, name_token, locals->names[entry]) == BUSTER_CHECK_NONE)
             {
-                check_input_report_label_undeclared(reader, name_token, end, false);
+                check_input_report_label_undeclared(reader, name_token, end, false, false);
             }
         }
         for (uint32_t entry = locals->count; entry-- > first;)
@@ -1730,17 +1961,146 @@ static bool check_input_fallthrough_literal_value(CheckInputReader* reader, uint
     return result;
 }
 
-// Whether two operands are the same, as clang's Expr::isSameComparisonOperand takes them: past their parentheses, one
-// identifier each that names one declaration.
-static bool check_input_fallthrough_same_operand(const CheckInputReader* reader, uint32_t first1, uint32_t end1, uint32_t first2, uint32_t end2)
+// A range's single identifier's declaration, past the range's parentheses, or BUSTER_CHECK_NONE.
+static uint32_t check_input_fallthrough_named(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    (void)check_input_fallthrough_ungroup(parser, &first, &end);
+    return first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[first] : BUSTER_CHECK_NONE;
+}
+
+// A member access's operator past the range's parentheses (`base.name` or `base->name`), or BUSTER_CHECK_NONE; its base's
+// range into `*base_end` (from `*first`, which the parentheses move).
+static uint32_t check_input_fallthrough_member(const Parser* parser, uint32_t* first, uint32_t* end)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t root = check_input_fallthrough_ungroup(parser, first, end);
+    const bool member = root < count && *first < root && root + 2 == *end && parser->tree.roles[root] == PARSE_ROLE_MEMBER_OPERATOR &&
+                        parser->tree.roles[root + 1] == PARSE_ROLE_MEMBER;
+    return member ? root : BUSTER_CHECK_NONE;
+}
+
+// A subscript's `[` past the range's parentheses (`base[index]`, its `]` the range's last token), or BUSTER_CHECK_NONE.
+static uint32_t check_input_fallthrough_subscript(const Parser* parser, uint32_t* first, uint32_t* end)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t root = check_input_fallthrough_ungroup(parser, first, end);
+    uint32_t open = BUSTER_CHECK_NONE;
+    if (root < count && *first < root && root + 1 == *end && parser->tree.roles[root] == PARSE_ROLE_CLOSE_SUBSCRIPT)
+    {
+        // The `[` that the closing `]` matches, past the brackets nested in the index.
+        uint32_t depth = 0;
+        uint32_t token = root;
+        while (open == BUSTER_CHECK_NONE && token > *first)
+        {
+            token -= 1;
+            const uint8_t kind = parser->tokens.kinds[token];
+            open = kind == PARSE_KIND_L_SQUARE && depth == 0 ? token : open;
+            depth = kind == PARSE_KIND_R_SQUARE ? depth + 1 : kind == PARSE_KIND_L_SQUARE && depth != 0 ? depth - 1 : depth;
+        }
+        open = open != BUSTER_CHECK_NONE && *first < open ? open : BUSTER_CHECK_NONE;
+    }
+    return open;
+}
+
+// An integer literal's value, a lone number token's (clang's IntegerLiteral, which a subscript's index is with no
+// parentheses), into `*bits`.
+static bool check_input_fallthrough_index_literal(CheckInputReader* reader, uint32_t first, uint32_t end, uint64_t* bits)
+{
+    const Parser* parser = reader->parser;
+    CheckValue value = { 0 };
+    const bool result = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_NUMBER && reader->pp != NULL &&
+                        check_input_evaluate_cached(reader, first, end, &value) && value.constant_kind == CHECK_CONSTANT_INTEGER;
+    *bits = result ? (uint64_t)value.integer : 0;
+    return result;
+}
+
+// Whether two operands are the same, as clang's Expr::isSameComparisonOperand takes them past the same implicit
+// conversions (`converted` false where their conversions differ, which leaves names alone): past their parentheses, one
+// identifier each that names one declaration; members of the same name (`s.m`, `p->m`, `s.a.b`) whose bases are the same
+// name or the same members, through parentheses; or elements (`a[1]`, `s.a[i]`, `a[1][j]`) of the same bases whose
+// indices are integer literals of one value, or else the same operands. A stack of 16 pairs takes them: no recursion (the
+// call graph's rule), and a deeper one is not the same.
+static bool check_input_fallthrough_same_operand_converted(CheckInputReader* reader, uint32_t first1, uint32_t end1, uint32_t first2, uint32_t end2,
+                                                           bool converted)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    (void)check_input_fallthrough_ungroup(parser, &first1, &end1);
-    (void)check_input_fallthrough_ungroup(parser, &first2, &end2);
-    const uint32_t one = first1 + 1 == end1 && parser->tokens.kinds[first1] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[first1] : BUSTER_CHECK_NONE;
-    const uint32_t two = first2 + 1 == end2 && parser->tokens.kinds[first2] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[first2] : BUSTER_CHECK_NONE;
-    return one < count && one == two;
+    uint32_t firsts[16][2];
+    uint32_t ends[16][2];
+    // A pair's operands: any of the three (0); a member chain's bases, names or members alone (1), as clang walks a
+    // MemberExpr chain past its bases' implicit conversions; or names alone (2), past conversions that differ.
+    uint8_t modes[16];
+    uint32_t depth = 1;
+    firsts[0][0] = first1;
+    firsts[0][1] = first2;
+    ends[0][0] = end1;
+    ends[0][1] = end2;
+    modes[0] = converted ? 0 : 2;
+    bool same = true;
+    while (same && depth != 0)
+    {
+        depth -= 1;
+        const uint8_t mode = modes[depth];
+        uint32_t member_first1 = firsts[depth][0];
+        uint32_t member_end1 = ends[depth][0];
+        uint32_t member_first2 = firsts[depth][1];
+        uint32_t member_end2 = ends[depth][1];
+        uint32_t element_first1 = member_first1;
+        uint32_t element_end1 = member_end1;
+        uint32_t element_first2 = member_first2;
+        uint32_t element_end2 = member_end2;
+        const uint32_t one = check_input_fallthrough_named(reader, member_first1, member_end1);
+        const uint32_t two = check_input_fallthrough_named(reader, member_first2, member_end2);
+        const uint32_t member1 = check_input_fallthrough_member(parser, &member_first1, &member_end1);
+        const uint32_t member2 = check_input_fallthrough_member(parser, &member_first2, &member_end2);
+        const uint32_t open1 = check_input_fallthrough_subscript(parser, &element_first1, &element_end1);
+        const uint32_t open2 = check_input_fallthrough_subscript(parser, &element_first2, &element_end2);
+        if (one < count || two < count)
+        {
+            same = one == two;
+        }
+        else if (mode != 2 && member1 < count && member2 < count && depth < 16)
+        {
+            same = parser->tokens.names[member1 + 1] == parser->tokens.names[member2 + 1];
+            firsts[depth][0] = member_first1;
+            ends[depth][0] = member1;
+            firsts[depth][1] = member_first2;
+            ends[depth][1] = member2;
+            modes[depth] = 1;
+            depth += 1;
+        }
+        else if (mode == 0 && open1 < count && open2 < count && depth + 2 <= 16)
+        {
+            // The bases, and the indices unless both are integer literals, which must have one value.
+            uint64_t index1 = 0;
+            uint64_t index2 = 0;
+            const bool literals = check_input_fallthrough_index_literal(reader, open1 + 1, element_end1 - 1, &index1) &&
+                                  check_input_fallthrough_index_literal(reader, open2 + 1, element_end2 - 1, &index2);
+            same = !literals || index1 == index2;
+            firsts[depth][0] = element_first1;
+            ends[depth][0] = open1;
+            firsts[depth][1] = element_first2;
+            ends[depth][1] = open2;
+            modes[depth] = 0;
+            firsts[depth + 1][0] = open1 + 1;
+            ends[depth + 1][0] = element_end1 - 1;
+            firsts[depth + 1][1] = open2 + 1;
+            ends[depth + 1][1] = element_end2 - 1;
+            modes[depth + 1] = 0;
+            depth += literals ? 1 : 2;
+        }
+        else
+        {
+            same = false;
+        }
+    }
+    return same;
+}
+
+static bool check_input_fallthrough_same_operand(CheckInputReader* reader, uint32_t first1, uint32_t end1, uint32_t first2, uint32_t end2)
+{
+    return check_input_fallthrough_same_operand_converted(reader, first1, end1, first2, end2, true);
 }
 
 // Whether an expression has a boolean value, as clang's isKnownToHaveBooleanValue takes it here: past its parentheses, a
@@ -1754,75 +2114,247 @@ static bool check_input_fallthrough_boolean(const Parser* parser, uint32_t first
            role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR;
 }
 
-// A comparison's operand that is a literal constant, as clang's CFG builder's tryTransformToLiteralConstant takes one for
-// its tautology checks: past its parentheses, an integer literal or a character constant, or one that `-` takes; its
-// value converted to `common`, the comparison's type (as clang's implicit cast gives it), and its literal's type.
-static bool check_input_fallthrough_constant(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId* type)
+// What a comparison's operand is to clang's CFG builder's tryTransformToLiteralConstant, which finds its tautology
+// checks' constants (CHECK_FALLTHROUGH_*): none, a literal (an integer literal or a character or floating constant, or
+// one that `-` takes, past parentheses), or an enumerator's name (past parentheses).
+enum
+{
+    CHECK_FALLTHROUGH_NONE,
+    CHECK_FALLTHROUGH_LITERAL,
+    CHECK_FALLTHROUGH_ENUMERATOR,
+};
+
+// A comparison's operand as a constant (CHECK_FALLTHROUGH_*), its value evaluated in its own type; `*grouped` whether
+// parentheses enclose it (a literal's implicit conversion then hides it from clang, its cast around the parentheses) and
+// `*declaration` an enumerator's.
+static uint8_t check_input_fallthrough_constant(CheckInputReader* reader, uint32_t first, uint32_t end, CheckValue* value, bool* grouped, uint32_t* declaration)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
+    const uint32_t outer = first;
     const uint32_t root = check_input_fallthrough_ungroup(parser, &first, &end);
     const bool negated = root == first && root + 2 == end && parser->tree.roles[root] == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_MINUS;
     const uint32_t literal = negated ? first + 1 : first;
     const uint8_t kind = literal < count ? parser->tokens.kinds[literal] : 0;
-    CheckValue value = { 0 };
-    const bool result = literal + 1 == end && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER) && reader->pp != NULL &&
-                        check_input_evaluate_cached(reader, first, end, &value);
-    *type = result ? value.type : 0;
-    return result;
+    const uint32_t named = first + 1 == end && kind == PARSE_KIND_IDENTIFIER ? reader->output->declarations[first] : BUSTER_CHECK_NONE;
+    const bool enumerator = named < count && reader->declaration_kinds[named] == C_BINDING_ENUMERATOR;
+    const bool constant = literal + 1 == end && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || enumerator) && reader->pp != NULL;
+    *value = (CheckValue){ 0 };
+    const bool evaluated = constant && check_input_evaluate_cached(reader, first, end, value) &&
+                           (value->constant_kind == CHECK_CONSTANT_INTEGER || (value->constant_kind == CHECK_CONSTANT_FLOATING && !enumerator));
+    *grouped = first != outer;
+    *declaration = enumerator ? named : BUSTER_CHECK_NONE;
+    return !evaluated ? CHECK_FALLTHROUGH_NONE : enumerator ? CHECK_FALLTHROUGH_ENUMERATOR : CHECK_FALLTHROUGH_LITERAL;
+}
+
+// Whether two enumerators are of one enumeration (clang's areExprTypesCompatible): their declarations in one list, no
+// brace closing it between them, nor either inside a nested one.
+static bool check_input_fallthrough_same_enum(const CheckInputReader* reader, uint32_t one, uint32_t two)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t low = one < two ? one : two;
+    const uint32_t high = one < two ? two : one;
+    int64_t depth = 0;
+    bool same = true;
+    for (uint32_t token = low; same && token < high; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        depth += kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_L_PAREN ? 1 : kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN ? -1 : 0;
+        same = depth >= 0;
+    }
+    return same && depth == 0;
+}
+
+// The implicit conversions clang gives a comparison's operand of type `type` past its lvalue's read, to `common`, the
+// comparison's type, as a code that two operands of one type share where their conversions' kinds are the same: an
+// integer promotion's IntegralCast, then the conversion's IntegralCast (merged into the promotion's, as clang's
+// ImpCastExprToType merges casts of one kind), IntegralToFloating or FloatingCast. Expr::isSameComparisonOperand
+// compares two operands past conversions of different kinds as names alone.
+static uint32_t check_input_fallthrough_casts(TypeTable* types, TypeId type, TypeId common)
+{
+    const TypeId operand = type_unqualified(type_strip_aligned(types, type));
+    const TypeId promoted = type_promote(types, operand);
+    const bool floating = type_kind(types, promoted) == BUSTER_TYPE_KIND_FLOATING;
+    const uint32_t inner = promoted != operand ? 1 : 0;
+    const uint32_t outer = common == promoted ? 0 : type_kind(types, common) != BUSTER_TYPE_KIND_FLOATING ? 1 : floating ? 3 : 2;
+    return inner == outer ? outer : inner | outer << 2;
+}
+
+// A value rounded to _Float16 (to nearest, ties to even, as APFloat rounds; past the largest finite value an infinity).
+static long double check_input_fallthrough_half(long double value)
+{
+    return check_action_half_value(CHECK_HALF_IEEE, check_action_half_bits(CHECK_HALF_IEEE, value));
 }
 
 // One comparison of a tautology's: its variable's tokens, its operator as `variable OP constant` (flipped where the
-// constant is on the left: tryNormalizeBinaryOperator) and its constant's tokens; false where it isn't one.
+// constant is on the left: tryNormalizeBinaryOperator), and its constant as clang's evaluator gives NumExpr: a literal's
+// converted to the comparison's type (its implicit IntegralCast or IntegralToFloating, which a literal inside parentheses
+// can't take, nor any other conversion), an enumerator's in its own type; an integer's bits below its width, its width
+// and signedness, or a floating one's value and type. False where it isn't one.
 typedef struct CheckFallthroughComparison CheckFallthroughComparison;
 struct CheckFallthroughComparison
 {
     uint32_t variable_first;
     uint32_t variable_end;
-    uint32_t constant_first;
-    uint32_t constant_end;
+    uint32_t enumerator;
+    uint32_t casts;
+    uint32_t width;
+    TypeId type;
+    uint64_t bits;
+    long double real;
     uint8_t kind;
+    uint8_t constant;
+    bool floating;
+    bool is_signed;
 };
 
 static bool check_input_fallthrough_comparison(CheckInputReader* reader, uint32_t first, uint32_t end, CheckFallthroughComparison* comparison)
 {
     const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
     const uint32_t count = parser->tokens.count;
     const uint32_t root = check_input_fallthrough_ungroup(parser, &first, &end);
     const uint8_t role = root < count ? parser->tree.roles[root] : PARSE_ROLE_NONE;
-    TypeId type = 0;
-    bool result = (role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY) && first < root && root + 1 < end;
-    const bool right = result && check_input_fallthrough_constant(reader, root + 1, end, &type);
-    const bool left = result && !right && check_input_fallthrough_constant(reader, first, root, &type);
-    uint8_t kind = result ? parser->tokens.kinds[root] : 0;
+    const bool comparison_root = (role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY) && first < root && root + 1 < end;
+    CheckValue left_value = { 0 };
+    CheckValue right_value = { 0 };
+    const bool typed = comparison_root && check_input_evaluate_cached(reader, first, root, &left_value) && check_input_evaluate_cached(reader, root + 1, end, &right_value) &&
+                       left_value.type != 0 && right_value.type != 0;
+    // The usual arithmetic conversions' type (0 for an operand that isn't arithmetic: a pointer), real: a complex
+    // comparison's constants are no integers or floating values to clang's analysis.
+    const TypeId converted = typed ? type_usual_arithmetic(types, type_unqualified(type_strip_aligned(types, left_value.type)),
+                                                           type_unqualified(type_strip_aligned(types, right_value.type))) :
+                                     0;
+    const TypeId common = converted != 0 && type_kind(types, converted) != BUSTER_TYPE_KIND_COMPLEX ? converted : 0;
+    const bool floating = common != 0 && type_kind(types, common) == BUSTER_TYPE_KIND_FLOATING;
+    // The right operand first, then the left one.
+    CheckValue constant = { 0 };
+    bool grouped = false;
+    uint32_t enumerator = BUSTER_CHECK_NONE;
+    bool right = false;
+    bool left = false;
+    uint8_t found = CHECK_FALLTHROUGH_NONE;
+    for (uint32_t side = 0; common != 0 && side < 2 && found == CHECK_FALLTHROUGH_NONE; side += 1)
+    {
+        found = check_input_fallthrough_constant(reader, side == 0 ? root + 1 : first, side == 0 ? end : root, &constant, &grouped, &enumerator);
+        const TypeId own = type_unqualified(type_strip_aligned(types, constant.type));
+        const bool cast = found == CHECK_FALLTHROUGH_LITERAL && own != common;
+        const bool castable = constant.constant_kind == CHECK_CONSTANT_INTEGER && !grouped;
+        found = cast && !castable ? CHECK_FALLTHROUGH_NONE : found;
+        right = side == 0 && found != CHECK_FALLTHROUGH_NONE;
+        left = side == 1 && found != CHECK_FALLTHROUGH_NONE;
+    }
+    uint8_t kind = comparison_root ? parser->tokens.kinds[root] : 0;
     if (left)
     {
         kind = kind == PARSE_KIND_GREATER ? PARSE_KIND_LESS : kind == PARSE_KIND_GREATEREQUAL ? PARSE_KIND_LESSEQUAL :
                kind == PARSE_KIND_LESS ? PARSE_KIND_GREATER : kind == PARSE_KIND_LESSEQUAL ? PARSE_KIND_GREATEREQUAL : kind;
     }
+    // The constant's value: an enumerator's in its type, a literal's converted to the comparison's.
+    const TypeId valued = found == CHECK_FALLTHROUGH_ENUMERATOR ? constant.type : common;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = found != CHECK_FALLTHROUGH_NONE && !(found == CHECK_FALLTHROUGH_LITERAL && floating) &&
+                         check_action_integer_type(types, valued, &width, &is_signed) && width <= 64;
+    long double real = constant.floating;
+    if (found == CHECK_FALLTHROUGH_LITERAL && floating && constant.constant_kind == CHECK_CONSTANT_INTEGER)
+    {
+        uint32_t literal_width = 0;
+        bool literal_signed = false;
+        (void)check_action_integer_type(types, constant.type, &literal_width, &literal_signed);
+        // The literal's bits below its width, sign-extended where it is signed.
+        const uint32_t shift = literal_width != 0 && literal_width <= 64 ? 64 - literal_width : 0;
+        const uint64_t bits = (uint64_t)constant.integer << shift;
+        const long double wide = literal_signed ? (long double)((int64_t)bits >> shift) : (long double)(bits >> shift);
+        real = common == BUSTER_TYPE_FLOAT16 ? check_input_fallthrough_half(wide) : common == BUSTER_TYPE_FLOAT ? (long double)(float)wide :
+               common == BUSTER_TYPE_DOUBLE ? (long double)(double)wide : wide;
+        found = literal_width <= 64 ? found : CHECK_FALLTHROUGH_NONE;
+    }
+    const uint32_t variable_first = right ? first : root + 1;
+    const uint32_t variable_end = right ? root : end;
     *comparison = (CheckFallthroughComparison){
-        .variable_first = right ? first : root + 1,
-        .variable_end = right ? root : end,
-        .constant_first = right ? root + 1 : first,
-        .constant_end = right ? end : root,
+        .variable_first = variable_first,
+        .variable_end = variable_end,
+        .enumerator = enumerator,
+        .casts = common != 0 ? check_input_fallthrough_casts(types, right ? left_value.type : right_value.type, common) : 0,
+        .width = width,
+        .type = common,
+        .bits = integer ? (uint64_t)constant.integer & (width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1) : 0,
+        .real = real,
         .kind = kind,
+        .constant = found,
+        .floating = found == CHECK_FALLTHROUGH_LITERAL && floating,
+        .is_signed = is_signed,
     };
-    return right || left;
+    return found != CHECK_FALLTHROUGH_NONE && (integer || (found == CHECK_FALLTHROUGH_LITERAL && floating));
 }
 
-// A comparison's constant's value as its comparison takes it: converted to the usual arithmetic conversions' type of its
-// variable and itself, an integer type's; its bits below the width, the width and the signedness.
-static bool check_input_fallthrough_compared(CheckInputReader* reader, const CheckFallthroughComparison* comparison, uint64_t* bits, uint32_t* width, bool* is_signed)
+// A floating comparison of a value with a constant, by a comparison's token kind (APFloat's operators: an unordered
+// one is false but for !=).
+static bool check_input_fallthrough_compare_real(uint8_t kind, long double left, long double right)
 {
-    TypeTable* types = reader->types;
-    CheckValue variable = { 0 };
-    CheckValue constant = { 0 };
-    const bool typed = check_input_evaluate_cached(reader, comparison->variable_first, comparison->variable_end, &variable) && variable.type != 0 &&
-                       check_input_evaluate_cached(reader, comparison->constant_first, comparison->constant_end, &constant) &&
-                       constant.constant_kind == CHECK_CONSTANT_INTEGER;
-    const TypeId common = typed ? type_usual_arithmetic(types, type_unqualified(type_strip_aligned(types, variable.type)), constant.type) : 0;
-    const bool result = common != 0 && check_action_integer_type(types, common, width, is_signed) && *width <= 64;
-    *bits = result ? (uint64_t)constant.integer & (*width == 64 ? UINT64_MAX : (UINT64_C(1) << *width) - 1) : 0;
+    return kind == PARSE_KIND_EQUALEQUAL ? left == right : kind == PARSE_KIND_EXCLAIMEQUAL ? left != right : kind == PARSE_KIND_LESS ? left < right :
+           kind == PARSE_KIND_LESSEQUAL ? left <= right : kind == PARSE_KIND_GREATER ? left > right : left >= right;
+}
+
+// checkIncorrectLogicOperator's floating case (`d > 5.0 && d < 3.0`): both constants in the wider of their types
+// (_Float16, float, double or long double; __bf16's and __float128's are unknown), and the value the same at the smallest negative subnormal, each constant,
+// their mean (computed in that type) and the largest finite value, as clang's APFloat values are; 1, 0 or 2 for unknown.
+static uint32_t check_input_fallthrough_real_tautology(bool either, const CheckFallthroughComparison* one, const CheckFallthroughComparison* two)
+{
+    const uint32_t rank_one = one->type == BUSTER_TYPE_FLOAT16 ? 1 : one->type == BUSTER_TYPE_FLOAT ? 2 : one->type == BUSTER_TYPE_DOUBLE ? 3 :
+                              one->type == BUSTER_TYPE_LONG_DOUBLE ? 4 : 0;
+    const uint32_t rank_two = two->type == BUSTER_TYPE_FLOAT16 ? 1 : two->type == BUSTER_TYPE_FLOAT ? 2 : two->type == BUSTER_TYPE_DOUBLE ? 3 :
+                              two->type == BUSTER_TYPE_LONG_DOUBLE ? 4 : 0;
+    const uint32_t rank = rank_one > rank_two ? rank_one : rank_two;
+    uint32_t result = 2;
+    if (rank_one != 0 && rank_two != 0)
+    {
+        const long double first = one->real;
+        const long double second = two->real;
+        long double mean = 0;
+        long double smallest = 0;
+        long double largest = 0;
+        if (rank == 1)
+        {
+            // Two _Float16 values' sum and half of one are exact in long double, and each is rounded once.
+            mean = check_input_fallthrough_half(check_input_fallthrough_half(first + second) / 2.0L);
+            smallest = -0x1p-24L;
+            largest = 65504.0L;
+        }
+        else if (rank == 2)
+        {
+            const float sum = (float)first + (float)second;
+            mean = sum / 2.0f;
+            smallest = -0x1p-149L;
+            largest = 0x1.fffffep127L;
+        }
+        else if (rank == 3)
+        {
+            const double sum = (double)first + (double)second;
+            mean = sum / 2.0;
+            smallest = -0x1p-1074L;
+            largest = 0x1.fffffffffffffp1023L;
+        }
+        else
+        {
+            mean = (first + second) / 2.0L;
+            smallest = -0x1p-16445L;
+            largest = 0x1.fffffffffffffffep16383L;
+        }
+        const long double values[5] = { smallest, first, mean, second, largest };
+        bool always_true = true;
+        bool always_false = true;
+        for (uint32_t i = 0; i < 5; i += 1)
+        {
+            const bool first_holds = check_input_fallthrough_compare_real(one->kind, values[i], first);
+            const bool second_holds = check_input_fallthrough_compare_real(two->kind, values[i], second);
+            const bool combined = either ? first_holds || second_holds : first_holds && second_holds;
+            always_true &= combined;
+            always_false &= !combined;
+        }
+        result = always_true ? 1 : always_false ? 0 : 2;
+    }
     return result;
 }
 
@@ -1840,8 +2372,10 @@ static bool check_input_fallthrough_compare(uint8_t kind, uint64_t left, uint64_
 
 // clang's CFG builder's checkIncorrectLogicOperator, of a `&&` or `||` (`root`) whose operands' values are unknown: an
 // operand's negation of the other (`x || !x`, true; `x && !x`, false), or two comparisons of the same variable with
-// integer literals of one type (`x > 5 && x < 3`), whose value is the same at the smallest value, each literal, the one
-// past the smaller literal and the largest; 1, 0 or 2 for unknown. (clang's floating literals' case is unknown here.)
+// constants (`x > 5 && x < 3`, `s.m == A || s.m != B`, `d > 5.0 && d < 3.0`): literals or enumerators of one
+// enumeration, both integers of one width and signedness, whose value is the same at the smallest value, each constant,
+// the one past the smaller constant and the largest, or both floating (check_input_fallthrough_real_tautology); 1, 0 or 2
+// for unknown.
 static uint32_t check_input_fallthrough_logic_tautology(CheckInputReader* reader, uint32_t first, uint32_t root, uint32_t end)
 {
     const Parser* parser = reader->parser;
@@ -1860,24 +2394,29 @@ static uint32_t check_input_fallthrough_logic_tautology(CheckInputReader* reader
     uint32_t result = 2;
     CheckFallthroughComparison one = { 0 };
     CheckFallthroughComparison two = { 0 };
-    uint64_t literal_one = 0;
-    uint64_t literal_two = 0;
-    uint32_t width_one = 0;
-    uint32_t width_two = 0;
-    bool signed_one = false;
-    bool signed_two = false;
+    // Two comparisons of the same operand with constants of one kind: literals, or enumerators of one enumeration.
+    const bool compared = !left_not && !right_not && left_root < count && right_root < count &&
+                          check_input_fallthrough_comparison(reader, left_first, left_end, &one) &&
+                          check_input_fallthrough_comparison(reader, right_first, right_end, &two) &&
+                          check_input_fallthrough_same_operand_converted(reader, one.variable_first, one.variable_end, two.variable_first, two.variable_end,
+                                                                         one.casts == two.casts) &&
+                          one.constant == two.constant &&
+                          (one.constant != CHECK_FALLTHROUGH_ENUMERATOR || check_input_fallthrough_same_enum(reader, one.enumerator, two.enumerator));
     if ((left_not && check_input_fallthrough_same_operand(reader, left_first + 1, left_end, right_first, right_end)) ||
         (right_not && check_input_fallthrough_same_operand(reader, right_first + 1, right_end, left_first, left_end)))
     {
         result = either ? 1 : 0;
     }
-    else if (left_root < count && right_root < count && check_input_fallthrough_comparison(reader, left_first, left_end, &one) &&
-             check_input_fallthrough_comparison(reader, right_first, right_end, &two) &&
-             check_input_fallthrough_same_operand(reader, one.variable_first, one.variable_end, two.variable_first, two.variable_end) &&
-             check_input_fallthrough_compared(reader, &one, &literal_one, &width_one, &signed_one) &&
-             check_input_fallthrough_compared(reader, &two, &literal_two, &width_two, &signed_two) && width_one == width_two && signed_one == signed_two)
+    else if (compared && one.floating && two.floating)
     {
-        const uint32_t width = width_one;
+        result = check_input_fallthrough_real_tautology(either, &one, &two);
+    }
+    else if (compared && !one.floating && !two.floating && one.width == two.width && one.is_signed == two.is_signed)
+    {
+        const uint64_t literal_one = one.bits;
+        const uint64_t literal_two = two.bits;
+        const bool signed_one = one.is_signed;
+        const uint32_t width = one.width;
         const uint64_t mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
         const uint64_t smallest = signed_one ? (UINT64_C(1) << (width - 1)) & mask : 0;
         const uint64_t largest = signed_one ? mask >> 1 : mask;
@@ -1969,10 +2508,12 @@ static uint32_t check_input_fallthrough_tautology(CheckInputReader* reader, uint
     }
     else if (role == PARSE_ROLE_BITWISE_OR)
     {
-        TypeId type = 0;
         CheckValue value = { 0 };
-        const bool left = check_input_fallthrough_constant(reader, first, root, &type);
-        const bool right = check_input_fallthrough_constant(reader, root + 1, end, &type);
+        bool grouped = false;
+        uint32_t enumerator = BUSTER_CHECK_NONE;
+        const bool left = check_input_fallthrough_constant(reader, first, root, &value, &grouped, &enumerator) != CHECK_FALLTHROUGH_NONE;
+        const bool right = check_input_fallthrough_constant(reader, root + 1, end, &value, &grouped, &enumerator) != CHECK_FALLTHROUGH_NONE;
+        value = (CheckValue){ 0 };
         const bool known = left != right && check_input_evaluate_cached(reader, left ? first : root + 1, left ? root : end, &value) &&
                            value.constant_kind == CHECK_CONSTANT_INTEGER;
         result = known && value.integer != 0 ? 1 : 2;
@@ -3014,6 +3555,15 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
             }
             if (kind == PARSE_KIND_LABEL && reader->ignored[token])
             {
+                // The unit's first list: the lookups before it, which no columns took, before its names are pushed.
+                if (locals.heads == NULL)
+                {
+                    check_input_local_labels_make(reader, &locals);
+                    if (locals.heads != NULL && body != BUSTER_CHECK_NONE)
+                    {
+                        check_input_label_lookups_before(reader, &locals, body, close, token);
+                    }
+                }
                 check_input_local_label_push(reader, &locals, token);
             }
             else if (role == PARSE_ROLE_LABEL)
@@ -3032,8 +3582,14 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     const uint32_t name = parser->tokens.names[name_token];
                     // A local label's definition is its scope's (CheckLocalLabels); one of an ambiguous name defines none.
                     const uint32_t local = check_input_local_label(reader, &locals, name);
-                    const bool ambiguous = local != BUSTER_CHECK_NONE && check_input_local_label_ambiguous(&locals, local);
-                    const uint32_t scope = local != BUSTER_CHECK_NONE ? locals.tokens[local] : body;
+                    const CheckLabelLookup lookup = check_input_label_lookup(reader, &locals, token, name_token, body, close);
+                    const bool ambiguous = lookup.ambiguous;
+                    const uint32_t scope = local != BUSTER_CHECK_NONE && !ambiguous ? locals.tokens[local] : body;
+                    // The label an ambiguous goto or address made, which this one alone of the function's finds, is defined.
+                    if (lookup.one < count && parser->tree.roles[lookup.one] != PARSE_ROLE_LABEL && locals.scopes[lookup.one] == BUSTER_CHECK_LABEL_AMBIGUOUS)
+                    {
+                        locals.scopes[lookup.one] = BUSTER_CHECK_LABEL_AMBIGUOUS_DEFINED;
+                    }
                     if (local != BUSTER_CHECK_NONE)
                     {
                         locals.scopes[token] = ambiguous ? 0 : scope + 1;
@@ -3041,11 +3597,13 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
                     // Whether a redefinition keeps the earlier label as the name's, for its gotos.
                     bool kept_earlier = false;
-                    while (!ambiguous && labels[slot] != 0)
+                    // An ambiguous definition defines the label of the function's own scope it made, which a later
+                    // reference may find alone: it goes into the table, but never as a redefinition.
+                    while (labels[slot] != 0)
                     {
                         const uint32_t old = labels[slot] - 1;
                         const uint32_t old_name = check_input_label_name(reader, old);
-                        if (check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
+                        if (!ambiguous && check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
                         {
                             // Clang defines a label as its statement completes (ActOnLabelStmt), so a label within the other's
                             // statement (`L: L: ;`, `L: { L: ; }`) is the one defined first, and the other is the redefinition,
@@ -3077,9 +3635,9 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     }
                     if (ambiguous && (!prefix || token < limit))
                     {
-                        check_input_report(reader, name_token, CHECK_INPUT_LABEL_AMBIGUOUS);
+                        check_input_report_label_ambiguous(reader, name_token, &lookup);
                     }
-                    else if (!ambiguous && !kept_earlier)
+                    if (!kept_earlier)
                     {
                         labels[slot] = token + 1;
                     }
@@ -3090,15 +3648,15 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, token, body);
                 // A use of a local label takes its scope here, where its lists are in scope: an ambiguous name's, at its name.
                 const uint32_t operand = reader->first_child[token];
-                const uint32_t local = operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER && !check_input_indirect_goto(parser, token) ?
-                                       check_input_local_label(reader, &locals, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
-                if (local != BUSTER_CHECK_NONE)
+                const bool named = operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER && !check_input_indirect_goto(parser, token);
+                const uint32_t local = named ? check_input_local_label(reader, &locals, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
+                const CheckLabelLookup lookup = named ? check_input_label_lookup(reader, &locals, token, operand, body, close) : (CheckLabelLookup){ .local = BUSTER_CHECK_NONE };
+                if (local != BUSTER_CHECK_NONE || lookup.ambiguous)
                 {
-                    const bool ambiguous = check_input_local_label_ambiguous(&locals, local);
-                    locals.scopes[token] = ambiguous ? BUSTER_CHECK_NONE : locals.tokens[local] + 1;
-                    if (ambiguous && (!prefix || token < limit))
+                    locals.scopes[token] = lookup.ambiguous ? BUSTER_CHECK_LABEL_AMBIGUOUS : locals.tokens[local] + 1;
+                    if (lookup.ambiguous && (!prefix || token < limit))
                     {
-                        check_input_report(reader, operand, CHECK_INPUT_LABEL_AMBIGUOUS);
+                        check_input_report_label_ambiguous(reader, operand, &lookup);
                     }
                 }
             }
@@ -3116,9 +3674,13 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     owner = parser->tree.parents[owner];
                 }
                 const bool complete = !prefix || (owner < limit && end < limit);
-                if (owner >= count || end >= count || (complete && !check_input_region_transfer(reader, owner, end)))
+                if (owner >= count || end >= count)
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                }
+                else if (complete && !check_input_region_transfer(reader, owner, end))
+                {
+                    check_input_report_jump(reader, token, CHECK_INPUT_JUMP_SWITCH, owner, end);
                 }
                 else if (complete)
                 {
@@ -3159,7 +3721,8 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 const uint32_t body = check_sparse_get(reader->output->declaration_bodies, token);
                 const uint32_t operand = reader->first_child[token];
                 const bool local = locals.scopes != NULL && locals.scopes[token] != 0;
-                const bool ambiguous = locals.scopes != NULL && locals.scopes[token] == BUSTER_CHECK_NONE;
+                const bool defined = locals.scopes != NULL && locals.scopes[token] == BUSTER_CHECK_LABEL_AMBIGUOUS_DEFINED;
+                const bool ambiguous = locals.scopes != NULL && (locals.scopes[token] == BUSTER_CHECK_LABEL_AMBIGUOUS || defined);
                 const uint32_t scope = check_input_label_scope(reader, &locals, token);
                 uint32_t target = body != BUSTER_CHECK_NONE && !ambiguous && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
                                         check_input_find_label(reader, &locals, labels, capacity, scope, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
@@ -3184,16 +3747,16 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     reader->output->label_address_count += address;
                     if (!address && (!prefix || !unfinished) && !check_input_region_transfer(reader, token, target))
                     {
-                        check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                        check_input_report_jump(reader, token, CHECK_INPUT_JUMP_GOTO, token, target);
                     }
                 }
                 // A missing label of the function's, and an ambiguous local one's use, for which clang's lookup creates a
                 // label of the function's that nothing defines, as the function ends (check_input_report_label_undeclared).
-                if (target == BUSTER_CHECK_NONE && !unfinished && (!local || ambiguous))
+                if (target == BUSTER_CHECK_NONE && !unfinished && (!local || ambiguous) && !defined)
                 {
                     const uint32_t close = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[body] : 0;
                     check_input_report_label_undeclared(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token,
-                                                        close < count ? close : 0, true);
+                                                        close < count ? close : 0, true, ambiguous);
                 }
             }
             else if (kind == PARSE_KIND_SEMI && check_input_attributes_at(reader->output, token) != 0)
