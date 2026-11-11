@@ -3830,9 +3830,14 @@ What the lowering covers past scalars (#145's programs):
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression, through a record
-  whose scope's end a constant switch's kept statements leave out, or whose
-  jump no path reaches keeps its run in place. Code and call rows grow
+  variables' count. An exit from a statement expression's statements takes
+  the chain through the records within its block, whose calls its region
+  lowers with its statements, from the empty evaluation stack the region
+  starts with: the dispatch's jumps and the exit's agree on the stack, out of
+  the region as within it. An exit that leaves the block's own records (their
+  calls run after its END, once its value is kept) or records outside it, one
+  through a record whose scope's end a constant switch's kept statements leave
+  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
@@ -5686,7 +5691,10 @@ declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
 so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
-A block's own `static`, `register` and automatic objects can be unused. The
+A block's own `static`, `register` and automatic objects can be unused. A
+variable with an applied `cleanup` attribute is used, as clang treats it,
+since its cleanup takes its address (#1881); one ignored at file scope can still
+be unused. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 
@@ -8701,7 +8709,7 @@ arguments against the function. The checker now gives these as clang does.
 
   Lowering: clang's x86 target maps address spaces 256, 257 and 258
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
-  and stores take a segment override. A load or store in `%fs` or `%gs` of an
+  and stores take a segment override. A load or store in `%fs`, `%gs` or `%ss` of an
   integer, a floating value (long double too), a 128-bit integer or a vector,
   by indirection, member (a bit-field's unit's pieces too), subscript or name, and an assignment, compound
   assignment, increment or decrement of one, takes it (check_lower_access: the
@@ -8715,8 +8723,7 @@ arguments against the function. The checker now gives these as clang does.
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
   type at all: CheckLowerWriter.segments): an aggregate's copy, a complex,
-  half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
-  space (258, whose `36` prefix no 64-bit form of the encoder's has), atomic
+  half-precision or `_BitInt` value, an `_Atomic` object, atomic
   builtins of another plan (generic ones by pointer, `__atomic_clear`,
   `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
   space: a vector's element, read or written (its type loses the vector's
@@ -9815,6 +9822,12 @@ enables, which this checker doesn't all give.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
+- A failed static assertion's requirement prints a character constant by its
+  value, as clang's `CharacterLiteral::print` does (#1999,
+  `check_semantic_character`): its prefix; `\'`, `\\` and the control
+  characters' C escapes; else, with an ordinary constant's sign extension of a
+  byte taken off, a printable byte as itself, `\xNN` below 256, `\uNNNN` to
+  0xFFFF and `\UNNNNNNNN` past it (`'ab'` is `'\u6162'`).
 - **Differences left.**
   - A cast inside a variable array's bound prints its builtin type keywords
     as clang's TypePrinter does (`int[(unsigned)n]` is `'int[(unsigned int)n]'`,
