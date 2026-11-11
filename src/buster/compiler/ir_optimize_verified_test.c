@@ -7,6 +7,8 @@
 
 #include "ir_optimize_verified.c"
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+
 static bool ir_verified_test_column(const uint32_t* a, const uint32_t* b, uint64_t count)
 {
     const bool equal = count == 0 || memcmp(a, b, count * sizeof(uint32_t)) == 0;
@@ -399,3 +401,5 @@ static void ir_verified_tests(IrOptimizeTest* test)
     arena_release(&output);
     arena_release(&input);
 }
+
+#endif

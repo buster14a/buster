@@ -8,6 +8,17 @@ item 2, tracked in #117 and its parts #118 to #125. This document records the
 design, how it is checked against clang, the Zen 5 measurements, and what comes
 next.
 
+`c_preprocessor.c` keeps shared state, declarations, feature tables and reader
+helpers; `c_preprocessor_impl.c` contains the private bodies, private tables
+and generated predefines. `c_preprocessor_history.c` supplies the shared
+history reader and diagnostic declarations, with recording and rendering in
+`c_preprocessor_history_impl.c`. The implementation includes the private
+literal evaluator in `c_preprocessor_literal.c`. FRONTEND reads these bodies
+in ordinary unity builds; standalone consumers and the configured fuzz DRIVER
+retain the complete module. Entry-point homes and runtime algorithms are
+unchanged. The [build guide](commands/build.md#production-parsing-and-implementation-dependencies)
+describes the dependency boundary.
+
 The [2026-10-23 acceptance refresh](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md)
 records frozen source and corpus identities, the independent scalar reference,
 lookup and final-output accounting, and the evidence for #118 through #124.
@@ -1887,7 +1898,9 @@ to the normal 9700X checks; this change makes no throughput claim.
 
 ### Expansion history and diagnostics
 
-`c_preprocessor_history.c` implements #108. The four output columns stay the
+`c_preprocessor_history.c` and `c_preprocessor_history_impl.c` implement #108:
+shared readers and declarations in the former, recording and diagnostic
+rendering in the latter. The four output columns stay the
 same: `kinds`, `flags`, `values`, and spelling `locations`. Origin handles live
 only in temporary argument, capture and expansion buffers. Completed output
 keeps sorted, maximal eight-byte `(token index, origin)` runs. Ordinary file
@@ -3029,7 +3042,7 @@ The configurations behind the results table:
     -I./include $(ls src/*/*.c src/*/x86_64/*.c)
 # in this repository:
 ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
-    src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+    -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 # in lua-5.4.8/src:
 ../../build/compiler test-preprocessor --clang -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX *.c
 ```
@@ -3501,7 +3514,7 @@ spellings alone would miss this change (#272).
 ./build/compiler test-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
-    src/buster/compiler/main.c
+    -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 ./build/compiler -E [-P] [-dM] [-H] [-o file] [options] file.c
 ./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
 ./build/compiler test-preprocessor --tables src path/to/libc
