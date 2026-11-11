@@ -11,8 +11,8 @@
 #include <stdlib.h>
 
 // IR_FENCE (#1059) keeps its order and scope in `a`, which the rows' default comparison and mutation take; IR_INTRINSIC
-// (#141, #1450) keeps its one or two values in `a,b`, with its operation in `c`, which the default comparison
-// takes as a comparison's predicate; IR_ATOMIC_RMW (#1059), the last added, keeps its operation
+// (#141, #1450) keeps its one or two values in `a,b`, with its operation in `c`, and a ternary kind's third value in the
+// extra array, its place in `c` past the kind (#1840), which ir_source_text_function compares by value; IR_ATOMIC_RMW (#1059), the last added, keeps its operation
 // and its order in the flags, which the rows' default comparison and mutation take, and a compare-exchange's desired
 // value in `c`, an optional use as a call's is.
 _Static_assert(IR_OP_COUNT == 64, "audit the text round-trip oracle when adding an IR operation");
@@ -167,6 +167,13 @@ static bool ir_source_text_equal(const IrFunction* a, const IrFunction* b)
                     const uint64_t y = (uint64_t)b->b[i] + 1 + (uint64_t)k * 2;
                     equal = ir_source_text_constant(a, a->extra[x], b, b->extra[y]) && a->extra[x + 1] == b->extra[y + 1];
                 }
+            } break;
+            case IR_INTRINSIC:
+            {
+                // A ternary kind's `c` also holds its third operand's place in the extra array (#1840): its kind and that
+                // operand's value are what the text says.
+                equal = a->a[i] == b->a[i] && a->b[i] == b->b[i] && ir_intrinsic_kind(a->c[i]) == ir_intrinsic_kind(b->c[i]) &&
+                        ir_value_third(a, i) == ir_value_third(b, i) && (ir_intrinsic_ternary(a->c[i]) || a->c[i] == b->c[i]);
             } break;
             case IR_BR_INDIRECT:
             {

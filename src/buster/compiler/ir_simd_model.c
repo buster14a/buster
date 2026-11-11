@@ -82,6 +82,17 @@ typedef enum IrSimdOperation
     // operation in the action's `index`: the unsigned or signed minimum or maximum, and the unsigned or signed saturating
     // sum or difference a - b.
     IR_SIMD_LANE_OP,
+    // A permute of two tables (#1840, ir.c's BUSTER_IR_INTRINSIC_PERMUTE2), its lanes' bytes' log2 the action's `index`:
+    // lane i is, of a's lanes followed by c's, the one that b's lane i's low bits name, as many as name twice the lanes.
+    IR_SIMD_PERMUTE2,
+    // A bitwise function of three vectors (#1840, ir.c's BUSTER_IR_INTRINSIC_TERNLOG), its truth table the action's
+    // `index`: each bit is the index's bit (a << 2 | b << 1 | c) of a's, b's and c's same bit.
+    IR_SIMD_TERNLOG,
+    // The compress and the expand of a vector's lanes (#1840, ir.c's BUSTER_IR_INTRINSIC_COMPRESS and _EXPAND), the lanes'
+    // bytes' log2 the action's `index`, b the mask of those lanes: a's lanes whose bits are set, packed from lane 0, and c's
+    // past them; and a's lanes from lane 0 at the set bits' lanes, c's at the others.
+    IR_SIMD_COMPRESS,
+    IR_SIMD_EXPAND,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -226,7 +237,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT || action->operation == IR_SIMD_PERMUTE ||
                           action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
                           action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT ||
-                          action->operation == IR_SIMD_LANE_OP);
+                          action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
+                          action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -263,6 +275,14 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                         action->index < ir_simd_bits(type) / ir_simd_bits(b) && c == IR_SIMD_NONE;
                 break;
             case IR_SIMD_PERMUTE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
+            case IR_SIMD_PERMUTE2: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && action->index <= 3; break;
+            case IR_SIMD_TERNLOG: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type; break;
+            case IR_SIMD_COMPRESS:
+            case IR_SIMD_EXPAND:
+            {
+                static const IrSimdLane lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+                valid = valid && ir_simd_vector(type) && a == type && c == type && action->index <= 3 && b == ir_simd_lane_mask(type, lanes[action->index & 3]);
+            } break;
             case IR_SIMD_SHUFFLE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE; break;
             case IR_SIMD_ALIGN:
                 valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && (action->index >> 4 == 2 || action->index >> 4 == 3) &&
@@ -601,6 +621,64 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         {
             const uint64_t a = ir_simd_lane_read(values[0], lane_bits, lane);
             ir_simd_lane_write(&staged, lane_bits, lane, ir_simd_integer_operation((IrSimdOperation)shifts[(action->index >> 2) & 3], a, count, lane_bits));
+        }
+    }
+    else if (valid && (action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND))
+    {
+        // Lane by lane, the mask's bits in order: a compress takes a's selected lanes into the next lane, an expand puts
+        // a's next lane into each selected lane; the third operand's fill the rest.
+        const uint32_t size = 1u << action->index;
+        const uint32_t lanes = ir_simd_bits(action->result) / 8 / size;
+        const uint64_t mask = values[1]->words[0];
+        const uint8_t* a = (const uint8_t*)values[0]->words;
+        const uint8_t* c = (const uint8_t*)values[2]->words;
+        uint8_t* out = (uint8_t*)staged.words;
+        memcpy(out, c, (uint64_t)lanes * size);
+        uint32_t next = 0;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            if ((mask >> lane & 1) != 0)
+            {
+                const bool compress = action->operation == IR_SIMD_COMPRESS;
+                memcpy(out + (compress ? next : lane) * size, a + (compress ? lane : next) * size, size);
+                next += 1;
+            }
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_TERNLOG)
+    {
+        // Each bit of the truth table, a 64-bit word at a time: the minterms whose bits are set, or'ed.
+        const uint32_t words = ir_simd_bits(action->result) / 64;
+        for (uint32_t w = 0; w < words; w += 1)
+        {
+            const uint64_t a = values[0]->words[w];
+            const uint64_t b = values[1]->words[w];
+            const uint64_t c = values[2]->words[w];
+            uint64_t value = 0;
+            for (uint32_t minterm = 0; minterm < 8; minterm += 1)
+            {
+                const uint64_t term = ((minterm & 4) != 0 ? a : ~a) & ((minterm & 2) != 0 ? b : ~b) & ((minterm & 1) != 0 ? c : ~c);
+                value |= (action->index >> minterm & 1) != 0 ? term : 0;
+            }
+            staged.words[w] = value;
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_PERMUTE2)
+    {
+        // Byte by byte: each result byte is a byte of the lane of a, or of c past a's lanes, that b's lane names.
+        const uint8_t* a = (const uint8_t*)values[0]->words;
+        const uint8_t* b = (const uint8_t*)values[1]->words;
+        const uint8_t* c = (const uint8_t*)values[2]->words;
+        uint8_t* out = (uint8_t*)staged.words;
+        const uint32_t bytes = ir_simd_bits(action->result) / 8;
+        const uint32_t size = 1u << action->index;
+        const uint32_t lanes = bytes / size;
+        for (uint32_t byte = 0; byte < bytes; byte += 1)
+        {
+            uint64_t index = 0;
+            memcpy(&index, b + (byte / size) * size, size);
+            const uint32_t selected = (uint32_t)(index & (2 * lanes - 1));
+            out[byte] = (selected < lanes ? a : c)[(selected & (lanes - 1)) * size + byte % size];
         }
     }
     else if (valid && action->operation >= IR_SIMD_PERMUTE && action->operation <= IR_SIMD_SHUFFLE_LANES)

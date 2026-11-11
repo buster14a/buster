@@ -2026,10 +2026,22 @@ literal's escape and prefix diagnostics show the macro argument it came from,
 (`Preprocessor.diagnostic_arguments`); a numeric constant's errors don't, nor
 clang's.
 
+An evaluated literal's escapes have the same warnings, as clang's literal
+parser gives them (`check_literal_evaluated_escapes`' `pedantic`): a GNU
+escape's at its backslash, a delimited numeric one's while the literal has no
+error, and a delimited or named universal character name's after one of no
+error of its own, whatever came before (`"\x{100}\u{e9}"` warns of the
+second). The driver words a refused literal's; the reader gives events of a
+literal its extended decoding read (`CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE`,
+`CHECK_WARNING_EVENT_DELIMITED_ESCAPE`), and scans one the fast decoding read,
+which takes `\e` without a word, only where the command line may give the
+warning or the unit has a diagnostic pragma (`check_input_gnu_escapes`). A
+static assertion's message, which the reader reads too, has the unevaluated
+scan's alone (`check_input_assertion_message`).
+
 Not clang's yet: what follows `\x` without digits, which clang alone keeps
-(its attribute still applies); and -pedantic's warnings of an evaluated
-literal's escapes (`"\e"` in an initializer), which the fast decoding takes
-without a scan. A static assertion's message of an escape
+(its attribute still applies); and the warnings of the literals after one the
+checker refuses, which ends the reading. A static assertion's message of an escape
 the fast decoding refuses (a named or a delimited one, #1447) is read as clang
 reads it (`check_literal_strings_extended`). Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
@@ -4387,8 +4399,8 @@ Clang marks a declaration whose declarator or type is in error invalid, keeps it
 bound, and leaves its uses quiet: a `RecoveryExpr` around each, whose enclosing
 expressions give no diagnostic of their own. The reader does the same for the
 declarator errors above and a variable of type `void` or of an incomplete type,
-in a declaration's own declarator (not a deduced `auto`'s or a K&R
-definition's; a typedef's and a parameter's are below):
+in a declaration's own declarator (not a deduced `auto`'s; a typedef's, a
+parameter's and a K&R definition's are below):
 
 - **The error recovers.** `check_input_declarator_recover` and
   `check_input_variable_recover` move the report to the recovered ones, so the
@@ -4448,10 +4460,17 @@ A member's declarator error, and one in a type name (`sizeof(C[4])`, but for
 a negative bound's), still stop the reader (#1893's too), where clang marks the member (and
 its record) or the expression invalid and goes on.
 
-Left as before: an initialized invalid declaration still stops the reader
-(clang checks its initializer without the declaration's type, and its
-undeclared names and warnings there), and so does an invalid function
-definition's K&R list. `-c` refuses every such unit.
+An initialized invalid object recovers too: clang checks its initializer no
+further, so the reader skips it to the declarator's end, the object invalid
+and its uses quiet. An invalid function's initializer is clang's "illegal
+initializer (only variables can be initialized)" at its name, after the
+declarator's own error (`CHECK_INPUT_FUNCTION_INITIALIZER`), recovered the
+same way. Clang still reports a skipped initializer's undeclared names, which
+the reader doesn't.
+
+An invalid K&R definition goes on too, its body checked as clang checks it, and
+its declaration list's declarator errors recover: the listed parameter is a
+stand-in, invalid and quiet in the body. `-c` refuses every such unit.
 
 #### Extern objects of type void (#1447)
 
@@ -5341,13 +5360,10 @@ own nodes take them.
 
 The later phases are left:
 
-- **Invalid declarations.** Not covered by phase 2 or the invalid
-  declarations above:
-  - An initialized invalid declaration, which clang marks invalid too.
-
-  These still stop the reader. (A non-constant initializer's place, `sizeof`
-  of an incomplete type's words and a nested tag's redefinition are clang's,
-  above and in phase 2.)
+- **Invalid declarations.** None is left beyond phase 2 and the invalid
+  declarations above. (A non-constant initializer's place, `sizeof` of an
+  incomplete type's words and a nested tag's redefinition are clang's, above
+  and in phase 2.)
 - **Errors no view part leaves out.** A body's error in a part that holds a
   `case` label or a tag's definition whose names are used outside it, or in a
   typedef's declaration, still leaves its body out, and its warnings with it. A reader's
@@ -6223,6 +6239,16 @@ headers and `-Werror` promotion apply through the shared sparse policy (`c_check
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
 compares the driver's complete diagnostics with clang's for every producer and policy, and
 `test-checker`'s catalogue compares each warning's line.
+
+The translation unit's end publishes after every other diagnostic, in clang's `ActOnEndOfTranslationUnit` order
+(#2238): `-Wundefined-internal`, unless an error has occurred; `-Wtentative-definition-array`, "tentative array
+definition assumed to have one element", for each object its tentative definitions leave an array of unknown bound
+(`check_input_tentative_arrays`: once, at its last tentative definition, unless a declaration defines it, in the
+order of its first tentative one, under the pragmas at that definition), which clang gives in a unit with errors too;
+then, unless an error has occurred, the unused file-scope declarations' warnings. A warning `-Werror` promotes counts
+as an error there, as clang's `hasErrorOccurred` has it, wherever it stands, the tentative arrays' among them
+(`check_driver_unit_end_split`). Differences left: a unit with a parse error gives none of them, and a rejected
+unit's object whose declaration the reader leaves out (`int b[] = { undeclared }; int b[];`) gets none.
 
 ## Corpus comparison and semantic mutations
 
@@ -8154,7 +8180,10 @@ arguments against the function. The checker now gives these as clang does.
 - **`-Wgnu-alignof-expression`.** C11's `_Alignof` and C23's `alignof` of an
   expression get clang's "'_Alignof' applied to an expression is a GNU
   extension" at the keyword (`check_input_alignof_expression`), once whichever
-  evaluation reaches it. GNU's `__alignof__` doesn't.
+  evaluation reaches it. GNU's `__alignof__` doesn't. An operand that holds
+  an undeclared name, which the walk builds no node of, gets it too, after the
+  name's error, as clang reads it as an expression; a type name's doesn't
+  (`check_input_alignof_undeclared`, #1946).
 - **Attributes after a definition.** A function's or variable's declaration
   after the entity's definition may carry a declaration attribute that the
   definition lacks: the definition's own and those it took from earlier
@@ -9402,6 +9431,14 @@ arguments against the function. The checker now gives these as clang does.
   declaration's later uses and the initializer's other elements are checked as
   clang checks them, by both paths. Differences left: without a `]` before the
   next `;` (`int z[1, 2;`) nothing is resumed, where clang reads on.
+- **A GNU attribute list's item that isn't a name** (#1447). After
+  `__attribute__((unused, __clang__::x))`'s "expected ')'" (`__clang__` is
+  the macro 1), clang's ParseGNUAttributes skips to the list's `)` and goes
+  on with the declaration: the view drops the tokens from the error to that
+  `)` (`ParseDiagnostic.resume_delete`), so the list's earlier attributes and
+  the unit's later declarations are checked, by both paths. Differences left:
+  the warnings a rejected unit drops still drop (`-Wdeprecated-declarations`
+  among them), and the caret display's "expanded from macro '__clang__'" note.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original

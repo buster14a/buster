@@ -451,6 +451,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void h3(void) { int k4[(void*)0 == 0 ? 1.0 : 2]; (void)k4; }\n"
         "int after = undeclared;\n",
         "typedef int T, U[-1], V;\nV v;\n",
+        // Initialized invalid declarations (#1447): an object's initializer is skipped, the object invalid and its uses
+        // quiet; a function's is clang's "illegal initializer", after the declarator's own error.
+        "int a[-1] = {1, \"x\"};\n"
+        "int c = a[0];\n"
+        "struct X; struct X xs[2] = {0};\n"
+        "void v = 1;\n"
+        "int (fa[2])(void) = {0};\n"
+        "int big[1ull<<62] = {0};\n"
+        "void f(void) { int l[-1] = {2}; char *p = l; int m = l[0]; (void)p; (void)m; }\n"
+        "int g(void)[3] = 0;\n"
+        "int h(void)[3] = {1}, k;\n"
+        "void f2(void) { void v1 = 1, w1; int u = q; }\n"
+        "int x = undeclared;\n",
         // An array of an element whose alignment an attribute raised past its size (#1893): clang's "size of array element
         // of type 'enum E' (4 bytes) isn't a multiple of its alignment (8 bytes)" at the `[`, recovered, the declaration
         // invalid and its uses quiet; arrays of pointers to it and an over-aligned record whose size grew are fine.
