@@ -2750,7 +2750,8 @@ static NightlyText nightly_buffer_text(NightlyBuffer* buffer)
 }
 
 // A run's plain rows, `shards` shards of each architecture, all succeeding but where `odd` names a job (architecture
-// times 64 plus shard, from 1) to conclude otherwise; and one failing sanitizer row, which never counts.
+// times 64 plus shard, from 1) to conclude otherwise; and one failing sanitizer row and the vector row's jobs, which
+// never count.
 static void nightly_test_plain(NightlyBuffer* buffer, uint64_t run, uint32_t shards, uint32_t odd, const char* conclusion, bool odd_missing)
 {
     static const char* const architectures[] = { "x86-64", "native" };
@@ -2768,6 +2769,12 @@ static void nightly_test_plain(NightlyBuffer* buffer, uint64_t run, uint32_t sha
         }
         nightly_append(buffer, "job\t%llu\tcompleted\tfailure\tTests on Ubuntu 26.04 (Clang 23, %s, thread, O3, shard 1 of %u)\n", (unsigned long long)run, architectures[a], shards);
     }
+    // The vector row's jobs (#2033), one pool of the plain and sanitizer configurations' items, which a full run has
+    // beside its `native` rows: no plain row's shard, whatever they conclude.
+    static const char vector[] = "Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / ";
+    nightly_append(buffer, "job\t%llu\tcompleted\tfailure\t%sVector draw 1, candidate 3 (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
+    nightly_append(buffer, "job\t%llu\tcompleted\tsuccess\t%sVector draw 1, candidate 4 (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
+    nightly_append(buffer, "job\t%llu\tcompleted\tfailure\t%sVector row verdict (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
 }
 
 static void nightly_test_run(NightlyBuffer* buffer, uint64_t id, const char* event, const char* status, const char* conclusion, const char* head, int64_t created, int64_t updated, const char* title)

@@ -1276,6 +1276,7 @@ static __attribute__((unused)) void main_checker_consumer_interfaces(void)
     (void)&check_vector_baseline_shuffle_row;
     (void)&check_vector_baseline_complement;
     (void)&check_vector_lower_element_row;
+    (void)&check_vector_lower_lanewise;
     (void)&check_vector_lower_brain;
     (void)&check_vector_lower_brain_rows;
     (void)&check_x86_lower_rule;

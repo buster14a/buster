@@ -1713,6 +1713,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
             result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
             break;
+        case CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE:
+            result = check_warning_text(scratch, "use of non-standard escape character '\\%c'", (char)payload->name);
+            break;
         case CHECK_WARNING_EVENT_DELIMITED_ESCAPE:
             result = payload->data != 0 ? "named escape sequences are a Clang extension" : "delimited escape sequences are a C2y extension";
             break;
@@ -2017,6 +2020,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_TENTATIVE_ARRAY:
+            result = "tentative array definition assumed to have one element";
+            break;
         case CHECK_WARNING_EVENT_UNUSED_RESULT:
         {
             static const char* const messages[] =
@@ -2308,7 +2314,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         pp_diagnose_output_offset_at(pp, disposition, source, 0, boundary, "%s%s", message, suffix);
                         pp->diagnostic_arguments = false;
                     }
-                    else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE)
+                    else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE || event->kind == CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE)
                     {
                         // At its backslash inside the literal's token (#1447), with the macro argument it came from.
                         pp->diagnostic_arguments = true;

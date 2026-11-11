@@ -471,7 +471,8 @@ static UnwindError emitted_unwind(const EmittedCode* code, const uint32_t* offse
         .frame_count = code->frame_count,
         .register_count = BUSTER_EMISSION_X86_DWARF_REGISTERS,
     };
-    UnwindError error = length == 0 || (code->frame_count != 0 && rows == 0) ? UNWIND_ERROR_INVALID : length > INT32_MAX ? UNWIND_ERROR_LIMIT : UNWIND_OK;
+    // A function of no bytes (an empty naked one, #1845) has no frame events, and clang's FDE of no range.
+    UnwindError error = (length == 0 && code->frame_count != 0) || (code->frame_count != 0 && rows == 0) ? UNWIND_ERROR_INVALID : length > INT32_MAX ? UNWIND_ERROR_LIMIT : UNWIND_OK;
     if (error == UNWIND_OK && code->frame_count != 0)
     {
         const EmissionStorage storage = {
