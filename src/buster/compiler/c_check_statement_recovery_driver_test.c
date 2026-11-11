@@ -226,6 +226,30 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int g(void) { return _Alignof((undecl2 + 1)); }\n"
         "int h(void) { return _Alignof(int[undecl3]); }\n",
         "int k(void) { return _Alignof(sizeof(undecl4)) + _Alignof(_Alignof(undecl5)); }\n",
+        // Warnings that default to errors (#1969): a conversion between an integer and a pointer or between pointers, and a
+        // return's missing or extra value. Clang's scopes don't count them (DiagnosticIDs::isUnrecoverable), so their unused
+        // variables are given; the view casts a conversion's source, so its statement's warnings are given too.
+        "int f(short q) { char *p = &q; return 0; }\n",
+        "int a(int *p) { int x; x = p; return x / 0; }\n"
+        "int b(int *p) { int x = p + (1 / 0); return x; }\n"
+        "int c(short q) { int u; char *p = &q; return *p << 40; }\n"
+        "int z3(void) { int u; return; }\n"
+        "void v(void) { int u; return 1; }\n"
+        "void t(int *); int d(void) { int u; t(5); return 0; }\n"
+        "int *e(int n) { int w; return n << 40; }\n"
+        "void (*fp)(int); void g0(void); int g(void) { int u; fp = g0; return 0; }\n",
+        // The same in a unit with an undeclared name, whose bodies' unused variables come from the view's reading.
+        "int f(short q) { char *p = &q; return 0; }\n"
+        "int z3(void) { int u; return; }\n"
+        "int k(int *p) { int q; q = p; return q + (1 << 40); }\n"
+        "int m(void) { int u; return undeclared; }\n"
+        "int n(int *p) { int u; int x = p; return x / 0; }\n",
+        // An array compound literal's conversion: the view's cast starts at its type name's `(`, not its body's `}`, so the
+        // function's later warnings stay (#2146 with #2132).
+        "int printf(const char *, ...);\n"
+        "void f(int n) { char *b = (int[2]){ 1, 2 }; printf(\"%s\\n\", n); }\n"
+        "void g(int n) { int u; char *e = (long[]){ 1, 2, 3 }; long *l = (int[1]){ 0 }; printf(\"%s\\n\", n); }\n"
+        "void h(int n) { int w = (struct { int x; }){ 1 }; char *a = (int[2]){ 1, 2 }; if (n < (unsigned){ 4 }) {} }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
