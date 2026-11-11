@@ -5,11 +5,12 @@
 // mappings and source pragmas are independent: a source mapping replaces the command-line baseline at its location.
 // The group relations and extension classes are checked against Clang 23.1.4, with original differential probes.
 
-// The warnings off by default that -pedantic (or -pedantic-errors) gives: GNU constant folding's, and an unevaluated
-// string literal's escapes' (#1447).
+// The warnings off by default that -pedantic (or -pedantic-errors) gives: GNU constant folding's, an unevaluated
+// string literal's escapes' (#1447), and GCC's cast to a union's (#2301).
 static bool check_warning_pedantic(uint32_t id)
 {
-    return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE;
+    return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE ||
+           id == CHECK_WARNING_ID_GNU_UNION_CAST;
 }
 
 static bool check_warning_extension(uint32_t id)
@@ -27,7 +28,7 @@ static bool check_warning_option(uint32_t id, String8 option)
     const CheckWarningDescription* description = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions + id : NULL;
     bool matches = description != NULL && (check_diagnostic_option(option, description->option) || check_diagnostic_option(option, description->parent));
     matches |= check_diagnostic_option(option, "-Weverything");
-    if (id == CHECK_WARNING_ID_GNU_CONSTANT)
+    if (id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_GNU_UNION_CAST)
     {
         matches |= check_diagnostic_option(option, "-Wpedantic");
     }

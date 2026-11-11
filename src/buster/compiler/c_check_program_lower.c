@@ -3330,7 +3330,7 @@ static void check_lower_limb_conversion(CheckLowerWriter* writer, TypeId from, T
 // A conversion of the value on top of the stack between `from` and `to`, either one an aggregate (and `to` not void): a
 // _BitInt's past 128 bits to or from another type, check_lower_limb_conversion's; a __float128's to or from a scalar,
 // check_lower_quad_conversion's; any other's nothing, as an aggregate converts to its own (compatible) type alone, and
-// GNU's cast to a union isn't lowered.
+// GNU's cast to a union is check_lower_union_cast's (#2301), which converts its operand to the member alone.
 static void check_lower_transport_cast(CheckLowerWriter* writer, TypeId from, TypeId to);
 
 static __attribute__((noinline)) void check_lower_aggregate_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
@@ -13384,6 +13384,33 @@ static __attribute__((noinline)) void check_lower_segment_read(CheckLowerWriter*
     }
 }
 
+// GCC's cast to a union (#2301, clang's CK_ToUnion), whose operand the checker converted to the member `member` it
+// initializes (BUSTER_CHECK_CONVERT_TO_UNION): a frame object of the union's type, the operand's value stored into its
+// first bytes (copied there for an aggregate's), as clang's code initializes the member of a temporary, and the cast's
+// value its address, as an aggregate's. The union's other bytes are left as they are, as clang's code leaves them. The
+// tasks run last pushed first.
+static __attribute__((noinline)) void check_lower_union_cast(CheckLowerWriter* writer, uint32_t node, TypeId to, TypeId member)
+{
+    const TypeTable* types = writer->program->types;
+    const uint32_t local = check_lower_object(writer, type_size(types, to), type_alignment_log2(types, to));
+    const uint8_t class = check_lower_class(writer, member);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+    if (check_lower_aggregate(writer, member))
+    {
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, member) });
+    }
+    else if (class == UINT8_MAX || class == BUSTER_TYPED_CLASS_VOID)
+    {
+        check_lower_unsupported(writer, check_lower_type_feature(types, member));
+    }
+    else
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_SET, class, check_lower_access_value(types, class, member));
+    }
+    check_lower_operand(writer, node, 0, false, member);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+}
+
 // A node check_lower_segment_access finds: a read of an object in a segment's space whose value is an address, but an
 // _Atomic one (check_lower_segment_read), and any other refused by name.
 static __attribute__((noinline)) void check_lower_segment_refused(CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address, bool discard)
@@ -13799,6 +13826,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         // VECTOR, the last of Tier 0's classes, and past it the half-precision classes and no class: out of line.
         check_lower_vector_operation(writer, node);
+    }
+    else if (op == CHECK_OP_CAST && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0)
+    {
+        check_lower_union_cast(writer, node, value->type, type_a);
     }
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {

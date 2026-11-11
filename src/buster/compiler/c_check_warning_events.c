@@ -177,6 +177,9 @@ enum
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
     // -Wunreachable-code-generic-assoc's, 131.)
     CHECK_WARNING_ID_UNSEQUENCED = 132,
+    // GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast): -Wgnu-union-cast, an extension off by
+    // default, under -Wgnu and -Wpedantic.
+    CHECK_WARNING_ID_GNU_UNION_CAST = 133,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -487,6 +490,8 @@ typedef enum CheckWarningEventKind
     // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
     // array's, 1 for a qualified one's.
     CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
+    // GCC's cast to a union (#2301, check_warning_graph_union_cast), at the cast's `(`: its description's words.
+    CHECK_WARNING_EVENT_GNU_UNION_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
