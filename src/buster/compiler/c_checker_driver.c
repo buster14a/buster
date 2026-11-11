@@ -9741,10 +9741,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 CheckResumed edited = { 0 };
                 const bool viewed = check_prefix_resume(&edited, parser, typo_edits.edits, typo_edits.count, &typo_tails, arena, scratch) == CHECK_PREFIX_READY;
-                if (viewed)
+                // (No view, where the last tail was given back and nothing else is edited: the failed parse's own.)
+                const bool original = !viewed && parser->errors != 0;
+                if (viewed || original)
                 {
-                    resumed = edited;
-                    recovered = &resumed.parser;
+                    resumed = viewed ? edited : resumed;
+                    recovered = viewed ? &resumed.parser : parser;
                     parse_failed = true;
                     prefix_only = true;
                     repairing = false;
@@ -9768,7 +9770,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         ready = false;
                     }
                 }
-                if (viewed && ready)
+                if ((viewed || original) && ready)
                 {
                     original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, recovered, pp, check_diagnostic_parse_end(recovered), arena,
                                                                                scratch);
