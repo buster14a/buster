@@ -5552,6 +5552,106 @@ static void check_test_driver_tier1_tls(CheckTest* test, const char* clang, cons
                                   true, 0);
 }
 
+// The segments' fixture (#1447): loads and stores in __seg_fs and __seg_gs by Tier 1, each with its segment override
+// (BUSTER_IR_SEGMENT, tier1_select_segment), every function Tier 1's. Thread-locals are reached through %fs (an
+// address less the thread pointer, __builtin_thread_pointer's): integers of every width, signed and unsigned, a
+// double, a float, a vector of 16 bytes and one of 32 (a baseline target's two pieces, #1624), an __int128 (its halves,
+// ir_wide.c), members and subscripts, compound assignments, increments, and relaxed, acquire and seq_cst atomic loads and
+// stores (a seq_cst store's xchg), in a loop. A global in __seg_gs, a struct's members, is reached through %gs, whose
+// base the other unit's arch_prctl sets to a window, a mapped page past it, and restores to 0.
+static const char check_test_tier1_segments_header[] =
+    "#include <stdio.h>\n"
+    "typedef int v4si __attribute__((vector_size(16)));\n"
+    "typedef double v4df __attribute__((vector_size(32)));\n"
+    "struct S { long a; int b; char c[8]; };\n"
+    "struct G { int count; long wide[4]; double d; v4si v; };\n"
+    "extern __seg_gs struct G gs;\n"
+    "long fs_run(int n);\n"
+    "long gs_run(int n);\n"
+    "int gs_enter(void);\n"
+    "int gs_leave(void);\n";
+
+static const char check_test_tier1_segments_source[] =
+    "#include \"tier1-segments.h\"\n"
+    "static _Thread_local long tl[4] = { 1, 2, 3, 4 };\n"
+    "static _Thread_local struct S ts = { 5, 6, \"abcdefg\" };\n"
+    "static _Thread_local double td = 2.5;\n"
+    "static _Thread_local float tf = 1.5f;\n"
+    "static _Thread_local v4si tv = { 9, 8, 7, 6 };\n"
+    "static _Thread_local v4df tw = { 1, 2, 3, 4 };\n"
+    "static _Thread_local short th = -3;\n"
+    "static _Thread_local signed char tc = -5;\n"
+    "static _Thread_local unsigned char tu = 200;\n"
+    "static _Thread_local int ta = 5;\n"
+    "static _Thread_local __int128 ti = 77;\n"
+    "#define FS(type, object) ((type __seg_fs*)((char*)&(object) - (char*)__builtin_thread_pointer()))\n"
+    "static long rd(long __seg_fs* p, int i) { return p[i]; }\n"
+    "static void wr(long __seg_fs* p, int i, long v) { p[i] = v; }\n"
+    "static int member(struct S __seg_fs* s, int n) { s->b += n; s->c[n & 7] = (char)('A' + n); return s->b + s->c[(n + 1) & 7] + (int)s->a; }\n"
+    "long fs_run(int n)\n"
+    "{\n"
+    "    long __seg_fs* p = FS(long, tl[0]);\n"
+    "    double __seg_fs* d = FS(double, td);\n"
+    "    float __seg_fs* f = FS(float, tf);\n"
+    "    v4si __seg_fs* v = FS(v4si, tv);\n"
+    "    v4df __seg_fs* w = FS(v4df, tw);\n"
+    "    short __seg_fs* h = FS(short, th);\n"
+    "    signed char __seg_fs* c = FS(signed char, tc);\n"
+    "    unsigned char __seg_fs* u = FS(unsigned char, tu);\n"
+    "    int __seg_fs* a = FS(int, ta);\n"
+    "    __int128 __seg_fs* q = FS(__int128, ti);\n"
+    "    wr(p, n & 3, n * 7L); *p += n; p[1]++; --p[2];\n"
+    "    long r = rd(p, (n + 1) & 3) + p[1] * 3 + (p[3] <<= 1) + member(FS(struct S, ts), n);\n"
+    "    *d += n; *d *= 1.5; *f *= 2.0f; *f += n;\n"
+    "    v4si k = { n, n + 1, n + 2, n + 3 }; *v = *v * k; *v += k; v4si x = *v; r += x[0] + x[1] * 3 + x[2] * 5 + x[3] * 7;\n"
+    "    *w *= *w; v4df y = *w; r += (long)y[n & 3];\n"
+    "    *h = (short)(*h * n); r += *h + *c + *u; *c = (signed char)(*c - n); *u = (unsigned char)(*u + n); r += *c + *u;\n"
+    "    *q += n; *q <<= 3; r += (long)*q + (long)(*q >> 64);\n"
+    "    r += __atomic_load_n(a, __ATOMIC_RELAXED); __atomic_store_n(a, (int)r, __ATOMIC_RELAXED);\n"
+    "    __atomic_store_n(a, __atomic_load_n(a, __ATOMIC_SEQ_CST) + 1, __ATOMIC_SEQ_CST); __atomic_store_n(a, __atomic_load_n(a, __ATOMIC_ACQUIRE) + 2, __ATOMIC_RELEASE);\n"
+    "    for (int i = 0; i < n; i += 1) { r += p[i & 3]; p[(i + 1) & 3] ^= i; }\n"
+    "    return r + tl[0] + tl[1] + tl[2] + tl[3] + ts.b + (long)td + (long)tf + tv[n & 3] + (long)tw[n & 3] + th + tc + tu + ta + (long)ti;\n"
+    "}\n"
+    "long gs_run(int n)\n"
+    "{\n"
+    "    if (gs_enter() != 0) return -1;\n"
+    "    gs.count = n; gs.count++; gs.count *= 3; gs.wide[n & 3] = gs.count; gs.wide[0] += gs.wide[1]; gs.d = n * 0.5; gs.d += gs.count;\n"
+    "    v4si k = { 1, 2, 3, n }; gs.v += k; v4si q = gs.v;\n"
+    "    long r = gs.count + gs.wide[0] + gs.wide[n & 3] + (long)gs.d + q[3] + q[0];\n"
+    "    r += --gs.count;\n"
+    "    return gs_leave() != 0 ? -2 : r;\n"
+    "}\n";
+
+static const char check_test_tier1_segments_other_source[] =
+    "#include \"tier1-segments.h\"\n"
+    "long syscall(long, ...);\n"
+    "#include <sys/mman.h>\n"
+    "__seg_gs struct G gs;\n"
+    "int gs_enter(void)\n"
+    "{\n"
+    "    static char* window;\n"
+    "    if (window == 0) window = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n"
+    "    if (window == MAP_FAILED || (unsigned long)window < (unsigned long)&gs) return -1;\n"
+    "    for (unsigned i = 0; i < sizeof(struct G); i += 1) window[i] = (char)(i * 7);\n"
+    "    return (int)syscall(158, 0x1001, (unsigned long)window - (unsigned long)&gs);\n"
+    "}\n"
+    "int gs_leave(void) { return (int)syscall(158, 0x1001, 0UL); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    long t = 0;\n"
+    "    for (int n = 0; n < 6; n += 1) t = t * 31 + fs_run(n) + gs_run(n) * 7;\n"
+    "    printf(\"%ld\\n\", t);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_segments(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-segments", "segments'", check_test_tier1_segments_header, check_test_tier1_segments_source,
+                                  check_test_tier1_segments_other_source, NULL, true, 0);
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-segments", "segments' (x86-64-v3)", check_test_tier1_segments_header,
+                                  check_test_tier1_segments_source, check_test_tier1_segments_other_source, "-march=x86-64-v3", true, 0);
+}
+
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
 // function but main Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both
 // prints: the arguments past the registers reach clang's callees in their stack slots, and the parameters past them
