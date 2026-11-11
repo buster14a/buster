@@ -339,6 +339,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
     CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
     CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
+    // An if's branches both clang::likely or both clang::unlikely (#2291, -Wignored-attributes), at the then branch's, with
+    // CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE at the else branch's.
+    CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT,
     // An initializer's use of a member an unavailable attribute marks (#147, check_init_member_use): clang's error, which
     // no warning option maps, staged with the walk's warnings (check_driver_initializer_warning_events gives it). The
     // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,

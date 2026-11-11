@@ -14737,7 +14737,13 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     else if (role == PARSE_ROLE_CLOSE_CASE)
     {
-        const uint32_t keyword = reader->first_child[token];
+        // The label's keyword, past the C23 attributes before it, whose list the parser makes the colon's child too (#2291).
+        uint32_t keyword = reader->first_child[token];
+        while (keyword < parser->tokens.count && parser->tokens.kinds[keyword] != PARSE_KIND_CASE && parser->tokens.kinds[keyword] != PARSE_KIND_DEFAULT)
+        {
+            keyword = reader->next_child[keyword];
+        }
+        keyword = keyword < parser->tokens.count ? keyword : reader->first_child[token];
         const bool fallback = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_DEFAULT;
         supported = check_sparse_get(reader->output->control_owners, token) != BUSTER_CHECK_NONE && (fallback ? count == 0 : count == 1 || count == 2);
         if (supported && !fallback)
