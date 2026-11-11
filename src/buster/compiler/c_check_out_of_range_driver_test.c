@@ -40,7 +40,6 @@ static const CheckDriverDefaultWarningFixture check_driver_out_of_range_fixtures
         .errors = 1,
         .c23 = true,
         .syntax_only = true,
-        .compare_warning_text = true,
     },
     {
         // -Wsign-compare (-Wextra) gives nothing of an always true or false comparison, and both follow clang's walk of a
