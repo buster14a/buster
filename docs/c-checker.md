@@ -5083,9 +5083,10 @@ What clang 23 does with each is followed:
   with the complex type's alignment (`SC` a `long` aligned to 4, `DC` an
   `__int128` aligned to 8), unless an alignment attribute gives one, which replaces it
   even downward (`mode(SC), aligned(2)` is aligned to 2); its enumerators stay
-  `int`. `XC` and `TC` (32 bytes, no integer) still stop the reader, and `HC`'s
-  complex `__fp16`, which the type table can't make, installs nothing (4 bytes
-  aligned to 4, where clang's are aligned to 2).
+  `int`. `XC` and `TC` (32 bytes, which no integer has) and `HC` (complex
+  `__fp16`, which the type table can't make) install nothing: the error
+  recovers and the enum is one with no mode (4 bytes aligned to 4, where
+  clang's are 32 aligned to 16, and 4 aligned to 2).
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.
@@ -5134,8 +5135,8 @@ alignments that stand.
 `c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
 These differences remain:
 
-- An enum's `XC` or `TC` mode still stops the reader, and an `HC` one has
-  the layout of an enum with no mode.
+- An enum's `XC`, `TC` or `HC` mode leaves it the layout of an enum with no
+  mode.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
