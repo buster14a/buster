@@ -181,9 +181,9 @@ table. The kinds are:
   fusion select them alike, including the deep-stack path where the preserving scratch crosses the register table's
   limit. `ir_lower` keeps the semantic store as an atomic IR `store`, with no read of an uninitialized object's old
   bytes, and refuses another marker shape. A standalone seq_cst `FENCE` still emits `mfence`.
-- A `LOAD`, `STORE` or `SET` of any class may also carry a segment override (#1447) in its `value`'s top two bits
-  (`BUSTER_TYPED_ACCESS_SEGMENT`, from bit 62, past what any class's value holds: the atomic marker and its order, a
-  vector's or a mask's bytes): `BUSTER_TYPED_SEGMENT_FS` (1, clang's address space 257, `__seg_fs`) or `_GS` (2, space
+- A `LOAD`, `STORE` or `SET` of any class, and an `ATOMIC_RMW` or `ATOMIC_CAS`, may also carry a segment override
+  (#1447) in its `value`'s top two bits (`BUSTER_TYPED_ACCESS_SEGMENT`, from bit 62, past what any of them holds: the
+  atomic marker and its order, a vector's or a mask's bytes, an operation, a CAS's local): `BUSTER_TYPED_SEGMENT_FS` (1, clang's address space 257, `__seg_fs`) or `_GS` (2, space
   256, `__seg_gs`), numbered as the encoder's overrides are, so that `form + segment * X86_FORM_COUNT` is the form with
   the override. A function with one says so (`Tier0Function.segments`, which the lowering sets and the inliners
   propagate); no other kind takes one (another kind's value is its own whole: a constant's top bits are its own), and 3
@@ -195,7 +195,9 @@ table. The kinds are:
   the frame's base or the incoming arguments' base), RIP-relative ones and `lea`'s. A marked access's address is in a
   depth register, as `LOAD`'s, `STORE`'s and `SET`'s templates take it (`[R1]`, `[R2 + R1 * 2^s]`, `[R1 + K]`; no home
   or constant variant), while the memory classes', vectors' and masks' deferred and deep forms move the value through
-  the frame's slots, which the frame's registers base. A seq_cst store's `xchg` takes the override too. `ir_lower`
+  the frame's slots, which the frame's registers base. A seq_cst store's `xchg` takes the override too, and so do
+  `ATOMIC_RMW`'s `xchg` or `lock xadd` (its address from its depth) and `ATOMIC_CAS`'s `lock cmpxchg` (its address
+  read from its local's home, a register or a frame slot, into a register). `ir_lower`
   refuses a function with the flag (`IR_ERROR_UNSUPPORTED`), so that Tier 1 falls back to Tier 0, and the typed
   interpreter refuses it.
 - `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and

@@ -900,7 +900,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             {
                 const TypeId bare = type_unqualified(type_strip_aligned(types, level));
                 const uint8_t kind = type_kind(types, bare);
-                abi = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_abi_kind(types, bare) : TYPE_FUNCTION_ABI_COUNT;
+                abi = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_convention(types, bare) : TYPE_FUNCTION_ABI_COUNT;
                 level = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
             }
             const String8 convention = abi < TYPE_FUNCTION_ABI_COUNT && alias_type == 0 ? spell->convention_macros[abi] : (String8){ 0 };
@@ -1215,11 +1215,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const bool large = event->kind == CHECK_WARNING_EVENT_LITERAL_OVERFLOW;
             const TypeId type = type_unqualified(payload->first_type);
             const char* name = type == BUSTER_TYPE_FLOAT ? "float" : type == BUSTER_TYPE_DOUBLE ? "double" :
-                               type == BUSTER_TYPE_LONG_DOUBLE ? "long double" : type == BUSTER_TYPE_FLOAT16 ? "_Float16" : NULL;
+                               type == BUSTER_TYPE_LONG_DOUBLE ? "long double" : type == BUSTER_TYPE_FLOAT16 ? "_Float16" :
+                               type == BUSTER_TYPE_FLOAT128 ? "__float128" : NULL;
             const char* limit = type == BUSTER_TYPE_FLOAT ? (large ? "3.40282347E+38" : "1.40129846E-45") :
                                 type == BUSTER_TYPE_DOUBLE ? (large ? "1.7976931348623157E+308" : "4.9406564584124654E-324") :
                                 type == BUSTER_TYPE_LONG_DOUBLE ? (large ? "1.18973149535723176502E+4932" : "3.64519953188247460253E-4951") :
-                                type == BUSTER_TYPE_FLOAT16 ? (large ? "65504" : "5.9605E-8") : NULL;
+                                type == BUSTER_TYPE_FLOAT16 ? (large ? "65504" : "5.9605E-8") :
+                                type == BUSTER_TYPE_FLOAT128 ? (large ? "1.18973149535723176508575932662800702E+4932" : "6.47517511943802511092443895822764655E-4966") :
+                                NULL;
             result = name != NULL ? check_warning_text(scratch, "magnitude of floating-point constant too %s for type '%s'; %s is %s",
                                                         large ? "large" : "small", name, large ? "maximum" : "minimum", limit) : NULL;
             break;

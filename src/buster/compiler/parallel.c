@@ -27,8 +27,10 @@
 // --shard K/N runs the K-th of N shards of the list, for N machines that each run one (a CI job's matrix): the runner
 // deals the commands to the shards, the costliest first, each to the shard whose commands cost the least so far
 // (parallel_shards), and runs its shard's in the list's order. FILE's lines (--costs) are `SECONDS TITLE`, a command's
-// time times the CPUs it held, as a runner's report gives them; a command without a line costs its CPUs times 10 s. The
-// deal depends on the list and the costs alone, never on the machine, so that the N shards run every command once.
+// time times the CPUs it held, as a runner's report gives them; a command without a line costs its CPUs times 10 s. A
+// FILE that names its runner's CPUs (`#: runner-cpus N`, as tools/ci/costs.c's tables do) deals each command to the
+// shard that, run on N CPUs, would end the earliest with it (test_deal_scheduled, #2031). The deal depends on the list
+// and the costs alone, never on the machine, so that the N shards run every command once.
 //
 // The report never holds up the run. A command's output is read into memory when it ends and its capture closed, so
 // that only running commands hold one, however many have ended before the report reaches them; and the report goes out
@@ -332,6 +334,9 @@ struct ParallelCosts
 {
     // Each command's cost in milliseconds, by its place in the list.
     uint64_t* milliseconds;
+    // The CPUs of the runner the costs were measured on, from a `#: runner-cpus N` line, or 0 without one: with them, the
+    // deal simulates each shard's schedule on that many (test_deal_scheduled, #2031), the same on every machine.
+    uint64_t runner_cpus;
     // The first problem: what it is, or null, and its line (from 1).
     const char* error;
     uint64_t error_line;
@@ -371,7 +376,9 @@ static uint64_t parallel_cost_seconds(String8 line, uint64_t* milliseconds)
 
 // Reads `text`'s costs for the list's commands: each line not blank nor a comment is `SECONDS TITLE`, a command's cost in
 // seconds of the CPUs it holds (its time, times its CPUs), then blanks, then its title as its heading has it. A title the
-// list doesn't have is left out (a command since removed); a command without a line costs its CPUs times 10 s.
+// list doesn't have is left out (a command since removed); a command without a line costs its CPUs times 10 s. One
+// comment may be `#: runner-cpus N`, N from 1 to 1,024: the CPUs of the runner whose times the costs are (the tables
+// that tools/ci/costs.c generates say so), which the deal then simulates.
 static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list, String8 text)
 {
     // The list stays as it is while the costs are stored.
@@ -408,10 +415,30 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
         }
         uint64_t milliseconds = 0;
         const uint64_t length = parallel_cost_seconds(line, &milliseconds);
+        static const char runner[] = "#: runner-cpus ";
+        const uint64_t runner_length = sizeof(runner) - 1;
         if (memchr(line.pointer, 0, line.length) != 0)
         {
             result.error = "a NUL byte";
             result.error_line = line_number;
+        }
+        else if (line.length >= runner_length && memcmp(line.pointer, runner, runner_length) == 0)
+        {
+            // The count's digits, then nothing but blanks.
+            uint64_t i = runner_length;
+            uint64_t cpus = 0;
+            while (i < line.length && line.pointer[i] >= '0' && line.pointer[i] <= '9' && cpus <= BUSTER_PARALLEL_CPUS)
+            {
+                cpus = cpus * 10 + (uint64_t)(line.pointer[i] - '0');
+                i += 1;
+            }
+            const bool counted = i != runner_length && cpus >= 1 && cpus <= BUSTER_PARALLEL_CPUS && parallel_blank_line((String8){ .pointer = line.pointer + i, .length = line.length - i });
+            if (!counted || result.runner_cpus != 0)
+            {
+                result.error = counted ? "a runner's CPUs that an earlier line gives" : "a runner's CPUs that aren't a count from 1 to 1024";
+                result.error_line = line_number;
+            }
+            result.runner_cpus = counted ? cpus : result.runner_cpus;
         }
         else if (!parallel_blank_line(line) && !parallel_comment_line(line))
         {
@@ -453,15 +480,29 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
 }
 
 // Deals the list's commands to `shards` shards by their costs (test_deal: the costliest first, each to the shard whose
-// commands cost the least so far): a command's shard, from 0, goes in assigned[i]. The deal needs room for no more shards
-// than commands, however many --shard asks for.
-static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shards, uint64_t* assigned)
+// commands cost the least so far): a command's shard, from 0, goes in assigned[i]. Costs that name their runner's CPUs
+// deal as test_deal_scheduled does instead: the costliest first, each to the shard that, run on that many CPUs as
+// parallel_run runs it, would end the earliest with it (#2031). The deal needs room for no more shards than commands,
+// however many --shard asks for.
+static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t runner_cpus, uint64_t shards, uint64_t* assigned)
 {
     const uint64_t count = list->count;
     uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
     uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (shards < count ? shards : count) + 1);
-    const bool valid = order != 0 && loads != 0;
-    if (valid)
+    uint64_t* held = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1) : 0;
+    uint64_t* ends = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runner_cpus + 1) : 0;
+    uint64_t* holds = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runner_cpus + 1) : 0;
+    const bool valid = order != 0 && loads != 0 && (runner_cpus == 0 || (held != 0 && ends != 0 && holds != 0));
+    if (valid && runner_cpus != 0)
+    {
+        // A command of more CPUs than the runner's runs alone, holding them all.
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            held[i] = list->commands[i].cpus < runner_cpus ? list->commands[i].cpus : runner_cpus;
+        }
+        test_deal_scheduled(costs, held, count, shards, runner_cpus, order, loads, assigned, ends, holds);
+    }
+    else if (valid)
     {
         test_deal(costs, count, shards, order, loads, assigned);
     }
@@ -469,14 +510,14 @@ static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64
 }
 
 // The list's commands that the deal gives shard `shard` (from 0), in the list's order, as a list of their own.
-static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shard, uint64_t shards)
+static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t runner_cpus, uint64_t shard, uint64_t shards)
 {
     // The list stays as it is while the shard's commands are copied.
     const uint64_t count = list->count;
     const ParallelCommand* const commands = list->commands;
     ParallelList result = { .commands = BUSTER_ARENA_PUSH_ARRAY(arena, ParallelCommand, count + 1) };
     uint64_t* assigned = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
-    if (result.commands == 0 || assigned == 0 || !parallel_shards(arena, list, costs, shards, assigned))
+    if (result.commands == 0 || assigned == 0 || !parallel_shards(arena, list, costs, runner_cpus, shards, assigned))
     {
         result.error = "out of memory for the shard";
     }
@@ -1423,7 +1464,7 @@ static int run_parallel_command(int argc, char** argv)
                 // The shard's commands, dealt by the costs (each command's CPUs times 10 s without a file of them).
                 costs = parallel_costs_parse(&arena, &list, costs_text);
                 options.listed = list.count;
-                list = costs.error == 0 ? parallel_list_shard(&arena, &list, costs.milliseconds, options.shard - 1, options.shards) : list;
+                list = costs.error == 0 ? parallel_list_shard(&arena, &list, costs.milliseconds, costs.runner_cpus, options.shard - 1, options.shards) : list;
                 if (costs.error != 0)
                 {
                     fprintf(stderr, "parallel: %s:%llu: %s\n", costs_path, (unsigned long long)costs.error_line, costs.error);

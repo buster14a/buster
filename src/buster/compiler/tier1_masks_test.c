@@ -117,6 +117,9 @@ struct Tier1MasksTest
     // IR's extract, widen or insert.
     uint32_t width_attempts;
     uint32_t width_rows;
+    // The front end's permutes (#1840, tier1_masks_test_permutes): those tried, and those through every stage as the IR's.
+    uint32_t permute_attempts;
+    uint32_t permute_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -4960,6 +4963,135 @@ static void tier1_masks_test_widths(Tier1MasksTest* test)
     free(program);
 }
 
+// A C model of a front-end permute's x86 instruction (#1840), from Intel's manual, lane by lane: `out` of `bytes` bytes, of
+// table or first source a and index, control or second source b, its elements `element` bytes and its immediate `code`.
+// vpermb to vpermq: each element is a's element at the index in b's same element, modulo the elements; vpshufb: each
+// byte is 0 where b's byte is negative, else a's byte in the same 16 bytes at b's byte's low 4 bits; valignd and valignq:
+// the elements of b then a, from the immediate modulo the elements on; vshufi32x4 and vshufi64x2: each 16-byte lane of the
+// result's low half is a's and of its high half b's, the one the immediate's next 1 (32 bytes) or 2 (64 bytes) bits name.
+static void tier1_masks_test_permute_model(uint32_t kind, uint32_t element, uint32_t bytes, uint32_t code, const uint8_t* a, const uint8_t* b, uint8_t* out)
+{
+    const uint32_t elements = bytes / element;
+    if (kind == 0 || kind == 2)
+    {
+        for (uint32_t e = 0; e < elements; e += 1)
+        {
+            uint64_t index = 0;
+            memcpy(&index, b + e * element, element);
+            const uint32_t from = kind == 0 ? (uint32_t)(index % elements) : e + code % elements;
+            const uint8_t* source = kind == 0 ? a + from * element : from < elements ? b + from * element : a + (from - elements) * element;
+            memcpy(out + e * element, source, element);
+        }
+    }
+    else if (kind == 1)
+    {
+        for (uint32_t byte = 0; byte < bytes; byte += 1)
+        {
+            out[byte] = (int8_t)b[byte] < 0 ? 0 : a[(byte & ~15u) + (b[byte] & 15u)];
+        }
+    }
+    else
+    {
+        const uint32_t lanes = bytes / 16;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const uint32_t selected = lanes == 2 ? (code >> lane) & 1 : (code >> (2 * lane)) & 3;
+            memcpy(out + 16 * lane, (lane < lanes / 2 ? a : b) + 16 * selected, 16);
+        }
+    }
+}
+
+// The front end's permutes through the IR to Tier 1 (#1840): every rule of vpermw, vpermd, vpermq, vpshufb, valignd,
+// valignq, vshufi32x4 and vshufi64x2 that the decoder takes (vpermb's need AVX512VBMI, which the pipeline's x86-64-v4
+// hasn't: test-ir-simd decodes them), at 8 immediates for the ones that take one, as the
+// program's only row in 4 statements of the input buffer's vectors k and k + 1 (modulo 4), stored into the output's
+// vector k; tier1_masks_test_typed_pipeline takes each through the IR as its permute, which the interpreter runs at
+// every stage, and Tier 1 natively, against tier1_masks_test_permute_model. Tier 0 doesn't run them here, as the selects'.
+static void tier1_masks_test_permutes(Tier1MasksTest* test)
+{
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the permutes' memory");
+    uint64_t state = test->random ^ UINT64_C(0xa54ff53a5f1d36f1);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const char* mnemonic = rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
+        const bool binary = rule->family == CHECK_X86_LOWER_BINARY && rule->other == 0;
+        const bool immediate = rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other == 0;
+        const uint32_t kind = binary && rule->swap && (strcmp(mnemonic, "vpermw") == 0 ||
+                                                       (strcmp(mnemonic, "vpermd") == 0 && rule->bytes >= 32) || (strcmp(mnemonic, "vpermq") == 0 && rule->bytes == 64)) ? 0 :
+                              binary && !rule->swap && strcmp(mnemonic, "vpshufb") == 0                                                                                   ? 1 :
+                              immediate && (strcmp(mnemonic, "valignd") == 0 || strcmp(mnemonic, "valignq") == 0)                                                           ? 2 :
+                              immediate && rule->bytes >= 32 && (strcmp(mnemonic, "vshufi32x4") == 0 || strcmp(mnemonic, "vshufi64x2") == 0)                               ? 3 :
+                                                                                                                                                                              4;
+        for (uint32_t code = 0; kind < 4 && code < (kind >= 2 ? 8u : 1u); code += 1)
+        {
+            const uint64_t output_mark = test->output.length;
+            test->permute_attempts += 1;
+            Tier0Operation row;
+            // A shuffle of lanes' immediates past the 8 low ones: every lane of each half named.
+            const uint32_t immediate_value = kind == 3 ? (code * 0x5b + 0x1e) & 0xff : code;
+            const bool made = check_x86_lower_row_of(&target, rule, immediate_value, 4, 0, false, &row) == NULL;
+            char name[128];
+            snprintf(name, sizeof(name), "%s (immediate %u)", rule->name, immediate_value);
+            const uint32_t bytes = rule->bytes;
+            bool ok = tier1_masks_test_expect(test, made && row.operand_count == 2 && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's permute's row");
+            program->count = 0;
+            program->overflow = false;
+            program->rows = true;
+            program->objects = false;
+            for (uint32_t k = 0; ok && k < 4; k += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + 1) * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the permute's program fits");
+            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+            functions[0].operations = &row;
+            functions[0].operation_count = 1;
+            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+            {
+                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+                tier0_test_mask_inputs(in, &state);
+                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+                for (uint32_t k = 0; k < 4; k += 1)
+                {
+                    tier1_masks_test_permute_model(kind, rule->element, bytes, immediate_value, (const uint8_t*)in + k * bytes % 256, (const uint8_t*)in + (k + 1) * bytes % 256,
+                                                   wanted + k * bytes);
+                }
+            }
+            bool machine = false;
+            ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+            test->permute_rows += ok;
+            tier1_masks_test_expect(test, test->scratch.length == 0, "the permutes return the scratch arena");
+            arena_pop_to(&test->output, output_mark);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                arena_pop_to(&arenas[k], 0);
+            }
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The front end's masked moves' selects and undefined vectors through Tier 0 and the IR to Tier 1 (#1840): every SELECT
 // rule (`__builtin_ia32_select*` of each element and width) as check_x86_lower_masks moves its mask into the mask class,
 // and every UNDEFINED rule, each as the program's only row, in 4 statements: a select of the vectors at k and k + 1
@@ -5151,6 +5283,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_compares(&test);
             tier1_masks_test_selects(&test);
             tier1_masks_test_widths(&test);
+            tier1_masks_test_permutes(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -5163,7 +5296,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows),
+            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -5177,20 +5310,27 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // The width changes (#1840): every insert and masked extract rule at each part, and the 6 casts.
             tier1_masks_test_expect(&test, test.width_attempts > 6 && test.width_rows == test.width_attempts,
                                     "every front-end width change goes through the IR and Tier 1 as the IR's extract, widen or insert");
+            // The permutes (#1840): vpermw at 3 widths, vpermd at 2 and vpermq at 1; vpshufb at 3; valignd and valignq at
+            // 3 widths and the two shuffles of lanes at 2, at 8 immediates.
+            tier1_masks_test_expect(&test, test.permute_attempts == 6 + 3 + 6 * 8 + 4 * 8 && test.permute_rows == test.permute_attempts,
+                                    "every front-end permute goes through the IR and Tier 1 as the IR's permute");
             // The front end's rows: every rule of the five families, the shifts at every count.
+        printf("test-tier1-masks: the front end's selects and undefined vectors: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect and zero vector\n",
+               test.select_rows);
             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
         }
         printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
                test.typed_programs, test.typed_runs, test.typed_machine);
-        printf("test-tier1-masks: the front end's selects and undefined vectors: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect and zero vector\n",
-               test.select_rows);
         printf("test-tier1-masks: the front end's opmask rows: %u through Tier 0 natively (%u runs), the IR's interpreter, SSA, the optimizer and Tier 1\n", test.builtin_rows, test.builtin_native);
         printf("test-tier1-masks: the front end's comparisons into masks: %u through Tier 0 natively (%u runs) and Tier 1, %u of them the IR's comparisons through its interpreter, SSA and the "
                "optimizer, the others machine rows\n",
                test.compare_rows, test.compare_native, test.compare_decoded);
         printf("test-tier1-masks: the front end's width changes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its extract, widen and insert\n",
                test.width_rows);
+        printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
+               "shuffle_lanes\n",
+               test.permute_rows);
         tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
                                 "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
         tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,

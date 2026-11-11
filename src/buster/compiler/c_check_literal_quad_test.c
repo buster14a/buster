@@ -31,6 +31,16 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         { "1e-5000Q", 0, 0, CHECK_LITERAL_RANGE_UNDERFLOW, false },
         { "0x1p-16495Q", 0, 0, CHECK_LITERAL_RANGE_UNDERFLOW, false },
         { "0e-99999q", 0, 0, CHECK_LITERAL_RANGE_NONE, false },
+        // Rounded once in binary128 (#1250): clang 23's object bytes.
+        { "0.1Q", UINT64_C(0x999999999999999a), UINT64_C(0x3ffb999999999999), CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1.0000000000000001p0q", UINT64_C(0x0001000000000000), UINT64_C(0x3fff000000000000), CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1.0000000000000000000000000001p0Q", 1, UINT64_C(0x3fff000000000000), CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1.0000000000000000000000000000800000000001p0Q", 1, UINT64_C(0x3fff000000000000), CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1.ffffffffffffffffffffffffffffp16383Q", UINT64_MAX, UINT64_C(0x7ffeffffffffffff), CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1p-16446Q", UINT64_C(0x0001000000000000), 0, CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1p-16494q", 1, 0, CHECK_LITERAL_RANGE_NONE, false },
+        { "0x1.0000000000000000000000000001p-16495Q", 1, 0, CHECK_LITERAL_RANGE_NONE, false },
+        { "1e4000q", UINT64_C(0x18c21ab905450cc3), UINT64_C(0x73e6a3750647fcab), CHECK_LITERAL_RANGE_NONE, false },
         { "1.5qi", 0, UINT64_C(0x3fff800000000000), CHECK_LITERAL_RANGE_NONE, true },
         { "1.5iQ", 0, UINT64_C(0x3fff800000000000), CHECK_LITERAL_RANGE_NONE, true },
         { "1.5QJ", 0, UINT64_C(0x3fff800000000000), CHECK_LITERAL_RANGE_NONE, true },
@@ -45,8 +55,10 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         const CheckValue value = check_literal_value(literal);
         CheckValue copied = { .type = type };
         check_value_copy_floating(&copied, &value);
-        uint64_t words[2] = { 0 };
-        check_action_quad_bits(exact[i].imaginary ? copied.imaginary : copied.floating, words);
+        // A real one's bits, and its mirror theirs (c_check_quad.c); an imaginary one's long double, exactly.
+        const unsigned __int128 bits = exact[i].imaginary ? check_quad_widen(copied.imaginary, false) : value.integer;
+        uint64_t words[2] = { (uint64_t)bits, (uint64_t)(bits >> 64) };
+        const bool mirrored = exact[i].imaginary || check_quad_mirror(bits) == copied.floating || isnan(copied.floating);
         CheckWarningEvent event = { 0 };
         const bool warned = check_literal_warning_event(&literal, 17, &event);
         char description[192];
@@ -54,14 +66,15 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         check_test_expect(test, literal.valid && !literal.resource && literal.real && literal.imaginary == exact[i].imaginary &&
                           literal.type == type && value.type == type && literal.range == exact[i].range &&
                           value.constant_kind == (exact[i].imaginary ? CHECK_CONSTANT_COMPLEX : CHECK_CONSTANT_FLOATING) &&
-                          words[0] == exact[i].low && words[1] == exact[i].high && scratch->length == mark &&
+                          words[0] == exact[i].low && words[1] == exact[i].high && mirrored && scratch->length == mark &&
                           warned == (exact[i].range != CHECK_LITERAL_RANGE_NONE) &&
                           (!warned || event.payload.first_type == BUSTER_TYPE_FLOAT128), description);
         if (!exact[i].imaginary && literal.valid)
         {
             CheckValue negative = { .type = type };
             check_action_fold_floating(CHECK_OP_NEGATIVE, &value, &value, &negative, 0, false);
-            check_action_quad_bits(negative.floating, words);
+            words[0] = (uint64_t)negative.integer;
+            words[1] = (uint64_t)(negative.integer >> 64);
             check_test_expect(test, negative.constant_kind == CHECK_CONSTANT_FLOATING && negative.fault == CHECK_FAULT_NONE &&
                               words[0] == exact[i].low && words[1] == (exact[i].high ^ (UINT64_C(1) << 63)),
                               "quad literal negation changes only the sign, including zero and infinity");
@@ -69,15 +82,7 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
     }
     const char* refused[] =
     {
-        // Valid binary128 constants whose rounded value the checker's current x87 storage cannot preserve.
-        "0.1Q",
-        "0x1.0000000000000001p0q",
-        "0x1.0000000000000000000000000001p0Q",
-        "0x1.0000000000000000000000000000800000000001p0Q",
-        "0x1.ffffffffffffffffffffffffffffp16383Q",
-        "0x1p-16446Q",
-        "0x1p-16494q",
-        "0x1.0000000000000000000000000001p-16495Q",
+        // An imaginary one whose value its long double can't hold, until _Complex __float128 constants keep their bits.
         "0.1iQ",
         // Q is a floating suffix, not an integer suffix or a second format specifier.
         "1Q", "0x1q", "0x1.0q", "1.5qq", "1.5Qf", "1.5FQ", "1.5QL", "1.5iqj", "1'.5q", "1.5'q",
@@ -89,7 +94,7 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         check_literal_number((const uint8_t*)refused[i], (uint32_t)strlen(refused[i]), scratch, &literal);
         CheckWarningEvent event = { 0 };
         char description[192];
-        snprintf(description, sizeof(description), "quad literal %s is refused rather than silently narrowed", refused[i]);
+        snprintf(description, sizeof(description), "quad literal %s is refused", refused[i]);
         check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark &&
                           !check_literal_warning_event(&literal, 17, &event), description);
     }

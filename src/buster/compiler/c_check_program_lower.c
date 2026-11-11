@@ -1007,7 +1007,8 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
 // swifttailcc's callee-popped frame (swiftasynccall's) are no frame or location Tier 0 has.
 static const char* check_lower_convention(const TypeTable* types, TypeId function)
 {
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    // (no_caller_saved_registers beside a convention, #1447, is that convention's arguments.)
+    const TypeFunctionABI convention = type_function_convention(types, function);
     const char* result = NULL;
     switch (convention)
     {
@@ -1040,6 +1041,7 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
 static const char* check_lower_convention_call(const TypeTable* types, TypeId function, uint64_t target)
 {
     const char* result = check_lower_convention(types, function);
+    // (One with no_caller_saved_registers keeps every register, #1447: its abi_kind is the bit's, which this isn't.)
     if (result == NULL && type_function_abi_kind(types, function) == TYPE_FUNCTION_ABI_INTEL_OCL && (target & BUSTER_X86_FEATURE(AVX512F)) != 0)
     {
         result = "calls of intel_ocl_bicc functions on an AVX-512 target, whose callees don't keep rbp, r12 and r13";
@@ -1061,10 +1063,12 @@ static const char* check_lower_convention_call(const TypeTable* types, TypeId fu
 // zmm31 and the mask registers, k4 to k7 of them (Tier 0's block keeps k0 to k7). Nothing for another convention.
 static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, bool interrupt, Tier0Function* output)
 {
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    // no_caller_saved_registers beside another convention keeps every register too (#1447, LLVM's getCalleeSavedRegs takes
+    // x86_intrcc's set for the attribute whatever the convention).
+    const bool every = type_function_keeps_registers(types, function) || interrupt;
+    const TypeFunctionABI convention = every ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED : type_function_abi_kind(types, function);
     const bool most = convention == TYPE_FUNCTION_ABI_PRESERVE_MOST;
     const bool all = convention == TYPE_FUNCTION_ABI_PRESERVE_ALL;
-    const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED || interrupt;
     const bool wide = every && (target & BUSTER_X86_FEATURE(AVX512F)) != 0;
     const uint16_t general = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |
                                         1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10);
@@ -3433,6 +3437,9 @@ struct CheckLowerBitField
     uint32_t width;
     uint8_t class;
     bool is_signed;
+    // Its record's segment override (#1447, BUSTER_TYPED_SEGMENT_FS or _GS; 0 for none), which its unit's LOADs and SETs
+    // take (check_lower_bit_unit, check_lower_bit_store).
+    uint8_t segment;
 };
 
 // The place of a bit-field of `width` bits and type `type` at bit `offset`; false for one that has no integer class or
@@ -3447,16 +3454,22 @@ static bool check_lower_bit_place(const TypeTable* types, uint64_t offset, uint3
     field->width = width;
     field->class = check_lower_type_class(types, type);
     field->is_signed = sign && bits != 1;
+    field->segment = 0;
     return integer && width != 0 && width <= bits && field->shift + width <= 64 && field->class < BUSTER_TYPED_CLASSES &&
            field->class != BUSTER_TYPED_CLASS_VOID;
 }
 
-// The place of the bit-field that MEMBER or ARROW node `node` designates: at the offset the checker found it at.
-static bool check_lower_bit_member(const CheckProgram* program, uint32_t node, CheckLowerBitField* field)
+// The place of the bit-field that MEMBER or ARROW node `node` designates: at the offset the checker found it at; in a
+// unit with a segment's space (`segments`, CheckLowerWriter.segments), its record's override (#1447), from the
+// member's type, which carries the record's space.
+static bool check_lower_bit_member(const CheckProgram* program, uint32_t node, CheckLowerBitField* field, bool segments)
 {
     const CheckStream* stream = program->stream;
-    return stream->diagnostics[node] == CHECK_DIAG_NONE &&
-           check_lower_bit_place(program->types, stream->member_offsets[node], check_stream_value(stream, node).bit_width, check_stream_type(stream, node), field);
+    const TypeId type = check_stream_type(stream, node);
+    const bool placed = stream->diagnostics[node] == CHECK_DIAG_NONE &&
+                        check_lower_bit_place(program->types, stream->member_offsets[node], check_stream_value(stream, node).bit_width, type, field);
+    field->segment = placed && __builtin_expect(segments, 0) ? (uint8_t)(check_lower_segment_override(program->types, type) >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) : 0;
+    return placed;
 }
 
 // The MEMBER or ARROW node of the bit-field that a store's destination `node` designates, through _Generic's
@@ -3473,11 +3486,11 @@ static uint32_t check_lower_bit_destination(const CheckProgram* program, uint32_
     return member ? destination : BUSTER_CHECK_NONE;
 }
 
-// A place in a task's `type`: the shift in bits 0 to 2, the width less one in bits 3 to 8, the class in bits 9 to 12
-// and the sign in bit 13. Its first byte is in the address the task finds.
+// A place in a task's `type`: the shift in bits 0 to 2, the width less one in bits 3 to 8, the class in bits 9 to 12,
+// the sign in bit 13 and the segment in bits 14 and 15. Its first byte is in the address the task finds.
 static uint32_t check_lower_bit_pack(const CheckLowerBitField* field)
 {
-    return field->shift | (field->width - 1) << 3 | (uint32_t)field->class << 9 | (uint32_t)field->is_signed << 13;
+    return field->shift | (field->width - 1) << 3 | (uint32_t)field->class << 9 | (uint32_t)field->is_signed << 13 | (uint32_t)field->segment << 14;
 }
 
 static CheckLowerBitField check_lower_bit_unpack(uint32_t packed)
@@ -3487,13 +3500,17 @@ static CheckLowerBitField check_lower_bit_unpack(uint32_t packed)
         .width = (packed >> 3 & 63) + 1,
         .class = (uint8_t)(packed >> 9 & 15),
         .is_signed = (packed >> 13 & 1) != 0,
+        .segment = (uint8_t)(packed >> 14 & 3),
     };
 }
 
 // A bit-field's unit from the address of its first byte on top of the stack: each of its `bytes` bytes' pieces loaded,
-// widened and put in place, as a U64. More than one piece reads the address from a temporary.
-static void check_lower_bit_unit(CheckLowerWriter* writer, uint32_t bytes)
+// widened and put in place, as a U64, with its record's segment override (`segment`, #1447). More than one piece reads
+// the address from a temporary.
+static void check_lower_bit_unit(CheckLowerWriter* writer, uint32_t bytes, uint32_t segment)
 {
+    const uint64_t override = (uint64_t)segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
+    writer->segment_entries = writer->segment_entries || segment != 0;
     const bool whole = (bytes & (bytes - 1)) == 0;
     const uint32_t address = whole ? BUSTER_CHECK_NONE : check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     if (!whole)
@@ -3510,7 +3527,7 @@ static void check_lower_bit_unit(CheckLowerWriter* writer, uint32_t bytes)
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
             check_lower_offset(writer, offset);
         }
-        check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
+        check_lower_emit(writer, BUSTER_TYPED_LOAD, class, override);
         if (class != BUSTER_TYPED_CLASS_U64)
         {
             check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
@@ -3554,7 +3571,7 @@ static void check_lower_bit_extract(CheckLowerWriter* writer, const CheckLowerBi
 static void check_lower_bit_read(CheckLowerWriter* writer, uint32_t packed)
 {
     const CheckLowerBitField field = check_lower_bit_unpack(packed);
-    check_lower_bit_unit(writer, (field.shift + field.width + 7) / 8);
+    check_lower_bit_unit(writer, (field.shift + field.width + 7) / 8, field.segment);
     check_lower_bit_extract(writer, &field, field.shift);
 }
 
@@ -3568,6 +3585,7 @@ static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLow
     const uint32_t bytes = (field.shift + field.width + 7) / 8;
     const bool whole = (bytes & (bytes - 1)) == 0;
     const uint64_t mask = field.width == 64 ? UINT64_MAX : (UINT64_C(1) << field.width) - 1;
+    const uint64_t override = (uint64_t)field.segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
     const uint32_t value = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     if (field.class != BUSTER_TYPED_CLASS_U64)
     {
@@ -3585,7 +3603,7 @@ static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLow
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
     }
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
-    check_lower_bit_unit(writer, bytes);
+    check_lower_bit_unit(writer, bytes, field.segment);
     check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, ~(mask << field.shift));
     check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, value);
@@ -3602,7 +3620,7 @@ static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLow
         {
             check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
         }
-        check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET, class, override);
     }
     else
     {
@@ -3625,7 +3643,7 @@ static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLow
             {
                 check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
             }
-            check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
+            check_lower_emit(writer, BUSTER_TYPED_SET, class, override);
             offset += piece;
         }
     }
@@ -4444,15 +4462,11 @@ static void check_lower_quad_call(CheckLowerWriter* writer, CheckLowerRuntime ru
     }
 }
 
-// A folded __float128 constant: a frame object of its 16 bytes, whose address it leaves, the value converted from the
-// checker's long double exactly, or a NaN's bits from its place there (check_action_quad_bits). The checker folds none of
-// __float128's arithmetic (check_action_float_supported), but gives a real value's __imag__ as a constant zero of its
-// type (c_check_complex.c), and __builtin_inff128, __builtin_nanf128 and the others their values, which come here.
+// A folded __float128 constant: a frame object of its 16 bytes, its bits (c_check_quad.c), whose address it leaves.
 static void check_lower_quad_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const uint32_t result = check_lower_quad_object(writer);
-    uint64_t halves[2] = { 0 };
-    check_action_quad_bits(value->floating, halves);
+    const uint64_t halves[2] = { (uint64_t)value->integer, (uint64_t)(value->integer >> 64) };
     for (uint32_t half = 0; half < 2; half += 1)
     {
         check_lower_complex_place(writer, result, half, 8);
@@ -4646,7 +4660,8 @@ static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node
     const uint32_t destination = (uint32_t)(locals >> 32);
     if (increment)
     {
-        const CheckValue one = { .floating = 1.0L };
+        CheckValue one = { .type = BUSTER_TYPE_FLOAT128 };
+        check_quad_set(&one, check_quad_widen(1.0L, false));
         value = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         check_lower_quad_constant(writer, &one);
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, value);
@@ -6432,7 +6447,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 // A direct atomic load or store (#1059, check_program_direct_access's `marker`): the pointer's operand, for a store the
 // value's, converted to the object's value type, then the typed stream's LOAD or SET with the marker. The backend
 // implements a seq_cst SET with memory xchg, so its producer adds no separate fence. The tasks run in reverse.
-static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t marker)
+static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t marker)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6463,7 +6478,7 @@ static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, c
 // result is whether the old byte was set (its conversion from unsigned char to the node's bool). Narrow classes negate,
 // add and subtract as C's promotions do, in int, and convert back. The result converted to the node's type; its constant
 // order evaluated for nothing, as a direct fence's. The tasks run in reverse.
-static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t value)
+static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t value)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6522,7 +6537,7 @@ static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t nod
 // old value stored where the pointer points where it isn't, as the leaf stores it, a store a successful exchange makes
 // nowhere. A narrow class's values are compared as I32, the class Tier 0 compares. The result converted to the node's
 // type; GNU's weak flag and the constant orders evaluated for nothing, as a direct fence's. The tasks run in reverse.
-static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t order)
+static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t order)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6616,7 +6631,7 @@ static void check_lower_atomic_cas_direct(CheckLowerWriter* writer, uint32_t nod
 // that result is the old value (compared in I32 for a narrow class, the class Tier 0 compares), and otherwise the old
 // value is that result and the loop runs again. The result, the old value or the new one, converted to the node's type;
 // the constant order evaluated for nothing, as a direct fence's. The tasks run in reverse.
-static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t order)
+static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint64_t order)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -6696,7 +6711,7 @@ static void check_lower_atomic_fetch_direct(CheckLowerWriter* writer, uint32_t n
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, old);
     check_lower_mark(writer, loop);
     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, old);
-    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, BUSTER_TYPED_ACCESS_ATOMIC);
+    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, BUSTER_TYPED_ACCESS_ATOMIC | (order & BUSTER_TYPED_ACCESS_SEGMENT));
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, operand);
     check_lower_convert(writer, checked, object);
@@ -7692,7 +7707,7 @@ static void check_lower_bit_assign(CheckLowerWriter* writer, uint32_t node, bool
     const CheckProgram* program = writer->program;
     const uint32_t destination = check_lower_bit_destination(program, program->input->graph.operand0[node]);
     CheckLowerBitField field = { 0 };
-    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field))
+    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field, writer->segments))
     {
         check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
     }
@@ -7726,7 +7741,7 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
     // A half-precision computation's (the field's value converted to `through`, check_lower_update_through) is out of line
     // (check_lower_update_classless).
     const bool half = check_lower_class_half(calculated_class) != CHECK_HALF_NONE;
-    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field) || (calculated_class >= BUSTER_TYPED_CLASSES && !half))
+    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field, writer->segments) || (calculated_class >= BUSTER_TYPED_CLASSES && !half))
     {
         check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
     }
@@ -8515,7 +8530,8 @@ static void check_lower_complex_builtin(CheckLowerWriter* writer, uint32_t node)
 // from its width, and a long double's 10 bytes are followed by 6 zeros (both, as clang's, an unsigned integer of the
 // item's size). A __float128's 16 bytes and a 2-byte vector's 2 are its object's (the value's address), read into the
 // item's temporaries as it is evaluated. Data of a type whose bytes clang's code doesn't make (past 16 bytes, which
-// clang's code generation crashes on) is refused by name.
+// clang's code generation crashes on) is refused by name. Up to 255 data arguments are taken, as clang's Sema takes them
+// (#1785); a format of more than 255 items, whose count byte clang's code truncates, is refused by name.
 static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -8526,9 +8542,9 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t arguments = count >= 2 ? count - 2 : 0;
-    bool valid = witness != NULL && witness->os_log_known && count >= 2 && count <= 31 && witness->os_log_count <= 255;
+    bool valid = witness != NULL && witness->os_log_known && count >= 2 && count <= 2 + 255 && witness->os_log_count <= 255;
     uint8_t summary = 0;
-    bool taken[31] = { false };
+    bool taken[255] = { false };
     for (uint32_t i = 0; valid && i < witness->os_log_count; i += 1)
     {
         const CheckOSLogItem* item = witness->os_log_items + i;
@@ -8544,12 +8560,12 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
     // Each taken argument's promoted type, its class and bytes, whether it is its address, the count a signed _BitInt's
     // value is shifted by to zero-extend it in its unsigned computing class (`extend`), and for a __float128 or a 2-byte
     // vector, whose value is its object's address, the classes of the parts its bytes are read in (`parts`).
-    uint8_t classes[31] = { 0 };
-    TypeId targets[31] = { 0 };
-    bool addresses[31] = { false };
-    uint64_t sizes[31] = { 0 };
-    uint32_t extend[31] = { 0 };
-    uint8_t parts[31] = { 0 };
+    uint8_t classes[255] = { 0 };
+    TypeId targets[255] = { 0 };
+    bool addresses[255] = { false };
+    uint64_t sizes[255] = { 0 };
+    uint32_t extend[255] = { 0 };
+    uint8_t parts[255] = { 0 };
     for (uint32_t k = 0; valid && k < arguments; k += 1)
     {
         if (taken[k])
@@ -8584,7 +8600,11 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
             valid = sized && (targets[k] == bare || addresses[k] || check_lower_class(writer, bare) != UINT8_MAX);
         }
     }
-    if (!valid)
+    if (witness != NULL && witness->os_log_known && witness->os_log_count > 255)
+    {
+        check_lower_unsupported(writer, "__builtin_os_log_format of more than 255 items, whose count clang's code truncates");
+    }
+    else if (!valid)
     {
         check_lower_unsupported(writer, "__builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)");
     }
@@ -12576,6 +12596,13 @@ static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_
     return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, pointer) : 0;
 }
 
+// The type whose space an atomic builtin's object is in: its object type where that has a segment's space, and otherwise
+// its pointer argument's pointee (check_lower_atomic_pointee).
+static TypeId check_lower_atomic_space(const CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect)
+{
+    return check_lower_segment(writer->program->types, effect->object_type) ? effect->object_type : check_lower_atomic_pointee(writer, node);
+}
+
 // Whether an atomic builtin has a pointer argument past its object's (a compare-exchange's expected value, a generic
 // builtin's value or result) into a segment's space: its LOAD or SET through it would take no override.
 static bool check_lower_atomic_other_segment(const CheckLowerWriter* writer, uint32_t node)
@@ -12608,27 +12635,33 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const uint32_t target = graph->operand0[node];
     const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < stream->count;
     const bool element = op == CHECK_OP_SUBSCRIPT && (value->flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && target < stream->count;
+    // An atomic builtin's object takes the override where a direct plan (#1059) takes the builtin, without a helper:
+    // its LOAD or SET, ATOMIC_RMW, ATOMIC_CAS, or a fetch's loop of a LOAD and ATOMIC_CAS.
+    const uint32_t helper = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node)
+                                                          : BUSTER_CHECK_NONE;
     const uint32_t atomic = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node)
                                                           : BUSTER_CHECK_NONE;
+    const CheckBuiltinAtomicEffect* effect = atomic != BUSTER_CHECK_NONE ? stream->atomics + atomic : NULL;
+    const TypeId atomic_space = effect != NULL ? check_lower_atomic_space(writer, node, effect) : 0;
+    const bool direct = effect != NULL && helper == BUSTER_CHECK_NONE && check_program_direct_fence(program, node, effect) == UINT32_MAX &&
+                        (check_program_direct_access(program, node, effect) != UINT32_MAX || check_program_direct_rmw(program, node, effect) != UINT32_MAX ||
+                         check_program_direct_cas(program, node, effect) != UINT32_MAX || check_program_direct_fetch(program, node, effect) != UINT32_MAX);
     // An array's lvalue isn't read: its value is its address, which a subscript or a member's own access reads through.
     const TypeTable* types = program->types;
     const bool read = !address && value->category == CHECK_LVALUE && check_lower_segment(types, value->type) &&
                       !type_kind_is_array(type_kind(types, type_strip_aligned(types, value->type)));
     const bool written = store && check_lower_segment(program->types, check_stream_type(stream, target));
-    // What takes the override (check_lower_access): a read by indirection, member (but a bit-field's), subscript (but a
+    // What takes the override (check_lower_access): a read by indirection, member (a bit-field's too), subscript (but a
     // vector's element's) or name, and an assignment, compound assignment, increment or decrement, of an object of a
     // class that one LOAD or STORE moves (check_lower_segment_carried), in %fs or %gs.
-    const bool member = (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && (value->flags & BUSTER_CHECK_BIT_FIELD) == 0;
+    const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
     const bool reader = op == CHECK_OP_DEREFERENCE || member || (op == CHECK_OP_SUBSCRIPT && !element) || op == CHECK_OP_VALUE;
-    // A bit-field's store reads and writes its unit through recipes of its own (check_lower_bit_store), which don't take
-    // the override: refused, as its read is.
-    const uint32_t bit_destination = written ? check_lower_bit_destination(program, target) : BUSTER_CHECK_NONE;
-    const bool bit_field = bit_destination != BUSTER_CHECK_NONE && (check_stream_value(stream, bit_destination).flags & BUSTER_CHECK_BIT_FIELD) != 0;
-    const bool carried = read ? reader && check_lower_segment_carried(writer, value->type)
-                              : written && !bit_field && check_lower_segment_carried(writer, check_stream_type(stream, target));
+    // A bit-field's read and store take it on its unit's pieces (check_lower_bit_unit, check_lower_bit_store), from its
+    // place (check_lower_bit_member).
+    const bool carried = read ? reader && check_lower_segment_carried(writer, value->type) : written && check_lower_segment_carried(writer, check_stream_type(stream, target));
     return ((read || written) && !carried) || (element && check_lower_segment(program->types, check_stream_type(stream, target))) ||
-           (atomic != BUSTER_CHECK_NONE && (check_lower_segment(types, stream->atomics[atomic].object_type) ||
-                                             check_lower_segment(types, check_lower_atomic_pointee(writer, node)) || check_lower_atomic_other_segment(writer, node)));
+           (effect != NULL && ((check_lower_segment(types, atomic_space) && !(direct && check_lower_segment_override(types, atomic_space) != 0)) ||
+                               check_lower_atomic_other_segment(writer, node)));
 }
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
@@ -12856,25 +12889,31 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const uint32_t fetch = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX && access == UINT32_MAX && rmw == UINT32_MAX && cas == UINT32_MAX
                                    ? check_program_direct_fetch(program, node, stream->atomics + atomic)
                                    : UINT32_MAX;
+        // A direct one's object in %fs or %gs (#1447) takes the segment's override on its LOAD, SET, ATOMIC_RMW or
+        // ATOMIC_CAS (check_lower_access's); check_lower_segment_access refuses one of another plan.
+        const uint64_t segment = __builtin_expect(writer->segments, 0) && atomic != BUSTER_CHECK_NONE
+                                     ? check_lower_segment_override(types, check_lower_atomic_space(writer, node, stream->atomics + atomic))
+                                     : 0;
+        writer->segment_entries = writer->segment_entries || segment != 0;
         if (fence != UINT32_MAX)
         {
             check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, fence);
         }
         else if (access != UINT32_MAX)
         {
-            check_lower_atomic_direct(writer, node, stream->atomics + atomic, access);
+            check_lower_atomic_direct(writer, node, stream->atomics + atomic, access | segment);
         }
         else if (rmw != UINT32_MAX)
         {
-            check_lower_atomic_rmw_direct(writer, node, stream->atomics + atomic, rmw);
+            check_lower_atomic_rmw_direct(writer, node, stream->atomics + atomic, rmw | segment);
         }
         else if (cas != UINT32_MAX)
         {
-            check_lower_atomic_cas_direct(writer, node, stream->atomics + atomic, cas);
+            check_lower_atomic_cas_direct(writer, node, stream->atomics + atomic, cas | segment);
         }
         else if (fetch != UINT32_MAX)
         {
-            check_lower_atomic_fetch_direct(writer, node, stream->atomics + atomic, fetch);
+            check_lower_atomic_fetch_direct(writer, node, stream->atomics + atomic, fetch | segment);
         }
         else if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {
@@ -12987,7 +13026,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             check_lower_unsupported(writer, "this member access");
         }
-        else if (bit_field && !check_lower_bit_member(program, node, &field))
+        else if (bit_field && !check_lower_bit_member(program, node, &field, writer->segments))
         {
             check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
         }
@@ -16905,7 +16944,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
             const TypeFunctionABI convention = type_function_abi_kind(types, type);
-            const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+            const bool every = type_function_keeps_registers(types, type);
             const bool ocl = convention == TYPE_FUNCTION_ABI_INTEL_OCL;
             static const char* const reasons[3][4] = {
                 { "__builtin_eh_return in an interrupt service routine", "__builtin_eh_return in a function with no_caller_saved_registers",

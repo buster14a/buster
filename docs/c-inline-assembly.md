@@ -672,8 +672,9 @@ takes the one-byte form, as GNU as does.
 For musl's templates (`arch/x86_64/atomic_arch.h`, `pthread_arch.h` and
 `src/math/x86_64`) the matcher also admits the `lock` prefix, as a statement of
 its own (`lock ; cmpxchg %3, %1`, which GNU as applies to the next instruction)
-or on the instruction's line, on `cmpxchg`, `xadd` and the arithmetic of memory
-destinations; `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
+or on the instruction's line, on `cmpxchg`, `xadd`, the arithmetic of memory
+destinations and `xchg` (#1846: `lock xchg %0, %1`, F0 before 87, which GNU as
+and clang keep though an exchange with memory is locked without it); `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
 SSE2's `psrlq` with their siblings; FMA3's scalar forms; the x87's operations on
 the stack's top (`fsqrt`, `fprem`, `frndint` and the rest), `fnstsw %ax` and
 `fistpll`. Since #1115 the x87's register operands (`fld %st(0)`, `fxch %st(1)`,
@@ -800,12 +801,19 @@ or undefined globals. The emission publishes it with the templates' units
 before the functions' atoms in the link, and in `-c`'s object a section of its
 own name, type and flags (`CheckProgramCode.asm_sections`,
 `check_program_sections`); the direct path's executable merges it into its
-class's output section. Refused by name, at the first file-scope statement:
-templates the assembler refuses; CFI, whose frames the emission's unwind table
-doesn't merge; a section of a class C's definitions don't have, or of another
-type than its class's (an init array's, a note); and what the templates' names
-refuse (a label another template defines too, or that the unit defines, a
-reference to another template's `.set` symbol).
+class's output section. Its sections are any the assembler makes (#1848):
+custom flags (`.pushsection __ex_table,"a"`), merged strings, notes (`-c`'s
+`SHT_NOTE`; the direct path keeps a note's bytes with its class's data, without
+a `PT_NOTE`), and the arrays of constructors and destructors
+(`.section .init_array,"aw"`), whose entries the direct path's executable runs
+as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
+beside the functions' unwind table, its CIE and FDEs as the assembler makes them
+(clang's object shares one CIE between the module's assembly and its
+functions), which the direct path's `.eh_frame_hdr` indexes with the
+functions'. Refused by name, at the first file-scope statement: templates the
+assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
+and what the templates' names refuse (a label another template defines too, or
+that the unit defines, a reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 
@@ -1092,7 +1100,7 @@ What the lowering still refuses of what GCC and clang take:
   above (a named label, a directive), which the helper design refuses by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
-- the matcher's gaps: `lock xchg`, `ffreep`, and the
+- the matcher's gaps: the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
 - explicit register variables in rsp (clang's code moves the variable's value

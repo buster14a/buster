@@ -129,11 +129,15 @@ jobs:
         # tools/ci/changes.c, built with the runner's cc in about a second: its self-test checks its tables against the
         # workflow (each output a step reads, each MEASURE name, each gated step changed alone) and the sources (each
         # pattern's alternatives and units), and its decisions on fixtures. When it fails, so does this job, and the remaining jobs do not run.
+        # So do the hosted rows' shard costs (tools/ci/costs.c, #2031): its self-test, then every row's table in
+        # tools/ci/costs/ against the inventory, which a new or renamed heading fails until `costs refresh` fits them.
         shell: bash
         run: |
           set -euo pipefail
           cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/changes" tools/ci/changes.c
           "$RUNNER_TEMP/changes" --self-test
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/costs.c -o "$RUNNER_TEMP/costs"
+          "$RUNNER_TEMP/costs" --self-test --root .
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification" --self-test
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/nightly.c -o "$RUNNER_TEMP/nightly"
@@ -203,14 +207,16 @@ jobs:
           persist-credentials: false
 
       - name: Test the nightly glue and the 9700X's caches against fixtures
-        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, without
-        # network access (tools/ci/nightly.c's own self-test runs in `changes`).
+        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, and the
+        # hosted vector row's draws (tools/ci/vector-draw.sh), without network access (tools/ci/nightly.c's own
+        # self-test runs in `changes`).
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
           bash tests/ci/nightly.sh
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
+          bash tests/ci/vector-draw.sh
 
       - name: Decide reuse and hardware admission
         id: decide
@@ -237,9 +243,11 @@ jobs:
     # qualification that can't pass. Pushes to main, the daily run and dispatched runs test regardless, so that every
     # row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
-    # Each row is hosted-correctness.yml: its 4 shards, and for a portable row the job that builds its compiler once for
+    # Each row is hosted-correctness.yml: its shards, and for a portable row the job that builds its compiler once for
     # them (#2032; docs/ci.md, "Shared row products"). Their names are this one's, ` / ` and their own, which
-    # tools/ci/nightly.c reads to find the plain rows' shards.
+    # tools/ci/nightly.c reads to find the plain rows' shards. A pull request's second row is the vector row (#2033), the
+    # explicit vector target's 4 shards on runners whose CPU qualifies, which replaces its random `native` row; every
+    # other run keeps `native` (docs/ci.md, "The vector row").
     needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     strategy:
@@ -248,7 +256,7 @@ jobs:
       # what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        host_arch: [x86-64, native]
+        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64", "vector"]' || '["x86-64", "native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
         # in the nightly mode (#2057, until the merge queue carries the full suite). The daily run, full dispatches,
@@ -257,11 +265,24 @@ jobs:
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
+    # The vector row's candidates and collectors read the run's artifacts and jobs (their claims and decisions); nothing
+    # here writes but the artifacts.
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/hosted-correctness.yml
     with:
       host_arch: ${{ matrix.host_arch }}
       sanitizer: ${{ matrix.sanitizer }}
       optimization: ${{ matrix.optimization }}
+      # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the plain rows 4, both
+      # host architectures alike (tools/ci/nightly.c counts their shards as one N). A portable row's shards share its one
+      # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 6, near their longest
+      # commands; a native row's shards each build their own compiler (5 to 10 minutes under a detector), so its MSan
+      # row runs as 5 and the others as 4. The vector row's N is its items' count (4, BUSTER_VECTOR_ITEMS), which its
+      # draws are sized for. tools/ci/changes.c's self-test checks each number against the row workflow's lookup
+      # (changes_shard_policy).
+      shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 6 || matrix.sanitizer == 'memory' && 5 || 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 

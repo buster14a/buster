@@ -275,13 +275,16 @@ static void check_test_attribute_abis(CheckTest* test)
                 const uint32_t type_count = types.table.types.count;
                 const uint8_t actual = check_input_attribute_abi_origin(&reader, &attributes, origin);
                 const bool matches = origin == 0 || origin == abi + 1;
-                // no_caller_saved_registers with System V's convention is one type; with another, refused by name (#147).
+                // no_caller_saved_registers is a bit beside any convention (#1447): after it, a convention is that one's with the
+                // bit (explicit sysv_abi's System V's, so that it conflicts later); and it hides an explicit convention before it,
+                // as clang's rebuilt function type drops that one's sugar (#2014's review), so the origin is none.
                 const uint8_t every = TYPE_FUNCTION_ABI_NO_CALLER_SAVED + 1;
-                const bool bit = origin != 0 && (origin == every) != (abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED);
-                const bool paired = bit && (origin == TYPE_FUNCTION_ABI_SYSV + 1 || abi == TYPE_FUNCTION_ABI_SYSV);
-                const bool kept = matches || paired;
-                check_test_expect(test, actual == (paired ? every : matches ? abi + 1 : origin) &&
-                                       attributes.error == (kept ? CHECK_ATTRIBUTE_ERROR_NONE : bit ? CHECK_ATTRIBUTE_ERROR_UNKNOWN : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
+                const bool saved = abi == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+                const bool after_saved = origin == every && !saved;
+                const bool hidden = saved && origin != 0 && origin != every;
+                const bool kept = matches || saved || after_saved;
+                const uint8_t expected = hidden ? 0 : after_saved ? (uint8_t)((abi | TYPE_FUNCTION_ABI_KEEPS_REGISTERS) + 1) : matches ? (uint8_t)(abi + 1) : origin;
+                check_test_expect(test, actual == expected && attributes.error == (kept ? CHECK_ATTRIBUTE_ERROR_NONE : CHECK_ATTRIBUTE_ERROR_CONFLICT) &&
                                        input.report_count == (kept ? 0 : 1) &&
                                        (kept || (attributes.error_first == 70 && attributes.error_end == 74 && reports[0].token == 70)) &&
                                        types.table.types.count == type_count && scratch.length == 31,

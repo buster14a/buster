@@ -4201,9 +4201,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
-    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, and its
-    // inserts, extracts and casts between widths into the IR's own intrinsics, which leaves 51 rows and 26 moves by Tier
-    // 1 (75 and 39 before).
+    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, its
+    // inserts, extracts and casts between widths into the IR's own intrinsics, and its variable permutes and byte shuffles
+    // into the IR's permutes, which leaves 47 rows and 26 moves by Tier 1 (75 and 39 before). The floor of 40 rows keeps the
+    // unit a machine rows' test as #1840 decodes more of them.
     const uint64_t compares = 11;
     char header[512];
     char unit[512];
@@ -4222,7 +4223,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 40 && 2 * build.row_moves <= build.machine_rows + compares, message);
         unlink(object);
     }
     unlink(unit);

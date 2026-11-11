@@ -829,14 +829,13 @@ without a payload given the bit below the quiet one (`nans("")` is
 
 The checker's long double holds every format's NaN as the x87's own loads
 place it: the format's fraction at the significand's top, so that bit 62 is
-every format's quiet bit (`check_action_nan_bits`). A `__float128`'s 112
-fraction bits don't fit, so its NaN keeps its quiet bit at 62, its fraction's
-bit 110 (a signaling NaN without a payload's) at 61 and its payload's low 61
-bits below (`check_action_quad_bits`). A payload past 61 bits is refused:
-in a static initializer as an initializer that is not a constant expression,
-and in a function as an unsupported floating builtin. The value keeps its bits until a conversion to another format quiets it,
-as APFloat's does (`check_action_convert_nan`, which first re-encodes a
-`__float128` NaN as a narrowing reads it), so a conversion to the value's own
+every format's quiet bit (`check_action_nan_bits`). A `__float128` keeps its
+own bits (#1250, `c_check_quad.c`), a NaN's whole 111-bit payload among them
+(payloads are read modulo 2^128), and its long double mirror holds its
+fraction's top 63 bits there. The value keeps its bits until a conversion to another format quiets it,
+as APFloat's does (`check_action_convert_nan`, which also truncates the
+payload to the narrower format's fraction, so that a NaN narrowed then widened
+keeps only what the narrow format held), so a conversion to the value's own
 format, the rounding of a NaN, and a unary `+` or `-` (a sign change alone, as
 `changeSign` makes it) leave a signaling NaN signaling.
 
@@ -845,10 +844,10 @@ that encoding, its payload and quiet bit among them (`check_data_float_bytes`,
 `check_lower_float_bits`). Main wrote the canonical NaN, so `static double d =
 __builtin_nan("5")` lost its payload (`0x7ff8000000000000` where clang writes
 `0x7ff8000000000005`), and so did `nanf` and `nanl` in static data and `nanl`
-in code. The classifications fold of `_Float16` constants, their least normal
-`0x1p-14`, and of `__float128` infinities, NaNs and zeros, the values these
-builtins make, which are exact in the long double. They still refuse a
-run-time `_Float16` or `__float128` argument by name, as before.
+in code. The classifications and comparisons fold of `_Float16` constants,
+their least normal `0x1p-14`, and of every `__float128` constant, by its
+mirror's class or its bits' order. They still refuse a run-time `_Float16` or
+`__float128` argument by name, as before.
 
 `test-check-builtins-float` checks the constructions and refusals, and
 `test-checker --program-float-constants` (`c_check_program_constants_test.c`)
@@ -2269,8 +2268,12 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
     the item's temporaries as it is evaluated.
   - A 32- or 64-byte vector and a `_BitInt` past 128 bits are refused by
     name: clang's code generation crashes on them.
-- **Limits.** At most 31 arguments are taken, and clang takes up to the
-  format's plus 255.
+- **Limits.** Up to 255 data arguments are taken, as clang's Sema takes
+  them (the required arguments plus 0xff): "too many arguments to function
+  call, expected at most 256" (257 for `__builtin_os_log_format`) past them.
+  Those past the operands' 32-bit mask are evaluated and reached through its
+  full mask (#1785). A format of more than 255 items, whose count byte clang's
+  code truncates (300 items store 0x2c), is refused by name.
 
 `__builtin_dump_struct(pointer, printer, rest...)` (0x4b3, #148) is clang's
 record dump, as `BuiltinDumpStruct` checks it.
@@ -3302,10 +3305,11 @@ builtin call whose operands evaluate (its CodeGen's `EmitBuiltinExpr` tries
 kin (`wcscmp`, `wcsncmp`, `wmemcmp`, which compare `wchar_t`s as `int`s) to
 clang's -1, 0 or 1, not the library's differences; `strlen` and `wcslen`;
 `abs`, `labs` and `llabs`; the `fmax`, `fmin`, `fmaximum_num` and
-`fminimum_num` families; and `copysignl`. Strings are literals, at constant
+`fminimum_num` families, their `f128` forms among them (of a `__float128`'s bits, #1250); and
+`copysignl` and `copysignf128`, and `fabsf128`. Strings are literals, at constant
 offsets, and `const` arrays whose initializers are constant (clang's GNU
 folding, for which its `-pedantic` warns; this doesn't). Pointer results
-(`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
+(`strchr`, `memchr`) and the other `_Float128` functions aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
 **Plain names.** `c_builtin_library_plain.inc` lists the 446 `f` rows of C's

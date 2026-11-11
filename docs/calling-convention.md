@@ -1910,9 +1910,17 @@ registers LLVM's frames of the three keep (`check_lower_preserve`):
 
 `no_caller_saved_registers` is clang's function type bit beside the calling
 convention. Here it is `TYPE_FUNCTION_ABI_NO_CALLER_SAVED`, a convention of its
-own: a System V function whose callee keeps every register. With `sysv_abi` or `cdecl` it is that type. With another
-convention (`ms_abi`, `vectorcall`, `preserve_all` and the others, which clang
-takes), it is refused by name, since the type has no room for both.
+own: a System V function whose callee keeps every register. With `sysv_abi` or
+`cdecl` it is that type. Beside another convention (#1447) it is that
+convention's ABI value with `TYPE_FUNCTION_ABI_KEEPS_REGISTERS`, a bit of the
+function type's info word past every convention: `type_function_convention`
+gives the convention and `type_function_keeps_registers` the bit. A definition
+takes the convention's arguments and keeps every register, as LLVM's
+`getCalleeSavedRegs` takes `x86_intrcc`'s set for the attribute whatever the
+convention: `preserve_most`'s, `preserve_all`'s and `intel_ocl_bicc`'s compile
+with that preserving frame (and an `intel_ocl_bicc` callee's call on an
+AVX-512 target, which then keeps rbp, r12 and r13 too), and the others stay
+refused by their convention's name.
 
 A call in a `no_caller_saved_registers` function, or in an x86 `interrupt`
 service routine, of a callee without the attribute on its declaration is

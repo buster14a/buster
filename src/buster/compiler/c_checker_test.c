@@ -157,15 +157,20 @@ static CheckValue check_test_integer(TypeId type, unsigned __int128 bits)
     return result;
 }
 
+// A floating constant of `type`: a __float128's of `value`'s bits exactly, with its mirror (c_check_quad.c).
 static CheckValue check_test_float(TypeId type, long double value)
 {
-    const CheckValue result = {
+    CheckValue result = {
         .type = type,
         .category = CHECK_RVALUE,
         .flags = BUSTER_CHECK_FLOAT_LITERAL,
         .constant_kind = CHECK_CONSTANT_FLOATING,
         .floating = value,
     };
+    if (type_unqualified(type) == BUSTER_TYPE_FLOAT128)
+    {
+        check_quad_set(&result, check_quad_widen(value, false));
+    }
     return result;
 }
 #endif
@@ -3710,12 +3715,12 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // A name with linkage declared before: its types would bind before the deduction.
+            // A name with linkage declared before: the deduced type redeclares it, as clang's (#2021).
             "__auto_type: a linked name declared before",
             "extern int e;\n"
             "__auto_type e = 1;\n",
-            true,
-            true
+            false,
+            false
         },
         {
             // _Alignas against the deduced type, not int, which stands for it until the initializer (#840's review): below
