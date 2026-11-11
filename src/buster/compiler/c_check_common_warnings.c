@@ -8467,6 +8467,33 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
     }
 }
 
+// A GNU statement expression's statements are graph roots of their own, evaluated as roots are; clang's CFG holds them
+// where it holds the statement expression (#1447). So for -Wuninitialized, where its value, the node at its `)`, is not
+// evaluated (a sizeof's or an alignof's operand, a condition's arm left out), neither is any of its nodes, the run of
+// nodes just before its own whose tokens its parentheses hold, nested statement expressions' and array bounds' with
+// them (the warnings that read a context keep a bound's, constant-evaluated to clang). The reader's list of statement
+// expressions finds them, and each one left out clears its own nodes once. Scalar: it runs only in a unit with statement
+// expressions, with the uninitialized analysis enabled, and clears only the nodes of those in an unevaluated operand,
+// rare and few, one store a node, which a vector store would save little of; its loop over the statement expressions
+// costs a load and a test each. It isn't measured on the 9700X: no unit of the timed corpus reaches the clearing.
+static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated)
+{
+    const CheckGraph* graph = &input->graph;
+    for (uint32_t region = evaluated != NULL && input->token_nodes != NULL ? input->region_count : 0; region-- > 0;)
+    {
+        const uint32_t open = input->regions[region].opening;
+        const uint32_t close = input->regions[region].closing;
+        const uint32_t value = close < input->token_count && close < parser->tokens.count ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+        if (value < graph->count && graph->ops[value] == CHECK_OP_STATEMENT_VALUE && evaluated[value] == 0)
+        {
+            for (uint32_t node = value; node-- > 0 && graph->tokens[node] > open && graph->tokens[node] < close;)
+            {
+                evaluated[node] = 0;
+            }
+        }
+    }
+}
+
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
 // reads it) and its reach, then which nodes are evaluated. The scalar path makes them in one pass over the nodes in graph
 // order, so that its operands' and arguments' already hold; an operand that doesn't precede its node, which the graph's
@@ -8475,10 +8502,11 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
 // first ancestor that has it, whose ancestors all do; and takes the evaluated nodes by check_common_evaluated_tree. False
 // where scratch can't hold them. (Whether a discarded value warns is check_common_unused_of's, asked only of a discarded
 // one.)
-static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+static bool check_common_facts(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, const uint8_t* flushed, Arena* scratch,
                                CheckCommonFacts* facts)
 {
+    const CheckGraph* graph = &input->graph;
     const uint32_t count = graph->count;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
@@ -8807,7 +8835,15 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     const uint8_t* used_value = facts->used;
     uint8_t* parameters = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* statement_write = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    const uint8_t* evaluated = facts->evaluated;
+    // (In a unit with statement expressions, the analysis's own copy of the facts, without an unevaluated one's nodes:
+    // clang's CFG holds none of them, where the warnings that read a context keep a bound's.)
+    uint8_t* regional = input->region_count != 0 && facts->evaluated != NULL && graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (regional != NULL)
+    {
+        memcpy(regional, facts->evaluated, graph->count);
+        check_common_region_evaluation(input, parser, regional);
+    }
+    const uint8_t* evaluated = regional != NULL ? regional : input->region_count != 0 ? NULL : facts->evaluated;
     bool valid = count == 0 || (first_write != NULL && addressed != NULL && written != NULL && first_read != NULL && first_use_read != NULL &&
                                 parameters != NULL && statement_write != NULL &&
                                 (graph->count == 0 || (nonread != NULL && self_read != NULL && target != NULL && used_value != NULL && evaluated != NULL)));
@@ -9662,7 +9698,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, flushed, scratch, &facts))
+    if (!check_common_facts(input, stream, types, parser, program, &enabled, flushed, scratch, &facts))
     {
         check_common_exhausted(pp);
     }
