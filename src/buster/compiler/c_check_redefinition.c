@@ -25,6 +25,11 @@ typedef enum CheckRedeclarationKind
     CHECK_REDECLARATION_ENUM_BASE,
     CHECK_REDECLARATION_ENUM_FIXED,
     CHECK_REDECLARATION_ENUM_NONFIXED,
+    // An __auto_type redeclaration of an entity with linkage whose type clang's mergeTypes refuses (#1844): the report's
+    // type the placeholder's through its declarator (check_semantic_auto_type_spelling), the earlier one's its value;
+    // "redefinition", or with extern "redeclaration", "with a different type".
+    CHECK_REDECLARATION_AUTO_TYPE,
+    CHECK_REDECLARATION_AUTO_TYPE_EXTERN,
 } CheckRedeclarationKind;
 
 // Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: a storage-class specifier
