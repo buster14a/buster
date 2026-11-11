@@ -191,6 +191,25 @@ static const char check_driver_vla_unevaluated_source[] =
     "char *bad = (int(*)[n])0;\n"
     "int s5 = sizeof(int[n]);\n";
 
+// A cast to a variably modified type in a body (#2321, #1852): its type name's bounds are evaluated before its operand,
+// as clang's EmitVariablyModifiedType does, a sizeof's in an unevaluated operand not; no comma of its own warns, and
+// -Wunsequenced, whose visit reaches no type, doesn't read them.
+static const char check_driver_vla_cast_source[] =
+    "int f(int n, int *v) { return (int)sizeof(*(int (*)[n])v); }\n"
+    "int g(int n, int *v) { int (*p)[n] = (int (*)[n])v; return (int)sizeof *p; }\n"
+    "void h(int n) { (void)((int (*)[n])0); }\n"
+    "void k(int n) { (void)sizeof((int (*)[n])0); }\n"
+    "void a(int n, int *v) { (int (*)[n])v; }\n"
+    "int b(int n, int x) { return (int)sizeof(x++, (int(*)[n])0) + x; }\n"
+    "void d(int i) { (void)sizeof((int (*)[i++])0); }\n"
+    "void e(int n, int *v) { if ((int (*)[n])v) {} }\n"
+    "void q(int n, int *v) { (void)(typeof(int[n]) *)v; }\n"
+    "int r(int n, int *v) { return ((int (*)[n])v == (int (*)[n + 1])v); }\n"
+    "int m(int n, int *v) { return _Alignof(int[n]) + (int)_Generic((int (*)[n])v, int (*)[]: 1, default: 2); }\n"
+    "int u1(int n, int *v) { return ((int (*)[n++])v)[0][0] + n; }\n"
+    "int u2(int n) { return (int)sizeof(int[n++]) + n; }\n"
+    "int u3(int n, int *v) { return (int)sizeof(*(int (*)[n++])v) + n; }\n";
+
 // The comma operators of constant bounds, bit-field widths and enumerators, which no graph walk reads (#2202): each
 // discarded left operand's -Wunused-value "left operand of comma operator has no effect" as clang's isUnusedResultAWarning
 // decides and places it (a binary or unary operator's at it, a cast's at its `(`, sizeof's at its keyword, a comma's at its
@@ -222,6 +241,11 @@ static const char check_driver_vla_fold_commas_source[] =
 
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
+    {
+        .name = "a body's casts to variably modified types",
+        .source = check_driver_vla_cast_source,
+        .warnings = 2,
+    },
     {
         .name = "misplaced variable-length arrays recover",
         .source = check_driver_vla_misplaced_source,
@@ -383,8 +407,92 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
     },
 };
 
+// A body's casts to variably modified types run as clang's build's do (#2321): each bound once, before the operand, a
+// sizeof's of the cast's value read from it, nested and comma bounds too; by both paths, at Tier 0 and Tier 1.
+static const char check_driver_vla_cast_program[] =
+    "int printf(const char*, ...);\n"
+    "static int calls;\n"
+    "static int k(int v) { calls = calls * 10 + v; return v; }\n"
+    "int f(int n, int *v){ return (int)sizeof(*(int (*)[n])v); }\n"
+    "int g(int n, int *v){ int (*p)[n] = (int (*)[n])v; return (int)sizeof *p + p[1][0]; }\n"
+    "int h(int n, int *v) { return ((int (*)[k(n)])(v + k(1)))[1][1]; }\n"
+    "int s(int i) { (void)sizeof((int (*)[i++])0); return i; }\n"
+    "int c2(int n, int *v) { return (int)sizeof(*(int (*)[(k(2), n)])v); }\n"
+    "long d(int n, int m, int *v) { return (long)sizeof(*(int (*)[n][m])v) + ((int (*)[n][m])v)[0][1][1]; }\n"
+    "int e(int n, void *v) { return (*(int (*)[n])v)[2] + (int)sizeof(*(char(*)[n + 1])(int (*)[n])v); }\n"
+    "int t(int n, int *v) { return ((int (*)[k(n)][k(2)])v)[1][1][0] + calls; }\n"
+    "int main(void) {\n"
+    "    int a[24] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };\n"
+    "    printf(\"%d %d\\n\", f(3, a), g(3, a));\n"
+    "    calls = 0; printf(\"%d %d\\n\", h(4, a), calls);\n"
+    "    printf(\"%d\\n\", s(5));\n"
+    "    calls = 0; printf(\"%d %d\\n\", c2(5, a), calls);\n"
+    "    printf(\"%ld %d\\n\", d(2, 3, a), e(4, a));\n"
+    "    calls = 0; printf(\"%d\\n\", t(3, a));\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_vla_cast_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const ways[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
+    char source[512];
+    char outputs[5][512];
+    snprintf(source, sizeof(source), "%s/vla-casts.c", directory);
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        snprintf(outputs[k], sizeof(outputs[k]), "%s/vla-casts-%u", directory, k);
+    }
+    const bool written = parse_test_write(source, check_driver_vla_cast_program, strlen(check_driver_vla_cast_program));
+    char* output = NULL;
+    char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
+    const int built = written ? check_test_driver_spawn(reference, &output) : 1;
+    free(output);
+    output = NULL;
+    static char expected[4096];
+    const bool referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+    check_test_expect(test, referenced && strlen(expected) != 0, "variably modified casts: clang's build runs");
+    for (uint32_t mode = 0; referenced && mode < 4; mode += 1)
+    {
+        char* arguments[16] = { (char*)executable };
+        uint32_t count = 1;
+        if ((mode & 1) != 0)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (mode >= 2)
+        {
+            arguments[count++] = "--tier1";
+            arguments[count++] = "--verify";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = outputs[mode];
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        const int status = check_test_driver_spawn(arguments, &output);
+        static char captured[4096];
+        const bool ran = status == 0 && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
+        char description[256];
+        snprintf(description, sizeof(description), "variably modified casts evaluate their bounds once, before their operands, as clang's build does (%s)", ways[mode]);
+        check_test_expect(test, ran && strcmp(captured, expected) == 0, description);
+        if (status != 0 && output != NULL)
+        {
+            fprintf(stderr, "%s", output);
+        }
+        else if (ran && strcmp(captured, expected) != 0)
+        {
+            fprintf(stderr, "variably modified casts (%s):\n%s\nclang's build:\n%s\n", ways[mode], captured, expected);
+        }
+        free(output);
+        output = NULL;
+        unlink(outputs[mode]);
+    }
+    unlink(outputs[4]);
+    unlink(source);
+}
+
 static void check_test_driver_vla_fold(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vla_fold_fixtures,
                                       BUSTER_ARRAY_LENGTH(check_driver_vla_fold_fixtures));
+    check_test_driver_vla_cast_runs(test, clang, executable, directory);
 }

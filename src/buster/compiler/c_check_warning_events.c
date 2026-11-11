@@ -194,9 +194,11 @@ enum
     // -Wgnu-designator's.
     CHECK_WARNING_ID_GNU_DESIGNATOR = 138,
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
+    // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
+    CHECK_WARNING_ID_STRING_PLUS_INT = 140,
     // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
     // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
-    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 140,
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 141,
     CHECK_WARNING_ID_COUNT,
 };
 
