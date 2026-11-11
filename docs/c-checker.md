@@ -299,8 +299,12 @@ enumerators of one base are of one type before C23, and of two after it). Each
 value is representable in the base as clang's `isRepresentableIntegerValue` has
 it (a negative one by its significant bits, any other by its active bits, less a
 signed base's sign bit) and converted to it; the base drops `const` and `volatile` (`restrict`, which
-needs a pointer, is refused), and an integer type of any width but `_BitInt`
-takes it. GNU attributes among the base's specifiers are the base type's, as
+needs a pointer, is refused), written or a typedef's, with clang's
+"'const' qualifier in enumeration underlying type ignored"
+(`-Wunderlying-cv-qualifier-ignored`, #1952) once, at the base's first token
+that isn't a qualifier; they aren't the declaration's own, so a declaration of
+the enum alone gives no "'const' ignored on this declaration" for them. An
+integer type of any width but `_BitInt` takes it. GNU attributes among the base's specifiers are the base type's, as
 clang has them: ignored, but one that would make it a vector's (`vector_size`,
 `ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
 declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
@@ -7955,9 +7959,39 @@ arguments against the function. The checker now gives these as clang does.
     marks (see the floating-point pragmas above);
   - and these, whose handlers change nothing in C past their subjects,
     counts and arguments' kinds: `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
-    `-frandomize-layout-seed`), `objc_boxable`, `objc_bridge_mutable`,
+    `-frandomize-layout-seed`), `objc_boxable`,
     Fuchsia's `use_handle` and `release_handle`, `suppress`, `swift_bridge`,
-    `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`.
+    `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`;
+  - Objective-C's bridges, `objc_bridge`, `objc_bridge_mutable` and
+    `objc_bridge_related` (#1447), which change nothing in C past their
+    handlers' checks (`check_input_attribute_objc_bridge`): a first argument
+    that is no identifier (an expression, or no argument of
+    `objc_bridge_related` without parentheses, whose custom parsing skips the
+    count) is "parameter of 'X' attribute must be a single name of an
+    Objective-C class" at the declaration's first token (a tag's keyword, a
+    typedef's first token); on a typedef `objc_bridge`'s identifier must be
+    `id` as written ("parameter of 'X' attribute must be 'id' when used on a
+    typedef") and its type a pointer to `void` ("'objc_bridge(id)' is only
+    allowed on structs and typedefs of void pointers"), both at the
+    attribute. A later argument is an expression whose names must name
+    something, as for any generic attribute, a tag's too ("use of undeclared
+    identifier", before the count's error). `objc_bridge_related`'s arguments
+    are read as clang's ParseObjCBridgeRelatedAttribute reads them
+    (`check_input_objc_bridge_related_parse`; the parser leaves them a
+    balanced run of tokens, `parse_scalar_custom_attribute`): a class's
+    identifier ("expected a related Objective-C class name, e.g.,
+    'NSColor'"), `,` (expected past the class), an optional selector of an
+    identifier and a `:` (not half of a `::`: "expected a class method selector
+    with single argument, e.g., 'colorWithCGColor:'"), `,` ("expected ','" at
+    the token, or the selector's error at a `:`), an optional identifier
+    ("expected ')'" at another token, without a note) and the `)` ("expected
+    ')'" with its note). Its C23 spelling with arguments, like the other
+    attributes clang's ParseClangAttributeArgs reads its own way
+    (`availability`, `external_source_symbol`, `type_tag_for_datatype`), is
+    located at its name rather than its scope in every report
+    (`check_diagnostic_custom_attribute_name`). `test-checker-driver`
+    (`c_check_objc_bridge_driver_test.c`) compares each unit's whole output
+    with clang's, by both paths, in GNU C17 and C23.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -8686,11 +8720,10 @@ arguments against the function. The checker now gives these as clang does.
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
   The rest stay refused by name, where they apply: `format_matches`,
-  `cfi_salt`, `objc_bridge`, `objc_bridge_related`, `swift_name`,
-  `swift_async_name`, `swift_error`, `swift_async_error`, `swift_newtype` and
-  `swift_wrapper` in either syntax, and the C23 spellings of `objc_gc`,
-  `objc_ownership`, `address_space` and the OpenCL spaces, and of
-  `annotate_type`. Recognizing their names does not supply their handlers.
+  `cfi_salt`, `swift_name`, `swift_async_name`, `swift_error`,
+  `swift_async_error`, `swift_newtype` and `swift_wrapper` in either syntax,
+  and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -8895,6 +8928,13 @@ arguments against the function. The checker now gives these as clang does.
   specifier (`#pragma pack`, `weak`, `GCC visibility`: any but those its
   preprocessor takes alone, such as `message` and the diagnostic ones) stops
   the recovery, as it does clang's.
+- **An array's size or a designator's index after a comma** (#1867). `int
+  u[n, m];` and `{ [1, 2] = 3 }` are clang's "expected ']'" at the comma, then
+  its parser skips to the `]` and goes on with `u[n]` and `[1]`: the view drops
+  the tokens from the comma to the `]` (`ParseDiagnostic.resume_delete`), so the
+  declaration's later uses and the initializer's other elements are checked as
+  clang checks them, by both paths. Differences left: without a `]` before the
+  next `;` (`int z[1, 2;`) nothing is resumed, where clang reads on.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original
@@ -9170,9 +9210,15 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   a conditional can skip it; otherwise each is "never produces a constant
   expression", its note at the call's name or the operator, as a call
   without a parameter is (`g(1) > 0`, `h()`). Any other shape (a subscript,
-  a builtin's call) is "not yet supported" in user code; in a system header,
-  and on an object-size wrapper (`pass_object_size`), the condition is kept
-  and decides nothing, as these wrappers had it before.
+  a builtin's call) is "not yet supported" in user code; in a system header
+  the condition is kept and decides nothing, as #1361's fortify wrappers had
+  it. A function declaration with a `pass_object_size` parameter (#1361's
+  object-size wrappers, `CheckInputAttributes.object_sizes`) doesn't read its
+  conditions at all, whatever their shape and wherever it is: none is built,
+  checked or kept (`check_input_conditions`), so in user code clang's
+  diagnostics of them are missing, an undeclared name's error and a
+  condition's warning or error at a use or a call alike
+  ([#2147](https://github.com/buster14a/buster/issues/2147)).
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
@@ -9447,6 +9493,13 @@ enables, which this checker doesn't all give.
   function's own parameter list, as the conversion notes find it, a function
   pointer object's (through `*`), its typedef'd function type's
   (`F *gp`), and a member's (`s.m(…)`).
+  A conversion's target keeps the typedef its declaration writes where it is
+  a call's parameter (`check_input_call_parameter_spelling`) or an
+  initializer's member or element (`check_semantic_subobject_spelling`, by the
+  subobject's offset from the initialized object, through arrays and member
+  declarators; a union's member is the first of the target's type), in
+  `-Wimplicit-enum-enum-cast` and in a failed initializer conversion's error:
+  `struct S s = { .lp = c }`'s "initializing 'LP' (aka 'long *')".
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
@@ -9463,6 +9516,9 @@ enables, which this checker doesn't all give.
     the `__builtin_dump_struct` printer's places (`check_lower_dump_places`,
     `TypeNames.alias_order`) spell each parameter's own and would serve here
     once they read the parser and input rather than a `CheckProgram`.
+  - An initializer subobject's null pointer warning (`{ .lp = 1-1 }`) prints
+    its target canonically: the initializer walk that gives it keeps neither
+    the declaration nor its subobject's member.
   - A call into a redeclared function prints its parameters' sugar from the
     declaration the call sees, where clang's composite type keeps the first
     declaration's (`void c(N *q); void c(NP q);`'s call prints `'NP'`, clang

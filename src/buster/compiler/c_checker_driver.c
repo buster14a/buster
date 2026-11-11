@@ -322,6 +322,14 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_TYPE_TAG_FLAG:
             snprintf(text, capacity, "invalid comparison flag '%.*s'; use 'layout_compatible' or 'must_be_null'", (int)literal.length, literal.pointer);
             break;
+        case CHECK_ARGUMENT_OBJC_CLASS: snprintf(text, capacity, "parameter of '%s' attribute must be a single name of an Objective-C class", parsed); break;
+        case CHECK_ARGUMENT_OBJC_TYPEDEF_ID: snprintf(text, capacity, "parameter of '%s' attribute must be 'id' when used on a typedef", parsed); break;
+        case CHECK_ARGUMENT_OBJC_TYPEDEF_POINTER: snprintf(text, capacity, "'objc_bridge(id)' is only allowed on structs and typedefs of void pointers"); break;
+        case CHECK_ARGUMENT_OBJC_RELATED_CLASS: snprintf(text, capacity, "expected a related Objective-C class name, e.g., 'NSColor'"); break;
+        case CHECK_ARGUMENT_OBJC_RELATED_SELECTOR:
+            snprintf(text, capacity, "expected a class method selector with single argument, e.g., 'colorWithCGColor:'");
+            break;
+        case CHECK_ARGUMENT_EXPECTED_COMMA: snprintf(text, capacity, "expected ','"); break;
         case CHECK_ARGUMENT_TYPE_TAG_INITIALIZER:
             snprintf(text, capacity, "'type_tag_for_datatype' attribute requires the initializer to be an integer constant expression");
             break;
@@ -2921,8 +2929,8 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
 // or an array's "array initializer must be an initializer list". NULL where it is none of those (the generic "invalid
 // initializer" stays).
 static const char* check_driver_initializer_conversion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                                       const TypeTable* types, TypeId target, uint32_t source, uint32_t declaration, uint32_t token,
-                                                       uint32_t* located, Arena* scratch)
+                                                       const TypeTable* types, TypeId target, uint32_t source, uint32_t declaration, uint64_t offset,
+                                                       uint32_t token, uint32_t* located, Arena* scratch)
 {
     CheckWarningSpelling spell = { 0 };
     const bool declared = declaration < input->token_count;
@@ -2947,6 +2955,9 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     }
     uint32_t spelling = 0;
     const TypeId spelled = whole ? check_input_object_spelling(types, input, parser, declaration, input->declared_types[declaration], target, &spelling) : target;
+    // A subobject's member or element spells it (#1447, check_semantic_subobject_spelling).
+    spelling = !whole && declared && source < stream->count ?
+               check_semantic_subobject_spelling(parser, input, types, input->declared_types[declaration], declaration, offset, target) : spelling;
     const TypeId bare = type_strip_aligned(types, target);
     const bool array = type_kind_is_array(type_kind(types, bare));
     // An array's (clang's FK_ArrayNeedsInitList and its string literal kinds): the literal its element takes named, a
@@ -8414,6 +8425,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             earlier.status = initializers.status;
                             earlier.failed_type = initializers.failed_type;
                             earlier.failed_source = initializers.failed_source;
+                            earlier.failed_offset = initializers.failed_offset;
                             earlier.failed_declaration = initializers.failed_declaration;
                             earlier.token = initializers.token;
                             earlier.completion = initializers.completion;
@@ -8439,6 +8451,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 .status = earlier.status,
                                 .failed_type = earlier.failed_type,
                                 .failed_source = earlier.failed_source,
+                                .failed_offset = earlier.failed_offset,
                                 .failed_declaration = earlier.failed_declaration,
                                 .token = earlier.token,
                                 .completion = earlier.completion,
@@ -8452,7 +8465,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 uint32_t place = failure.token;
                                 const char* conversion = failure.status == CHECK_INIT_INVALID ?
                                     check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, failure.failed_type, failure.failed_source - 1,
-                                                                        failure.failed_declaration, failure.token, &place, output_arena) : NULL;
+                                                                        failure.failed_declaration, failure.failed_offset, failure.token, &place, output_arena) : NULL;
                                 const char* message = conversion != NULL ? conversion : failure.status == CHECK_INIT_MEMBER ?
                                     check_driver_initializer_field_message(checking, checking_pp, &input, &types, failure.failed_type, failure.token, output_arena) :
                                     check_driver_initializer_message(failure.status);

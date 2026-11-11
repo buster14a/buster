@@ -45,10 +45,6 @@ static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser*
 // the declared type, so `declared` passes it), an ASSIGN's left operand's root, or 0 where no declaration is
 // reachable (#992).
 // Always inlined (#880), as profile-guided builds do; hot caller: check_input_warning_graph.
-// c_check_semantic_diagnostic.c's: a member access's member declarator (#1447).
-static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
-static uint32_t check_semantic_member_token(const Parser* parser, const CheckInput* input, const TypeTable* types, uint32_t member);
-
 // A call's argument (`call`, its CALL node, and its index `argument`; BUSTER_CHECK_NONE otherwise) prints its parameter's
 // typedef (#1100, check_input_parameter_spelling).
 static inline __attribute__((always_inline)) void check_warning_graph_null(CheckInputReader* reader, const CheckStream* stream, uint32_t source, TypeId destination,
@@ -91,22 +87,7 @@ static inline __attribute__((always_inline)) void check_warning_graph_null(Check
         // typedef specifier's declaration where its base was a typedef name.
         uint32_t spelling = 0;
         const TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser, lvalue, declared, destination, &spelling);
-        if (call < graph->count)
-        {
-            // Through a function pointer's dereferences (`(*fp)(…)`).
-            uint32_t callee = graph->operand0[call];
-            for (uint32_t steps = 0; steps < 8 && callee < graph->count && graph->ops[callee] == CHECK_OP_DEREFERENCE; steps += 1)
-            {
-                callee = graph->operand0[callee];
-            }
-            const bool named = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE;
-            // A member's pointer is its declarator's (`s.m(…)` of a member `void (*m)(N *)`).
-            const bool member = callee < graph->count && (graph->ops[callee] == CHECK_OP_MEMBER || graph->ops[callee] == CHECK_OP_ARROW);
-            const uint32_t selected = member ? check_semantic_member_of(reader->parser, reader->output, stream, reader->types, callee) : 0;
-            const uint32_t declarator = selected != 0 ? check_semantic_member_token(reader->parser, reader->output, reader->types, selected) : BUSTER_CHECK_NONE;
-            spelling = named ? check_input_parameter_spelling(reader->parser, reader->output, graph->tokens[callee], argument) :
-                       declarator < reader->output->token_count ? check_input_declarator_parameter_spelling(reader->parser, reader->output, declarator, argument) : 0;
-        }
+        spelling = call < graph->count ? check_input_call_parameter_spelling(reader->parser, reader->output, stream, reader->types, call, argument) : spelling;
         check_input_null_spelling(reader, destination, printed, spelling, &value, first, end, completion);
     }
 }

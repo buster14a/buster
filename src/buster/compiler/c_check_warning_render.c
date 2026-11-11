@@ -1849,6 +1849,11 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER:
+            result = payload->data == (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE) ? "'const' and 'volatile' qualifiers in enumeration underlying type ignored" :
+                     payload->data == BUSTER_TYPE_VOLATILE ? "'volatile' qualifier in enumeration underlying type ignored" :
+                                                             "'const' qualifier in enumeration underlying type ignored";
+            break;
         case CHECK_WARNING_EVENT_STANDALONE_SPECIFIER:
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;

@@ -2788,6 +2788,29 @@ static uint32_t check_input_declarator_parameter_spelling(const Parser* parser, 
     return parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
 }
 
+// c_check_semantic_diagnostic.c's: a member access's member declarator (#1447).
+static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+static uint32_t check_semantic_member_token(const Parser* parser, const CheckInput* input, const TypeTable* types, uint32_t member);
+
+// The typedef of argument `argument`'s parameter in the call node `call` (#1100): its callee's name's
+// (check_input_parameter_spelling), through a function pointer's dereferences, or a member's declarator's.
+static uint32_t check_input_call_parameter_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                    uint32_t call, uint32_t argument)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t callee = call < graph->count ? graph->operand0[call] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; steps < 8 && callee < graph->count && graph->ops[callee] == CHECK_OP_DEREFERENCE; steps += 1)
+    {
+        callee = graph->operand0[callee];
+    }
+    const bool named = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE;
+    const bool member = callee < graph->count && (graph->ops[callee] == CHECK_OP_MEMBER || graph->ops[callee] == CHECK_OP_ARROW);
+    const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, callee) : 0;
+    const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+    return named ? check_input_parameter_spelling(parser, input, graph->tokens[callee], argument) :
+           declarator < input->token_count ? check_input_declarator_parameter_spelling(parser, input, declarator, argument) : 0;
+}
+
 // A null pointer constant warning, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
 // shows (the declaration's written type, qualifiers kept) and `spelling` its typedef specifier's declaration,
 // or BUSTER_CHECK_NONE for `__size_t`, or 0 for no sugar.
@@ -3484,6 +3507,7 @@ struct CheckTagFrame;
 struct CheckTagMember;
 static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
                                      uint32_t depth, const struct CheckTagMember* members, uint32_t member_count);
+static bool check_input_tag_names(CheckInputReader* reader, const CheckInputAttributes* attributes);
 
 // A report at `token` naming `type` (#1447): spelled by the typedef name that `spelling`'s declaration's specifiers give it
 // (BUSTER_CHECK_NONE for none), with `value`, and an incomplete tag's forward declaration's note.
@@ -4258,6 +4282,32 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     {
         check_input_report(reader, colon + 1 < end ? colon + 1 : colon, CHECK_INPUT_DECLARATION);
     }
+    else
+    {
+        // Its const and volatile, written or a typedef's, which clang drops with -Wunderlying-cv-qualifier-ignored (#1952),
+        // once, at the base's first token that isn't a qualifier (its type's location).
+        const uint32_t dropped = (qualifiers | type_qualifiers(base)) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        uint32_t at = colon + 1;
+        uint32_t ignored_qualifiers = 0;
+        while (at + 1 < end && (check_input_qualifier(parser, at, &ignored_qualifiers) || check_input_attribute_starts(parser, at, end)))
+        {
+            at = check_input_attribute_starts(parser, at, end) ? check_input_skip_attributes(parser, at, end) : at + 1;
+        }
+        if (dropped != 0 && at < end)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER,
+                .kind = CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+                .token = at,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+                .completion = end,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = dropped },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+    }
     for (uint32_t i = colon; valid && i < end; i += 1)
     {
         reader->ignored[i] = true;
@@ -4405,8 +4455,9 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     {
         const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION :
                                   BUSTER_CHECK_SUBJECT_STRUCT;
-        // (The tag's keyword is its declaration's first token, where some handlers warn.)
-        valid = check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
+        // (The tag's keyword is its declaration's first token, where some handlers warn.) Its attributes' expressions' names
+        // first, which clang's parser looks up (#1447: objc_bridge's second argument).
+        valid = check_input_tag_names(reader, own) && check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
         // Complete before this declaration: a fixed enum's first declaration completes it with its attributes.
         const bool complete = type_is_complete(reader->types, type) && canonical != declaration;
         for (uint32_t r = 0; valid && kind == BUSTER_TYPE_KIND_UNION && !complete && r < own->count; r += 1)
@@ -8636,7 +8687,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->tag_attributes = false;
             // The tag's subjects as clang's attributes name them (#147).
             const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
-            valid = valid && check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
+            valid = valid && check_input_tag_names(reader, frame->attributes) &&
+                    check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
             check_input_set_attributes_at(reader->output, frame->token, frame->attributes);
             for (uint32_t attribute = 0; valid && frame->attributes != 0 && attribute < frame->attributes->count; attribute += 1)
             {
@@ -9847,6 +9899,16 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
         {
             const uint32_t close = parser->tree.parents[token];
             token = close > token && close < end ? close : end;
+            continue;
+        }
+        if (kind == PARSE_KIND_COLON)
+        {
+            // An enum's fixed base, to its body: its qualifiers are the base's, which it drops with a warning of its own
+            // (#1952, check_input_enum_underlying), not the declaration's.
+            while (token + 1 < end && parser->tokens.kinds[token + 1] != PARSE_KIND_L_BRACE)
+            {
+                token += 1;
+            }
             continue;
         }
         const uint32_t name = parser->tokens.names[token];

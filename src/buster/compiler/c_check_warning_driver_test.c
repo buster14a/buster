@@ -703,6 +703,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .compare_warning_text = true,
     },
     {
+        // An enum base's const and volatile (#1952): clang's -Wunderlying-cv-qualifier-ignored once per base, at its first
+        // token that isn't a qualifier, a typedef's qualifiers too, and no stand-alone declaration's warning for them.
+        .name = "enum underlying type qualifiers",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .warnings = 13,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "enum underlying type qualifiers under -Wall",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .options = { "-Wall" },
+        .warnings = 13,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "enum underlying type qualifiers under -w",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .options = { "-w" },
+    },
+    {
+        .name = "enum underlying type qualifiers as errors",
+        .source = "enum H : const int { D };\n",
+        .options = { "-Werror=underlying-cv-qualifier-ignored" },
+        .errors = 1,
+    },
+    {
+        .name = "enum underlying type qualifiers disabled",
+        .source = "enum H : const int { D };\n",
+        .options = { "-Wno-underlying-cv-qualifier-ignored" },
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
