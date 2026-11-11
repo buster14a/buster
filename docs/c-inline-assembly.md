@@ -458,8 +458,10 @@ does an asm body (#1839), which loads its operands from its block.
 
 `y` places an operand in an MMX register (#1846), mm0 up but the ones the
 clobbers name (`"mm0"`): an integer, a pointer, a `float` or a `double` of up
-to 8 bytes, as clang takes them (clang takes an `__m64` too, a vector whose
-8-byte loads Tier 0 doesn't have, so the lowering refuses it by name). The template
+to 8 bytes, as clang takes them, and an `__m64` (#1846, the owner's decision
+on #1447): its 8 bytes as an unsigned long, an input's read through its
+object's address (`CheckAsmPlace.m64`), since Tier 0 has no 8-byte vector load.
+An `__m64` input of no object (`v + v`) is refused by name. The template
 names it `%mm0`; clang refuses every modifier of one, and so does the lowering.
 The helper loads it as clang's code does, zero-extended into rax and moved into
 its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
@@ -580,12 +582,23 @@ instructions, labels and the syntax directives. It refuses:
 
 - every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to any of its labels: the planner assembles
-  these whole too (#1845), as their failure asks (`AsmCode.directive`), so
-  that `leaq 1f(%rip)`, `.`'s address and `loop 1b` are the assembler's own
-  fixups and branches, as clang's;
+  addend, and `loop` and `jrcxz` to its labels with an addend or across a `jmp`
+  or `jcc` that branch sizing sizes: the planner assembles these whole too
+  (#1845), as their failure asks (`AsmCode.directive`), so that `leaq
+  1f(%rip)`, `.`'s address and such a `loop 1b` are the assembler's own fixups
+  and branches, as clang's;
 - undefined numeric labels;
 - what the matcher doesn't take.
+
+A `loop` or a `jrcxz` to a label of the template's own, without an addend and
+with no `jmp` or `jcc` that branch sizing sizes between it and its label, is a
+record whose rel8 displacement the assembler fixes once the records are, by
+their lengths (#1839's item 4: these have no rel32 form, which branch sizing
+would need to grow them, and nothing between them can grow). A body or a
+helper takes it as any record; `check_asm_implicit` gives `loop` its rcx and
+`jrcxz` nothing, and `check_asm_inline_touched` takes it as the template's
+own branch. So `1: addq %rcx, %0; loop 1b` is an asm body in its caller, as
+clang places it.
 
 ### Templates that take directives
 
@@ -1202,13 +1215,14 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` (assembled whole, as templates that take directives are),
+templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
-would make its function Tier 0's), a function with a template that returns or a
-label of a template of no instructions is Tier 0's, and the
-code's certificate (`--verify`) leaves a function with an asm body uncertified.
+would make its function Tier 0's), and a function with a template that returns or a
+label of a template of no instructions is Tier 0's. The
+code's certificate (`--verify`) certifies a function with asm bodies
+([the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
 What the lowering still refuses of what GCC and clang take:
 

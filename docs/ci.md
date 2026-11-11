@@ -80,7 +80,8 @@ below). A `native` row's shards each build the compiler themselves, since a
 native build must run on the CPU model it was built for, which hosted runners
 don't share. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
-readers and the TSan/MSan `main.c` compiles) run in its shard 1, and each
+readers and the TSan/MSan `main.c` compiles) run in its shard 1, which the deal
+gives that much less of the inventory (its table's `#: first-shard`), and each
 shard's sanitizer reports are an artifact of its own.
 
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this

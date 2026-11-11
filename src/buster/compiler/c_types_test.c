@@ -2307,6 +2307,107 @@ static bool type_test_compatibility(void)
 // an aligned typedef's ALIGNED, with the TypeId's own qualifiers kept, and none on a function type), what the readers see
 // through it (size, alignment, completeness, kind), compatibility and composite types, clang's spellings, and the spaces'
 // inclusions (clang's isAddressSpaceSupersetOf in C).
+// Type sugar's print of `type` from `node` (c_types_sugar.c), with `macro` (if any) resolving every MACRO node, against
+// `expected` ("" for none: the caller prints canonically).
+static bool type_test_sugar_prints(const TypeTable* table, const TypeSugarTable* sugar, uint32_t node, TypeId type, const char* macro, const char* expected,
+                                   Arena* arena)
+{
+    const uint64_t length = arena->length;
+    uint32_t tokens[4];
+    String8 texts[4];
+    const uint32_t count = type_sugar_macro_tokens(table, sugar, node, type, tokens, 4);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        texts[i] = macro != NULL ? (String8){ .pointer = (char*)macro, .length = strlen(macro) } : (String8){ 0 };
+    }
+    const TypeNames names = {
+        .sugar_macro_tokens = tokens,
+        .sugar_macro_texts = texts,
+        .sugar_macro_count = count,
+    };
+    const String8 printed = type_sugar_print(table, sugar, arena, node, type, (String8){ 0 }, &names, 0);
+    const bool result = printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0;
+    if (!result)
+    {
+        fprintf(stderr, "test-types: sugar: \"%.*s\" against \"%s\"\n", (int)printed.length, printed.pointer, expected);
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
+// Type sugar (#1447, c_types_sugar.c): hash-consed nodes, kept across the table's growth, each with the canonical type it
+// was made with; and clang 23's TypePrinter over them, the strings its AST dumps give for the declarations they model
+// (c_check_type_sugar_driver_test.c compares the reader's with clang's whole output).
+static bool type_test_sugar(Arena* arena)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 4000), "type sugar", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        TypeSugarTable sugar;
+        const uint64_t mark = arena->length;
+        type_test_expect(&tally, type_sugar_initialize(&sugar, arena, 2), "type sugar", "the sugar table can't be made");
+        const TypeId plain = type_function(table, BUSTER_TYPE_VOID, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE);
+        const TypeId most = type_function_full(table, BUSTER_TYPE_VOID, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_PRESERVE_MOST, NULL);
+        const TypeId none = type_function_full(table, BUSTER_TYPE_VOID, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_PRESERVE_NONE, NULL);
+        const TypeId ms = type_function_full(table, BUSTER_TYPE_VOID, 0, 0, BUSTER_TYPE_FLAG_PROTOTYPE, TYPE_FUNCTION_ABI_MICROSOFT, NULL);
+        // `void (*p)(void) __attribute__((preserve_most))`: Pointer(Paren(Attributed(function))).
+        const uint32_t attributed = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_PRESERVE_MOST, 0, most, most);
+        const uint32_t paren = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_PAREN, 0, attributed, most, 0);
+        const uint32_t pointer = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_POINTER, 0, paren, type_pointer(table, most), 0);
+        // (The table grew past its two nodes: each is found again.)
+        type_test_expect(&tally, attributed != 0 && paren != 0 && pointer != 0 && sugar.capacity > 2, "type sugar", "nodes past the first capacity");
+        type_test_expect(&tally, type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_PRESERVE_MOST, 0, most, most) == attributed &&
+                         type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_PAREN, 0, attributed, most, 0) == paren &&
+                         type_sugar_make(&sugar, NULL, BUSTER_TYPE_SUGAR_POINTER, 0, paren, type_pointer(table, most), 0) == pointer,
+                         "type sugar", "one node for one sugar");
+        const uint32_t other = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_PRESERVE_ALL, 0, most, most);
+        type_test_expect(&tally, other != 0 && other != attributed && sugar.canonical[pointer] == type_pointer(table, most) && sugar.canonical[attributed] == most,
+                         "type sugar", "another attribute is another node, and each keeps its canonical type");
+        bool printed = type_test_sugar_prints(table, &sugar, pointer, type_pointer(table, most), NULL, "__attribute__((preserve_most))  void ((*))(void)", arena);
+        // `f` and `&f` of `void f(void) __attribute__((preserve_most))`, and `*p`.
+        printed &= type_test_sugar_prints(table, &sugar, attributed, most, NULL, "__attribute__((preserve_most)) void (void)", arena);
+        printed &= type_test_sugar_prints(table, &sugar, attributed, type_pointer(table, most), NULL, "__attribute__((preserve_most))  void (*)(void)", arena);
+        printed &= type_test_sugar_prints(table, &sugar, pointer, most, NULL, "__attribute__((preserve_most)) void (void)", arena);
+        // A pointer to it, and an array of them (`void (*a[2])(void) __attribute__((preserve_none))`).
+        const uint32_t pointers = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_POINTER, 0, pointer, type_pointer(table, type_pointer(table, most)), 0);
+        printed &= type_test_sugar_prints(table, &sugar, pointers, type_pointer(table, type_pointer(table, most)), NULL,
+                                          "__attribute__((preserve_most))  void ((**))(void)", arena);
+        const uint32_t none_attributed = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_PRESERVE_NONE, 0, none, none);
+        const uint32_t none_paren = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_PAREN, 0, none_attributed, none, 0);
+        const uint32_t none_pointer = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_POINTER, 0, none_paren, type_pointer(table, none), 0);
+        const TypeId none_array = type_array(table, type_pointer(table, none), 2);
+        const uint32_t array = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ARRAY, 0, none_pointer, none_array, 0);
+        printed &= type_test_sugar_prints(table, &sugar, array, none_array, NULL, "__attribute__((preserve_none))  void ((*[2]))(void)", arena);
+        // `void g(void) __attribute__((sysv_abi))`, and `&g`: an attribute the canonical type doesn't keep.
+        const uint32_t sysv = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_SYSV_ABI, 0, plain, plain);
+        printed &= type_test_sugar_prints(table, &sugar, sysv, plain, NULL, "void (void) __attribute__((sysv_abi))", arena);
+        printed &= type_test_sugar_prints(table, &sugar, sysv, type_pointer(table, plain), NULL, "void (*)(void) __attribute__((sysv_abi))", arena);
+        // `void (MS *r)(void)`: the macro's attribute is on the group, its modified type the function without it, which the
+        // macro prints; unresolved, the attribute prints after it. `MS void (*u)(void)`: the macro over the function's.
+        const uint32_t group = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_MS_ABI, 0, ms, plain);
+        const uint32_t macro = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_MACRO, 7, group, ms, 0);
+        const uint32_t through = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_POINTER, 0, macro, type_pointer(table, ms), 0);
+        printed &= type_test_sugar_prints(table, &sugar, through, type_pointer(table, ms), "MS", "MS void (*)(void)", arena);
+        printed &= type_test_sugar_prints(table, &sugar, through, type_pointer(table, ms), NULL, "void (*)(void) __attribute__((ms_abi))", arena);
+        const uint32_t distributed = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_ATTRIBUTED, TYPE_SUGAR_MS_ABI, 0, ms, ms);
+        const uint32_t distributed_macro = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_MACRO, 9, distributed, ms, 0);
+        const uint32_t distributed_paren = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_PAREN, 0, distributed_macro, ms, 0);
+        const uint32_t distributed_pointer = type_sugar_make(&sugar, arena, BUSTER_TYPE_SUGAR_POINTER, 0, distributed_paren, type_pointer(table, ms), 0);
+        printed &= type_test_sugar_prints(table, &sugar, distributed_pointer, type_pointer(table, ms), "MS", "MS void ((*))(void) __attribute__((ms_abi))", arena);
+        printed &= type_test_sugar_prints(table, &sugar, distributed_pointer, type_pointer(table, ms), NULL, "void ((*))(void) __attribute__((ms_abi))", arena);
+        // A type the sugar doesn't describe has no print of it.
+        printed &= type_test_sugar_prints(table, &sugar, pointer, BUSTER_TYPE_INT, NULL, "", arena);
+        printed &= type_test_sugar_prints(table, &sugar, sysv, type_pointer(table, ms), NULL, "", arena);
+        type_test_expect(&tally, printed, "type sugar", "clang's spellings");
+        arena_pop_to(arena, mark);
+        type_test_table_close(&test);
+    }
+    type_test_report("type sugar", tally);
+    return tally.failures == 0;
+}
+
 static bool type_test_extended(Arena* arena)
 {
     TypeTestTally tally = { 0 };
@@ -4717,6 +4818,7 @@ static int run_type_tests(int argc, char** argv)
         passed = type_test_scratch_exhaustion() && passed;
         passed = type_test_printing(&arena) && passed;
         passed = type_test_extended(&arena) && passed;
+        passed = type_test_sugar(&arena) && passed;
         passed = type_test_clang(seed, (uint32_t)count, clang, keep) && passed;
         result = passed ? 0 : 1;
     }
