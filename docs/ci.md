@@ -121,8 +121,11 @@ compares deterministic probe objects and executables, once for each host path:
 scalar path, #1193). It is not part of the required correctness or benchmark
 path; see [the self-host guide](self-hosting-ci.md).
 
-The hosted tests fetch the frozen corpus from the
+The frozen corpus comes from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).
+A run's preparation job fetches it once, with the apt packages, the baseline
+runtime and the c-testsuite and SQLite mirrors, and the hosted tests read them
+all with no network ([Offline inputs](hosted-toolchain.md#offline-inputs-2275)).
 `tools/ci/fetch-corpus.sh` checks the archive digest, original manifest digests,
 every input byte, file counts and file kinds. The archive retains source/header
 notices, package provenance and component license texts. Historical paths and

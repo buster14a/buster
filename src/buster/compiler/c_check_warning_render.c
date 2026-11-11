@@ -1485,9 +1485,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
         {
+            // A C23 attribute's scope is at payload.token (#1447), its spelling normalized.
             static const char* const keywords[] = { "struct", "union", "enum" };
-            result = check_warning_text(scratch, "attribute '%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)name.length,
-                                        name.pointer, keywords[payload->data < 3 ? payload->data : 0]);
+            const bool scoped = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE && payload->token < parser->tokens.count;
+            const String8 scope = scoped ? check_warning_attribute_scope(check_driver_warning_name(pp, parser->tokens.names[payload->token])) : (String8){ "", 0 };
+            const String8 attribute = scoped ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "attribute '%.*s%s%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)scope.length,
+                                        scope.pointer, scoped ? "::" : "", (int)attribute.length, attribute.pointer, keywords[payload->data < 3 ? payload->data : 0]);
             break;
         }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED:

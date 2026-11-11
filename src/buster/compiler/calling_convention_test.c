@@ -3647,6 +3647,7 @@ static bool abi_test_builtin_rows(void)
                             BUSTER_ABI_TEST_BUILTIN(storage, requested);
                             BUSTER_ABI_TEST_BUILTIN(layout, (uint64_t)requested * sizeof(*got.layout));
                             BUSTER_ABI_TEST_BUILTIN(results, (uint64_t)prefix * sizeof(*got.results));
+                            BUSTER_ABI_TEST_BUILTIN(transparent, (uint64_t)requested * sizeof(*got.transparent));
 #undef BUSTER_ABI_TEST_BUILTIN
                             abi_test_expect(&tally, bounds, "builtins", "all column slices remain inside the reservation");
                             abi_test_expect(&tally, memcmp(actual.base, expected.base, actual.capacity) == 0, "builtins", "padding and unclassified tails remain untouched");

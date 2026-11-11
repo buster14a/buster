@@ -58,8 +58,56 @@ static const char check_driver_unevaluated_macros_source[] =
     "    (void)_Generic(ID(i++), int: 1); (void)sizeof(({ ID(i++); 1; }));\n"
     "}\n";
 
+// The operands the constant reader reads (#1447, check_warning_graph_constant_queries): array bounds at file scope, in a
+// record and in a block, an enumerator's value, a `_Generic` in a bound, beside a static assertion's and an initializer's.
+static const char check_driver_unevaluated_constant_source[] =
+    "int x;\n"
+                  "int arr[sizeof(x++)];\n"
+                  "enum { E = sizeof(x = 1) };\n"
+                  "_Static_assert(sizeof(x++) == 4, \"s\");\n"
+                  "int y = sizeof(x--);\n"
+                  "struct S { int a[sizeof(++x)]; };\n"
+                  "int f(void) { int v[sizeof(x++)]; return sizeof v + _Alignof(int) + (int)sizeof(typeof(x++)); }\n"
+                  "int g = _Generic(x++, int: 1);\n"
+                  "char c[_Generic(x = 2, int: 3)];\n";
+
+// Its forms: type names and a designator's `=` (none), sizeof without parentheses, alignof, a nested sizeof (none), a cast,
+// a comma, a call (none), a macro's increment (none), a subscript, a bit-field's width, a case label and _Alignas.
+static const char check_driver_unevaluated_constant_forms_source[] =
+    "int x; int arr2[4];\n"
+                  "typedef int T;\n"
+                  "struct S { int a; int b[2]; };\n"
+                  "int f(void);\n"
+                  "#define INC(v) v++\n"
+                  "int a1[sizeof(int)];\n"
+                  "int a2[sizeof(T)];\n"
+                  "int a3[sizeof((struct S){ .a = 1, .b[1] = 2 })];\n"
+                  "int a4[sizeof x++];\n"
+                  "int a5[__alignof__(x = 3)];\n"
+                  "int a6[sizeof(sizeof(x++))];\n"
+                  "int a7[sizeof((int)(x = 1))];\n"
+                  "int a8[sizeof(x, x++)];\n"
+                  "int a9[sizeof(f())];\n"
+                  "int a10[sizeof(INC(x))];\n"
+                  "int a11[sizeof(arr2[x++])];\n"
+                  "struct B { int w : sizeof(x++); };\n"
+                  "enum { E1 = _Generic(x++, int: 1), E2 = sizeof(x += 2) };\n"
+                  "int a12[sizeof(x ? x-- : 0)];\n"
+                  "int a13[sizeof(T[2])];\n"
+                  "void g(void) { switch (x) { case sizeof(x++): break; } _Alignas(sizeof(x++)) int z; (void)z; }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_unevaluated_fixtures[] =
 {
+    {
+        .name = "side effects in the constant reader's unevaluated operands",
+        .source = check_driver_unevaluated_constant_source,
+        .warnings = 8,
+    },
+    {
+        .name = "side effects in the constant reader's unevaluated operands: forms",
+        .source = check_driver_unevaluated_constant_forms_source,
+        .warnings = 12,
+    },
     {
         .name = "side effects in unevaluated operands",
         .source = check_driver_unevaluated_operators_source,
