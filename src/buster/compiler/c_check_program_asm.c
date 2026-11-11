@@ -172,6 +172,9 @@ struct CheckAsmPlace
     // ZMM register and for XMM16 up), loading each address into rax before the general registers' loads.
     bool packed;
     bool vex;
+    // A global register variable's operand (#1846): its register, rsp or rbp, which the template names and nothing loads,
+    // stores or gives a slot.
+    bool global;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -988,7 +991,7 @@ static bool check_asm_packed_loads(const CheckAsmPlace* place)
 // is stored from rsp after the template.
 static bool check_asm_stack(const CheckAsmPlace* place)
 {
-    return place->kind == BUSTER_CHECK_ASM_GENERAL && place->reg == X86_REGISTER_RSP;
+    return place->kind == BUSTER_CHECK_ASM_GENERAL && place->reg == X86_REGISTER_RSP && !place->global;
 }
 
 // Whether the helper stores flag output `place` after the template: its condition's value over its object.
@@ -2010,6 +2013,31 @@ static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId de
     return type_unqualified(source) == type_unqualified(destination) || (from && to && sized && type_size(types, source) == type_size(types, destination));
 }
 
+// A global register variable's register (#1846, the owner's decision on #1447): `register long sp __asm__("rsp")` at file
+// scope, whose reads and writes are the register's, as clang's code makes them (llvm.read_register and write_register):
+// X86_REGISTER_RSP or X86_REGISTER_RBP, with its bytes (8, or 4 for esp's and ebp's) in `*bytes`; or -1 for an object
+// that is no such variable. The checker took only these four names (check_input_register_label).
+static int32_t check_program_global_register(const CheckProgram* program, uint32_t object, uint32_t* bytes)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = object != 0 && object <= input->token_count ? object - 1 : BUSTER_CHECK_NONE;
+    const bool global = declaration < input->token_count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) &&
+                        check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
+    const CheckInputAttributes* attributes = global ? check_input_attributes_at(input, declaration) : 0;
+    int32_t result = -1;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const String8 name = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored ? attribute->text : (String8){ 0 };
+        if (name.length == 3 && (name.pointer[0] == 'r' || name.pointer[0] == 'e') && (memcmp(name.pointer + 1, "sp", 2) == 0 || memcmp(name.pointer + 1, "bp", 2) == 0))
+        {
+            result = name.pointer[1] == 's' ? X86_REGISTER_RSP : X86_REGISTER_RBP;
+            *bytes = name.pointer[0] == 'r' ? 8 : 4;
+        }
+    }
+    return result;
+}
+
 // The register an asm operand takes when its expression names an explicit register variable (`register long r10
 // asm("r10") = a4;` and then "r"(r10), musl's syscall wrappers'), as clang's code gives it (CodeGen's
 // AddVariableConstraints): the variable itself, through casts that keep its value (check_asm_noop_cast), so that
@@ -2022,7 +2050,7 @@ static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId de
 // that names no such variable, or -2 for a register the lowering doesn't place one in: APX's r16 to r31 and the x87's
 // deeper registers.
 // An object's id is its first declaration's token plus one, which has its attributes.
-static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node)
+static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node, bool* global)
 {
     const CheckInput* input = program->input;
     const CheckStream* stream = program->stream;
@@ -2041,6 +2069,9 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
     const uint32_t declaration = value != 0 && (value->flags & BUSTER_CHECK_REGISTER) != 0 && value->object != 0 && value->object <= input->token_count ?
                                  value->object - 1 : BUSTER_CHECK_NONE;
     const CheckInputAttributes* attributes = declaration < input->token_count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, declaration) : 0;
+    // A global register variable's (#1846, check_program_global_register): its register itself.
+    uint32_t global_bytes = 0;
+    *global = declaration < input->token_count && check_program_global_register(program, declaration + 1, &global_bytes) >= 0;
     int32_t result = -1;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
@@ -2455,7 +2486,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // An explicit register variable's register, whatever the constraint's letters (check_asm_variable_register): an
         // output's even of a memory constraint, which clang's code makes that register too, but not an input's of one,
         // which clang refuses as it lowers it ("cannot handle indirect register inputs yet").
-        const int32_t variable = check_asm_variable_register(program, checked->node);
+        bool global = false;
+        const int32_t variable = check_asm_variable_register(program, checked->node, &global);
         const bool memory_only = constraint->memory && constraint->general == 0 && !constraint->vector && constraint->x87 == 0 && !constraint->mmx && constraint->masks == 0;
         const uint32_t x87 = check_asm_x87_bytes(types, type);
         if (constraint->refused != NULL)
@@ -2488,6 +2520,18 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         else if (variable >= 0 && !output && memory_only)
         {
             reason = "explicit register variables as inline assembly memory inputs";
+        }
+        else if (global && (variable == BUSTER_CHECK_ASM_VARIABLE_RSP || variable == X86_REGISTER_RBP))
+        {
+            // A global register variable (#1846): the register itself, whose value clang's code reads into a register and
+            // moves back, and after the template reads and writes back, the same value: the template names it, and nothing
+            // is loaded or stored. rbp's gives its function a frame pointer (check_lower_asm), as clang's reads rbp in one.
+            place->kind = BUSTER_CHECK_ASM_GENERAL;
+            place->tied = BUSTER_CHECK_NONE;
+            place->global = true;
+            place->written = false;
+            place->read = false;
+            constraint->general = 1u << (variable == BUSTER_CHECK_ASM_VARIABLE_RSP ? X86_REGISTER_RSP : X86_REGISTER_RBP);
         }
         else if (variable == BUSTER_CHECK_ASM_VARIABLE_RSP && integer && registered)
         {
@@ -2768,7 +2812,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 if (target == 0 ||
                     (target->kind != BUSTER_CHECK_ASM_GENERAL && target->kind != BUSTER_CHECK_ASM_VECTOR && target->kind != BUSTER_CHECK_ASM_X87 && target->kind != BUSTER_CHECK_ASM_MMX &&
                      target->kind != BUSTER_CHECK_ASM_MASK && target->kind != BUSTER_CHECK_ASM_PAIR) ||
-                    target->read || (target->kind == BUSTER_CHECK_ASM_PAIR && place->size != 0 && place->size != 16) ||
+                    target->read || target->global || (target->kind == BUSTER_CHECK_ASM_PAIR && place->size != 0 && place->size != 16) ||
                     (target->packed && !check_asm_packed_type(types, place->type, target->size)))
                 {
                     reason = "inline assembly inputs matching an output that isn't a register's of its own";
@@ -2886,7 +2930,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         CheckAsmPlace* place = places + k;
         const uint32_t bytes = (place->kind == BUSTER_CHECK_ASM_X87 || place->kind == BUSTER_CHECK_ASM_PAIR) && place->size > BUSTER_CHECK_ASM_SLOT_BYTES ? place->size :
                                BUSTER_CHECK_ASM_SLOT_BYTES;
-        if (place->kind != BUSTER_CHECK_ASM_CONSTANT && place->kind != BUSTER_CHECK_ASM_HELD)
+        if (place->kind != BUSTER_CHECK_ASM_CONSTANT && place->kind != BUSTER_CHECK_ASM_HELD && !place->global)
         {
             place->slot = block;
             block += place->written ? BUSTER_CHECK_ASM_SLOT_BYTES : bytes;
@@ -3094,11 +3138,14 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     bool held = false;
     bool flagged = false;
     bool stack = false;
+    bool stack_named = false;
     bool moved_vectors = false;
     bool packed_any = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         stack |= check_asm_stack(places + k);
+        // rsp named by a global register variable's operand too (#1846), which a helper's rsp isn't.
+        stack_named |= places[k].kind == BUSTER_CHECK_ASM_GENERAL && places[k].reg == X86_REGISTER_RSP;
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
         held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
         packed_any |= places[k].packed;
@@ -3107,7 +3154,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         moved_vectors |= places[k].packed && ((barriers >> k & 1) == 0 || places[k].tied != BUSTER_CHECK_NONE);
         flagged |= places[k].kind == BUSTER_CHECK_ASM_FLAG;
     }
-    reason = valid && reason == NULL && unit_assembled && stack ? "explicit register variables in rsp in templates that take directives" : reason;
+    reason = valid && reason == NULL && unit_assembled && stack_named ? "explicit register variables in rsp in templates that take directives" : reason;
     // The MMX registers are the x87's: a statement of both (#1846, the owner's decision on #1447) loads its x87 operands
     // first and its MMX ones after, and stores the MMX outputs before the x87 ones, as clang's code orders them; what the
     // x87's stack holds after an MMX load is the template's to know, as in clang's object.
@@ -3237,7 +3284,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     {
         reason = "inline assembly labels in templates of no instructions";
     }
-    else if (valid && reason == NULL && helped && stack)
+    else if (valid && reason == NULL && helped && stack_named)
     {
         // A helper's rsp is its own: rsp's variable is an asm body's alone (#1846).
         reason = "explicit register variables in rsp in inline assembly that keeps a helper";

@@ -457,6 +457,38 @@ The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
 register (a callee-saved one among the helper's pushes).
 
+### Global register variables
+
+`register long sp __asm__("rsp");` at file scope (#1846, the owner's decision on
+#1447) is a global register variable, as clang 23 takes one: only in rsp and rbp
+of 8 bytes, or esp and ebp of 4, of an integer or a pointer type. The checker
+gives clang's errors otherwise (`check_input_register_label`), each at clang's
+place, and goes on past them as clang does: "illegal storage class on
+file-scoped variable" without a label, "unknown register name 'X' in asm" for a
+name clang's x86-64 target doesn't know (a local register variable's too:
+`TargetInfo::isValidGCCRegisterName`'s names, an index of up to 180, past one
+`%` or `#`), "register 'X' unsuitable for global register variables on this
+target" for any other register (r12 among them: clang reserves no register
+for one), "size of register 'X' does not match variable size", and
+"unsupported type for named register variable" at the type specifier. A
+global register variable of a constraint that allows memory is clang's
+"reference to a global register variable in asm input|output with a memory
+constraint" (its words exchanged, as for a bit-field), and `&sp` is "address of
+register variable requested".
+
+Such a variable has no object and no symbol (an initializer is ignored, as
+clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
+`FRAME_ADDRESS`, which gives its function a frame pointer (clang's code reads rbp
+in one; under `--tier1`, such a function is Tier 0's, as `__builtin_frame_address`'s
+is), the low half for esp and ebp; an assignment of rsp or esp sets rsp
+(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does). An
+assignment of rbp or ebp, and an update (`sp += 8`, `sp++`), are refused by name.
+As an asm operand it is the register itself (`CheckAsmPlace.global`): the
+template names `%rsp` or `%rbp`, and nothing is loaded or stored, since clang's
+code moves the register's own value into it and back (but for esp and ebp
+inputs, whose `movl` clears the register's upper half: clang's build crashes);
+rbp's gives its function a frame pointer too.
+
 ### A's operands
 
 `A` is clang 23's on x86-64 (#1846): a value of up to 8 bytes in rax,

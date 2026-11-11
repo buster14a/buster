@@ -1573,6 +1573,10 @@ static const char* check_semantic_asm(const Parser* parser, Preprocessor* pp, co
             result = check_warning_text(scratch, "reference to a bit-field in asm %s with a memory constraint '%.*s'", output ? "input" : "output", constraint_length,
                                         constraint);
             break;
+        case CHECK_ASM_ERROR_GLOBAL_REGISTER:
+            result = check_warning_text(scratch, "reference to a global register variable in asm %s with a memory constraint '%.*s'", output ? "input" : "output",
+                                        constraint_length, constraint);
+            break;
         case CHECK_ASM_ERROR_BIT_INT:
             result = type.length != 0 ? check_warning_text(scratch, "invalid type %.*s in asm %s", (int)type.length, type.pointer, output ? "input" : "output") : NULL;
             break;
