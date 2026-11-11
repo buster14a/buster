@@ -173,6 +173,8 @@ struct CheckWarningSpelling
     uint32_t* space_macro_spaces;
     String8* space_macro_texts;
     uint32_t space_macro_count;
+    // Whether an address_space operand this reads isn't an integer constant, where no macro names a space.
+    bool space_unreadable;
     // The macro that writes each calling convention throughout the unit, by TypeFunctionABI (check_driver_convention_macros).
     String8 convention_macros[TYPE_FUNCTION_ABI_COUNT];
     bool built;
@@ -336,12 +338,59 @@ static String8 check_driver_attribute_macro(const Parser* parser, Preprocessor* 
            expansion != NULL ? check_driver_warning_name(pp, expansion->name) : (String8){ 0 };
 }
 
+// The address spaces an attribute list from `t` (its `__attribute__`) to its `)` at `close` writes (#1447): for each
+// `address_space(N)` of an integer constant N, its BUSTER_TYPE_SPACE_TARGET-based word, with the macro whose expansion
+// wrote the list (check_driver_attribute_macro, empty where none did), into `spaces` and `texts` from `*count`, at most
+// BUSTER_CHECK_DRIVER_SPACE_MACROS; `*unreadable` set where an operand isn't such a constant (`address_space(1+0)`).
+static void check_driver_space_list(const Parser* parser, Preprocessor* pp, uint32_t t, uint32_t close, uint32_t* spaces, String8* texts, uint32_t* count,
+                                    bool* unreadable, Arena* scratch)
+{
+    for (uint32_t a = t + 2; close < parser->tokens.count && a + 3 < close; a += 1)
+    {
+        const String8 name = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[a]) : (String8){ 0 };
+        const bool space = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                           (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+        const String8 number = space && parser->tokens.kinds[a + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[a + 2] == PARSE_KIND_NUMBER &&
+                               parser->tokens.kinds[a + 3] == PARSE_KIND_R_PAREN ? check_semantic_token(parser, pp, a + 2, scratch) : (String8){ 0 };
+        char digits[24] = { 0 };
+        const bool read = number.length != 0 && number.length < sizeof(digits);
+        if (read)
+        {
+            memcpy(digits, number.pointer, number.length);
+        }
+        char* end = NULL;
+        const unsigned long long value = read ? strtoull(digits, &end, 0) : 0;
+        // An integer suffix (`1u`, `1UL`) is the same constant.
+        while (read && end != NULL && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L'))
+        {
+            end += 1;
+        }
+        const bool constant = read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET;
+        // Any other operand (`1+0`, a named constant) may write any space directly: no macro names one then.
+        *unreadable |= space && !constant;
+        if (constant && *count < BUSTER_CHECK_DRIVER_SPACE_MACROS)
+        {
+            spaces[*count] = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
+            texts[*count] = check_driver_attribute_macro(parser, pp, t, close);
+            *count += 1;
+        }
+    }
+}
+
+// Whether token `t` is an identifier spelling address_space (or __address_space__).
+static bool check_driver_space_name(const Parser* parser, Preprocessor* pp, uint32_t t)
+{
+    const String8 name = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
+    return (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) || (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+}
+
 // The macros that write the unit's target address spaces (#1447), as clang's MacroQualifiedType names a type whose
 // attribute list one macro's expansion wrote (`#define AS1 __attribute__((address_space(1)))`, `'AS1 int *'`,
-// check_driver_attribute_macro). clang names each declaration's own spelling; a space this unit writes both ways, or
-// with two macros, keeps its attribute spelled out, and every space does where an operand isn't an integer constant
-// this reads (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, with the
-// pass's other spelling rows (check_driver_spelling_ready).
+// check_driver_attribute_macro). These are the fallback for a type no declaration's own spelling describes
+// (check_driver_declared_spaces gives a declaration's): a space this unit writes both ways, or with two macros, keeps its
+// attribute spelled out, and every space does where an operand isn't an integer constant this reads
+// (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, with the pass's other
+// spelling rows (check_driver_spelling_ready).
 static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
 {
     uint32_t* spaces = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS);
@@ -352,9 +401,7 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
     bool written = false;
     for (uint32_t t = 0; valid && !written && t < parser->tokens.count; t += 1)
     {
-        const String8 name = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
-        written = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
-                  (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+        written = check_driver_space_name(parser, pp, t);
     }
     const bool history = written && pp_history_ensure(pp);
     uint32_t count = 0;
@@ -364,49 +411,31 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
     {
         const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
                                BUSTER_CHECK_NONE;
-        for (uint32_t a = t + 2; close < token_count && a + 3 < close; a += 1)
+        uint32_t list_spaces[BUSTER_CHECK_DRIVER_SPACE_MACROS];
+        String8 list_texts[BUSTER_CHECK_DRIVER_SPACE_MACROS];
+        uint32_t listed = 0;
+        if (close < token_count)
         {
-            const String8 name = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[a]) : (String8){ 0 };
-            const bool space = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
-                               (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
-            const String8 number = space && parser->tokens.kinds[a + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[a + 2] == PARSE_KIND_NUMBER &&
-                                   parser->tokens.kinds[a + 3] == PARSE_KIND_R_PAREN ? check_semantic_token(parser, pp, a + 2, scratch) : (String8){ 0 };
-            char digits[24] = { 0 };
-            const bool read = number.length != 0 && number.length < sizeof(digits);
-            if (read)
+            check_driver_space_list(parser, pp, t, close, list_spaces, list_texts, &listed, &unreadable, scratch);
+        }
+        for (uint32_t k = 0; k < listed; k += 1)
+        {
+            uint32_t entry = count;
+            for (uint32_t i = 0; entry == count && i < count; i += 1)
             {
-                memcpy(digits, number.pointer, number.length);
+                entry = spaces[i] == list_spaces[k] ? i : count;
             }
-            char* end = NULL;
-            const unsigned long long value = read ? strtoull(digits, &end, 0) : 0;
-            // An integer suffix (`1u`, `1UL`) is the same constant.
-            while (read && end != NULL && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L'))
+            if (entry == count && count < BUSTER_CHECK_DRIVER_SPACE_MACROS)
             {
-                end += 1;
+                spaces[count] = list_spaces[k];
+                texts[count] = list_texts[k];
+                mixed[count] = list_texts[k].length == 0;
+                count += 1;
             }
-            const bool constant = read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET;
-            // Any other operand (`1+0`, a named constant) may write any space directly: no macro names one then.
-            unreadable |= space && !constant;
-            if (constant)
+            else if (entry < count)
             {
-                const uint32_t word = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
-                const String8 text = check_driver_attribute_macro(parser, pp, t, close);
-                uint32_t entry = count;
-                for (uint32_t i = 0; entry == count && i < count; i += 1)
-                {
-                    entry = spaces[i] == word ? i : count;
-                }
-                if (entry == count && count < BUSTER_CHECK_DRIVER_SPACE_MACROS)
-                {
-                    spaces[count] = word;
-                    texts[count] = text;
-                    mixed[count] = text.length == 0;
-                    count += 1;
-                }
-                else if (entry < count)
-                {
-                    mixed[entry] |= text.length != texts[entry].length || (text.length != 0 && memcmp(text.pointer, texts[entry].pointer, text.length) != 0);
-                }
+                const String8 text = list_texts[k];
+                mixed[entry] |= text.length != texts[entry].length || (text.length != 0 && memcmp(text.pointer, texts[entry].pointer, text.length) != 0);
             }
         }
     }
@@ -420,6 +449,7 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
     spell->space_macro_spaces = spaces;
     spell->space_macro_texts = texts;
     spell->space_macro_count = unreadable ? 0 : kept;
+    spell->space_unreadable = unreadable;
     return valid;
 }
 
@@ -1401,6 +1431,112 @@ static uint32_t check_driver_operand_declaration(const CheckInput* input, const 
         walking = op == CHECK_OP_CONVERT || op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT;
         node = walking ? graph->operand0[node] : node;
     }
+    return result;
+}
+
+// The spelling's address space macros while one declaration's type prints (#1447 item 2, check_driver_space_scope).
+typedef struct CheckDriverSpaceScope CheckDriverSpaceScope;
+struct CheckDriverSpaceScope
+{
+    uint32_t* spaces;
+    String8* texts;
+    uint32_t count;
+    bool scoped;
+};
+
+// Narrows the pass's address space macros (check_driver_space_macros) to declaration `name`'s own spelling while its
+// type prints, as clang's MacroQualifiedType names each declaration's: a space its declaration writes by a macro prints
+// by that macro (`ASA int *` where another declaration's `AS1` writes the same space), one it writes directly prints
+// spelled out, and a space it doesn't write prints as the unit's macros give it. The previous macros go into `*saved`,
+// which check_driver_space_restore puts back. Nothing changes where `name` is none, the unit writes no space, or an
+// operand isn't an integer constant.
+static void check_driver_space_scope(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, CheckWarningSpelling* spell,
+                                     uint32_t name, CheckDriverSpaceScope* saved, Arena* scratch)
+{
+    *saved = (CheckDriverSpaceScope){ 0 };
+    const bool ready = name < parser->tokens.count && name < input->token_count && check_driver_spelling_ready(parser, pp, input, types, spell, scratch) &&
+                       spell->space_macro_spaces != NULL && !spell->space_unreadable && pp_history_ensure(pp);
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    if (ready)
+    {
+        check_driver_place_extent(parser, name, &begin, &end);
+    }
+    uint32_t spaces[BUSTER_CHECK_DRIVER_SPACE_MACROS];
+    String8 texts[BUSTER_CHECK_DRIVER_SPACE_MACROS];
+    uint32_t count = 0;
+    bool unreadable = false;
+    for (uint32_t t = begin; ready && t + 1 < end; t += 1)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
+                               BUSTER_CHECK_NONE;
+        if (close < parser->tokens.count)
+        {
+            check_driver_space_list(parser, pp, t, close, spaces, texts, &count, &unreadable, scratch);
+            t = close;
+        }
+    }
+    uint32_t* merged = count != 0 && !unreadable ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS * 2) : NULL;
+    String8* merged_texts = merged != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, BUSTER_CHECK_DRIVER_SPACE_MACROS * 2) : NULL;
+    if (merged_texts != NULL)
+    {
+        uint32_t kept = 0;
+        // The declaration's own: its first spelling of each space, a macro's kept, a direct one's spelled out.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            bool first = true;
+            for (uint32_t k = 0; k < i; k += 1)
+            {
+                first &= spaces[k] != spaces[i];
+            }
+            if (first && texts[i].length != 0)
+            {
+                merged[kept] = spaces[i];
+                merged_texts[kept] = texts[i];
+                kept += 1;
+            }
+        }
+        // Then the unit's, for the spaces it doesn't write.
+        for (uint32_t u = 0; u < spell->space_macro_count; u += 1)
+        {
+            bool written = false;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                written |= spaces[i] == spell->space_macro_spaces[u];
+            }
+            if (!written)
+            {
+                merged[kept] = spell->space_macro_spaces[u];
+                merged_texts[kept] = spell->space_macro_texts[u];
+                kept += 1;
+            }
+        }
+        *saved = (CheckDriverSpaceScope){ .spaces = spell->space_macro_spaces, .texts = spell->space_macro_texts, .count = spell->space_macro_count, .scoped = true };
+        spell->space_macro_spaces = merged;
+        spell->space_macro_texts = merged_texts;
+        spell->space_macro_count = kept;
+    }
+}
+
+static void check_driver_space_restore(CheckWarningSpelling* spell, const CheckDriverSpaceScope* saved)
+{
+    if (saved->scoped)
+    {
+        spell->space_macro_spaces = saved->spaces;
+        spell->space_macro_texts = saved->texts;
+        spell->space_macro_count = saved->count;
+    }
+}
+
+// A warning operand's type (check_driver_warning_type) with its declaration's own address space macros
+// (check_driver_space_scope, #1447 item 2): `declaration` the operand's (check_driver_operand_declaration).
+static String8 check_driver_warning_type_declared(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                  CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling, uint32_t declaration)
+{
+    CheckDriverSpaceScope saved;
+    check_driver_space_scope(parser, pp, input, types, spell, declaration, &saved, scratch);
+    const String8 result = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
+    check_driver_space_restore(spell, &saved);
     return result;
 }
 

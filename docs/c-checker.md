@@ -9155,10 +9155,15 @@ arguments against the function. The checker now gives these as clang does.
   takes it or once it took it, as the NEON vectors' (#1447). On a tag's own
   list or a statement they are clang's errors.
 
-  What differs from clang: Clang names a type by the macro
-  that wrote its space (MacroQualifiedType: `'AS1 int *'`), declaration by
-  declaration. Here a space prints by its macro only where one macro writes it
-  throughout the unit (`check_driver_space_macros`, #1447). Its attribute is
+  Clang names a type by the macro that wrote its space (MacroQualifiedType:
+  `'AS1 int *'`), declaration by declaration. Here an address space error's
+  operands and a failed conversion's source and target do the same: the
+  macros their own declaration writes (`check_driver_space_scope`, #1447
+  item 2), so `ASA int *b` prints `'ASA int *'` where `AS1` writes the same
+  space elsewhere, and a space it writes directly is spelled out.
+  What differs from clang: other types, and a space their declaration doesn't
+  write (a typedef's), print by the macro only where one macro writes that
+  space throughout the unit (`check_driver_space_macros`). Its attribute is
   spelled out in three cases: a space the unit writes both ways or with two
   macros (`address_space(1u)` is space 1 written directly), every space where
   an operand isn't an integer constant (`address_space(1+0)`), and
