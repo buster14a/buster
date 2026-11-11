@@ -286,7 +286,7 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
         check_lower_complex_conversion(writer, computed, plan->value_type);
         if (stored_complex)
         {
-            check_lower_copy(writer, type_size(writer->program->types, plan->value_type), false, false);
+            check_lower_copy(writer, type_size(writer->program->types, plan->value_type), false, false, 0);
         }
         else
         {
@@ -553,11 +553,11 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
             // A generic compare-exchange's desired value is where its third argument points.
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[2]);
-            check_lower_copy(writer, plan->size, false, false);
+            check_lower_copy(writer, plan->size, false, false, 0);
         }
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
-        check_lower_copy(writer, type_size(types, plan->value_type), false, false);
+        check_lower_copy(writer, type_size(types, plan->value_type), false, false, 0);
         check_lower_atomic_call(writer, plan, BUSTER_CHECK_ATOMIC_COMPARE);
         const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
         const uint32_t end = check_lower_label(writer);
@@ -565,7 +565,7 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, end);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
-        check_lower_copy(writer, type_size(types, plan->value_type), false, false);
+        check_lower_copy(writer, type_size(types, plan->value_type), false, false, 0);
         check_lower_place(writer, end);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
         check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
@@ -578,14 +578,14 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
-            check_lower_copy(writer, plan->size, false, false);
+            check_lower_copy(writer, plan->size, false, false, 0);
         }
         check_lower_atomic_call(writer, plan, plan->operation);
         if (plan->operation != BUSTER_CHECK_ATOMIC_STORE)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[plan->operation == BUSTER_CHECK_ATOMIC_LOAD ? 1 : 2]);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->result);
-            check_lower_copy(writer, plan->size, false, false);
+            check_lower_copy(writer, plan->size, false, false, 0);
         }
     }
     else
@@ -686,7 +686,7 @@ static void check_lower_atomic_store_operand(CheckLowerWriter* writer, uint32_t 
     check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_CLEAR, .type = (TypeId)bytes, .value = buffer});
 }
 
-static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, bool builtin, bool discard)
+static void check_lower_atomic_plan(CheckLowerWriter* writer, uint32_t node, bool builtin, bool discard)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -821,5 +821,20 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         }
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, plan->address);
         check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_EXPRESSION, .node = target, .address = true});
+    }
+}
+
+// An atomic operation's plan (check_lower_atomic_plan), where the function's plans have room: a node that a dump's calls or
+// os_log's items evaluate again takes one each time (CheckLowerInitializers.extra_atomics, #1842), which the shared
+// capacity counts; past it the lowering fails for its resources rather than write past the table.
+static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, bool builtin, bool discard)
+{
+    if (writer->atomic_count >= writer->atomic_room)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    else
+    {
+        check_lower_atomic_plan(writer, node, builtin, discard);
     }
 }

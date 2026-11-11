@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# Per-VM setup. Release acquisition belongs to prepare-hosted-tools; a missing
-# handoff must not make each shard download independently.
+# Per-VM setup. Acquisition belongs to prepare-hosted-tools, the release inputs'
+# and the apt packages' alike; a missing handoff must not make each shard
+# download independently.
 set -euo pipefail
 : "${RUNNER_TEMP:?A private runner temporary directory is required}"
 : "${BUSTER_HOSTED_RELEASES:?Run the hosted-tools handoff action before setup}"
+: "${BUSTER_HOSTED_OFFLINE:?Run the hosted-tools handoff action before setup: it restores the offline inputs}"
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
 . /etc/os-release
 test "$VERSION_ID" = 26.04
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 bash "$here/hosted-release.sh" verify "$BUSTER_HOSTED_RELEASES"
-sudo apt-get update
-sudo apt-get install --yes --no-install-recommends gcc g++ binutils libc6-dev \
-    gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev
+# The packages (hosted-offline.sh's list) come from the closure the preparation
+# job downloaded, with no apt-get update and no download (#2275): a resolver
+# outage on Ubuntu's mirror names failed every hosted job for over half an hour
+# on 2026-11-11. The preparation's own apt-get keeps the retries and the
+# DNS-over-HTTPS pins this script had for it.
+bash "$here/hosted-offline.sh" apt-install "$BUSTER_HOSTED_OFFLINE"
 root="$RUNNER_TEMP/buster-hosted-tools"
 start=$SECONDS
 bash "$here/install-hosted-tools.sh" "$root"

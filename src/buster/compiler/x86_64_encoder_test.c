@@ -1967,6 +1967,28 @@ static const KnownEncoding x86_known_encodings[] = {
       9,
       { 0x65, 0x62, 0xd1, 0xfe, 0x48, 0x6f, 0x44, 0xc1, 0x01 } },
     { { .form = X86_FORM_NOTRACK_JMP_R64, .rm = X86_REGISTER_RAX }, 3, { 0x3e, 0xff, 0xe0 } },
+    // SS's override (address space 258, #1447), each as clang 23 encodes it (`clang -c` of `movq %ss:(%rax), %rax` and the
+    // rest): 36 first, before 66, F0 and REX, and after FWAIT's 9B.
+    { { .form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x36, 0x48, 0x8b, 0x00 } },
+    { { .form = X86_FORM_MOV_RM16_R16 + BUSTER_X86_FORM_SS, .reg = X86_REGISTER_RSI, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x36, 0x66, 0x89, 0x37 } },
+    { { .form = X86_FORM_MOV_RM8_IMM8 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 1 }, 4, { 0x36, 0xc6, 0x07, 0x01 } },
+    { { .form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_SS, .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RBX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x100 },
+      9,
+      { 0x36, 0x48, 0x8b, 0x94, 0xcb, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32 + BUSTER_X86_FORM_SS, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x36, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32 + BUSTER_X86_FORM_SS, .mode = BUSTER_X86_MEMORY_ABSOLUTE }, 8, { 0x36, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_LOCK_ADD_M16_R16 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x36, 0x66, 0xf0, 0x01, 0x00 } },
+    { { .form = X86_FORM_INC_RM8 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x36, 0xfe, 0x00 } },
+    { { .form = X86_FORM_XCHG_RM32_R32 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x36, 0x87, 0x07 } },
+    { { .form = X86_FORM_FLD_M80 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x36, 0xdb, 0x28 } },
+    { { .form = X86_FORM_FSTSW_M16 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x36, 0xdd, 0x38 } },
+    { { .form = X86_FORM_VMOVSS_X_M32 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x36, 0xc5, 0xfa, 0x10, 0x07 } },
+    { { .form = X86_FORM_VMOVAPS_Y_YM256 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x36, 0xc5, 0xfc, 0x28, 0x07 } },
+    { { .form = X86_FORM_VMOVDQU64_Z_ZM512 + BUSTER_X86_FORM_SS, .rm = X86_REGISTER_R9, .index = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x40 },
+      9,
+      { 0x36, 0x62, 0xd1, 0xfe, 0x48, 0x6f, 0x44, 0xc1, 0x01 } },
+    { { .form = X86_FORM_VMOVNTDQ_M256_Y + BUSTER_X86_FORM_SS, .reg = 9, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x36, 0xc5, 0x7d, 0xe7, 0x08 } },
+    { { .form = X86_FORM_PMOVZXBD_X_XM32 + BUSTER_X86_FORM_SS, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x36, 0x66, 0x0f, 0x38, 0x31, 0x08 } },
     // SSE to SSE4.2: psllw xmm9, 3 (a /digit with REX.B); pslldq xmm1, 4; pextrw eax, xmm1, 3 and pextrw word ptr [rax],
     // xmm1, 3 (SSE2's register and SSE4.1's memory form); pinsrw xmm1, word ptr [rax], 3; extrq xmm1, 3, 4 and insertq
     // xmm1, xmm2, 3, 4 (two immediates); blendvpd xmm9, xmmword ptr [rax], xmm0; pcmpestriq xmm0, xmm1, 5 (66, then

@@ -3,7 +3,10 @@
 Every merge and direct push to `main` triggers hosted correctness against
 that push's exact `github.sha`, including documentation-only changes (#1271).
 In the nightly mode it runs the plain rows: both host architectures, plain
-O3, four shards each (#2057, the owner's choice on 2026-11-10). The sanitizer
+O3, four shards each (#2057, the owner's choice on 2026-11-10). Every row
+runs SQLite's pinned Tcl subset; the whole suite (`hosted-correctness.yml`'s
+`sqlite-full`) runs on the nightly and dispatched runs alone, not on pushes
+(#2334). The sanitizer
 rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
 until the merge queue (#1430) runs the complete suite before each merge and
 pushes to main run no checks at all. Before the nightly mode, which has no
@@ -121,8 +124,11 @@ compares deterministic probe objects and executables, once for each host path:
 scalar path, #1193). It is not part of the required correctness or benchmark
 path; see [the self-host guide](self-hosting-ci.md).
 
-The hosted tests fetch the frozen corpus from the
+The frozen corpus comes from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).
+A run's preparation job fetches it once, with the apt packages, the baseline
+runtime and the c-testsuite and SQLite mirrors, and the hosted tests read them
+all with no network ([Offline inputs](hosted-toolchain.md#offline-inputs-2275)).
 `tools/ci/fetch-corpus.sh` checks the archive digest, original manifest digests,
 every input byte, file counts and file kinds. The archive retains source/header
 notices, package provenance and component license texts. Historical paths and
@@ -233,8 +239,9 @@ The hosted selector job runs that test before any hardware admission, and the
 selector's own policy mutants pin the draft guard and ready/draft triggers.
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
-fast, and its tests wait for the agent-guide size and DCO hook checks, which finish
-within the `changes` job's time, and don't start when either fails. Pushes
+fast, and its tests wait for the policy job (`Measurement storage policy`: the
+measurement storage, agent-guide size and DCO hook checks in one job, #2334), which
+finishes about when the `changes` job does, and don't start when it fails. Pushes
 to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
@@ -421,8 +428,11 @@ uploading its name. The race fixture (below) disproved it on 2026-11-11 (run
 uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
 name. So no candidate claims anything. Each draw's **collector**
 (`collect-1` to `collect-3`, and the verdict's reading after the last) starts
-with its draw and polls the run every 5 s, through the artifacts and jobs APIs
-(`actions: read`). It waits until as many candidates qualified as items are
+with its draw and polls the run every 15 s, through the artifacts and jobs APIs
+(`actions: read`). Those calls share the repository's hourly REST limit with
+every other run, so a failed listing doubles the pause, up to 60 s, and the
+jobs fetch `tools/ci/vector-draw.sh` by a one-file checkout rather than the
+contents API (#2309). It waits until as many candidates qualified as items are
 missing, or every candidate has published its verdict or ended, at most 25
 minutes. Then it assigns: the qualifying candidates, by their numbers, get the
 missing items, the costliest first (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1

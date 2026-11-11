@@ -33,6 +33,30 @@ typedef enum CheckPackAlignWarning
     CHECK_PACK_ALIGN_RESET_EMPTY,
 } CheckPackAlignWarning;
 
+// A `#pragma pack` warning's message (#1849), an event's payload.name: clang's parser's (HandlePragmaPack) for a
+// malformed directive, which is ignored, at the token it names or past the last one; Sema's (ActOnPragmaPack) at the
+// directive's `pack`; and one at the unit's end for each push left open (DiagnoseUnterminatedPragmaAlignPack).
+typedef enum CheckPackMessage
+{
+    CHECK_PACK_MESSAGE_ALIGN,
+    CHECK_PACK_MESSAGE_EXPECTED_LPAREN,
+    CHECK_PACK_MESSAGE_EXPECTED_RPAREN,
+    CHECK_PACK_MESSAGE_INVALID_ACTION,
+    CHECK_PACK_MESSAGE_MALFORMED,
+    CHECK_PACK_MESSAGE_EXTRA,
+    CHECK_PACK_MESSAGE_INVALID_ALIGNMENT,
+    CHECK_PACK_MESSAGE_SHOW,
+    CHECK_PACK_MESSAGE_NAMED_POP,
+    CHECK_PACK_MESSAGE_EMPTY_POP,
+    CHECK_PACK_MESSAGE_UNTERMINATED,
+    CHECK_PACK_MESSAGE_INCLUDE,
+} CheckPackMessage;
+
+// An unterminated push's note (#1849): the event's payload.token is the source of the record that set the current value,
+// or one of these.
+#define BUSTER_CHECK_PACK_NO_NOTE UINT32_MAX
+#define BUSTER_CHECK_PACK_UNLOCATED_NOTE (UINT32_MAX - 1u)
+
 enum
 {
     CHECK_PACK_WARNING_SYNTAX = 1u << 0,
@@ -76,6 +100,12 @@ struct CheckInputPackPragma
     bool custom_after;
     uint32_t diagnostic_source;
     uint32_t diagnostic_location;
+    // A `#pragma pack`'s parser warning (CheckPackMessage, #1849), at diagnostic_source or diagnostic_location as an
+    // align one's; the record that set the current value when this one ran (clang's CurrentPragmaLocation, a push's
+    // saved one), BUSTER_CHECK_NONE for none; and whether it is a push left open at the unit's end.
+    uint8_t syntax_warning;
+    bool unterminated;
+    uint32_t current_before;
 };
 
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
@@ -87,6 +117,22 @@ struct CheckInputPackPragmas
     uint32_t unmatched_pushes;
     uint8_t final_log2;
     bool final_custom;
+    // The record that set the current value last (clang's CurrentPragmaLocation), BUSTER_CHECK_NONE for none (#1849).
+    uint32_t current;
+    // The inclusions that leave the value another than they found it (#1849, CheckPackInclude), in the order they end.
+    struct CheckPackInclude* includes;
+    uint32_t include_count;
+};
+
+// An inclusion that changes the pack value (#1849, clang's ChangedStateAtExit): where it was included (the file name's
+// location), where its output ends, and the source of the directive that set the value at its end, or a
+// BUSTER_CHECK_PACK_* note sentinel.
+typedef struct CheckPackInclude CheckPackInclude;
+struct CheckPackInclude
+{
+    uint32_t location;
+    uint32_t exit;
+    uint32_t note;
 };
 
 typedef struct CheckPackLabel CheckPackLabel;
@@ -163,7 +209,23 @@ static void check_input_pack_number(CheckInputReader* reader, CheckInputPackPrag
     }
 }
 
-static CheckInputPackPragma check_input_pack_record(CheckInputReader* reader, uint32_t pragma, uint32_t source, uint32_t end, uint32_t token)
+// The source location just past the token at `source` (#1849), where clang's parser places a warning about the end of
+// the directive's line: a name's or a number's spelling, or a punctuator's one byte.
+static uint32_t check_input_pack_after(CheckInputReader* reader, uint32_t source)
+{
+    const PPTokens* output = &reader->pp->output;
+    const uint8_t kind = output->kinds[source];
+    const bool named = check_input_pragma_name(reader, source) != 0;
+    const uint32_t length = named ? intern_length(reader->pp->table, output->values[source]) :
+                            kind == C_TOKEN_NUMERIC_CONSTANT && output->values[source] > output->locations[source] ? output->values[source] - output->locations[source] :
+                                                                                                                    1;
+    return output->locations[source] + length;
+}
+
+// `#pragma pack`'s record, as clang's parser reads it (HandlePragmaPack): `()` resets, `(N)` sets, `(show)`, and
+// `(push|pop[, label][, N])`. A malformed one is ignored with the parser's warning (#1849, CheckPackMessage), at the
+// token it names or past the line's last one.
+static CheckInputPackPragma check_input_pack_record(CheckInputReader* reader, uint32_t pragma, uint32_t source, uint32_t end, uint32_t token, uint64_t** macros)
 {
     const PPTokens* output = &reader->pp->output;
     CheckInputPackPragma record =
@@ -176,70 +238,77 @@ static CheckInputPackPragma check_input_pack_record(CheckInputReader* reader, ui
         .alignment_source = BUSTER_CHECK_NONE,
         .matching_push = BUSTER_CHECK_NONE,
         .previous_same = BUSTER_CHECK_NONE,
+        .current_before = BUSTER_CHECK_NONE,
         .handled = 1,
+        .operation = CHECK_PACK_RESET,
     };
     uint32_t cursor = source + 3;
-    bool syntax = cursor < end && output->kinds[cursor] == C_TOKEN_L_PAREN;
-    cursor += syntax;
-    if (syntax && cursor < end && output->kinds[cursor] == C_TOKEN_R_PAREN)
-    {
-        record.operation = CHECK_PACK_RESET;
-    }
-    else if (syntax && cursor < end && check_input_pack_number_kind(output->kinds[cursor]))
+    uint8_t warning = cursor < end && output->kinds[cursor] == C_TOKEN_L_PAREN ? CHECK_PACK_MESSAGE_ALIGN : CHECK_PACK_MESSAGE_EXPECTED_LPAREN;
+    cursor += warning == CHECK_PACK_MESSAGE_ALIGN;
+    if (warning == CHECK_PACK_MESSAGE_ALIGN && cursor < end && check_input_pack_number_kind(output->kinds[cursor]))
     {
         record.operation = CHECK_PACK_SET;
         record.has_alignment = true;
         record.alignment_source = cursor++;
     }
-    else if (syntax && cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER)
+    else if (warning == CHECK_PACK_MESSAGE_ALIGN && cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER)
     {
         record.operation = pp_token_is_name(reader->pp, output, cursor, end, "push") ? CHECK_PACK_PUSH :
                            pp_token_is_name(reader->pp, output, cursor, end, "pop") ? CHECK_PACK_POP :
                            pp_token_is_name(reader->pp, output, cursor, end, "show") ? CHECK_PACK_SHOW : CHECK_PACK_UNKNOWN;
-        record.handled = record.operation == CHECK_PACK_UNKNOWN ? 0 : 1;
-        cursor += 1;
+        warning = record.operation == CHECK_PACK_UNKNOWN ? CHECK_PACK_MESSAGE_INVALID_ACTION : warning;
+        cursor += warning == CHECK_PACK_MESSAGE_ALIGN;
         if ((record.operation == CHECK_PACK_PUSH || record.operation == CHECK_PACK_POP) && cursor < end && output->kinds[cursor] == C_TOKEN_COMMA)
         {
             cursor += 1;
-            if (cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER)
+            if (cursor < end && check_input_pack_number_kind(output->kinds[cursor]))
+            {
+                record.has_alignment = true;
+                record.alignment_source = cursor++;
+            }
+            else if (cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER)
             {
                 record.name = output->values[cursor++];
                 if (cursor < end && output->kinds[cursor] == C_TOKEN_COMMA)
                 {
                     cursor += 1;
-                    record.has_alignment = true;
+                    warning = cursor < end && check_input_pack_number_kind(output->kinds[cursor]) ? warning : CHECK_PACK_MESSAGE_MALFORMED;
+                    record.has_alignment = warning == CHECK_PACK_MESSAGE_ALIGN;
+                    record.alignment_source = warning == CHECK_PACK_MESSAGE_ALIGN ? cursor++ : BUSTER_CHECK_NONE;
                 }
             }
             else
             {
-                record.has_alignment = true;
-            }
-            if (record.has_alignment)
-            {
-                if (cursor < end && check_input_pack_number_kind(output->kinds[cursor]))
-                {
-                    record.alignment_source = cursor++;
-                }
-                else
-                {
-                    record.handled = cursor < end && output->kinds[cursor] == C_TOKEN_RAW_IDENTIFIER ? 0 : record.handled;
-                    syntax = false;
-                }
+                warning = CHECK_PACK_MESSAGE_MALFORMED;
             }
         }
     }
-    else
+    if (warning == CHECK_PACK_MESSAGE_ALIGN && (cursor >= end || output->kinds[cursor] != C_TOKEN_R_PAREN))
     {
-        syntax = false;
+        warning = CHECK_PACK_MESSAGE_EXPECTED_RPAREN;
     }
-    syntax = syntax && cursor < end && output->kinds[cursor] == C_TOKEN_R_PAREN && cursor + 1 == end;
-    if (!syntax)
+    cursor += warning == CHECK_PACK_MESSAGE_ALIGN;
+    if (warning == CHECK_PACK_MESSAGE_ALIGN && cursor < end)
     {
+        warning = CHECK_PACK_MESSAGE_EXTRA;
+    }
+    if (warning != CHECK_PACK_MESSAGE_ALIGN)
+    {
+        // No annotation: the directive is ignored, wherever it is.
         record.warnings |= CHECK_PACK_WARNING_SYNTAX;
+        record.syntax_warning = warning;
+        record.diagnostic_source = cursor < end ? cursor : end - 1;
+        record.diagnostic_location = cursor < end ? 0 : check_input_pack_after(reader, end - 1);
     }
-    else if (record.handled != 0 && record.has_alignment)
+    else if (record.has_alignment)
     {
         check_input_pack_number(reader, &record);
+    }
+    // A raw client's operand that a macro spells is left unhandled, as an align one's: clang's parser reads its expansion.
+    for (uint32_t s = source + 3; !reader->pp->options.semantic_pragmas && record.handled != 0 && s < end; s += 1)
+    {
+        const IdentId name = check_input_pragma_name(reader, s);
+        record.handled = name != 0 && check_input_pragma_macro(reader, macros, name) ? 0 : record.handled;
     }
     return record;
 }
@@ -513,6 +582,7 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
             *history = (CheckInputPackPragmas)
             {
                 .records = records,
+                .current = BUSTER_CHECK_NONE,
             };
             memset(labels, 0, label_capacity * sizeof(*labels));
             previous_end = 0;
@@ -528,12 +598,13 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
                 if (range && (align || pp_token_is_name(reader->pp, &reader->pp->output, source + 2, end, "pack")))
                 {
                     CheckInputPackPragma record = align ? check_input_pack_align_record(reader, pragma, source, end, token, &macros) :
-                                                          check_input_pack_record(reader, pragma, source, end, token);
+                                                          check_input_pack_record(reader, pragma, source, end, token, &macros);
                     memset(column + written, history->final_log2, token - written);
                     written = token;
                     record.depth_before = history->unmatched_pushes;
                     record.pack_before = history->final_log2;
                     record.custom_before = history->final_custom;
+                    record.current_before = history->current;
                     if (record.handled == 1 && record.warnings == 0 && record.operation == CHECK_PACK_ALIGN_RESET)
                     {
                         // clang's reset: a pop of the stack's top, a reset of a value other than the default, or its warning.
@@ -572,6 +643,7 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
                                     const uint32_t depth = records[target].depth_before;
                                     history->final_log2 = records[target].pack_before;
                                     history->final_custom = records[target].custom_before;
+                                    history->current = records[target].current_before;
                                     while (history->unmatched_pushes > depth)
                                     {
                                         const CheckInputPackPragma* popped = &records[stack[--history->unmatched_pushes]];
@@ -587,6 +659,7 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
                         {
                             history->final_log2 = 0;
                             history->final_custom = false;
+                            history->current = history->count;
                         }
                         else if (record.operation == CHECK_PACK_SHOW)
                         {
@@ -598,6 +671,7 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
                             // A pack value set is clang's pack attribute; options align's mode is the default's alone
                             // for native and power (#1849).
                             history->final_custom = !record.native_mode;
+                            history->current = history->count;
                         }
                     }
                     record.depth_after = history->unmatched_pushes;
@@ -610,6 +684,11 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
             if (valid)
             {
                 memset(column + written, history->final_log2, (uint64_t)token_count + 1 - written);
+                // The pushes left open at the unit's end, which clang warns about there (#1849).
+                for (uint32_t k = 0; k < history->unmatched_pushes; k += 1)
+                {
+                    records[stack[k]].unterminated = true;
+                }
             }
         }
     }
@@ -645,8 +724,9 @@ static const CheckInputPackPragma* check_input_pack_warning(const CheckInput* in
     return result;
 }
 
-// clang's -Wignored-pragmas message of a `#pragma options align` or `#pragma align` record's warning (#1849).
-static const char* check_input_pack_align_message(const CheckInputPackPragma* record)
+// clang's message of a `#pragma pack`, `#pragma options align` or `#pragma align` record's warning (#1849): an align
+// one's own (CHECK_PACK_MESSAGE_ALIGN), or the event's CheckPackMessage (payload.name), with its text in `scratch`.
+static const char* check_input_pack_message(const CheckInputPackPragma* record, const CheckWarningEvent* event, Arena* scratch)
 {
     static const char* const options[] = {
         [CHECK_PACK_ALIGN_EXPECTED_ALIGN] = "expected 'align' following '#pragma options' - ignored",
@@ -664,12 +744,187 @@ static const char* check_input_pack_align_message(const CheckInputPackPragma* re
         [CHECK_PACK_ALIGN_EXTRA] = "extra tokens at end of '#pragma align' - ignored",
         [CHECK_PACK_ALIGN_RESET_EMPTY] = "#pragma options align=reset failed: stack empty",
     };
+    static const char* const pack[] = {
+        [CHECK_PACK_MESSAGE_EXPECTED_LPAREN] = "missing '(' after '#pragma pack' - ignoring",
+        [CHECK_PACK_MESSAGE_EXPECTED_RPAREN] = "missing ')' after '#pragma pack' - ignoring",
+        [CHECK_PACK_MESSAGE_INVALID_ACTION] = "unknown action for '#pragma pack' - ignored",
+        [CHECK_PACK_MESSAGE_MALFORMED] = "expected integer or identifier in '#pragma pack' - ignored",
+        [CHECK_PACK_MESSAGE_EXTRA] = "extra tokens at end of '#pragma pack' - ignored",
+        [CHECK_PACK_MESSAGE_INVALID_ALIGNMENT] = "expected #pragma pack parameter to be '1', '2', '4', '8', or '16'",
+        [CHECK_PACK_MESSAGE_NAMED_POP] = "specifying both a name and alignment to 'pop' is undefined",
+        [CHECK_PACK_MESSAGE_EMPTY_POP] = "#pragma pack(pop, ...) failed: stack empty",
+        [CHECK_PACK_MESSAGE_UNTERMINATED] = "unterminated '#pragma pack (push, ...)' at end of file",
+        [CHECK_PACK_MESSAGE_INCLUDE] = "the current #pragma pack alignment value is modified in the included file",
+    };
+    const uint32_t kind = event->payload.name;
     const uint8_t warning = record->align_warning;
-    return warning != CHECK_PACK_ALIGN_NONE && warning <= CHECK_PACK_ALIGN_RESET_EMPTY ? (record->options ? options : align)[warning] : NULL;
+    // pack(show)'s value is the current one, 8 for the default (Sema::ActOnPragmaPack's).
+    const uint32_t value = record->pack_before != 0 ? UINT32_C(1) << (record->pack_before - 1) : 8;
+    char* shown = kind == CHECK_PACK_MESSAGE_SHOW ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, 48) : NULL;
+    if (shown != NULL)
+    {
+        snprintf(shown, 48, "value of #pragma pack(show) == %u", value);
+    }
+    return kind == CHECK_PACK_MESSAGE_SHOW ? shown :
+           kind != CHECK_PACK_MESSAGE_ALIGN ? (kind <= CHECK_PACK_MESSAGE_INCLUDE ? pack[kind] : NULL) :
+           warning != CHECK_PACK_ALIGN_NONE && warning <= CHECK_PACK_ALIGN_RESET_EMPTY ? (record->options ? options : align)[warning] :
+                                                                                         NULL;
 }
 
-// The warnings of `#pragma options align` and `#pragma align` (#1849), appended to the lexical pragma facts after the
-// unknown-pragma collector has published its view, as ms_struct's are.
+// Whether a pack event is Sema's, after the directive's annotation is parsed or at the unit's end (#1849), rather than the
+// parser's at the directive.
+static bool check_input_pack_semantic(const CheckInputPackPragma* record, const CheckWarningEvent* event)
+{
+    return (event->payload.name >= CHECK_PACK_MESSAGE_INVALID_ALIGNMENT && event->payload.name <= CHECK_PACK_MESSAGE_UNTERMINATED) ||
+           (record->align && record->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+}
+
+// The output position just before the pack directive after `record` (#1849), where its Sema warnings come at the latest;
+// UINT32_MAX for the last one, and for one right after a function's body, whose own warnings at its end the checker
+// publishes at the next parser token, which clang reports before it handles the directive's annotation (a later pack
+// directive's parser warnings then come before this one's Sema ones, where clang's come after).
+static uint32_t check_input_pack_following(const Parser* parser, const CheckInputPackPragmas* history, const CheckInputPackPragma* record)
+{
+    const uint64_t index = (uint64_t)(record - history->records);
+    const bool after_body = record->token != 0 && record->token - 1 < parser->tokens.count && parser->tree.roles[record->token - 1] == PARSE_ROLE_CLOSE_BODY;
+    return !after_body && index + 1 < history->count && history->records[index + 1].source_begin != 0 ? history->records[index + 1].source_begin - 1 : UINT32_MAX;
+}
+
+// Appends a pack record's warning event of `message`, at `source` (#1849).
+static bool check_input_pack_event(CheckWarningBuffer* buffer, const CheckInputPackPragma* record, uint32_t index, uint32_t id, uint32_t message, uint32_t source,
+                                   bool end, uint32_t note)
+{
+    const CheckWarningEvent event = {
+        .id = id,
+        .kind = CHECK_WARNING_EVENT_PRAGMA,
+        .flags = BUSTER_CHECK_WARNING_PACK_PRAGMA,
+        .token = record->token,
+        .source = source,
+        .completion_kind = end ? CHECK_WARNING_COMPLETE_TU_END : CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = end ? BUSTER_CHECK_WARNING_NO_SOURCE : record->token,
+        .suborder = end ? CHECK_WARNING_UNIT_END_PACK : 0,
+        .payload = { .name = message, .token = end ? note : record->source_begin, .data = index + 1 },
+    };
+    return check_warning_append(buffer, &event, NULL, 0);
+}
+
+// The pack value after the records before output position `position` (#1849): the last such record's, and in `current`
+// the record that set it (clang's CurrentPragmaLocation), BUSTER_CHECK_NONE for none.
+static uint32_t check_input_pack_value_at(const CheckInputPackPragmas* history, uint32_t position, uint32_t* current)
+{
+    uint32_t low = 0;
+    uint32_t high = history->count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = history->records[middle].source_begin < position ? middle + 1 : low;
+        high = history->records[middle].source_begin < position ? high : middle;
+    }
+    const CheckInputPackPragma* last = low != 0 ? history->records + low - 1 : NULL;
+    *current = last == NULL ? BUSTER_CHECK_NONE : low < history->count ? history->records[low].current_before : history->current;
+    return last != NULL ? (uint32_t)last->pack_after << 1 | (last->custom_after ? 1u : 0u) : 0;
+}
+
+// The location of the file name of the directive at `location` in `range` (#1849), clang's include location: past its
+// '#', its name and the blanks between them; `location` itself where the bytes end first.
+static uint32_t check_input_pack_include_name(const PPRange* range, uint32_t location)
+{
+    uint32_t at = location >= range->base && location - range->base < range->length ? location - range->base : range->length;
+    const uint32_t start = at;
+    at += at < range->length && range->bytes[at] == '#' ? 1 : 0;
+    while (at < range->length && (range->bytes[at] == ' ' || range->bytes[at] == '\t'))
+    {
+        at += 1;
+    }
+    while (at < range->length && (range->bytes[at] == '_' || (range->bytes[at] | 0x20) - 'a' < 26u))
+    {
+        at += 1;
+    }
+    while (at < range->length && (range->bytes[at] == ' ' || range->bytes[at] == '\t'))
+    {
+        at += 1;
+    }
+    return at < range->length && start < range->length ? range->base + at : location;
+}
+
+// The inclusions that leave the pack value another than they found it (#1849, clang's SemaPPCallbacks and
+// DiagnoseNonDefaultPragmaAlignPack's ChangedStateAtExit), from the preprocessor's runs of output by range: each
+// inclusion's entry is the first run in it, its exit the first run outside it (an ancestor's, or the output's end).
+// Only a unit with pack directives and exact runs is walked; a range of no include location (the main file) is none's.
+static bool check_input_pack_includes(CheckInputReader* reader, CheckInputPackPragmas* history)
+{
+    const Preprocessor* pp = reader->pp;
+    const uint32_t runs = pp->system_runs_inexact ? 0 : pp->system_run_count;
+    const uint64_t mark = reader->scratch->length;
+    // The open inclusions: their ranges and entries, at most one per range.
+    uint32_t* stack = runs != 0 ? arena_push_array(reader->scratch, (uint64_t)pp->range_count + 1, sizeof(uint32_t), 4) : 0;
+    uint32_t* entries = runs != 0 ? arena_push_array(reader->scratch, (uint64_t)pp->range_count + 1, sizeof(uint32_t), 4) : 0;
+    CheckPackInclude* found = runs != 0 ? arena_push_array(reader->arena, pp->range_count, sizeof(CheckPackInclude), _Alignof(CheckPackInclude)) : 0;
+    bool valid = runs == 0 || (stack != 0 && entries != 0 && found != 0);
+    reader->output->resource |= !valid;
+    uint32_t depth = 0;
+    uint32_t count = 0;
+    for (uint32_t r = 0; valid && runs != 0 && r <= runs; r += 1)
+    {
+        const uint32_t range = r < runs ? pp->system_runs[r].range : BUSTER_PP_NONE;
+        const uint32_t position = r < runs ? pp->system_runs[r].token : pp->output.count;
+        // A run of scratch spellings (a chunk of no file) is no inclusion's.
+        if (range < pp->range_count && pp->ranges[range].file == BUSTER_PP_NONE)
+        {
+            continue;
+        }
+        // Leave the open inclusions that aren't the run's range or one of its ancestors.
+        bool ancestor = false;
+        while (depth != 0 && !ancestor)
+        {
+            for (uint32_t at = range; !ancestor && at < pp->range_count; at = pp->ranges[at].parent)
+            {
+                ancestor = at == stack[depth - 1];
+            }
+            if (!ancestor)
+            {
+                depth -= 1;
+                const uint32_t left = stack[depth];
+                uint32_t entry_current = BUSTER_CHECK_NONE;
+                uint32_t exit_current = BUSTER_CHECK_NONE;
+                const uint32_t before = check_input_pack_value_at(history, entries[depth], &entry_current);
+                const uint32_t after = check_input_pack_value_at(history, position, &exit_current);
+                const uint32_t parent = pp->ranges[left].parent;
+                if (before != after && parent < pp->range_count && pp->ranges[left].include_location != BUSTER_PP_NONE && count < pp->range_count)
+                {
+                    found[count++] = (CheckPackInclude){
+                        .location = check_input_pack_include_name(&pp->ranges[parent], pp->ranges[left].include_location),
+                        .exit = position,
+                        .note = exit_current != BUSTER_CHECK_NONE ? history->records[exit_current].source_begin + 2 : BUSTER_CHECK_PACK_UNLOCATED_NOTE,
+                    };
+                }
+            }
+        }
+        // Enter the run's range and the ancestors of it not open yet, outermost first.
+        const uint32_t base = depth;
+        for (uint32_t at = range; at < pp->range_count && (base == 0 || at != stack[base - 1]) && depth <= pp->range_count; at = pp->ranges[at].parent)
+        {
+            stack[depth] = at;
+            entries[depth] = position;
+            depth += 1;
+        }
+        for (uint32_t low = base, high = depth; low + 1 < high; low += 1, high -= 1)
+        {
+            const uint32_t swapped = stack[low];
+            stack[low] = stack[high - 1];
+            stack[high - 1] = swapped;
+        }
+    }
+    history->includes = count != 0 ? found : NULL;
+    history->include_count = count;
+    reader->scratch->length = mark;
+    return valid;
+}
+
+// The warnings of `#pragma pack`, `#pragma options align` and `#pragma align` (#1849), appended to the lexical pragma
+// facts after the unknown-pragma collector has published its view, as ms_struct's are: each directive's parser or Sema
+// warnings, then each push left open, the innermost first, at the unit's end, the innermost with clang's note where the
+// current value is the default (BUSTER_CHECK_PACK_NOTE: the payload's token, past the record that set it, or none).
 static bool check_input_pack_align_warnings(CheckInputReader* reader)
 {
     const CheckInputPackPragmas* history = reader->output->pack_pragmas;
@@ -679,19 +934,57 @@ static bool check_input_pack_align_warnings(CheckInputReader* reader)
     for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
     {
         const CheckInputPackPragma* record = history->records + i;
-        if (record->align && record->handled != 0 && record->align_warning != CHECK_PACK_ALIGN_NONE)
+        const uint32_t at = record->source_begin + 2;
+        if (record->handled == 1 && record->align && record->align_warning != CHECK_PACK_ALIGN_NONE)
         {
-            const CheckWarningEvent event = {
-                .id = CHECK_WARNING_ID_IGNORED_PRAGMA,
-                .kind = CHECK_WARNING_EVENT_PRAGMA,
-                .flags = BUSTER_CHECK_WARNING_PACK_PRAGMA,
-                .token = record->token,
-                .source = record->diagnostic_source,
-                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = record->token,
-                .payload = { .token = record->source_begin, .data = i + 1 },
-            };
-            valid = check_warning_append(&buffer, &event, NULL, 0);
+            valid = check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_IGNORED_PRAGMA, CHECK_PACK_MESSAGE_ALIGN, record->diagnostic_source, false, 0);
+        }
+        else if (record->handled == 1 && !record->align && record->syntax_warning != CHECK_PACK_MESSAGE_ALIGN)
+        {
+            valid = check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_IGNORED_PRAGMA, record->syntax_warning, record->diagnostic_source, false, 0);
+        }
+        else if (record->handled == 1 && !record->align)
+        {
+            const uint8_t warnings = record->warnings;
+            valid = (warnings & CHECK_PACK_WARNING_ALIGNMENT) == 0 ||
+                    check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_IGNORED_PRAGMA, CHECK_PACK_MESSAGE_INVALID_ALIGNMENT, at, false, 0);
+            valid = valid && ((warnings & CHECK_PACK_WARNING_SHOW) == 0 ||
+                              check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_PRAGMA_PACK_NOTICE, CHECK_PACK_MESSAGE_SHOW, at, false, 0));
+            valid = valid && ((warnings & CHECK_PACK_WARNING_NAMED_ALIGNMENT) == 0 ||
+                              check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_PRAGMA_PACK_NOTICE, CHECK_PACK_MESSAGE_NAMED_POP, at, false, 0));
+            valid = valid && ((warnings & CHECK_PACK_WARNING_EMPTY) == 0 ||
+                              check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_IGNORED_PRAGMA, CHECK_PACK_MESSAGE_EMPTY_POP, at, false, 0));
+        }
+    }
+    valid = valid && (history == NULL || check_input_pack_includes(reader, reader->output->pack_pragmas));
+    for (uint32_t k = 0; valid && history != NULL && k < history->include_count; k += 1)
+    {
+        // The event's record is the unit's first, for the event's view; its payload's token is the inclusion's index.
+        const CheckInputPackPragma* first = history->records;
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_PRAGMA_PACK,
+            .kind = CHECK_WARNING_EVENT_PRAGMA,
+            .flags = BUSTER_CHECK_WARNING_PACK_PRAGMA,
+            .token = first->token,
+            .source = first->source_begin,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = first->token,
+            .payload = { .name = CHECK_PACK_MESSAGE_INCLUDE, .token = k, .data = 1 },
+        };
+        valid = check_warning_append(&buffer, &event, NULL, 0);
+    }
+    const bool reset = history != NULL && history->final_log2 == 0 && !history->final_custom;
+    bool innermost = true;
+    for (uint32_t i = history != NULL ? history->count : 0; valid && i != 0; i -= 1)
+    {
+        const CheckInputPackPragma* record = history->records + i - 1;
+        if (record->unterminated)
+        {
+            const uint32_t note = !innermost || !reset ? BUSTER_CHECK_PACK_NO_NOTE :
+                                  history->current != BUSTER_CHECK_NONE ? history->records[history->current].source_begin + 2 :
+                                                                          BUSTER_CHECK_PACK_UNLOCATED_NOTE;
+            valid = check_input_pack_event(&buffer, record, i - 1, CHECK_WARNING_ID_PRAGMA_PACK, CHECK_PACK_MESSAGE_UNTERMINATED, record->source_begin + 2, true, note);
+            innermost = false;
         }
     }
     if (valid)

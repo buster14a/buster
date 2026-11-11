@@ -3604,6 +3604,25 @@ static void check_test_program_many_declarators(CheckTest* test, const char* cla
     }
 }
 
+// #1847: the lowering's library functions that return twice (check_lower_twice_entries), whose callers Tier 1 leaves to
+// Tier 0, are exactly the catalogue's entries with the 'j' attribute but __builtin_setjmp, in its order.
+static void check_test_program_twice_library(CheckTest* test)
+{
+    uint32_t matched = 0;
+    bool ordered = true;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+        const bool own = info->name_length == sizeof("__builtin_setjmp") - 1 && memcmp(info->name, "__builtin_setjmp", info->name_length) == 0;
+        const bool listed = !own && memchr(info->attributes, 'j', info->attributes_length) != NULL;
+        const BuiltinIntrinsicName* entry = listed && matched < BUSTER_CHECK_LOWER_TWICE_NAMES ? check_lower_twice_entries + matched : NULL;
+        ordered = ordered && (!listed || (entry != NULL && entry->length == info->name_length && memcmp(entry->name, info->name, entry->length) == 0));
+        matched += listed ? 1 : 0;
+    }
+    check_test_expect(test, ordered && matched == BUSTER_CHECK_LOWER_TWICE_NAMES,
+                      "the lowering's returns-twice library names are exactly the catalogue's entries with the 'j' attribute but __builtin_setjmp");
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     if (check_test_takes())
@@ -3611,6 +3630,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_array_alignment(test, clang);
         check_test_program_return_marks(test);
         check_test_program_return_library(test);
+        check_test_program_twice_library(test);
         check_test_literal_tables(test, clang);
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
@@ -5062,6 +5082,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "cl l=n*0.25L+1.0Li;cl l1=l--;++l;acc^=fold((double)__real__ l)*37^fold((double)__real__ l1)*41^fold((double)__imag__ l)*43;"
             "return (int)acc;}",
             "complex-increments", clang);
+        // __auto_type's _Atomic and restrict, its deduced type's (#1844): an atomic int's compound assignments and a const
+        // atomic double's value, a restrict pointer's and a pointer declarator's restrict, and two declarators of one type.
+        check_test_program_source(test,
+            "int tested(int n){int v=n;_Atomic __auto_type a=v;a+=2;a*=3;__auto_type restrict p=&v;*p+=a;const _Atomic __auto_type b=n*1.25;"
+            "__auto_type*restrict q=&v;volatile _Atomic __auto_type c=n,d=n+1;c+=d;return a+*p+*q+(int)(b*4)+c+(int)sizeof(_Atomic(long)[2]);}",
+            "auto-type-qualifiers", clang);
         // Complex values passed and returned (in xmm registers, in st0 and st1, on the stack), in structs, read by va_arg,
         // through a function pointer, and in arrays.
         check_test_program_source(test,
@@ -5221,6 +5247,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "FOLD(a);FOLD(b);FOLD(c);FOLD(d);FOLD(e);FOLD(f);FOLD(gq);FOLD(a++);FOLD(--c);FOLD(a);FOLD(c);Q big=1e40;big++;FOLD(big);"
             "Q half=0.5;Q g=half--;FOLD(g);FOLD(half);return (int)(h%1000003)+(int)(a*4)+(int)(c*4);}",
             "float128-increments", clang);
+        // Complex values' ++ and -- of aggregate parts (#1447): a _Complex __float128's and a complex _BitInt's past 128
+        // bits, whose real part alone is stepped (a -0.0 imaginary part stays -0.0), prefix and postfix, of locals and
+        // through a pointer; a postfix one's value a copy of the object before it.
+        check_test_program_source(test,
+            "typedef _Complex __float128 CQ;typedef __float128 Q;typedef _BitInt(200) B;typedef __typeof__((_Complex char)0+(B)0) CB;"
+            "static unsigned long fold(unsigned long h,Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return ((h^w[0])*1099511628211ul)^(w[1]*31u);}\n"
+            "static unsigned long foldz(unsigned long h,CQ z){return fold(fold(h,__real__ z),__imag__ z);}\n"
+            "static unsigned long foldb(unsigned long h,CB z){return ((h^(unsigned long)(__real__ z>>3))*1099511628211ul)^(unsigned long)(__imag__ z>>130)^(unsigned long)__imag__ z;}\n"
+            "static CQ step(CQ*p){return (*p)++;}\n"
+            "int tested(int n){unsigned long h=2166136261u;CQ a=n;__imag__ a=-0.0Q;CQ c=a/4,*p=&c;CQ b=a++;CQ d=++a;CQ e=c--;CQ f=--c;"
+            "h=foldz(h,a);h=foldz(h,b);h=foldz(h,c);h=foldz(h,d);h=foldz(h,e);h=foldz(h,f);h=foldz(h,step(p));h=foldz(h,--*p);"
+            "CB x=(B)n<<150;__imag__ x=-(B)n<<140;CB y=x--;CB z=++x;x++;CB w=x--;--x;"
+            "h=foldb(h,x);h=foldb(h,y);h=foldb(h,z);h=foldb(h,w);return (int)(h%1000003)+(int)__real__ a;}",
+            "complex-aggregate-increments", clang);
         // A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
         // after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
         // refused and the other was an address of 0.
@@ -5290,6 +5330,40 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "if(w)h+=17;if(!u)h+=19;h+=(a&&u)*23+(q||0)*29;S200 sel=n>3?a:b;FOLD(sel,200);\n"
             "return (int)(h%1000003)^cmp;}\n",
             "bit-int-past-128-bits", clang);
+        // Their constants (#1447, c_check_wide.c): literals past 128 bits in every radix and with separators, and the 129-bit
+        // ones a signed value with its top bit set needs; globals, statics, members and array elements initialized with
+        // folded constants (the static data writes their limbs, extended past the width); and locals the lowering takes
+        // as folded limbs. Every operator folds: sums, differences and negations, products, quotients and remainders of
+        // either sign, the bitwise ones, shifts by narrow and wide counts and narrow values by wide ones, compares, truth
+        // (!, &&, ||, ?:, if) and conversions to and from narrower integers, other widths, the floating types and back,
+        // with integer constant expressions of them as array bounds and enumerators.
+        check_test_program_source(test,
+            "typedef _BitInt(129) S129;typedef _BitInt(200) S200;typedef unsigned _BitInt(200) U200;typedef _BitInt(256) S256;\n"
+            "typedef unsigned _BitInt(300) U300;typedef unsigned _BitInt(1000) U1000;typedef _BitInt(4100) S4100;\n"
+            "static unsigned long fold(unsigned long h,const void*p,unsigned bytes){const unsigned char*b=(const unsigned char*)p;\n"
+            "for(unsigned i=0;i<bytes;i++)h=(h^b[i])*1099511628211ul;return h;}\n"
+            "#define FOLD(x) do{__typeof__(x) t_=(x);h=fold(h,&t_,sizeof t_);}while(0)\n"
+            "struct M{int a;S200 w;char c;U1000 u;};\n"
+            "S200 g1=5,g2=-7,g3=(S200)1<<199>>3,g4=-((S200)1<<150)/12345,g5=(S200)-123456789012345678901234567890wb%997;\n"
+            "U300 g6=0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123uwb,g7=~(U300)0/3,g8=(U300)1<<299,g9=0b1011wb;\n"
+            "S129 g10=340282366920938463463374607431768211455wb,g11=-340282366920938463463374607431768211455wb-1;\n"
+            "S256 g12=(S256)0777777777777777777777777777777777777777777777777777777777777wb*3,g13=1000000000000000000000000000000000000000000000wb;\n"
+            "U1000 g14=~(U1000)0>>17^(U1000)0xdeadbeefuwb<<900;S4100 g15=-((S4100)1<<4000)+(S4100)3;\n"
+            "struct M gm={1,-((S200)5<<100),'x',~(U1000)0/3};S256 ga[3]={1,(S256)1<<254>>1,-1};\n"
+            "double gd=(double)((S200)1<<150);float gf=(float)-((U300)1<<200);long double gl=(long double)(U300)0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123uwb;S200 gfd=(S200)-1.5e50,gfl=(S200)1e40L;\n"
+            "int gc[8]={(S200)3<(S200)4,(S200)-3<(S200)2,(U200)3<(U200)-1,(S200)1<<150==(S200)1<<150,!(S200)0,(S200)1<<140&&(S200)0,(S200)0||(S200)1<<190,(int)((U1000)1<<999>>990)};\n"
+            "enum{E1=(S200)1<<180>>178,E2=(int)(((U300)1<<299)>>295)};\n"
+            "long gn=(long)(-((S200)77<<130)>>130);unsigned gu=(unsigned)((U300)0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123uwb>>200);_Bool gb=(S200)1<<160;__int128 gq=(__int128)-((S256)5<<100);\n"
+            "int gs1=1<<(S200)30,gs2=(int)((S200)1<<(_BitInt(300))70>>(unsigned char)64);S200 gs3=(S200)-1>>(U300)150;\n"
+            "int tested(int n){unsigned long h=2166136261u;\n"
+            "static S256 s1=(S256)1<<255>>200;S200 l1=((S200)1<<150)+12345,l2=-(S200)3*(S200)1000000000000000000000000000000000000000wb;\n"
+            "S200 l3=l2/7,l4=l2%7,l5=(S200)1<<150?(S200)3:(S200)4;U1000 l6=~(U1000)0>>5;char arr[(int)((S200)1<<140>>137)];\n"
+            "FOLD(g1);FOLD(g2);FOLD(g3);FOLD(g4);FOLD(g5);FOLD(g6);FOLD(g7);FOLD(g8);FOLD(g9);FOLD(g10);FOLD(g11);FOLD(g12);FOLD(g13);FOLD(g14);FOLD(g15);\n"
+            "FOLD(gm);h=fold(h,ga,sizeof ga);FOLD(gd);FOLD(gf);h=fold(h,&gl,10);FOLD(gfd);FOLD(gfl);h=fold(h,gc,sizeof gc);FOLD(gn);FOLD(gu);FOLD(gb);FOLD(gq);FOLD(gs1);FOLD(gs2);FOLD(gs3);\n"
+            "FOLD(s1);FOLD(l1);FOLD(l2);FOLD(l3);FOLD(l4);FOLD(l5);FOLD(l6);h+=sizeof arr+E1*3+E2*5;\n"
+            "if((S200)0)h+=7;if((S200)1<<140)h+=11;S200 v=(S200)n<<150;FOLD(v+((S200)1<<160));FOLD(v<((S200)1<<151));\n"
+            "return (int)(h%1000003);}\n",
+            "bit-int-past-128-bits-constants", clang);
     }
     // _Complex __float128 (#137): a frame object of two __float128s, whose parts are values as a __float128 is. Each part's
     // sum, difference, negation, product with and quotient by a real value is __float128's (libgcc's __addtf3 ...), a
@@ -5704,13 +5778,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "transparent-union-call-machine-boundary", true, true, 1, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(global);}",
-            "vector-builtin-live-reference-machine-boundary", true, false, 1, 0);
+            "vector-builtin-live-reference-machine-boundary", true, true, 1, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_nondeterministic_value(global));}",
-            "vector-builtin-unevaluated-type-argument", true, false, 0, 0);
+            "vector-builtin-unevaluated-type-argument", true, true, 0, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_shufflevector(global,global,0,1,2,3));}",
-            "vector-builtin-shuffle-prefix-reference-mask", true, false, 1, 0);
+            "vector-builtin-shuffle-prefix-reference-mask", true, true, 1, 0);
         check_test_program_boundary(test, "int tested(int n){int values[n+10];return sizeof values;}", "variable-length-array-program", true, true, 0, 0);
         check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                     "vla-bound-reference", true, true, 1, 0);

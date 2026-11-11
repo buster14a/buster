@@ -1392,20 +1392,28 @@ qualifiers"). clang's x86 target maps 256, 257 and 258 (`__seg_gs`, `__seg_fs`)
 to the `%gs`, `%fs` and `%ss` segments: its -O0 code loads and stores there with
 a segment override (`mov %gs:(%rax),%eax`).
 
-`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs` or `%gs`
-the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
+`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs`, `%gs` or
+`%ss` the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
 typed stream), from the accessed lvalue's type: a read's own, an assignment's
 target's (the assignment's value has lost the space), an update's stored type
 for its load and its store (the postfix one's too). It marks the function
 (`Tier0Function.segments`), which Tier 0 compiles with the override on the
-access's memory operand, and which Tier 1 leaves to Tier 0. A global in one of
+access's memory operand, and which Tier 1 compiles with it too (docs/ir.md's
+"Segment overrides"; an atomic read/modify/write's stays Tier 0's). A global in one of
 those spaces goes through its address (GLOBAL_ADDRESS, then LOAD or STORE), as a
 memory class's does: `lea sym(%rip)` and `%gs:(%rax)` reach the byte clang's
 `%gs:sym(%rip)` does. What takes the override (`check_lower_segment_carried`):
-a read by indirection, member, subscript (not a vector's element's) or name, and an assignment, compound assignment, increment or
+a read by indirection, member, subscript or name, and an assignment, compound assignment, increment or
 decrement, of an integer's, a floating value's (long double's too), a 128-bit
 integer's or a vector's class (not a transport vector), which one LOAD or STORE
-moves. An array's lvalue isn't read: its value is its address. A bit-field's
+moves, and a half-precision value's (`_Float16`'s, `__bf16`'s), whose loads and
+stores are a U16's (`c_check_program_half.c`). An array's lvalue isn't read: its value is its address. A vector's
+element, read, assigned or updated, takes its vector lvalue's override, which the
+element's own type has lost (`check_lower_element_segment`): clang reads the
+whole vector through it and extracts the element, and writes it by a read, an
+insertion and a store of the whole vector, which for a vector that isn't
+volatile is the same access as one of the element's bytes (an element of a
+volatile vector stays refused by name). A bit-field's
 read and store take it on each piece of its unit (`check_lower_bit_unit`,
 `check_lower_bit_store`): its place (`CheckLowerBitField.segment`, packed in its
 task's bits 14 and 15) has its record's override, from the member's type
@@ -1417,14 +1425,31 @@ its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),
 pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
 `__atomic_test_and_set`'s, doesn't carry it).
 
+An object whose value is an address (a struct's, a union's, a complex value's, a
+`__float128`'s, a wide `_BitInt`'s limbs, a transport vector's) is read by a
+copy of its bytes through the override to a frame object of its own
+(`check_lower_segment_read`), whose address its consumers then take as any
+flat one: a copy, a call's argument, a register return, a complex operation, a
+comma's or a conditional's forwarding. A struct's or union's assignment into a
+segment copies through the override (`CheckLowerTask.segments`, the
+destination's in bits 2 and 3, `check_lower_copy_segmented`), and its value is
+the stored bytes at the source's address. Each copy is pieces of 8, 4, 2 and 1
+bytes, a `LOAD` and a `SET` each with its side's override. Clang lowers such a
+copy (an `llvm.memcpy` in a segment's address space, which no library
+function takes) inline as at most 8 stores of its widest vector (4 at `-Os`)
+and stops with "cannot lower memory intrinsic in address space" past them: 128
+bytes for SSE, 256 for AVX and 512 for znver5's AVX-512. The lowering takes up to 8
+of the function's target's widest vector registers' bytes, never fewer than
+clang, and refuses a larger copy by name ("an aggregate copy of more than 8
+vector registers in a segment's address space ..., which clang can't lower
+either").
+
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an aggregate's copy, a complex, half-precision or `_BitInt` value
+a complex value's store, a `_BitInt`'s value
 and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
-`__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
-form of the encoder's has its `36` prefix); a vector's
-element read or written through a vector in one (the element's type has lost the
-space); and an atomic builtin's object in one, which its pointer argument reaches
+`__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
+which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches
 (`check_lower_segment_access`). An asm statement's register output in one is
 refused too (`check_lower_asm_segment`), since its value is stored through the
 output's address; a memory operand's address goes to the template without the
@@ -1547,7 +1572,14 @@ refusal: clang 23.1.4 emits a scalar zero count followed by an invalid
 scalar-to-vector `trunc`, crashing or producing incorrect code depending on
 the vector's width. Element-wise conversions, shuffles, non-boolean builtins,
 reductions and logical operations take at most 1024 elements, bounding their
-expanded entry runs; packed bit operations do not unpack those lanes.
+expanded entry runs; packed bit operations do not unpack those lanes. Past that
+(`BUSTER_CHECK_LOWER_TRANSPORT_LANES`) they stay refused by name, where clang
+compiles them (#1834's sweep: `ext_vector_type(1025)`): LLVM splits such a
+vector into its legal registers' pieces, while these lowerings expand an entry
+run per element, a function's entries growing with the lanes. Matching clang
+there takes conversions, shuffles and reductions at the registers' width, as
+the operators' pieces are (`check_lower_transport_rows`), not wider bounds;
+#2216 lists them with the other refusals that hold at every target.
 
 `test-checker --program-vectors` runs a program of all of these against clang
 -O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,

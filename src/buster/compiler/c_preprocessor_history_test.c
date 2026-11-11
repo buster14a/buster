@@ -32,7 +32,7 @@ static void pp_test_normalize_scratch(char* text)
 // test-preprocessor has one (oracle_serve_child), else as a child.
 static char* pp_test_clang_diagnostics(const char* path, const char* directory, bool parser)
 {
-    char* const arguments[] = { "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics", "-fno-diagnostics-show-option",
+    char* const arguments[] = { "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics",
                                 "-fmacro-backtrace-limit=0", "-I", (char*)directory, (char*)path, 0 };
     char** environment = pp_test_clang_environment();
     char* output = 0;

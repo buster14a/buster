@@ -291,16 +291,29 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
+      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        if: inputs.host_arch == 'vector'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       # The item the draw's collector assigned this candidate becomes its shard (BUSTER_SHARD), which the steps below
       # run; without one, it ends here, successfully, as a redraw. In a rerun of the failed jobs, a candidate that held
-      # an item takes it again (tools/ci/vector-draw.sh, fetched from this commit without a checkout).
+      # an item takes it again (tools/ci/vector-draw.sh, fetched from this commit by the step above).
       - name: Take the vector item the draw assigns, or end as a redraw
         if: inputs.host_arch == 'vector'
         env:
           GH_TOKEN: ${{ github.token }}
           VERDICT: ${{ steps.probe.outputs.verdict }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" take "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$VERDICT" "$RUNNER_TEMP/vector-draw/record"
           cat "$RUNNER_TEMP/vector-draw/record"
 
@@ -561,15 +574,16 @@ jobs:
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
-        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
-        # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. It comes
+        # from the mirror in the run's offline inputs, with no network (#2275), as the 9700X's comes from its private
+        # cache: Git's pack protocol checks it again (fetch-c-testsuite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
       - name: Fetch SQLite's sources at their pinned commit
         # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
-        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
-        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, from the run's offline inputs
+        # as c-testsuite's above (fetch-sqlite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
@@ -699,6 +713,76 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # SQLite's whole Tcl test suite (#146): every script of its `full` permutation, through testfixture built by clang -O0,
+  # Tier 0 and --tier1 from this row's shared compiler (test-sqlite-testfixture; docs/commands/c-testsuite.md). Every
+  # row, pull requests' too, runs the inventory's pinned subset; this job runs on the nightly and dispatched runs alone,
+  # beside the plain portable row's shards, with its runner's 4 CPUs to itself. Main's pushes skip it (#2334): it took
+  # 27 to 41 of a push run's 96 to 112 runner-minutes, at 25 to 37 pushes an hour. Its name must not end like a shard's
+  # (tools/ci/nightly.c).
+  sqlite-full:
+    name: SQLite's full Tcl suite by both tiers against clang's (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }})
+    needs: compiler
+    if: ${{ !cancelled() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' }}
+    runs-on: ubuntu-26.04
+    # About 9 minutes a build on a 4-CPU runner, three builds.
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require this row's compiler product
+        env:
+          BUILD: ${{ needs.compiler.result }}
+        run: |
+          if [ "$BUILD" != success ]; then
+              printf '::error title=Shared compiler product::This row'"'"'s compiler wasn'"'"'t built (its job: %s).\n' "${BUILD:-missing}"
+              exit 1
+          fi
+
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Restore verified hosted release inputs
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ inputs.hosted-tools }}
+
+      - name: Install official Clang 23.1.4 and test tools
+        run: bash tools/ci/setup-hosted.sh
+
+      - name: Fetch generic baseline startup objects and runtime for emulation
+        run: bash tools/ci/setup-baseline-runtime.sh
+
+      - name: Fetch and verify frozen corpus inputs
+        run: |
+          corpus="$RUNNER_TEMP/preprocessor-391e729af658"
+          bash tools/ci/fetch-corpus.sh "$corpus"
+          printf 'BUSTER_CORPUS=%s\n' "$corpus" >> "$GITHUB_ENV"
+
+      - name: Download this row's compiler product
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.compiler.outputs.artifact }}
+          path: ${{ runner.temp }}/compiler-product-download
+
+      - name: Verify and install this row's compiler product
+        env:
+          DIGEST: ${{ needs.compiler.outputs.digest }}
+        run: bash tools/ci/hosted-product.sh install "$RUNNER_TEMP/compiler-product-download" "$DIGEST"
+
+      - name: Fetch SQLite's sources at their pinned commit
+        run: bash tools/ci/fetch-sqlite.sh build/sqlite
+
+      - name: Run SQLite's full Tcl suite by both tiers against clang's
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          tcl=$(bash tools/ci/tcl-config.sh)
+          "$BUSTER_COMPILER" test-sqlite-testfixture --clang clang --tree build/sqlite --tcl "$tcl" --amalgamation "$BUSTER_CORPUS/sqlite/sqlite3.c" \
+            --jobs "$(nproc)" --timeout 5400 --directory build
+
   # The vector row (#2033; docs/ci.md, "The vector row"): the explicit vector target's build, which only CPUs with
   # every feature of host_isa.h's predicate run, and whose 4 shards are items rather than jobs. A draw starts generic
   # candidates, each of which probes its own runner's CPU and publishes its verdict. The draw's collector, one job,
@@ -757,12 +841,24 @@ jobs:
       BUSTER_DRAW_CANDIDATES: '12'
       BUSTER_DRAW_NEXT: '4'
     steps: &collect-steps
+      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
+      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       - name: Assign the draw's vector items to its qualifying candidates by rank
         id: assign
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" assign "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATES" "$BUSTER_DRAW_NEXT"
           cat "$RUNNER_TEMP/vector-assignment"
 
@@ -908,9 +1004,21 @@ jobs:
           pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*
           path: ${{ runner.temp }}/vector-records
 
+      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
+      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       - name: Require one passing qualified execution of each vector item
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" verdict "$RUNNER_TEMP/vector-records"

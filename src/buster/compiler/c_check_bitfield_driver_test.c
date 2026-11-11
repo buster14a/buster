@@ -32,6 +32,24 @@ static const CheckDriverDefaultWarningFixture check_driver_bitfield_fixtures[] =
         .warnings = 4,
     },
     {
+        // _BitInt constants past 128 bits (#1447, c_check_wide.c): their values change in narrower types, signed, unsigned
+        // and wider than 128 bits, in decimal; a sign flip into a signed target is reported at once, as clang's.
+        .name = "constants past 128 bits change value in narrower types",
+        .source = "char c = ((_BitInt(200))1 << 150) | 257;\nint s = 340282366920938463463374607431768211457wb;\n"
+                  "_BitInt(150) n = (_BitInt(300))1 << 200;\nunsigned _BitInt(129) m = ((unsigned _BitInt(300))1 << 250) + 7;\n"
+                  "signed char k = ((_BitInt(200))1 << 7) + 0;\n_BitInt(129) p = ((_BitInt(130))1 << 128) + 1;\nunsigned char u = -(_BitInt(200))1;\n"
+                  "short t = -((_BitInt(200))40000);\nunsigned long v = -((_BitInt(300))1 << 64);\n"
+                  "int f(void) { int a = (_BitInt(200))1 << 150; unsigned _BitInt(200) b = (_BitInt(256))-1; long d = (_BitInt(200))1 << 63; return a + (int)b + (int)d; }\n",
+        .warnings = 11,
+    },
+    {
+        // A declarator after a specifier's parentheses is evaluated (#1447): `_BitInt(100) n = e;` (and `typeof(int) y = e;`) keeps
+        // its conversion's warnings, which an operand of typeof's own drops.
+        .name = "a declarator after typeof's or _BitInt's parentheses keeps its warnings",
+        .source = "_BitInt(100) n = (_BitInt(120))1 << 110;\n__typeof__((char)300) z = 0;\nvoid f(void) { _BitInt(100) m = (_BitInt(120))1 << 110; (void)m; }\n",
+        .warnings = 2,
+    },
+    {
         .name = "an assignment's truncation leaves out its constant conversion and follows clang's walk",
         .source = "struct S { signed char c : 2; unsigned char d : 4; int b : 3; unsigned u : 3; } s;\nint f(int);\n"
                   "void g(int x) {\n    s.c = 200;\n    s.d = 300;\n    s.b = 9, s.b = 10;\n    f(s.b = 12);\n    s.b = s.u = 9;\n    s.b = 1 ? 9 : 2;\n"

@@ -204,6 +204,46 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "int main(void) { return f(); }\n",
         "__attribute__((target(\"default\"))) int f(void);\n"
         "__attribute__((target(\"no-apxf\"))) int f(void);\n",
+        // Attributes after a definition (#1920): a redefinition's, warned before its error, of target's, a plain one's and
+        // an object's; a redeclaration's of target, target_clones, cpu_specific and cpu_dispatch; a version's redefinition
+        // and redeclaration.
+        "int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 0; }\n"
+        "int g(void) { return 1; }\n"
+        "__attribute__((noinline)) int g(void) { return 0; }\n"
+        "int h(void) { return 1; }\n"
+        "__attribute__((aligned(16), cold)) int h(void) { return 0; }\n"
+        "__attribute__((noinline)) int w(void) { return 1; }\n"
+        "__attribute__((noinline)) int w(void) { return 2; }\n"
+        "int x = 1;\n"
+        "__attribute__((aligned(16))) int x = 2;\n"
+        "int y = 1;\n"
+        "__attribute__((weak)) int y = 2;\n"
+        "int v(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int v(void) { return 2; }\n"
+        "int t(void) { return 1; }\n"
+        "long t(void) { return 2; }\n",
+        "int u(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int u(void) { return 2; }\n",
+        "int a(void) { return 1; }\n"
+        "__attribute__((cpu_specific(generic))) int a(void);\n"
+        "int b(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int b(void);\n"
+        "int c(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int c(void);\n"
+        "__attribute__((target(\"avx2\"))) int d(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int d(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int e(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int e(void);\n"
+        "int g(void) { return 1; }\n"
+        "__attribute__((cpu_dispatch(generic))) int g(void);\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"), used)) int f(void);\n"
+        "__attribute__((target(\"avx2\"), used)) int f(void) { return 2; }\n",
+        // A version refused for its attribute isn't merged: no warning (#1920).
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"), cold)) int f(void) { return 1; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
@@ -405,14 +445,14 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"arch=znver4\"))) int f(int x) { return x + 4; }\n"
         "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x) { return x + 42; }\n"
         "__attribute__((target(\"apxf\"))) int f(int x) { return x + 36; }\n"
-        "static __attribute__((target(\"default\"))) int s(void) { return 10; }\n"
-        "static __attribute__((target(\"avx512f\"))) int s(void) { return 20; }\n"
+        "static __attribute__((target(\"default\"))) int s(void) { static int n = 10; return n; }\n"
+        "static __attribute__((target(\"avx512f\"))) int s(void) { static int n = 20; return n; }\n"
         "int call_s(void) { return s(); }\n"
         "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x) { return x * 3; }\n"
         "static __attribute__((target_clones(\"gfni\", \"default\"))) int t(void) { return 7; }\n"
         "int call_t(void) { return t(); }\n"
         // A repeated version (kept for its index, without a symbol of its own) and a default that isn't last.
-        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { return x * 5; }\n"
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { static int m = 5; return x * m; }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
@@ -540,7 +580,12 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
     static const char model[] =
         "int printf(const char*, ...);\n"
         "struct M { unsigned vendor, type, subtype; unsigned features[1]; } __cpu_model = { VENDOR, TYPE, SUBTYPE, { W0 } };\n"
-        "unsigned __cpu_features2[3] = { W1, W2, W3 };\nvoid __cpu_indicator_init(void) {}\n"
+        "unsigned __cpu_features2[3] = { W1, W2, W3 };\n"
+        // Once main calls a resolver, the frames an unwinder walks from inside it: through the resolver's unwind entry.
+        "int _Unwind_Backtrace(int (*)(void*, void*), void*);\n"
+        "static int armed;\nstatic int frames;\n"
+        "static int frame(void* context, void* count) { (void)context; *(int*)count += 1; return 0; }\n"
+        "void __cpu_indicator_init(void) { int count = 0; if (armed) { _Unwind_Backtrace(frame, &count); frames = count; } }\n"
         "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
         "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
         "__attribute__((target(\"arch=znver4\"))) int f(void) { return 2; }\n"
@@ -561,13 +606,26 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         "void* resolve_d(void) __asm__(\"d.resolver\");\n"
         "int d0(void) __asm__(\"d.avx2.0\");\nint d1(void) __asm__(\"d.sse4.2.1\");\nint d3(void) __asm__(\"d.default.3\");\n"
         "int (*address_d)(void) = d;\n"
-        "int main(void)\n{\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
+        // arch= of a CPU type (atom), and target_clones' of a name __builtin_cpu_is doesn't know (skx, corei7-avx: tests of
+        // the vendor against 0).
+        "__attribute__((target(\"default\"))) int h(void) { return 0; }\n"
+        "__attribute__((target(\"arch=atom\"))) int h(void) { return 2; }\n"
+        "__attribute__((target(\"avx2\"))) int h(void) { return 3; }\n"
+        "__attribute__((target_clones(\"arch=skx\", \"arch=corei7-avx\", \"sse4.2\", \"default\"))) int e(void);\n"
+        "void* resolve_e(void) __asm__(\"e.resolver\");\n"
+        "int e0(void) __asm__(\"e.arch_skx.0\");\nint e1(void) __asm__(\"e.arch_corei7-avx.1\");\nint e2(void) __asm__(\"e.sse4.2.2\");\n"
+        "int e3(void) __asm__(\"e.default.3\");\n"
+        "int (*address_e)(void) = e;\n"
+        "int main(void)\n{\n    armed = 1;\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
         "    int index = -1;\n    for (int i = 0; i < 8; i += 1) { index = versions[i] == chosen ? i : index; }\n"
         "    void* chosen_d = resolve_d();\n    int index_d = chosen_d == (void*)d0 ? 0 : chosen_d == (void*)d1 ? 1 : chosen_d == (void*)d3 ? 3 : -1;\n"
-        "    printf(\"%d %d %d\\n\", f(), index, index_d);\n    return 0;\n}\n";
+        "    void* chosen_e = resolve_e();\n"
+        "    int index_e = chosen_e == (void*)e0 ? 0 : chosen_e == (void*)e1 ? 1 : chosen_e == (void*)e2 ? 2 : chosen_e == (void*)e3 ? 3 : -1;\n"
+        "    printf(\"%d %d %d %d %d %d\\n\", f(), index, index_d, h(), index_e, frames);\n    return 0;\n}\n";
     static const char clones[] =
         "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n"
-        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n";
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n"
+        "__attribute__((target_clones(\"arch=skx\", \"arch=corei7-avx\", \"sse4.2\", \"default\"))) int e(void) { return 3; }\n";
     char path[PATH_MAX];
     char clones_path[PATH_MAX];
     char clones_object[PATH_MAX];
@@ -601,6 +659,10 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         { 2, 3, 30, 0, 0, 0, 0 },
         { 0, 0, 0, 0x80u, 0, 0, 0 },
         { 0, 0, 0, 0x20000u, 0, 0, 0 },
+        // atom, Intel's type 1, with and without avx2 and sse4.2; Intel's vendor with them.
+        { 1, 1, 0, 0, 0, 0, 0 },
+        { 1, 1, 0, 0x500u, 0, 0, 0 },
+        { 1, 0, 0, 0x500u, 0, 0, 0 },
     };
     for (uint32_t m = 0; written && m < BUSTER_ARRAY_LENGTH(models); m += 1)
     {

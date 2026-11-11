@@ -218,6 +218,28 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     CheckValue value = { 0 };
     uint32_t failed = BUSTER_CHECK_NONE;
     const bool evaluated = self == BUSTER_CHECK_NONE && check_input_evaluate_cached_at(reader, begin, end, &value, &failed);
+    // The specifiers' _Atomic and restrict, the deduced type's (#1844, check_input_auto_type_qualifiers; their declarators'
+    // deductions, check_input_c23_auto_deduce, apply them). Refused by name: either through a declarator (`_Atomic
+    // __auto_type *p`, whose initializer clang always finds incompatible), an _Atomic of an atomic value (clang's error
+    // names the placeholder's type), and a restrict of a value that is no pointer to an object, whose `restrict int` the
+    // placeholder can't be told from.
+    // The placeholder itself, or under a declarator's pointers and arrays.
+    TypeId marker = placeholder;
+    for (uint32_t steps = 0; marker != 0 && !check_input_auto_type(marker) && steps < 64; steps += 1)
+    {
+        const TypeId level = type_strip_aligned(types, marker);
+        const uint8_t kind = type_kind(types, level);
+        marker = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? types->types.base[type_index(level)] : 0;
+    }
+    const bool declarator = marker != placeholder;
+    bool atomic = false;
+    const uint32_t qualifiers = check_input_auto_type_qualifiers(marker, &atomic);
+    const bool restricted = (qualifiers & BUSTER_TYPE_RESTRICT) != 0;
+    const TypeId adjusted = evaluated ? type_strip_aligned(types, type_adjust_parameter(types, value.type)) : 0;
+    const uint8_t adjusted_kind = adjusted != 0 ? type_kind(types, adjusted) : BUSTER_TYPE_KIND_NONE;
+    const bool object_pointer = adjusted_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, types->types.base[type_index(adjusted)]) != BUSTER_TYPE_KIND_FUNCTION;
+    const bool refused = (atomic || restricted) && evaluated &&
+                         (declarator || (atomic && adjusted_kind == BUSTER_TYPE_KIND_ATOMIC) || (restricted && !object_pointer));
     const CheckNoderefType* noderef = evaluated ? check_input_noderef_value(reader, value.type, reader->constant_noderef) : NULL;
     TypeId result = 0;
     if (self != BUSTER_CHECK_NONE)
@@ -229,10 +251,20 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         // An identifier the walk found no declaration for is clang's undeclared one.
         const bool undeclared = failed < parser->tokens.count && parser->tokens.kinds[failed] == PARSE_KIND_IDENTIFIER &&
                                 reader->output->declarations[failed] == BUSTER_CHECK_NONE;
-        if (!reader->output->resource)
+        if (!reader->output->resource && (atomic || restricted) && !undeclared)
+        {
+            // An initializer the walk can't evaluate under the specifiers' _Atomic or restrict: refused by name, as before
+            // they were taken.
+            check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
+        }
+        else if (!reader->output->resource)
         {
             check_input_report(reader, failed < parser->tokens.count ? failed : begin, undeclared ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
         }
+    }
+    else if (refused)
+    {
+        check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
     }
     else if ((value.flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
@@ -292,7 +324,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         }
         else if (deduced != 0)
         {
-            result = deduced_declarator ? deduced : type_qualify(types, deduced, type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
+            const TypeId atomic_deduced = atomic && !deduced_declarator ? check_input_type_result(reader, type_atomic(types, deduced)) : deduced;
+            result = deduced_declarator ? deduced : atomic_deduced != 0 ? type_qualify(types, atomic_deduced, qualifiers) : 0;
             reader->declared_types[declaration] = result;
             reader->query_types[assignment] = result;
             check_input_noderef_set(reader->output, declaration, noderef);
@@ -573,7 +606,8 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
         {
             reader->output->reports[before].type = reader->declared_types[declaration];
             reader->output->reports[before].type_spelling = check_input_typedef_spelling(reader->output, parser, declaration);
-            reader->output->reports[before].value = literal;
+            // (The literal's type name's typedef in the high half, #1812: `'A2' (aka 'int[2]')`.)
+            reader->output->reports[before].value = (uint64_t)literal | (uint64_t)check_input_token_type_spelling(reader->output, parser, begin, false) << 32;
             reader->output->reports[before].completion = end;
         }
         mismatched = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);

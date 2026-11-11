@@ -137,8 +137,65 @@ static const char check_driver_vla_place_source_16[] =
     "int n;\n"
     "int (*(p))[n];\n";
 
+// Scalar compound literals in bounds (#1447): folded, with clang's warning where the array can't be variable, an
+// enumerator's quietly; an `&` keeps the literal's object.
+static const char check_driver_vla_compound_source[] =
+    "int a[(int){3}];\n"
+    "int b[(long){2 * 4} + 1];\n"
+    "struct S { int m[(int){2}]; };\n"
+    "void f(void) { static int s[(int){4}]; int t[(int){5}]; int *p = &(int){1}; (void)s; (void)t; (void)p; }\n"
+    "int c[(const int){2}];\n"
+    "enum { E = (int){1} };\n"
+    "int e = (int){3} + E;\n"
+    "int sz = sizeof((int){1});\n"
+    "_Static_assert(sizeof(a) == 12 && sizeof(b) == 36, \"\");\n";
+
+// A block's automatic variable-length array with an initializer (#1447): clang's "variable-sized object may not be
+// initialized", at the outermost bound for a list and at the name otherwise, recovered; the declaration stays valid and its
+// initializer unchecked, and `= {}` is taken.
+static const char check_driver_vla_initializer_source[] =
+    "void f(int n) {\n"
+    "  int a[n] = {1};\n"
+    "  int b[n + 1][2] = {{1}};\n"
+    "  char s[n] = \"ab\";\n"
+    "  int c[(n)] = {1, 2}, d = q1;\n"
+    "  int e[n] = 5;\n"
+    "  int use = a[0] + b[0][0] + s[0] + c[0] + e[0] + d;\n"
+    "  int (*p)[n] = 0;\n"
+    "  char *bad = use;\n"
+    "  int g[n] = {1, \"x\"}; char *t3 = g;\n"
+    "  int h[n] = {}; char *t4 = h;\n"
+    "  (void)p; (void)bad; (void)t3; (void)t4;\n"
+    "}\n"
+    "int x = y;\n";
+
+// A file-scope cast's or _Alignof's variable type name (#1852), which clang takes and never evaluates.
+static const char check_driver_vla_unevaluated_source[] =
+    "int n; void *p = (int(*)[n])0;\n"
+    "int n2; int s = (int)(long)(int(*)[n2])0;\n"
+    "int n3; int s3 = _Alignof(int[n3]);\n"
+    "_Static_assert(_Alignof(long[n3]) == 8, \"\");\n"
+    "int s4 = _Alignof(int[n3][4]) + sizeof(int);\n"
+    "char *bad = (int(*)[n])0;\n"
+    "int s5 = sizeof(int[n]);\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
+    {
+        .name = "scalar compound literals in bounds",
+        .source = check_driver_vla_compound_source,
+        .warnings = 5,
+    },
+    {
+        .name = "a file-scope cast's and _Alignof's variable type names",
+        .source = check_driver_vla_unevaluated_source,
+        .errors = 2,
+    },
+    {
+        .name = "a block's variable-length array with an initializer",
+        .source = check_driver_vla_initializer_source,
+        .errors = 11,
+    },
     {
         .name = "folded bounds in each context, by default",
         .source = check_driver_vla_fold_contexts_source,

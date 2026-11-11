@@ -15,8 +15,9 @@
 //
 // This is a cold, per-call plan of a type's layout, made once a call before the lanes run; it stays scalar.
 
-// The nesting of a type's arrays, records, complex and atomic types; the entries an element's plan may have; the cost, in
-// typed entries, of the stores a call's recipe makes itself, within a builtin's BUSTER_CBUILTIN_LOWER_ENTRIES.
+// The walk's first room for the nesting of a type's arrays, records, complex and atomic types, which grows as it needs
+// (#1842); the entries an element's plan may have; the cost, in typed entries, of the stores a call's recipe makes
+// itself, within a builtin's BUSTER_CBUILTIN_LOWER_ENTRIES.
 #define BUSTER_CHECK_LOWER_PADDING_DEPTH 64u
 #define BUSTER_CHECK_LOWER_PADDING_RUNS (1u << 20)
 #define BUSTER_CHECK_LOWER_PADDING_INLINE 460u
@@ -114,26 +115,33 @@ static bool check_lower_padding_room(Arena* scratch, CheckLowerPaddingBits** bit
 
 // The plan of a call's stores on an element of `type`, the size of `size` bytes: its entries, each the byte offset << 32,
 // the run's bytes << 8 and the mask kept (0 for a run of zeros), in `scratch`'s top. Returns their count, or UINT32_MAX
-// with `*refusal` set where the type nests past the depth above, an offset passes 4 GiB or its runs pass their limit, or
-// the arena is full.
+// with `*refusal` set where an offset passes 4 GiB or its runs pass their limit, or the arena is full. The walk's stack
+// grows in `scratch` with the type's nesting, which a type table of 32-bit ids bounds.
+typedef struct CheckLowerPaddingFrame CheckLowerPaddingFrame;
+struct CheckLowerPaddingFrame
+{
+    uint64_t offset;
+    TypeId type;
+    uint64_t index;
+    uint32_t mark;
+};
+
 static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type, uint64_t size, Arena* scratch, uint64_t** result, const char** refusal)
 {
-    typedef struct
-    {
-        uint64_t offset;
-        TypeId type;
-        uint64_t index;
-        uint32_t mark;
-    } Frame;
-    Frame stack[BUSTER_CHECK_LOWER_PADDING_DEPTH];
+    typedef CheckLowerPaddingFrame Frame;
+    uint64_t room = BUSTER_CHECK_LOWER_PADDING_DEPTH;
+    Frame* stack = BUSTER_ARENA_PUSH_ARRAY(scratch, Frame, room);
     uint64_t capacity = 64;
     CheckLowerPaddingBits* bits = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerPaddingBits, capacity);
     CheckLowerPaddingBits* spare = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerPaddingBits, capacity);
     uint32_t count = 0;
     uint32_t depth = 1;
-    bool valid = bits != NULL && spare != NULL && size <= UINT32_MAX;
+    bool valid = stack != NULL && bits != NULL && spare != NULL && size <= UINT32_MAX;
     *refusal = valid ? NULL : size > UINT32_MAX ? "__builtin_clear_padding of an element past 4 GiB" : NULL;
-    stack[0] = (Frame){ .offset = 0, .type = type, .index = 0, .mark = 0 };
+    if (valid)
+    {
+        stack[0] = (Frame){ .offset = 0, .type = type, .index = 0, .mark = 0 };
+    }
     while (valid && depth != 0)
     {
         Frame* top = stack + depth - 1;
@@ -229,12 +237,23 @@ static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type,
         {
             bits[count++] = (CheckLowerPaddingBits){ .first = first, .last = last };
         }
+        if (valid && pushed != 0 && depth == room)
+        {
+            // Twice the room, the frames copied: the arena's pushes are its own, so the old ones stay as garbage until the
+            // call's plan pops the scratch.
+            Frame* grown = BUSTER_ARENA_PUSH_ARRAY(scratch, Frame, 2 * room);
+            valid = grown != NULL;
+            if (valid)
+            {
+                memcpy(grown, stack, room * sizeof(*stack));
+                stack = grown;
+                room *= 2;
+            }
+        }
         if (valid && pushed != 0)
         {
-            valid = depth < BUSTER_CHECK_LOWER_PADDING_DEPTH;
-            *refusal = valid ? NULL : "__builtin_clear_padding of a type nested more than 64 levels";
             stack[depth] = (Frame){ .offset = at, .type = pushed, .index = 0, .mark = 0 };
-            depth += valid;
+            depth += 1;
         }
     }
     count = valid ? check_lower_padding_normalize(bits, spare, 0, count) : 0;

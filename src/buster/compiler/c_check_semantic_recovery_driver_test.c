@@ -11,25 +11,6 @@
 // source order, and test-checker-deferred checks the deferred reader's scalar twins. Include after c_check_resume_driver_test.c, whose reader this
 // takes.
 
-// The legacy preprocessor omits #warning's option suffix (the initializer/constant timing controls have the same
-// boundary). Normalize only this fixture's explicit lookahead marker; its location, severity, message and ordering,
-// and every semantic diagnostic's full text and option label, remain exact.
-static void check_test_semantic_recovery_lookahead(char* text)
-{
-    static const char marker[] = ": warning: after-loop";
-    static const char labeled[] = ": warning: after-loop [-W#warnings]";
-    char* match = text != NULL ? strstr(text, labeled) : NULL;
-    if (match != NULL)
-    {
-        const char* end = match + sizeof(labeled) - 1;
-        if (*end == '\n' || *end == 0)
-        {
-            memmove(match + sizeof(marker) - 1, end, strlen(end) + 1);
-        }
-    }
-}
-
-
 // The typo stress fixture's source (#1447): three thousand file-scope names (alpha_000 to charlie_999) declared one by one,
 // and a function that reads fifty-three of them misspelled, each without its `_`, which only its own name is one edit from.
 // Its length, or 0 where `capacity` is too small.
@@ -434,6 +415,50 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum D : char { M = 200, N, P, P = 400 };\n"
         "_Static_assert(N == -55, \"n\");\n"
         "int use(void) { return A2 + B3 + C2 + undeclared; }\n",
+        // A typedef's and a parameter's declarator errors (#1447): a typedef keeps its stand-in type, whose uses are
+        // checked; a parameter is an invalid stand-in int, quiet in its body, and makes the function whose own list it is
+        // invalid, but not a function pointer. After a declarator whose own type is in error, the group's later
+        // declarators aren't declared, and a typedef name it dropped is "unknown type name", which still stops.
+        "typedef int U[-1];\n"
+        "U u1 = \"x\";\n"
+        "int w = u1 + (char*)0;\n"
+        "void k(void) { U loc; int *pp = loc; typedef int L[-3]; L l = \"s\"; (void)pp; (void)l; }\n"
+        "typedef struct X SX[3];\n"
+        "SX sx;\n"
+        "typedef int F(void)[3];\n"
+        "int bad(int q[-1]);\n"
+        "int call = bad(\"x\");\n"
+        "void (*fp)(int r[-1]);\n"
+        "void use(void) { char *c = bad(1); fp(\"y\"); (void)c; }\n"
+        "int def(int a[-1], int b) { int *pk = a; char *c = b; (void)pk; (void)c; return 0; }\n"
+        "int c2 = def(\"z\", 1);\n"
+        "int nested(void (*cb)(int n[-1]), int m[-2]);\n"
+        "int g(int q2[-1]), h(int);\n"
+        "int z = h(\"w\");\n"
+        "int a[-1], b;\n"
+        "int c = b;\n"
+        "void f(void) { int p[-1], r; int s = r; (void)s; }\n"
+        "int x = undeclared;\n",
+        // An array bound of another type than an integer's (#2170): clang's "size of array has non-integer type", its
+        // declaration invalid and its uses quiet, in a function, at file scope, in a typedef, a variable array's, a
+        // conditional's, a cast's.
+        "void h(int n) { int k[(long double)1]; int *pk = k; (void)pk; }\n"
+        "int g1[1.5];\n"
+        "int use1 = g1 + 1;\n"
+        "void h2(void) { int k2[2.0f]; double d = 1; int k3[d]; (void)k2; (void)k3; }\n"
+        "typedef int T[(double)2];\n"
+        "T t;\n"
+        "void h3(void) { int k4[(void*)0 == 0 ? 1.0 : 2]; (void)k4; }\n"
+        "int after = undeclared;\n",
+        "typedef int T, U[-1], V;\nV v;\n",
+        // C23's enum redefinitions in a block, and a third and fourth definition (#1826): compatible ones are taken, and an
+        // ambiguous use lists every candidate, a block's qualified by its function (`g(int, char *)::B`, `k()::P`).
+        "/* gnu23 only */\n"
+        "enum X { A, B };\nenum X { A, C };\nenum X { A, D };\nenum X { A, E };\nint u = A;\n"
+        "void f(void) { enum Z { Z1 }; enum Z { Z1 }; int w = Z1; (void)w; }\n"
+        "void g(int x, char *y) { enum Y { B, C }; enum Y { B, D }; int v = B; (void)x; (void)y; (void)v; }\n"
+        "int k(void) { enum W { P, Q }; enum W { P, R }; enum W { P, S }; return P; }\n"
+        "int z = undeclared;\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
@@ -932,7 +957,6 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                 {
                     compile[compile_count++] = (char*)options[o];
                 }
-                check_test_semantic_recovery_lookahead(expected);
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
                 check_test_expect(test, lines && oracle != 0, "semantic recovery: clang rejects the fixture and its lines are read");
                 // The vector path, the scalar one, and deferred bodies on 1, 2 and 3 lanes.
@@ -964,7 +988,6 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                     char* actual = NULL;
                     const int status = check_test_driver_spawn(spawned, &actual);
                     const bool written = spawned == compile && access(object, F_OK) == 0;
-                    check_test_semantic_recovery_lookahead(actual);
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],

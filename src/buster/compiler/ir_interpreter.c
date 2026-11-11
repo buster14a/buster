@@ -1107,7 +1107,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
                     break;
                 case IR_STACK_SAVE:
-                    result.status = interpreter_stack_save(&frame->dynamic, &runtime, arena, &value.low);
+                    // A frame address (#1847) is a machine frame's, which the interpreter's frames don't have.
+                    result.status = function->flags[i] == BUSTER_IR_STACK_SAVE_FRAME ? INTERPRETER_UNSUPPORTED : interpreter_stack_save(&frame->dynamic, &runtime, arena, &value.low);
                     break;
                 case IR_STACK_RESTORE:
                     result.status = interpreter_stack_restore(&frame->dynamic, av.low, &runtime, arena);
@@ -1128,7 +1129,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const uint32_t bytes = (ir_type_bits[memory_type] + 7) / 8;
                     void* loaded = ir_vector_type(memory_type) ? (void*)&wide_value : (void*)&value;
                     const void* stored = op == IR_STORE && ir_vector_type(memory_type) ? (const void*)&frame->vector_values[frame->vector_indices[b]] : (const void*)&bv;
-                    result.status = interpreter_memory_access(&runtime, av.low, bytes, op == IR_STORE);
+                    // An access in a segment (#1447, BUSTER_IR_SEGMENT) is an offset from its base, which the interpreter
+                    // doesn't model.
+                    result.status = (function->flags[i] & BUSTER_IR_SEGMENT) != 0 ? INTERPRETER_UNSUPPORTED : interpreter_memory_access(&runtime, av.low, bytes, op == IR_STORE);
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
                     if (result.status == INTERPRETER_OK && options->check_memory && (av.low & alignment_mask) != 0)
                     {

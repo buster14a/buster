@@ -33,7 +33,7 @@ SQLite tree at 3.53.2's commit (`ccc132c`), whose amalgamation and shell are
 the corpus's, as the c-testsuite fetch does; CI puts it in `build/sqlite`.
 The owner chose all of SQLite's tests as #146's criterion: speedtest1
 (`measure-tier1-programs`), the shell's own checks (below) and the Tcl suite
-through `testfixture` (to come).
+through `testfixture` (below).
 
 - `test-sqlite --clang PATH --sqlite DIR --tests DIR --scripts DIR
   [--directory DIR] [--keep]` builds the `sqlite3` shell (`shell.c` and
@@ -49,3 +49,44 @@ through `testfixture` (to come).
   status must be clang's shell's, byte for byte, and clang's shell must have
   read the script to its end (status 0 or 1, and the sentinel's line). The hosted rows and native correctness run it
   (`correctness.tests`); it takes a few seconds.
+- `test-sqlite-testfixture --clang PATH --tree DIR --tcl DIR
+  [--amalgamation FILE] [--subset FILE] [--jobs N] [--timeout SECONDS]
+  [--directory DIR] [--keep]` (`sqlite_testfixture.c`) builds `testfixture`
+  (Tcl, `tclsqlite.c`, SQLite's test sources and the amalgamation) three
+  times by SQLite's own `configure --with-tcl=DIR` and `make testfixture`,
+  each in a directory of its own: by clang -O0, Tier 0 and `--tier1`.
+  `--tree` is `fetch-sqlite.sh`'s tree and `--tcl` the directory of Tcl 8.6's
+  `tclConfig.sh` (`tools/ci/tcl-config.sh` finds it). The Makefile's
+  `CFLAGS.core=` drops `-fPIC`, which the driver refuses (#2101); its
+  `-rpath DIR` is accepted since #1854. With `--amalgamation`, each build's
+  generated `sqlite3.c` must be that file (the frozen corpus's is). Each
+  build then runs `testfixture test/testrunner.tcl --jobs N full` in an empty
+  directory: SQLite's `full` permutation is every Tcl script of `test/` and
+  `ext/` (1,451 of them; only the 13 `test/*.test` that run other scripts,
+  such as `all.test`, `veryquick.test` and `permutations.test`, are left
+  out), or with `--subset` the scripts its file names. clang's testfixture
+  reads each run's `testrunner.db`; clang's run must have run every script
+  once and passed them all, and each of the others' scripts must have clang's
+  state, error count and test count (`crash.test`'s count is random and
+  isn't compared). Run it as a user other than root: as root, eleven of
+  SQLite's scripts that test read-only files and directories fail for every
+  build.
+  - **Every row (pull requests and main pushes too):** `correctness.tests`
+    runs it with `tests/sqlite/testfixture-subset.txt`, the 1,215 scripts
+    that took under 100 ms each in Tier 0's full run, about a minute in all.
+  - **Nightly and dispatched runs:** `hosted-correctness.yml`'s `sqlite-full`
+    job runs the whole permutation by the plain portable row's compiler,
+    about 9 minutes a build on a 4-CPU runner. Main's pushes skip it (#2334):
+    it took 27 to 41 runner-minutes of each push run.
+  - **Tcl's pin:** the distribution's package. Hosted: Ubuntu 26.04's
+    `tcl8.6-dev` 8.6.17+dfsg-1build1 (`setup-hosted.sh` installs it;
+    `tcl-config.sh` fails a hosted run on another version, to be pinned
+    again). The 9700X: Arch's `tcl` 8.6.16-1 (`/usr/lib64/tclConfig.sh`),
+    installed by the owner on 2026-11-11, so native correctness runs the
+    subset too. Elsewhere `tcl-config.sh` prints the version it found, and a
+    host without the package skips the heading.
+  - **Results (2026-11-11, main `d43c37e` with #2100, a 4-CPU cloud
+    container, as a non-root user):** the full permutation, 1,451 scripts and
+    1,031,345 tests, passed by all three builds, every script with clang's
+    state, errors and count; the per-PR subset took 47 s. SQLite's own `SQLITE_DEBUG` isn't
+    in testfixture's flags, so #1360's slow `-c` doesn't apply.

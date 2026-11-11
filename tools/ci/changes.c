@@ -2598,7 +2598,8 @@ static void changes_test_split(ChangesTest* test)
 // correctness step (#1272); every other run's runs it before the measurements. Nightly backlog runs reuse the oracle cache, as
 // pull requests do; the snapshot's comprehensive run checks it, as the daily run did. The hosted rows are the row
 // workflow's jobs (`row`), which the test job calls for both host architectures: its shards check the oracle cache, and
-// they and the build of a shared compiler check out the triggering revision.
+// they and the build of a shared compiler check out the triggering revision, in every checkout of this repository there
+// (a `ref` that doesn't follow a `repository`), such as the shards' one-file checkout of the vector draw's script (#2309).
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow, Text row)
 {
@@ -2608,6 +2609,8 @@ static bool changes_oracle_policy(Text workflow, Text row)
     bool hosted_calls = false;
     bool build_revision = false;
     bool shard_revision = false;
+    bool other_revision = false;
+    bool after_repository = false;
     bool native_needs = false;
     bool native_success = false;
     bool native_modes = false;
@@ -2656,8 +2659,10 @@ static bool changes_oracle_policy(Text workflow, Text row)
         hosted_check |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
         build_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
         shard_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        other_revision |= job != 0 && !after_repository && text_starts_with(line, "          ref: ") && !text_equal_c(line, "          ref: ${{ github.sha }}");
+        after_repository = text_starts_with(line, "          repository: ");
     }
-    return hosted_check && hosted_variants && hosted_calls && build_revision && shard_revision && native_needs && native_success && native_modes && native_revision && native_step;
+    return hosted_check && hosted_variants && hosted_calls && build_revision && shard_revision && !other_revision && native_needs && native_success && native_modes && native_revision && native_step;
 }
 
 // The text with its first `before` from `from` on replaced by `after`, and whether there was one: a mutant for the
@@ -2750,7 +2755,8 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         }
         changes_expect(test, found != NULL && !changes_oracle_policy(changed, row), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
     }
-    // Each job's first checkout, until the next job: the row's build and shards, and the 9700X job.
+    // Each job's first checkout, until the next job: the row's build and shards, and the 9700X job; and the shards' own
+    // checkout after the one-file checkout of the vector draw's script.
     static const struct
     {
         bool row;
@@ -2758,6 +2764,7 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
     } jobs[] = {
         { true, "\n  compiler:\n" },
         { true, "\n  shards:\n" },
+        { true, "\n      - name: Check out triggering commit\n        if: env.BUSTER_SHARD != ''\n" },
         { false, "\n  benchmarks:\n" },
     };
     for (uint32_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); i += 1)
@@ -2784,13 +2791,13 @@ static bool changes_main_policy(Text workflow)
     } required[] = {
         { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
-        { 4, "    needs: [changes, evidence, agent-guide-size, dco-hooks]" },
-        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 4, "    needs: [changes, evidence, policy]" },
+        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}" },
         { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
-        { 1, "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]" },
+        { 1, "    needs: [changes, evidence, policy, prepare-hosted-tools]" },
         { 1, "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES },
         { 1, "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
-        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}" },
         { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
         { 1, BUSTER_CHANGES_HOST_ARCHES },
         { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
@@ -2875,12 +2882,12 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: true", "main cancellation" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: false", "lost PR cancellation" },
-        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "native reuse suppresses hosted tests" },
+        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}", "native reuse suppresses hosted tests" },
         { "  prepare-hosted-tools:", "needs.evidence.outputs.hosted == 'run'", "needs.evidence.outputs.hosted == 'reused'", "preparation excludes required hosted work" },
         { "  prepare-hosted-tools:", "    uses: ./.github/workflows/prepare-hosted-tools.yml", "    uses: ./.github/workflows/absent.yml", "missing preparation implementation" },
         { "  test:", "needs.prepare-hosted-tools.result == 'success' && ", "", "tests bypass preparation failure" },
         { "  test:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "tests accept skipped preparation" },
-        { "  test:", "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]", "    needs: [changes, evidence, agent-guide-size, dco-hooks]", "tests omit preparation dependency" },
+        { "  test:", "    needs: [changes, evidence, policy, prepare-hosted-tools]", "    needs: [changes, evidence, policy]", "tests omit preparation dependency" },
         { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
         { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"native\"]'", "missing baseline architecture" },
         { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"x86-64\", \"vector\"]'", "main's native row replaced before its qualification" },

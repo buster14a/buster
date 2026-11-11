@@ -71,7 +71,8 @@ struct CheckProgramConstraint
 // record it runs and the outermost. The controls after it (its tail: its STACK_RESTORE, its LIFETIME ends and its JUMP,
 // or its RETURN) are what follows the calls, so every walk of the controls sees the path it saw when the calls were
 // there. The lowering runs each record's call once, at its CLEANUP at its scope's end, the chain the exit enters
-// (check_program_chains, CheckProgramChain). An exit from a statement expression keeps its run of CLEANUPs.
+// (check_program_chains, CheckProgramChain). An exit from a statement expression does so through the records within its
+// block, apart from the block's own; one that leaves the block's records keeps its run of CLEANUPs.
 // A block's objects' lifetimes (#177, c_check_program_lifetime.c), in a program asked for them: CHECK_CONTROL_LIFETIME
 // (`target` the block's closing brace, whose locals CheckProgram.lifetime_first lists, `node` 0 for their start and 1 for
 // their end, `token` where) where the block's statements begin, where they end, after its cleanups, and before each
@@ -157,9 +158,10 @@ struct CheckProgramRegion
 // outermost (`last`), both CheckInput.cleanups' records; the destination slot's value it stores before it jumps to its
 // first record's entry, BUSTER_CHECK_NONE where no dispatch on its path tests it; and how many of the controls after it,
 // its tail, the lowering leaves out: where its destination's tail is another exit's, or its target the dispatch's own.
-// A `skip` of BUSTER_CHECK_NONE marks an exit that runs its calls in place, as an exit from a statement expression does:
-// one through a record without a CLEANUP at its scope's end (a constant switch's kept statements leave their compounds'
-// ends out), or one no path completes (its JUMP unreached, an END now).
+// A `skip` of BUSTER_CHECK_NONE marks an exit that runs its calls in place: one through a record without a CLEANUP at its
+// scope's end (a constant switch's kept statements leave their compounds' ends out, and a statement expression's block's
+// own records run after its END), one from a statement expression whose records leave its block, or one no path
+// completes (its JUMP unreached, an END now).
 typedef struct CheckProgramExit CheckProgramExit;
 struct CheckProgramExit
 {
@@ -170,6 +172,12 @@ struct CheckProgramExit
     uint32_t hold;
     uint32_t value;
     uint32_t skip;
+    // An exit from a statement expression's statements: the closing token of the region's block, whose own records'
+    // cleanups run after its END, and the token that opens it; BUSTER_CHECK_NONE for an exit of the function's statements.
+    // Only one whose records' scopes all lie within the block, apart from the block's own records, goes through their
+    // chain; any other keeps its run in place (check_program_chains).
+    uint32_t region_open;
+    uint32_t region_close;
 };
 
 // A record's place in its body's chain of cleanups (#1370, check_program_chains), by its index in CheckInput.cleanups:
@@ -492,6 +500,18 @@ struct CheckProgram
     CheckProgramAlias* aliases;
     uint8_t* alias_states;
     uint32_t alias_count;
+    // Asm labels that name another object's symbol (#1979, check_program_label_merges): one symbol per name, as clang's
+    // module has one global per name. Keys of an object in the high half and the object whose symbol it takes (its name's
+    // definition, else its first tentative definition, else its first object) in the low, sorted by object; null in a unit
+    // without them, the usual one, and shared by a selection. label_conflict is one more than the token of a function's
+    // second definition of a name, clang's error at code generation, and label_previous the first's; label_refused one
+    // more than the token of a variable's second definition of a name (0 for none).
+    uint64_t* label_merges;
+    uint32_t label_merge_count;
+    uint32_t label_conflict;
+    uint32_t label_previous;
+    uint32_t label_refused;
+    String8 label_conflict_name;
     // clang's cpu_specific and cpu_dispatch multiversioning (#1447, c_check_program_cpu_dispatch.c): the unit's groups and
     // versions, null in a unit without them, the usual one; a selection shares them. And each program's own symbols of the
     // versions (cpu_version_count of them, 0 for a version without a body) and of the groups' dispatchers (after them, 0
@@ -699,11 +719,13 @@ struct CheckControlWriter
     uint32_t cleanup_first;
     uint32_t cleanup_count;
     // CheckProgram.exits while the bodies are written, `exit_capacity` of them, and whether a statement expression's
-    // region is being written, whose exits keep their runs of CLEANUPs.
+    // region is being written, the tokens that open and close its block (CheckProgramExit.region_open, region_close).
     CheckProgramExit* exits;
     uint32_t exit_count;
     uint32_t exit_capacity;
     bool in_region;
+    uint32_t region_open;
+    uint32_t region_close;
     // The statement expression's last statement while its region is written: the region's result, never a statement of
     // its own, also where it is a label's (CheckInputRegion.final_statement).
     uint32_t region_final;
@@ -766,6 +788,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE 512u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK 1024u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL 2048u
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
@@ -796,7 +819,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
         const uint32_t patchable = kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE : 0;
         const uint32_t weak = kind == CHECK_ATTRIBUTE_WEAK ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak;
+        const uint32_t label = kind == CHECK_ATTRIBUTE_ASM_LABEL ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak | label;
     }
     return bits;
 }
@@ -808,8 +832,9 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // code generation's check of target features or a late symbol rename's emission walk reads (#775,
 // CheckProgram.attribute_keys); the file-scope declarations with an alias, ifunc or weakref attribute, which
 // check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases); the function declarations with a
-// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); and the declarations with a weak attribute,
-// `#pragma weak`'s among them (#1849, check_program_weak_late).
+// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); the declarations with a weak attribute,
+// `#pragma weak`'s among them (#1849, check_program_weak_late); and the declarations with linkage and an asm label
+// (#1979, check_program_label_merges).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -830,6 +855,9 @@ struct CheckProgramTargetEvents
     uint64_t* weak_keys;
     uint32_t weak_count;
     uint32_t weak_capacity;
+    uint64_t* label_keys;
+    uint32_t label_count;
+    uint32_t label_capacity;
 };
 
 // clang's cpu_specific and cpu_dispatch multiversioning (#1447), defined in c_check_program_cpu_dispatch.c.
@@ -1500,11 +1528,18 @@ static void check_control_cleanups(CheckControlWriter* writer, uint32_t position
     // the innermost whose scope holds where it goes (`hold`, none for a return's), an ancestor of the first, as no jump
     // enters a cleanup's scope. Its last, the hold's child on the path, check_program_chains finds in one sweep, where a
     // climb here took each exit's whole path.
-    const bool chained = scope == BUSTER_CHECK_NONE && !writer->in_region;
+    // An exit from a statement expression's statements too, whose records the planner checks lie within its block.
+    const bool chained = scope == BUSTER_CHECK_NONE;
     const uint32_t hold = chained && record != BUSTER_CHECK_NONE && target != BUSTER_CHECK_NONE ? check_control_cleanup_at(writer, target) : BUSTER_CHECK_NONE;
     if (chained && record != BUSTER_CHECK_NONE && record != hold && writer->exit_count < writer->exit_capacity)
     {
-        writer->exits[writer->exit_count] = (CheckProgramExit){ .first = record, .last = BUSTER_CHECK_NONE, .hold = hold, .value = BUSTER_CHECK_NONE, .skip = 0 };
+        writer->exits[writer->exit_count] = (CheckProgramExit){ .first = record,
+                                                                .last = BUSTER_CHECK_NONE,
+                                                                .hold = hold,
+                                                                .value = BUSTER_CHECK_NONE,
+                                                                .skip = 0,
+                                                                .region_open = writer->in_region ? writer->region_open : BUSTER_CHECK_NONE,
+                                                                .region_close = writer->in_region ? writer->region_close : BUSTER_CHECK_NONE };
         check_control_entry(writer, CHECK_CONTROL_EXIT, position, BUSTER_CHECK_NONE, writer->exit_count);
         writer->exit_count += 1;
     }
@@ -2650,6 +2685,8 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
         else
         {
             writer->in_region = true;
+            writer->region_open = check_control_opening(writer, source->block, PARSE_ROLE_OPEN_BLOCK);
+            writer->region_close = source->block;
             writer->region_final = source->final_statement;
             for (uint32_t child = writer->last[source->block]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
             {
@@ -3058,15 +3095,19 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
         }
         // The controls that branches go to, the records' entries and the exits' places. An asm goto or a label whose
         // address is taken may go to any: every fall is then reached.
+        // A statement expression's region's CLEANUPs past the function's controls are entries too, but for its block's
+        // own, the run after its END, which the region lowers after its value (check_lower_region).
         bool anywhere = false;
+        bool ended = false;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckControl* control = controls + i;
+            ended = control->kind == CHECK_CONTROL_END || (ended && control->kind == CHECK_CONTROL_CLEANUP);
             if (control->kind >= CHECK_CONTROL_BRANCH_FALSE && control->target < count)
             {
                 check_program_bit_set(targeted, control->target);
             }
-            else if (control->kind == CHECK_CONTROL_CLEANUP && i < body->entry_count && control->target >= record_first && control->target < record_end)
+            else if (control->kind == CHECK_CONTROL_CLEANUP && (i < body->entry_count || !ended) && control->target >= record_first && control->target < record_end)
             {
                 chains[control->target].entry = i;
             }
@@ -3124,7 +3165,11 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
             }
             const bool held = exit->first >= record_first && exit->first < record_end && exit->last >= record_first && exit->last < record_end;
             const uint32_t missing = held ? absent[exit->first - record_first] : 0;
-            const bool live = held && end < count && (controls[end].kind == CHECK_CONTROL_RETURN || controls[end].kind == CHECK_CONTROL_JUMP) &&
+            // A statement expression's exit, only through records within its block, not of the block itself: their entries
+            // are its statements' controls, lowered with its region.
+            const bool within = exit->region_open == BUSTER_CHECK_NONE ||
+                                (held && cleanups[exit->last].declaration > exit->region_open && cleanups[exit->last].end < exit->region_close);
+            const bool live = held && within && end < count && (controls[end].kind == CHECK_CONTROL_RETURN || controls[end].kind == CHECK_CONTROL_JUMP) &&
                               (missing == 0 || missing - 1 < chains[exit->last].depth);
             if (!held)
             {
@@ -3881,6 +3926,11 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK) != 0)
         {
             check_program_event_push(events, &events->weak_keys, &events->weak_count, &events->weak_capacity, object, token);
+        }
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL) != 0 && check_input_linkage(input->declaration_bits, token) != 0 &&
+            !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
+        {
+            check_program_event_push(events, &events->label_keys, &events->label_count, &events->label_capacity, object, token);
         }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
@@ -4928,7 +4978,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
         const bool aliased = grouped && (target_events.alias_count == 0 ||
                                          check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-        valid = naked_room && aliased && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
+        // Asm labels naming another object's symbol (#1979), whose objects take that symbol as the symbols are numbered.
+        const bool labelled = aliased && (target_events.label_count == 0 || check_program_label_merges(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
+        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
         valid = valid && (target_events.weak_count == 0 || check_program_weak_late(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
@@ -4979,6 +5031,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #else
 #include "c_check_program_vectors.c"
 #include "c_check_program_x86.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+// The IR decoder's conversion tests' producer (#1840).
+#include "c_check_program_vector_convert.c"
+#undef BUSTER_CHECK_BASE_PACKED
+#undef BUSTER_CHECK_BASE_UNARY
+#endif
 #include "c_check_program_emit.c"
 #endif
 #endif

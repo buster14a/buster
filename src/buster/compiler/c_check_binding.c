@@ -90,7 +90,10 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
         const uint32_t attribute = attributes->records[i].kind;
         // x86's interrupt that its subject takes is clang's implicit used too (#147, handleAnyX86InterruptAttr).
         const bool interrupt = attribute == CHECK_ATTRIBUTE_INTERRUPT && !attributes->records[i].ignored && !attributes->records[i].subject_ignored;
-        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED || interrupt;
+        // An applied cleanup takes its variable's address, so clang's ShouldDiagnoseUnusedDecl skips it (#1881); one
+        // ignored at file scope still leaves the variable unused.
+        const bool cleanup = attribute == CHECK_ATTRIBUTE_CLEANUP && !attributes->records[i].ignored;
+        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED || interrupt || cleanup;
     }
     const bool result = kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION ? true : marked;
     return result;
@@ -262,7 +265,9 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool file_scope = !local && kind == C_BINDING_OBJECT;
         const bool main_file = !file_scope || check_input_in_main_file(reader, token);
         const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
-        const bool declaration_used = parameter || local ? used_tokens[token] != 0 : used[event] != 0;
+        // An invalid declaration (#1447, a recovered parameter's) is never unused, as clang's ShouldDiagnoseUnusedDecl skips it.
+        const bool invalid_declaration = output->invalid_declarations != NULL && output->invalid_declarations[token] != 0;
+        const bool declaration_used = invalid_declaration || (parameter || local ? used_tokens[token] != 0 : used[event] != 0);
         // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
         // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
         // local's is one without linkage (#1447).
@@ -500,8 +505,21 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             check_input_report(reader, token, ambiguous ? CHECK_INPUT_AMBIGUOUS : CHECK_INPUT_INVALID_USE);
             if (ambiguous && output->report_count == before + 1 && !output->resource)
             {
+                const uint32_t earliest = reader->ambiguous_partners[pair - 1];
                 output->reports[before].note_token = declaration;
-                output->reports[before].attribute = reader->ambiguous_partners[pair - 1];
+                output->reports[before].attribute = earliest;
+                // The definitions between (#1826: a third's use lists all three, as clang's candidates do), up to two, the
+                // later first, packed in `value` (each plus 1; 0 for none). Only a unit with a third definition has one.
+                uint32_t middle[2] = { 0, 0 };
+                for (uint32_t k = 0; k < reader->ambiguous_count; k += 1)
+                {
+                    const uint32_t other = reader->ambiguous_declarations[k];
+                    const bool between = reader->ambiguous_partners[k] == earliest && other != declaration && other < declaration && other < token;
+                    const uint32_t later = between && other > middle[0] ? other : middle[0];
+                    middle[1] = between && other > middle[0] ? middle[0] : between && other > middle[1] ? other : middle[1];
+                    middle[0] = later;
+                }
+                output->reports[before].value = (uint64_t)(middle[0] != 0 ? middle[0] + 1 : 0) | (uint64_t)(middle[1] != 0 ? middle[1] + 1 : 0) << 32;
             }
         }
     }

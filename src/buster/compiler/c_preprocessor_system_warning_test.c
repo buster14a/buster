@@ -20,7 +20,7 @@ struct PPSystemWarningCase
 // (oracle_serve_child), else as a child.
 static char* pp_test_system_warning_clang(const char* path, const char* directory, bool system, bool show, uint32_t errors)
 {
-    char* const arguments[] = { "clang", "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-fmacro-backtrace-limit=0",
+    char* const arguments[] = { "clang", "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fmacro-backtrace-limit=0",
                                 "-D__INT64_C(c)=c##L", show ? "-Wsystem-headers" : "-Wno-system-headers", system ? "-isystem" : "-I", (char*)directory, (char*)path, NULL };
     char** environment = pp_test_clang_environment();
     char* output = NULL;

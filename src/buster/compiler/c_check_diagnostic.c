@@ -162,6 +162,13 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
+    [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
+    [CHECK_WARNING_ID_PRAGMA_PACK] = { "-Wpragma-pack", "-Wpragmas", "unterminated '#pragma pack (push, ...)' at end of file" },
+    [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = { NULL, NULL, "value of #pragma pack(show)" },
+    [CHECK_WARNING_ID_POINTER_TO_INT_CAST] = { "-Wpointer-to-int-cast", NULL, "cast to smaller integer type" },
+    [CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST] = { "-Wvoid-pointer-to-int-cast", "-Wpointer-to-int-cast", "cast to smaller integer type" },
+    [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = { "-Wpointer-to-enum-cast", NULL, "cast to smaller integer type" },
+    [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = { "-Wvoid-pointer-to-enum-cast", "-Wpointer-to-enum-cast", "cast to smaller integer type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -308,10 +315,14 @@ static CheckWarningSeverity check_diagnostic_range_severity(const CheckInput* in
     return quiet ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, baseline);
 }
 
-static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t token)
+// The severity of the unit's `index`th implicit declaration's diagnostic: a library function's, an unknown builtin's
+// (clang's DefaultError "use of unknown builtin", #2121) or any other function's policy.
+static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t index)
 {
+    const uint32_t token = input->implicit_function_tokens[index];
     const bool library = token < input->token_count && input->function_flags != NULL && (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
-    const uint8_t policy = library ? input->implicit_library_diagnostic : input->implicit_function_diagnostic;
+    const bool builtin = input->implicit_function_builtins != NULL && input->implicit_function_builtins[index];
+    const uint8_t policy = builtin ? input->implicit_builtin_diagnostic : library ? input->implicit_library_diagnostic : input->implicit_function_diagnostic;
     const CheckWarningSeverity baseline = policy == 1 ? CHECK_WARNING_IGNORE : policy == 2 ? CHECK_WARNING_WARNING : CHECK_WARNING_ERROR;
     const CheckWarningSeverity severity = input->implicit_function_system || !check_graph_system_token(&input->graph, token) ?
         check_diagnostic_severity_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION, baseline) : CHECK_WARNING_IGNORE;
@@ -383,6 +394,25 @@ static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t
         callee = graph->operand0[callee];
     }
     return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
+}
+
+// The name a reader's K&R record's severity and words read: a call's callee's (check_input_kr_call), else its token.
+static uint32_t check_diagnostic_kr_name(const CheckInputKrDiagnostic* diagnostic)
+{
+    return diagnostic->warning != CHECK_WARNING_KR_DEFINITION && diagnostic->body != BUSTER_CHECK_NONE ? diagnostic->body : diagnostic->token;
+}
+
+// Where clang reports a call's K&R warning (#1994, Sema::BuildResolvedCallExpr and ConvertArgumentsForCall): passing
+// arguments without a prototype at the call's `(`, a known definition's too few or too many at its `)`, the node's token.
+static uint32_t check_diagnostic_kr_call_place(const CheckInput* input, const Parser* parser, uint32_t node, uint32_t warning)
+{
+    const uint32_t close = input->graph.tokens[node];
+    uint32_t open = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && close < parser->tokens.count ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    return open != 0 ? open : close;
 }
 
 static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
@@ -539,7 +569,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
     {
         const uint32_t at = input->implicit_function_tokens[i];
-        if (at < first && check_diagnostic_implicit_function(input, at) >= CHECK_WARNING_ERROR)
+        if (at < first && check_diagnostic_implicit_function(input, i) >= CHECK_WARNING_ERROR)
         {
             first = at;
         }
@@ -562,7 +592,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     {
         const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
         const uint32_t at = diagnostic.token;
-        if (at < first && check_diagnostic_kr_severity(input, at, diagnostic.warning) >= CHECK_WARNING_ERROR)
+        if (at < first && check_diagnostic_kr_severity(input, check_diagnostic_kr_name(&diagnostic), diagnostic.warning) >= CHECK_WARNING_ERROR)
         {
             first = at;
         }
@@ -641,9 +671,31 @@ static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* rec
     return result;
 }
 
+// The name of the C23 attribute whose scope is at `token`, where clang's parser reads its arguments its own way (#1447,
+// ParseClangAttributeArgs: availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's,
+// with parentheses), or BUSTER_CHECK_NONE: clang's attribute is located at its name, not at its scope, as each of these
+// parsers makes it. Only a `clang::` one is known, so only one has reports at its scope. Cold: an attribute's report.
+static uint32_t check_diagnostic_custom_attribute_name(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* kinds = parser->tokens.kinds;
+    const bool scoped = token + 4 < count && kinds[token] == PARSE_KIND_IDENTIFIER && kinds[token + 1] == PARSE_KIND_COLON &&
+                        kinds[token + 2] == PARSE_KIND_COLON && kinds[token + 4] == PARSE_KIND_L_PAREN && token >= 1 &&
+                        (kinds[token - 1] == PARSE_KIND_L_SQUARE || kinds[token - 1] == PARSE_KIND_COMMA);
+    const uint32_t name = scoped ? parser->tokens.names[token + 3] : 0;
+    bool custom = false;
+    for (uint32_t s = 0; name != 0 && s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
+    {
+        custom |= parser->meanings.custom_attributes[s] == name;
+    }
+    return custom ? token + 3 : BUSTER_CHECK_NONE;
+}
+
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
 {
     uint32_t source = check_input_report_source(parser, report);
+    const uint32_t custom = report->pragma == 0 && report->token < parser->tokens.count ? check_diagnostic_custom_attribute_name(parser, report->token) : BUSTER_CHECK_NONE;
+    source = custom != BUSTER_CHECK_NONE ? parser->tokens.sources[custom] : source;
     if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
     {
         source = parser->tokens.sources[input->naked_diagnostic->token];
