@@ -2979,7 +2979,11 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
     const __mmask16 use_a = active & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(active, f->a + first), none)));
     const __mmask16 use_b = active & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(active, f->b + first), none)));
     const __mmask16 use_c = active & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(active, f->c + first), none)));
-    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)));
+    // A ternary intrinsic's third operand (#1840) is in the extra array, as a phi's and a call's operands are.
+    const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi32(active, f->c + first), _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
+    const __mmask16 ternary = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_INTRINSIC)) & _mm512_cmpge_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
+                              _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT));
+    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | ternary);
     const uint64_t present = _pdep_u64(use_a, BUSTER_IR_USES_LANE_BITS) | _pdep_u64(use_b, BUSTER_IR_USES_LANE_BITS << 1) | _pdep_u64(use_c, BUSTER_IR_USES_LANE_BITS << 2);
     const uint32_t* const columns[4] = { f->a + first, f->b + first, f->c + first, f->c + first };
     uint64_t total = 0;
@@ -3020,8 +3024,9 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
         {
             const uint32_t i = first + last;
             const bool phi = f->op[i] == IR_PHI;
-            const uint32_t amount = phi ? f->b[i] : f->calls[f->b[i]].argument_count;
-            const uint32_t* const extra = phi ? f->extra + f->a[i] + 1 : f->extra + f->calls[f->b[i]].argument_first;
+            const bool third = f->op[i] == IR_INTRINSIC;
+            const uint32_t amount = phi ? f->b[i] : third ? 1 : f->calls[f->b[i]].argument_count;
+            const uint32_t* const extra = phi ? f->extra + f->a[i] + 1 : third ? f->extra + ir_intrinsic_extra(f->c[i]) : f->extra + f->calls[f->b[i]].argument_first;
             const uint32_t stride = phi ? 2 : 1;
             for (uint32_t p = 0; p < amount; p += 1)
             {
