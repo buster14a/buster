@@ -1403,10 +1403,17 @@ access's memory operand, and which Tier 1 compiles with it too (docs/ir.md's
 those spaces goes through its address (GLOBAL_ADDRESS, then LOAD or STORE), as a
 memory class's does: `lea sym(%rip)` and `%gs:(%rax)` reach the byte clang's
 `%gs:sym(%rip)` does. What takes the override (`check_lower_segment_carried`):
-a read by indirection, member, subscript (not a vector's element's) or name, and an assignment, compound assignment, increment or
+a read by indirection, member, subscript or name, and an assignment, compound assignment, increment or
 decrement, of an integer's, a floating value's (long double's too), a 128-bit
 integer's or a vector's class (not a transport vector), which one LOAD or STORE
-moves. An array's lvalue isn't read: its value is its address. A bit-field's
+moves, and a half-precision value's (`_Float16`'s, `__bf16`'s), whose loads and
+stores are a U16's (`c_check_program_half.c`). An array's lvalue isn't read: its value is its address. A vector's
+element, read, assigned or updated, takes its vector lvalue's override, which the
+element's own type has lost (`check_lower_element_segment`): clang reads the
+whole vector through it and extracts the element, and writes it by a read, an
+insertion and a store of the whole vector, which for a vector that isn't
+volatile is the same access as one of the element's bytes (an element of a
+volatile vector stays refused by name). A bit-field's
 read and store take it on each piece of its unit (`check_lower_bit_unit`,
 `check_lower_bit_store`): its place (`CheckLowerBitField.segment`, packed in its
 task's bits 14 and 15) has its record's override, from the member's type
@@ -1419,13 +1426,12 @@ pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
 `__atomic_test_and_set`'s, doesn't carry it).
 
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an aggregate's copy, a complex, half-precision or `_BitInt` value
+an aggregate's copy, a complex or `_BitInt` value
 and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
 `__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
-form of the encoder's has its `36` prefix); a vector's
-element read or written through a vector in one (the element's type has lost the
-space); and an atomic builtin's object in one, which its pointer argument reaches
+form of the encoder's has its `36` prefix); a bit of a vector of bool in one,
+which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches
 (`check_lower_segment_access`). An asm statement's register output in one is
 refused too (`check_lower_asm_segment`), since its value is stored through the
 output's address; a memory operand's address goes to the template without the
