@@ -293,9 +293,10 @@ static void check_lanes_test_close(CheckLanesTestUnit* unit)
 
 // Compiles `path` to its selected program into `unit` by the scalar path or the vector one, with `pp` and `parser`,
 // which the caller keeps and releases; when `ordered`, with its identifiers' ids in another order, as the driver's
-// --id-order `id_order` gives them (check_driver_id_order).
+// --id-order `id_order` gives them (check_driver_id_order); with `tier1`, lowered for Tier 1 as the driver's --tier1 lowers
+// (CheckProgramOptions.asm_bodies: its asm statements' helpers and bodies are Tier 1's).
 static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocessor* pp, Parser* parser, InternTable* identifiers, const char* path, bool scalar,
-                                           bool ordered, uint64_t id_order)
+                                           bool ordered, uint64_t id_order, bool tier1)
 {
     *pp = (Preprocessor){ 0 };
     *parser = (Parser){ 0 };
@@ -344,6 +345,7 @@ static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocesso
         .initializer_references = unit->data.references,
         .initializer_reference_count = unit->data.reference_count,
         .scalar = scalar,
+        .asm_bodies = tier1,
         .target = options.target,
         .predefines = &options.predefines,
     };
@@ -354,7 +356,14 @@ static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocesso
 
 static void check_lanes_test_compile(CheckLanesTestUnit* unit, Preprocessor* pp, Parser* parser, InternTable* identifiers, const char* path, bool scalar)
 {
-    check_lanes_test_compile_order(unit, pp, parser, identifiers, path, scalar, false, 0);
+    check_lanes_test_compile_order(unit, pp, parser, identifiers, path, scalar, false, 0, false);
+}
+
+// The same, lowered for Tier 1 (check_lanes_test_compile_order's `tier1`).
+static __attribute__((unused)) void check_lanes_test_compile_tier1(CheckLanesTestUnit* unit, Preprocessor* pp, Parser* parser, InternTable* identifiers, const char* path,
+                                                                   bool scalar)
+{
+    check_lanes_test_compile_order(unit, pp, parser, identifiers, path, scalar, false, 0, true);
 }
 
 // One emission of a compiled unit and what it made: its object's bytes (malloc'd, the caller frees them), or its
@@ -678,7 +687,7 @@ static uint32_t check_lanes_test_order(CheckLanesTestTally* tally, CheckLanesTes
     static Preprocessor ordered_pp;
     static Parser ordered_parser;
     CheckLanesTestUnit ordered;
-    check_lanes_test_compile_order(&ordered, &ordered_pp, &ordered_parser, &ordered_identifiers, path, scalar, true, id_order);
+    check_lanes_test_compile_order(&ordered, &ordered_pp, &ordered_parser, &ordered_identifiers, path, scalar, true, id_order, false);
     char detail[256];
     snprintf(detail, sizeof(detail), "%s, %s path, --id-order %llu", what, scalar ? "scalar" : "vector", (unsigned long long)id_order);
     check_lanes_test_expect(tally, ordered.ready, "compile a program with its identifiers' ids in another order", detail);

@@ -1598,25 +1598,26 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
         Tier0Operation scalar;
         Tier0Operation scalar_tail;
         CheckVectorConstants scalar_constants = { 0 };
-        // The lanes' fold is LLVM's where its legal vectors are AVX-512's; a narrower target's legalization isn't modelled.
-        const char* reason = number && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0 ? "elementwise builtins of scalars without AVX-512F" :
-                             number ? check_vector_floating_scalar_row(&writer->target, maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM,
+        // The pieces are the target's registers' bytes, LLVM's legal vectors there (#1834), whose halves it pairs first.
+        const char* reason = number ? check_vector_floating_scalar_row(&writer->target, maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM,
                                                                        class, &scalar, &scalar_constants, &scalar_tail) :
-                                      check_vector_reduce_floating_shape_rows(builtin, piece, tail, &count);
-        Tier0Operation combine;
+                                      check_vector_reduce_floating_target_rows(&writer->target, builtin, piece, tail, &count);
+        Tier0Operation chain[BUSTER_CHECK_VECTOR_FLOATING_ROWS];
+        Tier0Operation* combine = chain;
+        uint32_t links = 1;
         CheckVectorConstants constants = { 0 };
         if (reason == NULL && shape.bytes > bytes)
         {
             if (sum)
             {
                 const CheckVectorElement element = { .bytes = shape.element, .floating = true, .is_signed = true };
-                reason = check_vector_lower_element_row(&writer->target, false, CHECK_OP_ADD, element, bytes, 0, &combine);
+                reason = check_vector_lower_element_row(&writer->target, false, CHECK_OP_ADD, element, bytes, 0, combine);
             }
             else
             {
                 const CBuiltinId operation = number ? maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM :
                                                      maximum ? CBUILTIN_ELEMENTWISE_MAXIMUM : CBUILTIN_ELEMENTWISE_MINIMUM;
-                reason = check_vector_floating_shape_row(operation, piece, &combine, &constants);
+                reason = check_vector_floating_rows(&writer->target, operation, piece, chain, &links, &constants);
             }
         }
         if (reason != NULL)
@@ -1630,7 +1631,12 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
             const uint32_t local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
             const bool explicit_start = sum && graph->argument_counts[node] == 2;
             const uint32_t start = explicit_start ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
-            const uint32_t operation = shape.bytes > bytes ? check_lower_operation_index(writer, &combine) : BUSTER_CHECK_NONE;
+            const uint32_t operation = shape.bytes > bytes ? check_lower_operation_index(writer, combine) : BUSTER_CHECK_NONE;
+            uint32_t chained[BUSTER_CHECK_VECTOR_FLOATING_ROWS] = { 0 };
+            for (uint32_t k = 1; k < links && shape.bytes > bytes; k += 1)
+            {
+                chained[k] = check_lower_operation_index(writer, chain + k);
+            }
             if (number)
             {
                 // LLVM's fmax/fmin reduction legalizes wide vectors by pairing their halves, then folds the legal
@@ -1654,7 +1660,7 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
             for (uint32_t r = count; r-- > 0;)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_X86, tail[r].result_class, check_lower_operation_index(writer, tail + r));
-                if (!sum && !number)
+                if (!sum && !number && tail[r].operand_count > 1)
                 {
                     uint64_t words[8] = { 0 };
                     const uint64_t mask = maximum ? sign - 1 : sign;
@@ -1690,8 +1696,18 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
                 for (uint32_t p = half / bytes; p-- > 0;)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                    // A chain's later rows (check_vector_baseline_floating_rows') take the previous one's result and the
+                    // two halves again.
+                    for (uint32_t k = links; k-- > 1;)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, chained[k]);
+                        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                        check_lower_element_address(writer, object, half + p * bytes);
+                        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                        check_lower_element_address(writer, object, p * bytes);
+                    }
                     check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, operation);
-                    check_lower_row_constants(writer, &combine, &constants, 2);
+                    check_lower_row_constants(writer, combine, &constants, 2);
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
                     check_lower_element_address(writer, object, half + p * bytes);
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
