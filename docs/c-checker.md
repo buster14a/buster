@@ -9896,8 +9896,9 @@ tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
 above (a cast to void or to `void *` in a condition gives none of clang's
 "never produces a constant expression" errors, nor
 `-Wint-to-void-pointer-cast`); the comma warnings of a static assertion's
-condition, of a type name's bound in an `_Alignof` or a file-scope
-initializer's `sizeof`, and a const builtin call's "ignoring return value"
+condition, of a type name's bound that a constant expression reads (`sizeof(int[(1, 2)])`
+within a bound, an `_Alignof`, or a file-scope initializer's `sizeof`: their check reads
+constants again, which would make the constant walk recursive), and a const builtin call's "ignoring return value"
 as a left operand, which clang gives too; in a function body, a constant
 bound's comma warnings come before the body's graph-walked ones rather than
 among them in source order; and, as everywhere in this driver, the uses' errors stop the unit's

@@ -69,8 +69,6 @@ static bool check_input_integer_attribute(const CheckInputReader* reader, const 
     return check_input_integer_ice(reader, value) && (value->flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0;
 }
 
-// c_check_attribute_expression.c's: a constant expression's comma operators' discarded left operands' warnings (#2202).
-static void check_input_attribute_unused(CheckInputReader* reader, uint32_t first, uint32_t end, bool bound);
 
 static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t warnings)
 {
@@ -1095,8 +1093,8 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     part.extent = (uint64_t)extent;
                     if (valid)
                     {
-                        // Its comma operators' left operands' -Wunused-value, as a declarator's constant bound's (#2202).
-                        check_input_attribute_unused(reader, i + 1, close, true);
+                        // (Its comma operators' left operands' -Wunused-value isn't given here: their check reads constants
+                        // again, which would make this walk recursive; docs/c-checker.md.)
                         check_input_constant_bound_warning(reader, i + 1, close, &bound, i, false);
                     }
                 }
