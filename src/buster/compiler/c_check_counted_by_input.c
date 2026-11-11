@@ -116,6 +116,84 @@ static void check_input_counted_report(CheckInputReader* reader, uint32_t token,
     }
 }
 
+static bool check_input_thread_name(CheckInputReader* reader, uint32_t parameters, const CheckTagFrame* frames, uint32_t depth, const CheckTagMember* members,
+                                    uint32_t member_count, uint32_t token);
+
+static bool check_condition_unevaluated_keyword(const Parser* parser, uint32_t token);
+
+// The token past a group that opens at `open` (a `(` or `[`), before `end`.
+static uint32_t check_input_counted_group_end(const Parser* parser, uint32_t open, uint32_t end)
+{
+    uint32_t nesting = 0;
+    uint32_t t = open;
+    do
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        nesting += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE ? 1u : 0u;
+        nesting -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE) && nesting != 0 ? 1u : 0u;
+        t += 1;
+    } while (nesting != 0 && t < end);
+    return t;
+}
+
+// The token past the operand of sizeof's, alignof's or typeof's keyword at `keyword`, before `end`: a parenthesized
+// one's group, or a unary expression's prefix operators, primary and postfix operators.
+static uint32_t check_input_counted_unevaluated_end(const Parser* parser, uint32_t keyword, uint32_t end)
+{
+    uint32_t t = keyword + 1;
+    while (t < end && parser->tokens.kinds[t] != PARSE_KIND_L_PAREN && parser->tokens.kinds[t] != PARSE_KIND_IDENTIFIER &&
+           parser->tokens.kinds[t] != PARSE_KIND_NUMBER && parser->tokens.kinds[t] != PARSE_KIND_STRING && parser->tokens.kinds[t] != PARSE_KIND_CHARACTER)
+    {
+        t += 1;
+    }
+    const bool grouped = t == keyword + 1 && t < end && parser->tokens.kinds[t] == PARSE_KIND_L_PAREN;
+    t = t < end && parser->tokens.kinds[t] == PARSE_KIND_L_PAREN ? check_input_counted_group_end(parser, t, end) : t < end ? t + 1 : t;
+    bool postfix = !grouped;
+    while (postfix && t < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool group = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
+        const bool member = (kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_ARROW) && t + 1 < end;
+        postfix = group || member || kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
+        t = group ? check_input_counted_group_end(parser, t, end) : member ? t + 2 : postfix ? t + 1 : t;
+    }
+    return t;
+}
+
+// The type of a counted_by family's argument that is more than a name (#1842), as clang's parser reads it where the
+// attribute is: the record's earlier members and the scope's names (check_input_thread_name; in sizeof's, alignof's and
+// typeof's unevaluated operands, the scope's alone, as clang's member lookup there finds none), each name that names
+// nothing clang's "use of undeclared identifier" error, at the first (*undeclared, which ends the attribute); 0 where its
+// type isn't worked out.
+static TypeId check_input_counted_argument_type(CheckInputReader* reader, const CheckTagFrame* frames, uint32_t depth, const CheckTagMember* members,
+                                                uint32_t member_count, uint32_t first, uint32_t end, uint32_t* undeclared)
+{
+    const Parser* parser = reader->parser;
+    *undeclared = BUSTER_CHECK_NONE;
+    uint32_t unevaluated = first;
+    for (uint32_t t = first; t < end; t += 1)
+    {
+        unevaluated = t >= unevaluated && check_condition_unevaluated_keyword(parser, t) ? check_input_counted_unevaluated_end(parser, t, end) : unevaluated;
+        const bool fields = t >= unevaluated;
+        const bool named = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && parser->tree.roles[t] != PARSE_ROLE_SPECIFIER &&
+                           check_input_thread_name(reader, BUSTER_CHECK_NONE, fields ? frames : NULL, depth, members, member_count, t);
+        *undeclared = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && parser->tree.roles[t] != PARSE_ROLE_SPECIFIER && !named && *undeclared == BUSTER_CHECK_NONE ?
+                      t : *undeclared;
+    }
+    TypeId type = 0;
+    if (*undeclared == BUSTER_CHECK_NONE)
+    {
+        // Its type alone: a report the reading makes is none of clang's here, which reads the argument as an expression.
+        const uint32_t reports = reader->output->report_count;
+        CheckValue value = { 0 };
+        TypeId unused = 0;
+        const bool read = check_input_constant_read(reader, first, end, false, false, true, &value, &unused, NULL, NULL);
+        type = read || value.type != 0 ? value.type : 0;
+        reader->output->report_count = reports;
+    }
+    return type;
+}
+
 // The counted_by family's attributes of a member being declared in the innermost of `frames` (its declaration's first
 // token `begin`, its type `type`), checked as clang's CheckCountedByAttrOnField checks them, in its order, with its
 // errors; a valid one's kind and count into `member`, the last one's. False where one is an error (reported).
@@ -180,6 +258,11 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
             const CheckValue value = literal.valid ? check_input_literal_value(reader, first, literal) : (CheckValue){ 0 };
             literal_integer = literal.valid && check_input_counted_integer(types, value.type);
         }
+        // Any other expression's type, with the members' names (#1842); a literal's where it isn't worked out.
+        uint32_t undeclared = BUSTER_CHECK_NONE;
+        const TypeId argument_type = kind != BUSTER_TYPE_COUNT_NONE && named == BUSTER_CHECK_NONE && first < attribute->argument_end ?
+                                     check_input_counted_argument_type(reader, frames, depth, members, member_count, first, attribute->argument_end, &undeclared) : 0;
+        const bool integer_argument = argument_type != 0 ? check_input_counted_integer(types, argument_type) : literal_integer;
         if (kind == BUSTER_TYPE_COUNT_NONE)
         {
         }
@@ -187,6 +270,11 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
         {
             // clang's parser reads the argument first: a name nothing declares is its error, and the attribute's end.
             check_input_report(reader, named, CHECK_INPUT_UNDECLARED);
+            valid = false;
+        }
+        else if (undeclared != BUSTER_CHECK_NONE)
+        {
+            check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
             valid = false;
         }
         else if (type_kind(types, record) == BUSTER_TYPE_KIND_UNION)
@@ -231,9 +319,9 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
         }
         else if (named == BUSTER_CHECK_NONE || grouped)
         {
-            // Another expression: a literal of no integer type, clang's integer error; anything else, its declaration
-            // reference's (#148's simplification: the type of an expression of more tokens isn't worked out).
-            check_input_counted_report(reader, first, literal_integer ? CHECK_INPUT_COUNTED_REFERENCE : CHECK_INPUT_COUNTED_INTEGER, index, 0, BUSTER_CHECK_NONE);
+            // Another expression: one of no integer type, clang's integer error (its type with the members' names,
+            // check_input_counted_argument_type); anything else, its declaration reference's.
+            check_input_counted_report(reader, first, integer_argument ? CHECK_INPUT_COUNTED_REFERENCE : CHECK_INPUT_COUNTED_INTEGER, index, 0, BUSTER_CHECK_NONE);
             valid = false;
         }
         else if (count == BUSTER_CHECK_NONE)

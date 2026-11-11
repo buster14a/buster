@@ -57,6 +57,18 @@ requirements. [Command index](README.md).
   padding GNU ld wouldn't. A bound section whose atoms would need more than
   one bucket (mixed classes, or TLS and non-TLS) is refused with
   `EXECUTABLE_CAUSE_UNSUPPORTED_BOUND`.
+  Read-only atoms whose input section is a `.note*` one (file-scope asm's
+  `.pushsection .note.NAME,"a",@note`, #1848) go the same way, even alone, into
+  note buckets of their own, one per alignment: each non-empty one is an
+  `SHT_NOTE` section after `.note.gnu.build-id`, named after its first input
+  section, as lld names it. The one of 4 that directly follows the build ID
+  shares its `PT_NOTE`; each other has a `PT_NOTE` of its own alignment, so
+  `readelf -n` lists every note. Note sections of different names but the same
+  largest alignment share one output section (named after the first), since
+  the writer's section table is fixed; their notes stay whole and covered. A
+  link without such atoms pays one class-byte scan and writes the same bytes as
+  before. `test-checker-driver --asm-definitions-only` compares the direct
+  path's notes, sections and `PT_NOTE`s with clang's build's.
   Local-exec accesses and undefined DTPOFF32 module offsets in shared
   libraries are refused. Distinct general-/initial-exec slot columns allow
   both models to reference the same symbol. TLSGD target bitsets are reduced

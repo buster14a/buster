@@ -1008,6 +1008,15 @@ static void ir_parse_instruction(IrParseState* state)
                         const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
                         row.flags = (uint8_t)(row.flags | BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
                     }
+                    // A segment override (#1447), as the printer names it.
+                    if (ir_parse_word(state, "fs"))
+                    {
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_SEGMENT_FS << BUSTER_IR_SEGMENT_SHIFT);
+                    }
+                    else if (ir_parse_word(state, "gs"))
+                    {
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_SEGMENT_GS << BUSTER_IR_SEGMENT_SHIFT);
+                    }
                 }
             } break;
         }

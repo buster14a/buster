@@ -843,24 +843,50 @@ static void check_builtin_bits_test_constraints(CheckBuiltinBitsTest* test, Type
             check_builtin_bits_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE && result.action.diagnostic != CHECK_DIAG_UNSUPPORTED &&
                                                      result.action.diagnostic_operand == 0, "a generic bit builtin of a non-integer is an error");
         }
+        // A runtime _BitInt past 128 bits is a runtime action; a constant one folds by its limbs (#1447, c_check_wide.c).
         const CheckValue wide[2] =
         {
-            check_test_integer(type_bit_int(table, 208, true), 1),
+            (CheckValue){ .type = type_bit_int(table, 208, true), .category = CHECK_RVALUE },
             check_test_integer(rotate ? type_bit_int(table, 200, false) : BUSTER_TYPE_INT, 1),
         };
         const CheckBuiltinMiscResult result = check_builtin_bits_test_action(table, id, wide, rotate ? 2 : 1);
         check_builtin_bits_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE &&
                                                  result.action.value.fault == CHECK_FAULT_NONE,
-                                       "a _BitInt past 128 bits is a runtime action");
+                                       "a runtime _BitInt past 128 bits is a runtime action");
+        CheckValue constants[2] =
+        {
+            check_test_integer(BUSTER_TYPE_INT, 1),
+            check_test_integer(BUSTER_TYPE_INT, 1),
+        };
+        const bool held = check_wide_convert(table, constants, type_bit_int(table, 208, true), 1) &&
+                          (!rotate || check_wide_convert(table, constants + 1, type_bit_int(table, 200, false), 2));
+        constants[0].type = type_bit_int(table, 208, true);
+        constants[1].type = rotate ? type_bit_int(table, 200, false) : BUSTER_TYPE_INT;
+        const CheckBuiltinMiscResult folded = check_builtin_bits_test_action(table, id, constants, rotate ? 2 : 1);
+        check_builtin_bits_test_expect(test, held && folded.action.diagnostic == CHECK_DIAG_NONE && folded.action.value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                                                 folded.action.value.fault == CHECK_FAULT_NONE,
+                                       "a constant _BitInt past 128 bits folds");
     }
     const CheckValue wide_count[2] =
     {
         unsigned_value,
-        check_test_integer(type_bit_int(table, 200, false), 1),
+        (CheckValue){ .type = type_bit_int(table, 200, false), .category = CHECK_RVALUE },
     };
     const CheckBuiltinMiscResult result = check_builtin_bits_test_action(table, CBUILTIN_STDC_ROTATE_RIGHT, wide_count, 2);
     check_builtin_bits_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE,
-                                   "a rotation's count past 128 bits is a runtime action");
+                                   "a runtime rotation's count past 128 bits is a runtime action");
+    // The set bits of limbs, vpopcntq's and its scalar twin's, at every count around the vector's 8.
+    uint64_t limbs[40];
+    bool same = true;
+    for (uint32_t count = 1; count <= BUSTER_ARRAY_LENGTH(limbs); count += 1)
+    {
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            limbs[i] = check_builtin_bits_test_random(test);
+        }
+        same &= check_builtin_bits_popcount_vector(limbs, count) == check_builtin_bits_popcount_scalar(limbs, count);
+    }
+    check_builtin_bits_test_expect(test, same, "the set bits of limbs match their scalar twin");
     const CheckValue fixed_refused = { .type = type_pointer(table, BUSTER_TYPE_UINT), .category = CHECK_RVALUE };
     const CBuiltinId fixed[] = { CBUILTIN_BITREVERSE32, CBUILTIN_CLRSBL, CBUILTIN_CTZS };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixed); i += 1)
