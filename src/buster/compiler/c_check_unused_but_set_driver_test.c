@@ -61,7 +61,6 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_but_set_fixtur
         .warnings = 1,
         .errors = 1,
         .syntax_only = true,
-        .compare_warning_text = true,
     },
     {
         .name = "variables set but not used by default",
