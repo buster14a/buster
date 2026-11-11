@@ -1692,6 +1692,23 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // A statement expression in a static selection's chosen operand is evaluated where the selection is: its
+        // statements, roots of their own, are left out of the selection's unselected roots (#2023), so -Wuninitialized
+        // reads them and an initializer's -Wconstant-conversion is given; nested in another selection's other operand,
+        // they stay unselected.
+        .name = "statement expressions in a chosen selection operand are evaluated",
+        .source = "int f1(void) { int u; return _Generic(1, int: ({ u; }), default: 0); }\n"
+                  "int f2(void) { int u; return __builtin_choose_expr(1, ({ u; }), 0); }\n"
+                  "int f3(void) { return _Generic(1, int: ({ char c = 302; c; }), default: 0); }\n"
+                  "int f4(void) { int u; return _Generic(1, int: _Generic(2, long: 0, default: ({ u; })), default: 0); }\n"
+                  "int f5(void) { int u; return __builtin_choose_expr(0, _Generic(1, int: ({ u; })), 0); }\n"
+                  "int f6(int x) { return _Generic(1, int: ({ x == 1; 0; }), default: 0); }\n"
+                  "int f7(void) { int u; return _Generic(1, long: ({ u; }), int: ({ int v = 1; v; })); }\n",
+        .options = { "-Wall" },
+        .warnings = 5,
+        .notes = 4,
+    },
+    {
         .name = "typeof statement expressions are unevaluated",
         .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
                   "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",

@@ -5725,7 +5725,11 @@ path, the twin, visits every item and runs the same tests.
 A static selection's unselected arms and controlling expression
 (`check_common_unselected_roots`, which `check_common_evaluated` and the
 returned-address check use) are the roots inside its range, from past its
-keyword to its closing token, other than the arm it selects. One pass finds
+keyword to its closing token, but outside the operand it chooses, between that
+operand's top-level commas (`check_common_chosen_span`): a statement
+expression's statements there are roots of their own, evaluated where the
+selection is (#2023); the ranges' bits leave each one's chosen operand out,
+the selections found by their closing tokens, sorted. One pass finds
 them for every selection (#1341, #1360): the `SELECT` nodes 16 at a time by
 operator, their closing tokens as bits; their keywords from one pass down the
 tokens below the last of them, 64 kinds at a time, each closing token claimed

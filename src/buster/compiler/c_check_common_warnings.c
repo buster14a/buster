@@ -7854,6 +7854,51 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
     return valid;
 }
 
+// A static selection's range: the tokens from just past its keyword up to its closing token, which it excludes.
+typedef struct CheckCommonRange CheckCommonRange;
+struct CheckCommonRange
+{
+    uint32_t first;
+    uint32_t end;
+};
+
+// The tokens of the operand the static selection `node` chooses, from just past the top-level comma before it (or the
+// selection's `(`) up to the comma after it (or its `)`), which it excludes: a root there, a statement of a statement
+// expression in the chosen arm, is evaluated where the selection is (#2023). Its operand is the selection's first,
+// under the conversions at its `)`; none (an empty range) for one the reader folded to a constant at its `)`, or
+// without the parser's depths.
+static CheckCommonRange check_common_chosen_span(const CheckGraph* graph, const Parser* parser, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t close = graph->ops[node] == CHECK_OP_SELECT ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    uint32_t chosen = close < count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_CONVERT && graph->tokens[chosen] == close && steps < graph->count;
+         steps += 1)
+    {
+        chosen = graph->operand0[chosen];
+    }
+    const uint32_t token = chosen < graph->count ? graph->tokens[chosen] : BUSTER_CHECK_NONE;
+    CheckCommonRange result = { 0 };
+    if (parser->tree.depths != NULL && token < close)
+    {
+        // (The selection's contents are one deeper than its parentheses.)
+        const uint32_t depth = parser->tree.depths[close] + 1;
+        uint32_t first = token;
+        while (first > 0 && parser->tree.depths[first - 1] >= depth &&
+               !(parser->tokens.kinds[first - 1] == PARSE_KIND_COMMA && parser->tree.depths[first - 1] == depth))
+        {
+            first -= 1;
+        }
+        uint32_t end = token;
+        while (end < close && !(parser->tokens.kinds[end] == PARSE_KIND_COMMA && parser->tree.depths[end] == depth))
+        {
+            end += 1;
+        }
+        result = (CheckCommonRange){ .first = first, .end = end };
+    }
+    return result;
+}
+
 // check_common_unselected_roots by its definition, a selection at a time: each walks back from its token for its keyword,
 // then visits every node. That is O(selections × (tokens + nodes)), seconds on a unit of many asserts or _Generic
 // selections (#1341, #1360). The exact path for a selection whose selected node `roots` holds, which none of the callers'
@@ -7874,23 +7919,17 @@ static void check_common_unselected_walk(const CheckGraph* graph, const Parser* 
             }
         }
         const uint32_t selected = graph->operand0[node];
+        const CheckCommonRange chosen = check_common_chosen_span(graph, parser, node);
         for (uint32_t candidate = 0; close < parser->tokens.count && candidate < graph->count; candidate += 1)
         {
-            if (roots[candidate] != 0 && candidate != selected && graph->tokens[candidate] > token && graph->tokens[candidate] < close)
+            const uint32_t at = graph->tokens[candidate];
+            if (roots[candidate] != 0 && candidate != selected && at > token && at < close && !(at >= chosen.first && at < chosen.end))
             {
                 marks[candidate] = value;
             }
         }
     }
 }
-
-// A static selection's range: the tokens from just past its keyword up to its closing token, which it excludes.
-typedef struct CheckCommonRange CheckCommonRange;
-struct CheckCommonRange
-{
-    uint32_t first;
-    uint32_t end;
-};
 
 // Sets the bits from `first` up to `end`, which it excludes, a word at a time.
 static void check_common_set_bits(uint64_t* bits, uint32_t first, uint32_t end)
@@ -7928,6 +7967,9 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     static const CheckOp selects[] = { CHECK_OP_SELECT };
     const CheckCommonOps set = check_common_ops(selects, BUSTER_ARRAY_LENGTH(selects));
     uint64_t* bits = NULL;
+    // Each selection's `)` above its node, which the ranges find their chosen operands by (check_common_chosen_span).
+    uint64_t* keys = NULL;
+    uint64_t* temporary = NULL;
     bool valid = true;
     bool walk = false;
     uint32_t selections = 0;
@@ -7941,7 +7983,9 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
             if (bits == NULL)
             {
                 bits = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words);
-                valid = bits != NULL;
+                keys = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count);
+                temporary = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count);
+                valid = bits != NULL && keys != NULL && temporary != NULL;
                 if (valid)
                 {
                     memset(bits, 0, words * sizeof(uint64_t));
@@ -7950,6 +7994,7 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
             if (valid)
             {
                 bits[close >> 6] |= UINT64_C(1) << (close & 63);
+                keys[selections] = (uint64_t)close << 32 | node;
             }
             const uint32_t selected = graph->operand0[node];
             walk |= selected < graph->count && roots[selected] != 0;
@@ -7959,6 +8004,7 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     }
     CheckCommonRange* ranges = valid && selections != 0 && !walk ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonRange, selections) : NULL;
     valid &= selections == 0 || walk || ranges != NULL;
+    const uint64_t* closes = ranges != NULL ? c_bindings_sort(keys, temporary, selections, vector, UINT32_MAX >> __builtin_clz(last)) : NULL;
     uint32_t used = 0;
     // Once every selection has its keyword, no token before them claims one.
     for (uint32_t end = ranges != NULL ? last : 0; end != 0 && used < selections;)
@@ -7992,20 +8038,51 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     }
     if (used != 0)
     {
-        // The claims came in descending keyword order: the ranges in ascending order, each bit set once.
+        // The claims came in descending keyword order: the ranges in ascending order. Each sets its bits but its chosen
+        // operand's, whose roots are evaluated where the selection is (#2023); the ranges nest, and one inside an earlier
+        // range that left nothing out adds nothing.
         memset(bits, 0, ((uint64_t)last + 63) / 64 * sizeof(uint64_t));
         uint32_t covered = 0;
         uint32_t lowest = UINT32_MAX;
         for (uint32_t i = used; i-- > 0;)
         {
-            const uint32_t from = ranges[i].first > covered ? ranges[i].first : covered;
-            if (ranges[i].end > from)
+            const uint32_t close = ranges[i].end;
+            // (The selection whose `)` this is: the sorted keys' first at or past it, a binary search.)
+            uint32_t low = 0;
+            uint32_t high = selections;
+            while (low < high)
             {
-                check_common_set_bits(bits, from, ranges[i].end);
-                covered = ranges[i].end;
-                lowest = from < lowest ? from : lowest;
+                const uint32_t middle = low + (high - low) / 2;
+                const bool before = (uint32_t)(closes[middle] >> 32) < close;
+                low = before ? middle + 1 : low;
+                high = before ? high : middle;
             }
+            // (Selections that share a `)`, which only a test's graph has, leave out what each of them chooses.)
+            CheckCommonRange chosen = { .first = 0, .end = UINT32_MAX };
+            for (uint32_t k = low; k < selections && (uint32_t)(closes[k] >> 32) == close; k += 1)
+            {
+                const CheckCommonRange own = check_common_chosen_span(graph, parser, (uint32_t)closes[k]);
+                chosen.first = own.first > chosen.first ? own.first : chosen.first;
+                chosen.end = own.end < chosen.end ? own.end : chosen.end;
+            }
+            const bool split = chosen.end > chosen.first && chosen.end > ranges[i].first && chosen.first < close;
+            const uint32_t gap = split && chosen.first > ranges[i].first ? chosen.first : ranges[i].first;
+            const uint32_t resume = split && chosen.end < close ? chosen.end : close;
+            const CheckCommonRange pieces[] = {
+                { .first = ranges[i].first, .end = split ? gap : close },
+                { .first = split ? resume : close, .end = close },
+            };
+            for (uint32_t k = 0; ranges[i].end > covered && k < BUSTER_ARRAY_LENGTH(pieces); k += 1)
+            {
+                if (pieces[k].end > pieces[k].first)
+                {
+                    check_common_set_bits(bits, pieces[k].first, pieces[k].end);
+                    lowest = pieces[k].first < lowest ? pieces[k].first : lowest;
+                }
+            }
+            covered = !split && close > covered ? close : covered;
         }
+        covered = last;
         // The vector path gathers the bits of the roots whose tokens the ranges span alone: from the lowest range's
         // first token to the highest's end.
         for (uint32_t first = 0; first < graph->count; first += 16)
