@@ -1021,6 +1021,8 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // test-sqlite (#146): SQLite's shell by both tiers against clang's, over SQLite's CLI tests and tests/sqlite's scripts.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
 #include "buster/compiler/sqlite_test.c"
+// test-sqlite-testfixture (#146): SQLite's Tcl test suite through testfixture by both tiers against clang's.
+#include "buster/compiler/sqlite_testfixture.c"
 #endif
 // measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
 // own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
@@ -2408,6 +2410,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-sqlite") == 0)
     {
         result = run_sqlite_tests(argc - 1, argv + 1);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-sqlite-testfixture") == 0)
+    {
+        result = run_sqlite_testfixture(argc - 1, argv + 1);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)

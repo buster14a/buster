@@ -119,3 +119,8 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 9, 10))) void pp
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_diagnose_output_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase,
                                                                                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, ...);
+// A diagnostic at an explicit place (`location`, `origin`) with notes at explicit places, a place of location 0 a note
+// without one (#1849: clang's note at an invalid location).
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 9, 10))) void pp_diagnose_placed_sources_phase(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin,
+                                                                                                          uint32_t position, PPDiagnosticPhase phase, const PPDiagnosticSourceNote* placed,
+                                                                                                          uint32_t placed_count, const char* format, ...);
