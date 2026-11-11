@@ -21,6 +21,26 @@ static uint32_t check_semantic_note_count(const PPOutputDiagnosticNote* notes)
     return count;
 }
 
+// The first token of `node`'s subtree, whose tokens are contiguous before it: the tokens before it whose parents reach it
+// (an error's path alone asks).
+static uint32_t check_semantic_first_token(const Parser* parser, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t first = node;
+    bool inside = true;
+    while (inside && first != 0)
+    {
+        uint32_t ancestor = first - 1;
+        for (uint32_t steps = 0; ancestor < count && ancestor < node && steps < count; steps += 1)
+        {
+            ancestor = parser->tree.parents[ancestor];
+        }
+        inside = ancestor == node;
+        first -= inside ? 1u : 0u;
+    }
+    return first;
+}
+
 static const char* check_semantic_text(Preprocessor* pp, const char* text)
 {
     // Do not quietly replace a failed contextual rendering with a successful generic diagnostic.
@@ -1950,16 +1970,25 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool first_pointer = operand_type != 0 && check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER;
             const uint32_t pointer = first_pointer ? operand : second;
             const TypeId pointer_type = first_pointer ? operand_type : second_type;
-            const TypeId pointee = pointer_type != 0 && check_action_kind(types, pointer_type) == BUSTER_TYPE_KIND_POINTER ?
+            // (A function's name, either operand, which the subscript decays: its function type is the pointee's.)
+            const bool designator = op == CHECK_OP_SUBSCRIPT && operand_type != 0 && check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_FUNCTION;
+            const bool designator_second = op == CHECK_OP_SUBSCRIPT && !designator && second_type != 0 && check_action_kind(types, second_type) == BUSTER_TYPE_KIND_FUNCTION;
+            const TypeId pointee = designator ? operand_type : designator_second ? second_type :
+                                   pointer_type != 0 && check_action_kind(types, pointer_type) == BUSTER_TYPE_KIND_POINTER ?
                                    type_element(types, type_unqualified(type_strip_aligned(types, pointer_type))) : 0;
             const TypeId bare = pointee != 0 ? type_unqualified(type_strip_aligned(types, pointee)) : 0;
             const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
             const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+            // A subscript of a function's pointer (a function's name decayed): clang's err_subscript_function_type (#2406).
+            const bool function = op == CHECK_OP_SUBSCRIPT && kind == BUSTER_TYPE_KIND_FUNCTION;
             const String8 type = tag ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, stream, types, pointer)) :
-                                       (String8){ "", 0 };
+                                 function && !designator && !designator_second ?
+                                 check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, stream, types, pointer)) :
+                                 function ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0) : (String8){ "", 0 };
             if (type.length != 0)
             {
-                result = check_warning_text(scratch, op == CHECK_OP_SUBSCRIPT ? "subscript of pointer to incomplete type %.*s" :
+                result = check_warning_text(scratch, function ? "subscript of pointer to function type %.*s" :
+                                                     op == CHECK_OP_SUBSCRIPT ? "subscript of pointer to incomplete type %.*s" :
                                                      "arithmetic on a pointer to an incomplete type %.*s", (int)type.length, type.pointer);
                 // (A subscript's at its `[`, the opener of its node's `]`.)
                 uint32_t open = token;
@@ -1968,9 +1997,22 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 {
                     open -= 1;
                 }
-                *location = open;
-                *note = check_semantic_forward_note(parser, pp, input, types, spell, bare, scratch);
+                // (A function's pointer's at that operand, as clang's is at the base.)
+                const uint32_t based = designator ? operand : designator_second ? second : pointer;
+                *location = function && based < count && graph->tokens[based] < parser->tokens.count ? check_semantic_first_token(parser, graph->tokens[based]) : open;
+                *note = function ? *note : check_semantic_forward_note(parser, pp, input, types, spell, bare, scratch);
             }
+        }
+        else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_SUBSCRIPT && token < parser->tokens.count)
+        {
+            // A subscript of neither an array, a pointer nor a vector: clang's err_typecheck_subscript_value at its `[` (#2406).
+            uint32_t open = token;
+            while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE && parser->tree.parents[open] == token))
+            {
+                open -= 1;
+            }
+            *location = open;
+            result = "subscripted value is not an array, pointer, or vector";
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && token < parser->tokens.count &&
                  graph->tokens[node] == token)

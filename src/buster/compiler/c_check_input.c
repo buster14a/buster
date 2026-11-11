@@ -389,6 +389,10 @@ typedef enum CheckInputMessage
     // "conflicting asm label" at its name, its note "previous declaration is here" at the earlier label's string
     // (`note_token`).
     CHECK_INPUT_ASM_LABEL_CONFLICT,
+    // A `case` or a `default` label outside any switch (#2406): clang's "'case' statement not in switch statement" (or
+    // 'default') at its keyword.
+    CHECK_INPUT_CASE_OUTSIDE_SWITCH,
+    CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
