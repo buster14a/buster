@@ -830,11 +830,14 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
 // A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
-// review): a long double's, in its depth's slot, which later expressions share. Both paths refuse it by name, and compile
-// the same function with no value held across its setjmp.
+// review): a deep expression's, in its depth's slot, which later expressions share. Both paths refuse it by name, and
+// compile a long double held across setjmp, whose slot the call snapshots (#1843), and a function with no value held.
 static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char* const sources[2] = {
+    static const char* const sources[3] = {
+        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
+        "int run(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j)\n"
+        "{ int r = a + (b * (c - (d + (e * (f - (g + (h * (i - (j + __builtin_setjmp(buf)))))))))); if (r == 0) jump(); return r; }\n",
         "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
         "long double run(long double x) { long double r = x + __builtin_setjmp(buf); if (r == x) jump(); return r; }\n",
         "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
@@ -844,7 +847,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
     char object[256];
     snprintf(source, sizeof(source), "%s/setjmp_held.c", directory);
     snprintf(object, sizeof(object), "%s/setjmp_held.o", directory);
-    for (uint32_t s = 0; s < 2; s += 1)
+    for (uint32_t s = 0; s < 3; s += 1)
     {
         const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
         for (uint32_t path = 0; written && path < 2; path += 1)
@@ -854,12 +857,12 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
             char* text = NULL;
             const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
             const bool refused = status == 1 && text != NULL &&
-                                 strstr(text, "unsupported: a long double, __int128, vector or mask value, or a deep expression's, held across a call in a function "
-                                              "that calls __builtin_setjmp") != NULL;
+                                 strstr(text, "unsupported: a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp") != NULL;
             const bool compiled = status == 0;
             check_test_expect(test, s == 0 ? refused : compiled,
-                              s == 0 ? (path == 0 ? "a long double held across __builtin_setjmp is refused by name" : "the same, scalar")
-                                     : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
+                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp is refused by name" : "the same, scalar")
+                              : s == 1 ? (path == 0 ? "a long double held across __builtin_setjmp compiles" : "the same, scalar")
+                                       : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
             free(text);
         }
         check_test_expect(test, written, "setjmp's held-value sources written");
@@ -9233,6 +9236,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_unknown_builtins(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_operand_errors(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -9423,6 +9430,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_tls(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_segments(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
