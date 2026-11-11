@@ -3,7 +3,10 @@
 Every merge and direct push to `main` triggers hosted correctness against
 that push's exact `github.sha`, including documentation-only changes (#1271).
 In the nightly mode it runs the plain rows: both host architectures, plain
-O3, four shards each (#2057, the owner's choice on 2026-11-10). The sanitizer
+O3, four shards each (#2057, the owner's choice on 2026-11-10). Every row
+runs SQLite's pinned Tcl subset; the whole suite (`hosted-correctness.yml`'s
+`sqlite-full`) runs on the nightly and dispatched runs alone, not on pushes
+(#2334). The sanitizer
 rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
 until the merge queue (#1430) runs the complete suite before each merge and
 pushes to main run no checks at all. Before the nightly mode, which has no
