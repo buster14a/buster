@@ -6071,10 +6071,14 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             }
             // Its unsequenced accesses, after its conversions, as clang's CheckCompletedExpr checks them (#1953); not in
             // unreachable code, which clang's DiagRuntimeBehavior drops.
+            // (Only a root holding a modification can warn: the cheap tests first.)
             const uint32_t root_token = graph->tokens[node];
-            const bool unsequenced_dropped = program != NULL && (facts->flushed == NULL || root_token >= parser->tokens.count || facts->flushed[root_token] == 0) &&
+            const bool unsequenced_candidate = root && !planned && unsequenced_marks != NULL && node < graph->count &&
+                                               (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0 && evaluated[node] != 0;
+            const bool unsequenced_dropped = unsequenced_candidate && program != NULL &&
+                                             (facts->flushed == NULL || root_token >= parser->tokens.count || facts->flushed[root_token] == 0) &&
                                              root_token < parser->tokens.count && check_program_token_dropped(program, root_token);
-            if (root && !planned && unsequenced_marks != NULL && evaluated[node] != 0 && !unsequenced_dropped && !pp->fatal)
+            if (unsequenced_candidate && !unsequenced_dropped && !pp->fatal)
             {
                 check_unseq_check(&emission, &unsequenced, unsequenced_marks, &node, NULL, 1);
             }

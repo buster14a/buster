@@ -893,19 +893,21 @@ static uint32_t check_unseq_count(const CheckUnseq* checker, uint32_t root, uint
 
 // The first node of `root`'s subtree in postorder, which keeps each subtree's nodes together: its smallest child's,
 // repeatedly.
-static uint32_t check_unseq_first(const CheckUnseq* checker, uint32_t root)
+static uint32_t check_unseq_first(const CheckGraph* graph, uint32_t root)
 {
-    const CheckGraph* graph = checker->graph;
     uint32_t at = root;
     bool going = true;
     while (going)
     {
+        // (A missing operand is BUSTER_CHECK_NONE, above every node.)
         uint32_t least = at;
-        const uint32_t slots = check_unseq_slots(graph, at);
-        for (uint32_t slot = 0; slot < slots; slot += 1)
+        least = graph->operand0[at] < least ? graph->operand0[at] : least;
+        least = graph->operand1[at] < least ? graph->operand1[at] : least;
+        least = graph->operand2[at] < least ? graph->operand2[at] : least;
+        const uint32_t arguments = check_graph_has_arguments(graph->ops[at]) && graph->argument_counts != NULL ? graph->argument_counts[at] : 0;
+        for (uint32_t a = 0; a < arguments; a += 1)
         {
-            bool read = false;
-            const uint32_t child = check_unseq_child(checker, at, slot, &read);
+            const uint32_t child = graph->argument_nodes[graph->argument_offsets[at] + a];
             least = child < least ? child : least;
         }
         going = least < at;
@@ -930,7 +932,7 @@ static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser,
     uint32_t names[8];
     uint32_t uses[8];
     uint32_t name_count = 0;
-    const uint32_t first = !repeats ? check_unseq_first(checker, root) : 0;
+    const uint32_t first = !repeats ? check_unseq_first(graph, root) : 0;
     const uint32_t end = !repeats ? root + 1 : 0;
     // (Two passes: the modifications' targets' names, then every identifier value's against them.)
     for (uint32_t pass = 0; pass < 2 && !repeats; pass += 1)
