@@ -235,6 +235,14 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
         { "void f(void *p); void g(void) { int f; { __attribute__((interrupt)) void f(void *); } } void k(void) { void f(void *); f(0); }\n", NULL, { NULL } },
         { "void g(int f) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n", NULL, { NULL } },
         { "void q(void); void g(void) { { __attribute__((no_caller_saved_registers)) void q(void); } } void q(void); __attribute__((interrupt)) void h(void *p) { q(); }\n", NULL, { NULL } },
+        // After a definition, and in a unit with an earlier warning or error, whose reports come before the links (#2016's
+        // review): the file-scope prototype's lookup still finds the definition or the first prototype.
+        { "void f(void *p) { } void g(void) { { __attribute__((interrupt)) void f(void *p); } } void f(void *p); void k(void) { f(0); }\n", NULL, { NULL } },
+        { "int w = 1 << 40; void f(void *p); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n", NULL,
+          { NULL } },
+        { "void z(void) { return 1; } void f(void *p); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n",
+          NULL, { NULL } },
+        { "void z(void) { return 1; } void g(void) { { __attribute__((interrupt)) void f(void *); f(0); } }\n", NULL, { NULL } },
         // A call around one's error is clang's invalid expression, of no -Wexcessive-regsave warning of its own.
         { "__attribute__((interrupt)) void h(void *p) { (void)__builtin_call_with_static_chain(h(p), p); }\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); int g(int); __attribute__((interrupt)) void h(void *p) { g((f(p), 1)); g(2); }\n", NULL, { NULL } },
