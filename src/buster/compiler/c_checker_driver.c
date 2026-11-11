@@ -8930,16 +8930,49 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 };
                                 // A static object's braced subobject whose conversion clang warns of and makes, where its value is
                                 // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
-                                if (conversion != NULL && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
+                                // Once at its place (#1812): a compound literal's own declaration and the array it initializes
+                                // check the same body, each failure at the same subobject, which clang reports once.
+                                const char* nonconstant = check_driver_initializer_message(CHECK_INIT_NON_CONSTANT);
+                                bool given_before = false;
+                                for (uint32_t d = 0; conversion != NULL && d < additional_count; d += 1)
+                                {
+                                    given_before |= additional[d].repeated && additional[d].token == place && additional[d].message == nonconstant;
+                                }
+                                if (conversion != NULL && !given_before && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
                                     check_input_bit(input.declaration_bits, failure.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
                                     check_init_value_nonconstant(&stream, &types, failure.failed_type, failure.failed_source - 1))
                                 {
                                     // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
-                                    additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
-                                                                                              failure.completion, true };
+                                    additional[additional_count++] = (CheckDriverDiagnostic){ place, nonconstant, place, failure.completion, true };
                                 }
                             }
                         }
+                        // A file-scope array's recovered mismatch with the compound literal it is initialized by (#1812, "cannot
+                        // initialize array of type ... with array of type ..."), whose body holds a value that is no constant:
+                        // clang's literal is invalid then, and its initialization gives no error of its own.
+                        uint32_t kept_reports = 0;
+                        for (uint32_t r = 0; r < input.report_count; r += 1)
+                        {
+                            const CheckInputReport* report = input.reports + r;
+                            const bool candidate = report->recovered && report->message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH && report->token < input.token_count &&
+                                                   check_input_bit(input.declaration_bits, report->token, BUSTER_CHECK_BITS_STATIC) != 0 &&
+                                                   check_sparse_get(input.declaration_bodies, report->token) >= input.token_count;
+                            bool nonconstant_body = false;
+                            for (uint32_t d = 0; candidate && d < additional_count; d += 1)
+                            {
+                                nonconstant_body |= additional[d].token > report->token && additional[d].token < report->completion &&
+                                                    additional[d].message == check_driver_initializer_message(CHECK_INIT_NON_CONSTANT);
+                            }
+                            for (uint32_t u = 0; candidate && u < input.report_count; u += 1)
+                            {
+                                nonconstant_body |= input.reports[u].message == CHECK_INPUT_CONSTANT_INITIALIZER && input.reports[u].token > report->token &&
+                                                    input.reports[u].token < report->completion;
+                            }
+                            input.reports[kept_reports] = *report;
+                            kept_reports += !nonconstant_body;
+                            input.recovered_published -= nonconstant_body;
+                        }
+                        input.report_count = kept_reports;
                         if (diagnosed)
                         {
                             excess_tokens = warnings.tokens;
