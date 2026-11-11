@@ -151,9 +151,9 @@ static const struct
       "__float128 r=g(n);x=hash(x,&r,16);__float128 c=0.7q;x=hash(x,&c,16);double e=0.1q;x=hash(x,&e,8);"
       "x=hash(x,z,sizeof z);x^=(unsigned)cz();__float128 w=cr(n&1);x=hash(x,&w,16);"
       "return (int)(x^(unsigned)n);}" },
-    // __float128 narrowed where rounding to odd at 64 bits must still round once (#1250, review on #1889): below, at and
-    // above the midpoints of zero and the least subnormal, of the greatest subnormal and the least normal, and of the
-    // greatest finite value and the infinity, of double, float, _Float16 and long double, with their negatives; and
+    // __float128 narrowed where rounding to odd at 64 bits must still round once (#1250, review on #1889): below, at
+    // and above the midpoints of zero and the least subnormal, of the greatest subnormal and the least normal, and of
+    // the greatest finite value and the infinity, of double, float, _Float16 and long double, with their negatives; and
     // integer conversions at each type's range boundary, the out-of-range ones saturated as clang folds them.
     { "float-constants-quad-boundaries",
       BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
@@ -179,6 +179,32 @@ static const struct
       "(x,bf,sizeof bf);x=hash(x,bh,sizeof bh);for(unsigned i=0;i<sizeof bl/sizeof*bl;i++)x=hash(x,&bl[i],10);x=hash(x,"
       "bi,sizeof bi);x=hash(x,bu,sizeof bu);x=hash(x,bll,sizeof bll);x=hash(x,bui,sizeof bui);return (int)(x^(unsigned)"
       "n);}" },
+    // __float128 arithmetic folded in binary128, rounded once (#1250): ties, cancellation, signed zeros, overflow to an
+    // infinity, gradual underflow, APFloat's NaNs (an invalid operation's positive canonical NaN, else the first NaN
+    // operand quieted), mixed operands converted first, in static data, in code and in an integer constant expression.
+    { "float-constants-quad-arithmetic",
+      BUSTER_CHECK_TEST_FLOAT_CONSTANTS_HASH
+      "static __float128 q[]={0.1q+0.2q,0.3q-0.1q,0.1q*3,1.0q/3,2.0q/3,1.0q+0x1p-113q,1.0q+0x1.0000000000000000000000000001p-113q,"
+      "1.0q+0x1p-112q+0x1p-113q,(1.0q+0x1p-112q)-1.0q,1e4932q*10,-1e4932q*10,0x1p-16494q/2,0x1.8p-16494q/2,0x1p-16382q*0x1p-100q,"
+      "0.0q/0.0q,1.0q/0.0q,-1.0q/0.0q,1.0q/-0.0q,__builtin_inff128()-__builtin_inff128(),0.0q*__builtin_inff128(),"
+      "__builtin_inff128()/__builtin_inff128(),1.0q-(-__builtin_nanf128(\"5\")),-__builtin_nanf128(\"1\")+__builtin_nanf128(\"2\"),"
+      "__builtin_nansf128(\"4\")*-__builtin_nanf128(\"2\"),__builtin_nanf128(\"2\")/__builtin_nansf128(\"4\"),0.1q-0.1q,-0.1q+0.1q,"
+      "-0.0q-0.0q,-0.0q+-0.0q,(__float128)0.1*0.1,0.1q*0.1+0.1f,7/2.0q,((__int128)1<<100)*1.0q,1e100q*1e100q/3e-50q,"
+      "1.18973149535723176508575932662800702e4932q+1e4900q,0x1.ffffffffffffffffffffffffffffp0q*0x1.ffffffffffffffffffffffffffffp0q,"
+      "0x1.0000000000000000000000000001p0q*0x1.0000000000000000000000000001p0q,1.0q/0x1.0000000000000000000000000001p0q};"
+      "static double d[]={0.1q+0.2q,(0.1q+0.2q)*1e300q};static int k[]={(int)(2.5q*2),1.0q/3*3==1.0q,0.1q+0.2q!=0.3q,0.5q+0.25q==0.75q};"
+      "int a[(int)(2.5q*2)+1];"
+      "__float128 g(int n){switch(n&3){case 0:return 0.1q+0.2q;case 1:return 1.0q/3;case 2:return 0.0q/0.0q;default:return -0x1p-16494q/4;}}"
+      "int tested(int n){unsigned x=2166136261u;x=hash(x,q,sizeof q);x=hash(x,d,sizeof d);x=hash(x,k,sizeof k);"
+      "__float128 r=g(n);x=hash(x,&r,16);__float128 c=1e100q*1e100q/3e-50q;x=hash(x,&c,16);"
+      "return (int)(x^(unsigned)n^(unsigned)sizeof a);}" },
+    // Under FENV_ACCESS a __float128 operation is constant where it is exact, as clang's evaluator decides it (#1250).
+    { "float-constants-quad-fenv",
+      "#pragma STDC FENV_ACCESS ON\n"
+      "int tested(int n){return n^(__builtin_constant_p(0.5q+0.25q)*1+__builtin_constant_p(0.1q+0.2q)*2+__builtin_constant_p(3.0q*0.5q)*4+"
+      "__builtin_constant_p(1.0q/3)*8+__builtin_constant_p(1.0q/4)*16+"
+      "__builtin_constant_p(0x1.0000000000000000000000000001p0q*0x1.0000000000000000000000000001p0q)*32+"
+      "__builtin_constant_p(0x1.8p0q*0x1.8p0q)*64+__builtin_constant_p(1e4932q*10)*128);}" },
     // A narrow NaN converted at run time. Runtime conversion must still
     // quiet signaling inputs and put their payloads in the target format's high fraction bits.
     { "float-constants-narrow-nan-to-quad-runtime",
