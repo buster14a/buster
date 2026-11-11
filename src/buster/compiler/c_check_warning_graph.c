@@ -1150,7 +1150,15 @@ static bool check_warning_graph_effect(const CheckInput* input, const Parser* pa
     const bool atomic = (id >= CBUILTIN_ATOMIC_LOAD && id <= CBUILTIN_ATOMIC_CLEAR) || (id >= CBUILTIN_ATOMIC_FETCH_MIN && id <= CBUILTIN_ATOMIC_FETCH_UDEC) ||
                         (id >= CBUILTIN_C11_ATOMIC_INIT && id <= CBUILTIN_C11_ATOMIC_FETCH_MAX) ||
                         (id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM);
-    const bool result = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) || op == CHECK_OP_VARARGS || atomic;
+    // A token the constant reader read (an array bound's, an enumerator's value's, with no node) is an assignment's or an
+    // increment's by its role or kind, but a designator's `=` (#1447, check_warning_graph_constant_queries).
+    const uint8_t role = parser->tree.roles[token];
+    const uint8_t kind = parser->tokens.kinds[token];
+    const bool designator = token >= 2 && (parser->tokens.kinds[token - 1] == PARSE_KIND_R_SQUARE ||
+                                           (parser->tokens.kinds[token - 1] == PARSE_KIND_IDENTIFIER && parser->tokens.kinds[token - 2] == PARSE_KIND_PERIOD));
+    const bool unread = node == BUSTER_CHECK_NONE && input->token_nodes != NULL &&
+                        ((role == PARSE_ROLE_ASSIGN && !designator) || kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS);
+    const bool result = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) || op == CHECK_OP_VARARGS || atomic || unread;
     *location = result ? check_warning_graph_location(input, parser, token) : BUSTER_CHECK_NONE;
     return result;
 }
@@ -1293,6 +1301,66 @@ static void check_warning_graph_operand(CheckInputReader* reader, const CheckStr
         }
         const uint32_t location = grouped ? token + 1 : root < count ? check_warning_graph_location(reader->output, parser, root) : BUSTER_CHECK_NONE;
         check_warning_graph_unevaluated(reader, grouped ? token + 2 : token + 1, grouped ? end - 1 : end, grouped ? end - 1 : token, location, end);
+    }
+}
+
+// Whether the tokens from `first` start a type name: a type keyword, a qualifier, a tag's keyword, typeof, or a typedef's
+// name as its declaration binds it.
+static bool check_warning_graph_type_name(const CheckInputReader* reader, uint32_t first)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t kind = first < parser->tokens.count ? parser->tokens.kinds[first] : PARSE_KIND_COUNT;
+    const uint32_t declaration = kind == PARSE_KIND_IDENTIFIER && first < reader->output->token_count ? reader->output->declarations[first] : BUSTER_CHECK_NONE;
+    return kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_TYPEOF ||
+           (declaration < parser->tokens.count && reader->output->declaration_kinds != NULL &&
+            reader->output->declaration_kinds[declaration] == C_BINDING_TYPEDEF);
+}
+
+// The sizeof and alignof operations the constant reader reads (#1447): an array bound's, an enumerator's value's, which
+// have no node (check_warning_graph_operand warns of the graph's). Their keywords found 64 tokens at a time (the scalar
+// path's twin visits every token); an expression operand with a side effect warns as clang's
+// CheckUnaryExprOrTypeTraitOperand does, a type name's not.
+static void check_warning_graph_constant_queries(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    const uint32_t count = parser->tokens.count;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
+    for (uint32_t first = 0; input->token_nodes != NULL && first < count && !reader->output->resource; first += 64)
+    {
+        uint64_t active = scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_SIZEOF);
+        for (; active != 0 && !reader->output->resource; active &= active - 1)
+        {
+            const uint32_t keyword = first + (uint32_t)__builtin_ctzll(active);
+            const bool nodeless = keyword < input->token_count && input->token_nodes[keyword] == BUSTER_CHECK_NONE;
+            const bool query = nodeless && parser->tokens.kinds[keyword] == PARSE_KIND_SIZEOF && parser->tree.roles[keyword] == PARSE_ROLE_PREFIX && keyword + 1 < count;
+            const bool grouped = query && parser->tree.roles[keyword + 1] == PARSE_ROLE_OPEN_SIZEOF;
+            const uint32_t close = grouped ? parser->tree.parents[keyword + 1] : BUSTER_CHECK_NONE;
+            if (grouped && close < count && close > keyword + 2 && !check_warning_graph_type_name(reader, keyword + 2))
+            {
+                check_warning_graph_unevaluated(reader, keyword + 2, close, close, keyword + 1, close + 1);
+            }
+            else if (query && !grouped && !check_warning_graph_type_name(reader, keyword + 1))
+            {
+                // (The operand is the keyword's subtree after it, the root among those tokens the one whose parent is it.)
+                uint32_t end = keyword + 1;
+                uint32_t root = BUSTER_CHECK_NONE;
+                for (bool under = true; under && end < count; end += under ? 1 : 0)
+                {
+                    uint32_t at = end;
+                    for (uint32_t steps = 0; at != keyword && at < count && steps < count; steps += 1)
+                    {
+                        root = parser->tree.parents[at] == keyword ? at : root;
+                        at = parser->tree.parents[at];
+                    }
+                    under = at == keyword;
+                }
+                if (root < end)
+                {
+                    check_warning_graph_unevaluated(reader, keyword + 1, end, keyword, check_warning_graph_location(input, parser, root), end);
+                }
+            }
+        }
     }
 }
 
@@ -1485,6 +1553,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     if (valid)
     {
         check_warning_graph_generics(&reader);
+        check_warning_graph_constant_queries(&reader);
         valid = !staged.resource;
     }
     if (valid && check_sparse_wide_present(input->noderef_types))

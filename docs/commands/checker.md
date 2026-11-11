@@ -275,9 +275,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   effect in the operand and stops at an expression whose location a macro wrote (an argument's too), a nested sizeof,
   a type, a specifier's operand, a static selection's other operands, and, in a statement expression, an
   unevaluated-argument builtin's call that is a statement's own expression. The scan is part of the warning graph's
-  16-node pass, and an operand's tokens are classified 64 at a time. Left: the operands the constant reader alone
-  reads (file-scope initializers, array bounds, enumerators, `_Static_assert`), and a bound of a pointer to a
-  variable array in a statement expression's declaration, which clang leaves out and the scan reads.
+  16-node pass, and an operand's tokens are classified 64 at a time. The sizeofs and alignofs the constant reader alone
+  reads (array bounds, enumerators' values, bit-field widths, case labels, `_Alignas`), which have no node, are found by
+  their keywords 64 tokens at a time (`check_warning_graph_constant_queries`): an expression operand's side effect there
+  is an assignment's operator (but a designator's `=`) or an increment's by its role or kind, and a type name's operand
+  warns of none. Left: a bound of a pointer to a variable array in a statement expression's declaration, which clang
+  leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
