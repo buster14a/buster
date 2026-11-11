@@ -9786,6 +9786,27 @@ enables, which this checker doesn't all give.
   `check_semantic_requirement`), and a type name with its typedef names as
   written (`'typeof(L *)' (aka 'long *')`). A member's declarator spells its
   type too (below).
+- **A failed static assertion** (#1447). Its error is clang's CheckStaticAssert's
+  (`check_semantic_assert`): the requirement is the first term of the
+  condition's `&&` conjunction that is no integer literal (nor C23's `true` or
+  `false`) and is false, else the whole condition (findFailedBooleanCondition),
+  at its first token; an integer literal's is the plain "static assertion
+  failed" at the condition's first token, `(` included. The requirement prints
+  as clang's StmtPrinter prints it: an integer literal's value in decimal with
+  its type's suffix (`0x80000000` is `2147483648U`), a floating one's APFloat
+  digits at its type's default precision with `.` where they have none and
+  `F`/`L` (`0.1f` is `0.100000001F`, `2.0` is `2.`), a character one by its
+  value (`'\0'` is `'\x00'`), `sizeof (x)` with a space before an expression
+  operand, `__alignof` and `_Alignof`, C23's `(bool)`. A binary requirement but
+  `||` adds "expression evaluates to 'L op R'" at its operator where either
+  operand is worth printing (DiagnoseStaticAssertDetails' UsefulToPrintExpr: no
+  literal, nor a unary operator's, nor a comparison, logical or comma
+  operator), each value by its operand's own type (ConvertAPValueToString): a
+  bool's `true`, a plain char's `'A' (0x41, 65)` with a control's `<U+001B>` and
+  a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. Still
+  separate: a type name's literals print as written (`sizeof(int[0x10])`, clang
+  `int[16]`); `_Generic`'s and a comma operator's spacing (`(A,0)`, clang
+  `(A , 0)`); a complex value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that

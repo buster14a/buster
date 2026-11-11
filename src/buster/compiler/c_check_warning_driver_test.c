@@ -37,6 +37,66 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        // A failed static assertion's requirement and its operands' values (#1447, check_semantic_assert): the first
+        // false term of a conjunction, literals printed as clang's StmtPrinter prints them (`2147483648U`, `'\x00'`,
+        // `2.`, `1.0E+10`), `sizeof (x)`, `__alignof`, and the "expression evaluates to" note where an operand isn't
+        // obvious, a plain char's value as `'<0xC8>' (0xC8, -56)`, floats at APFloat's default precision.
+        .name = "static assertion requirements and their values",
+        .source = "enum { A = 3 };\n"
+                  "_Static_assert(A == 4, \"a\");\n"
+                  "_Static_assert(1 && A > 2 && (A < 3 || A > 5), \"b\");\n"
+                  "_Static_assert(-A == 4 && 1, \"c\");\n"
+                  "_Static_assert('a' == A, \"d\");\n"
+                  "_Static_assert(1.5 + A < 2.0, \"e\");\n"
+                  "_Static_assert((_Bool)A == 0, \"f\");\n"
+                  "_Static_assert(A + 0u > 5u, \"g\");\n"
+                  "_Static_assert((char)A == 'b', \"h\");\n"
+                  "_Static_assert((char)200 == (char)'\\n', \"i\");\n"
+                  "_Static_assert(A < 1 == 1, \"j\");\n"
+                  "_Static_assert(A - 3, \"k\");\n"
+                  "_Static_assert(0x80000000 == A + 3000000000, \"l\");\n"
+                  "_Static_assert(1e300 * A == 0.1f, \"m\");\n"
+                  "_Static_assert(1e-5 * A == 1e5, \"n\");\n"
+                  "_Static_assert(sizeof A == sizeof (A) + sizeof(int), \"o\");\n"
+                  "_Static_assert(__alignof__(A) == 2 * _Alignof(int), \"p\");\n",
+        .errors = 16,
+        .notes = 14,
+    },
+    {
+        // (Apart, as clang stops at 20 errors.)
+        .name = "static assertion requirements and their values, literals and conjunctions",
+        .source = "enum { A = 3 };\n"
+                  "_Static_assert('\\0' == 1 && 0, \"q\");\n"
+                  "_Static_assert((0), \"r\");\n"
+                  "_Static_assert(1 && (0), \"s\");\n"
+                  "_Static_assert(0 && 2 == 3, \"t\");\n"
+                  "_Static_assert(L'\\x263a' + u'x' == 1, \"u\");\n"
+                  "_Static_assert(-0.0 == 1.0L, \"v\");\n"
+                  "_Static_assert((A & 1) == 0 && (A | 4) == 3, \"w\");\n"
+                  "_Static_assert((A << 2) == (A >> 1), \"x\");\n"
+                  "_Static_assert(A == 3 ? 0 : 1, \"y\");\n"
+                  "_Static_assert(!A, \"z\");\n"
+                  "void f(void) { _Static_assert(A * 1000000 == 4, \"block\"); }\n",
+        .errors = 11,
+        .notes = 4,
+    },
+    {
+        .name = "static assertion requirements and their values in C23",
+        .source = "enum { A = 3 };\n"
+                  "_Static_assert((bool)A == false, \"a\");\n"
+                  "_Static_assert((_Bool)A == 0, \"b\");\n"
+                  "_Static_assert(1wb + A == 2uwb, \"c\");\n"
+                  "_Static_assert(1'000 * A == 18446744073709551615u, \"d\");\n"
+                  "_Static_assert(alignof(int) == sizeof 1 + 1, \"e\");\n"
+                  "_Static_assert(true && A == 4, \"f\");\n"
+                  "_Static_assert(u8'a' == 1.0e10, \"g\");\n"
+                  "_Static_assert((float)A / 3 == 2, \"h\");\n"
+                  "_Static_assert(false, \"i\");\n",
+        .errors = 9,
+        .notes = 6,
+        .c23 = true,
+    },
+    {
         // A statement expression's statements are evaluated as it is (#1447, check_common_statement_roots): a
         // short-circuited operand's, a constant conditional's other arm's, a constant if's and unreachable code's give
         // none of their runtime or unused-value warnings, as clang's CFG leaves their blocks unreachable.
