@@ -262,8 +262,9 @@ static uint32_t check_wide_add_vector(uint64_t* destination, const uint64_t* a, 
         const __mmask8 carries = (__mmask8)((total ^ propagate) & mask);
         const __m512i result = _mm512_mask_sub_epi64(sum, carries, sum, ones);
         _mm512_mask_storeu_epi64(destination + i, mask, result);
-        c = (total >> left) & 1u;
-        c = left >= BUSTER_CHECK_WIDE_VECTOR_LIMBS ? (total >> BUSTER_CHECK_WIDE_VECTOR_LIMBS) & 1u : c;
+        // The carry out sits above the chunk's last limb; a full chunk shifts by its width, never by `left`.
+        const uint32_t shift = left >= BUSTER_CHECK_WIDE_VECTOR_LIMBS ? BUSTER_CHECK_WIDE_VECTOR_LIMBS : left;
+        c = (total >> shift) & 1u;
     }
 #else
     c = check_wide_add_scalar(destination, a, b, count, invert, carry);

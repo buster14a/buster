@@ -1020,6 +1020,152 @@ static void ir_test_permute2s(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 3 * 2 * 4, "permute2 is admitted at every width and lanes, its slot first or not");
 }
 
+// The bitwise functions of three vectors (#1840): both verifiers admit ternlog of three vectors of the result's type with
+// any truth table, and refuse a third operand of another width; the model is checked against each bit's table entry.
+static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x3c6ef372fe94f82b);
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t table = 0; table < 256; table += 15)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType type = (IrType)(IR_V4I32 + width);
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .extra_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "ternlog verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 5;
+                ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_UNDEF, other == 0 ? type : (IrType)(IR_V4I32 + (width + 1) % 3), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 3, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_TERNLOG, 0));
+                ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.extra[0] = 2;
+                function.flags[3] = (uint8_t)table;
+                ir_test_pair(test, &function, scratch, NULL, other == 0, "a ternlog is admitted with any table, its three operands of its type");
+                arena_pop_to(output, mark);
+            }
+            IrSimdValue values[3] = { 0 };
+            for (uint32_t v = 0; v < 3; v += 1)
+            {
+                for (uint32_t w = 0; w < 2u << width; w += 1)
+                {
+                    state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                    values[v].words[w] = state;
+                }
+            }
+            const IrSimdValue* operands[3] = { &values[0], &values[1], &values[2] };
+            const IrSimdShape shape = ir_simd_shape((IrType)(IR_V4I32 + width));
+            const IrSimdAction action = { .operation = IR_SIMD_TERNLOG, .result = shape, .operands = { shape, shape, shape }, .index = (uint8_t)table };
+            IrSimdValue value;
+            memset(&value, 0xa5, sizeof(value));
+            bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+            for (uint32_t bit = 0; exact && bit < (128u << width); bit += 1)
+            {
+                const uint32_t w = bit / 64;
+                const uint32_t index = (uint32_t)((values[0].words[w] >> (bit % 64) & 1) << 2 | (values[1].words[w] >> (bit % 64) & 1) << 1 | (values[2].words[w] >> (bit % 64) & 1));
+                exact = (value.words[w] >> (bit % 64) & 1) == (table >> index & 1);
+            }
+            ir_test_expect(test, exact, "the model's ternlog gives each bit its table's entry");
+        }
+    }
+}
+
+// The compresses and expands (#1840): both verifiers admit them exactly where their lanes (flags 0 to 3) name b's mask
+// type and a and the third operand are of the result's type; the model is checked against C's packing of the selected
+// lanes and spreading of the next ones, the rest the third operand's, on random vectors and masks.
+static void ir_test_compresses(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrSimdLane lane_kinds[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0xa54ff53a5f1d36f1);
+    uint32_t admitted_count = 0;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t flags = 0; flags < 5; flags += 1)
+            {
+                for (uint32_t wrong = 0; wrong < 2; wrong += 1)
+                {
+                    const IrType type = (IrType)(IR_V4I32 + width);
+                    const uint32_t right_mask = ir_lane_mask(type, lane_kinds[flags & 3]);
+                    // A mask of other lanes' width: the next lanes' mask where it differs, else another vector's.
+                    const uint32_t other_mask = ir_lane_mask(type, lane_kinds[(flags + 1) & 3]) != right_mask ? ir_lane_mask(type, lane_kinds[(flags + 1) & 3]) : (uint32_t)type;
+                    const bool admitted = flags <= 3 && wrong == 0;
+                    admitted_count += admitted;
+                    IrFunction function = {0};
+                    const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .extra_count = 1 };
+                    if (ir_create(output, &sizes, &function) != IR_OK)
+                    {
+                        ir_test_expect(test, false, "compress verifier fixture allocation");
+                        continue;
+                    }
+                    function.result_type = IR_VOID;
+                    function.block_offsets[1] = 5;
+                    ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 1, IR_UNDEF, wrong == 0 ? right_mask : other_mask, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 2, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 3, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_COMPRESS + kind, 0));
+                    ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    function.extra[0] = 2;
+                    function.flags[3] = (uint8_t)flags;
+                    ir_test_pair(test, &function, scratch, NULL, admitted, "a compress or expand is admitted exactly where its lanes name its mask");
+                    arena_pop_to(output, mark);
+                }
+                if (flags > 3)
+                {
+                    continue;
+                }
+                const IrType type = (IrType)(IR_V4I32 + width);
+                const uint32_t size = 1u << flags;
+                const uint32_t lanes = (16u << width) / size;
+                IrSimdValue values[3] = { 0 };
+                for (uint32_t w = 0; w < 2u << width; w += 1)
+                {
+                    state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                    values[0].words[w] = state;
+                    state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                    values[2].words[w] = state;
+                }
+                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                values[1].words[0] = lanes >= 64 ? state : state & ((UINT64_C(1) << lanes) - 1);
+                const IrSimdValue* operands[3] = { &values[0], &values[1], &values[2] };
+                const IrSimdAction action = {
+                    .operation = kind == 0 ? IR_SIMD_COMPRESS : IR_SIMD_EXPAND,
+                    .result = ir_simd_shape(type),
+                    .operands = { ir_simd_shape(type), ir_simd_shape((IrType)ir_lane_mask(type, lane_kinds[flags])), ir_simd_shape(type) },
+                    .index = (uint8_t)flags,
+                };
+                IrSimdValue value;
+                memset(&value, 0xa5, sizeof(value));
+                bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+                uint8_t wanted[64];
+                memcpy(wanted, values[2].words, (uint64_t)lanes * size);
+                uint32_t next = 0;
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
+                {
+                    if ((values[1].words[0] >> lane & 1) != 0)
+                    {
+                        memcpy(wanted + (kind == 0 ? next : lane) * size, (const uint8_t*)values[0].words + (kind == 0 ? lane : next) * size, size);
+                        next += 1;
+                    }
+                }
+                exact = exact && memcmp(value.words, wanted, (uint64_t)lanes * size) == 0;
+                ir_test_expect(test, exact, "the model's compress and expand move the selected lanes as C does");
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 2 * 3 * 4, "compress and expand are admitted at every width and lanes");
+}
+
 // The lane operations (#1840): lane_op at every vector width, for every flags byte below 64 and a second operand of the
 // result's type or another width's, admitted by both verifiers exactly where the operation is a minimum or a maximum, or
 // a saturating sum or difference of bytes or words, and the operands are of the result's type; and the model's lanes
@@ -1130,6 +1276,8 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_scalar_shifts(test, output, scratch);
     ir_test_lane_ops(test, output, scratch);
     ir_test_permute2s(test, output, scratch);
+    ir_test_ternlogs(test, output, scratch);
+    ir_test_compresses(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);
     ir_test_width_changes(test, output, scratch);

@@ -2284,6 +2284,27 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
            place->object != 0 ? check_semantic_subobject_spelling(parser, input, types, place->object, place->declaration, place->offset, target) : 0;
 }
 
+// The innermost macro argument occurrence that substituted `token` (clang's immediate macro argument expansion), as its
+// expansion's and its parameter's indices plus one: the last argument substitution its origin passes through, which
+// runs from the outermost expansion in; 0 for a token no argument substituted (a source token, a macro body's, a
+// generated one).
+static uint64_t check_common_argument_occurrence(const Parser* parser, Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
+    uint32_t origin = macro && pp_history_ensure(pp) ? pp_history_at(pp, source) : 0;
+    uint64_t result = 0;
+    for (uint32_t steps = 0; origin != 0 && steps < 256; steps += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        const PPSubstitution* substitution = kind == BUSTER_PP_ORIGIN_ARGUMENT ? &pp->substitutions[index] : NULL;
+        result = substitution != NULL ? ((uint64_t)substitution->expansion << 32 | substitution->parameter) + 1 : result;
+        origin = kind == 0 ? pp->history[index].parent : substitution != NULL ? substitution->source : 0;
+    }
+    return result;
+}
+
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
 // conversion to `target`, carried to a conditional's arms (its true arm's first, the unselected one's too: no runtime
 // pruning) and to a root comma's result, warns at each leaf whose type, an enumerator's taken as its enumeration
@@ -2343,8 +2364,18 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
                 const char* message = check_warning_text(scratch, "implicit conversion from enumeration type %.*s to different enumeration type %.*s",
                                                           (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer);
                 const uint32_t publication = at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, leaf);
-                check_common_report_evaluated(parser, pp, input, check_common_enum_cast_location(parser, graph, leaf), publication, PP_DIAGNOSTIC_DEFERRED,
+                const uint32_t location = check_common_enum_cast_location(parser, graph, leaf);
+                // Its ranges are the leaf's and its context's (DiagnoseImpCast's CContext: the assignment's operator, the
+                // declarator, the return, the call, a brace initializer's declaration), so a leaf a macro's argument writes
+                // shows that argument's macro unless the context is written in the same argument too
+                // (rangesInsideSameMacroArgExpansion).
+                const uint32_t context = place->conversion < graph->count ? graph->tokens[place->conversion] :
+                                         place->call < graph->count ? graph->tokens[place->call] : place->declaration;
+                const uint64_t occurrence = check_common_argument_occurrence(parser, pp, location);
+                pp->diagnostic_spans = occurrence != 0 && (context >= parser->tokens.count || check_common_argument_occurrence(parser, pp, context) != occurrence);
+                check_common_report_evaluated(parser, pp, input, location, publication, PP_DIAGNOSTIC_DEFERRED,
                                               CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST, false, message, NULL, 0, scratch);
+                pp->diagnostic_spans = false;
             }
         }
     }

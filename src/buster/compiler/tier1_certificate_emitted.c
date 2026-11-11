@@ -1863,6 +1863,11 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     {
         reason = TIER1_CERT_EMITTED_ENTRY_LOOP;
     }
+    // An asm body that moves a value into rsp (#1846, IrAsmBody.stack) leaves the frame to the program: a dynamic one.
+    for (uint32_t b = 0; reason == TIER1_CERT_EMITTED_OK && b < function->asm_body_count && function->asm_bodies != 0; b += 1)
+    {
+        reason = function->asm_bodies[b].stack ? TIER1_CERT_EMITTED_DYNAMIC : reason;
+    }
     // A probe's loop in the prologue isn't decoded.
     for (uint32_t k = 0; reason == TIER1_CERT_EMITTED_OK && k < emitted->frame.prologue_count && k < BUSTER_TIER1_FRAME_STEP_CAPACITY; k += 1)
     {

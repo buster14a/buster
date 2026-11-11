@@ -629,9 +629,10 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }
-    else if (op == IR_INTRINSIC && ir_intrinsic_kind(f->c[i]) == BUSTER_IR_INTRINSIC_PERMUTE2)
+    else if (op == IR_INTRINSIC && ir_intrinsic_ternary(f->c[i]))
     {
-        // A permute of two tables (#1840), its third operand in the extra array, folded by the model as the others.
+        // A permute of two tables or a bitwise function of three vectors (#1840), its third operand in the extra array,
+        // folded by the model as the others.
         const uint32_t third = ir_intrinsic_third(f, i);
         const uint8_t states[3] = { work->states[a], work->states[b], work->states[third] };
         const bool over = states[0] == IROPT_OVERDEFINED || states[1] == IROPT_OVERDEFINED || states[2] == IROPT_OVERDEFINED;
@@ -641,11 +642,11 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
         {
             const IrSimdValue operands[3] = { ir_optimize_simd_value(work, a), ir_optimize_simd_value(work, b), ir_optimize_simd_value(work, third) };
             const IrSimdValue* pointers[3] = { &operands[0], &operands[1], &operands[2] };
-            const IrSimdShape shape = ir_simd_shape(f->type[i]);
+            static const uint8_t operations[] = { IR_SIMD_PERMUTE2, IR_SIMD_TERNLOG, IR_SIMD_COMPRESS, IR_SIMD_EXPAND };
             const IrSimdAction action = {
-                .operation = IR_SIMD_PERMUTE2,
-                .result = shape,
-                .operands = { shape, shape, shape },
+                .operation = (IrSimdOperation)operations[ir_intrinsic_kind(f->c[i]) - BUSTER_IR_INTRINSIC_TERNARY],
+                .result = ir_simd_shape(f->type[i]),
+                .operands = { ir_simd_shape(f->type[a]), ir_simd_shape(f->type[b]), ir_simd_shape(f->type[third]) },
                 .index = f->flags[i],
             };
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;

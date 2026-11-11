@@ -52,6 +52,9 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_SHIFT: operation = IR_SIMD_SHIFT; break;
         case BUSTER_IR_INTRINSIC_LANE_OP: operation = IR_SIMD_LANE_OP; break;
         case BUSTER_IR_INTRINSIC_PERMUTE2: operation = IR_SIMD_PERMUTE2; break;
+        case BUSTER_IR_INTRINSIC_TERNLOG: operation = IR_SIMD_TERNLOG; break;
+        case BUSTER_IR_INTRINSIC_COMPRESS: operation = IR_SIMD_COMPRESS; break;
+        case BUSTER_IR_INTRINSIC_EXPAND: operation = IR_SIMD_EXPAND; break;
         default: break;
     }
     return operation;
