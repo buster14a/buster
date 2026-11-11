@@ -326,10 +326,80 @@ static uint32_t check_common_ignored_pointee(const Parser* parser, const CheckIn
     {
         const uint32_t up = parser->tree.parents[name];
         const bool star = up < count && parser->tree.roles[up] == PARSE_ROLE_PREFIX && parser->tokens.kinds[up] == PARSE_KIND_STAR;
+        // (Up through a pointer's further `*` and an array's bound, #1447: `R (**pp)(void)`, `R (*arr[2])(void)`.)
+        const bool bound = up < count && (parser->tree.roles[up] == PARSE_ROLE_OPEN_SUBSCRIPT || parser->tree.roles[up] == PARSE_ROLE_CLOSE_SUBSCRIPT);
         result = star ? check_common_ignored_typedef(parser, input, up) : BUSTER_CHECK_NONE;
-        name = star ? BUSTER_CHECK_NONE : check_common_ignored_typedef(parser, input, name);
+        const bool deeper = (star || bound) && result == BUSTER_CHECK_NONE;
+        name = deeper ? up : star ? BUSTER_CHECK_NONE : check_common_ignored_typedef(parser, input, name);
     }
     return result;
+}
+
+// The declaration whose declarator spells a callee of no function's name (#1447): a member's declarator, an element's or
+// a pointer's object, a call's callee's return typedef (`get()()` of an `FP get(void)`), a comma's or a conditional's
+// value (its true arm), through dereferences and addresses; check_common_ignored_pointee then reads the typedef past its
+// `*`. BUSTER_CHECK_NONE where none is found. Only a candidate call's callee asks.
+static uint32_t check_common_ignored_callee(const CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckInput* input = emission->input;
+    const Parser* parser = emission->parser;
+    const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool walking = true;
+    for (uint32_t steps = 0; walking && node < graph->count && steps < 32; steps += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t token = graph->tokens[node];
+        walking = false;
+        if (op == CHECK_OP_DEREFERENCE || op == CHECK_OP_ADDRESS || op == CHECK_OP_SUBSCRIPT)
+        {
+            node = graph->operand0[node];
+            walking = true;
+        }
+        else if (op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
+        {
+            node = graph->operand1[node];
+            walking = true;
+        }
+        else if (op == CHECK_OP_VALUE)
+        {
+            const uint32_t declaration = token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
+                                         input->declarations[token] : BUSTER_CHECK_NONE;
+            result = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_OBJECT ? declaration :
+                     BUSTER_CHECK_NONE;
+        }
+        else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+        {
+            const uint32_t member = check_semantic_member_of(parser, input, emission->stream, emission->types, node);
+            const uint32_t declarator = member != 0 ? check_semantic_member_token(parser, input, emission->types, member) : BUSTER_CHECK_NONE;
+            result = declarator < count ? declarator : BUSTER_CHECK_NONE;
+        }
+        else if (op == CHECK_OP_CALL)
+        {
+            // The called function's return typedef, whose own declarator holds the pointer.
+            uint32_t inner = graph->operand0[node];
+            for (uint32_t k = 0; inner < graph->count && (graph->ops[inner] == CHECK_OP_DEREFERENCE || graph->ops[inner] == CHECK_OP_ADDRESS) && k < 32; k += 1)
+            {
+                inner = graph->operand0[inner];
+            }
+            const uint32_t name = inner < graph->count && graph->ops[inner] == CHECK_OP_VALUE ? graph->tokens[inner] : BUSTER_CHECK_NONE;
+            const uint32_t function = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
+                                      input->declarations[name] : BUSTER_CHECK_NONE;
+            const bool named = function < count && input->declaration_kinds != NULL && input->declaration_kinds[function] == C_BINDING_FUNCTION;
+            const uint32_t spelled = named ? check_common_ignored_typedef(parser, input, function) : BUSTER_CHECK_NONE;
+            result = spelled < count ? spelled : BUSTER_CHECK_NONE;
+        }
+    }
+    return result;
+}
+
+// The typedef past a nameless callee's `*` (check_common_ignored_callee, check_common_ignored_pointee).
+static uint32_t check_common_ignored_unnamed(const CheckCommonEmission* emission, uint32_t callee)
+{
+    const uint32_t declaration = check_common_ignored_callee(emission, callee);
+    const uint32_t count = emission->parser->tokens.count < emission->input->token_count ? emission->parser->tokens.count : emission->input->token_count;
+    return declaration < count ? check_common_ignored_pointee(emission->parser, emission->input, declaration) : BUSTER_CHECK_NONE;
 }
 
 // What the call `node`'s discarded result warns of (CheckCommonIgnoredResult), or false: a call of a function or a
@@ -391,7 +461,9 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
         const uint32_t close = graph->tokens[node];
         const uint32_t open = close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL ? check_common_ignored_opener(parser, close) :
                               BUSTER_CHECK_NONE;
+        // (A callee of no name: its expression's first token, #1447.)
         uint32_t at = written != callee && written < graph->count ? graph->tokens[written] : name;
+        at = at >= count && written < graph->count ? check_warning_graph_first(graph, parser, written) : at;
         while (at < count && at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN && parser->tree.roles[at - 1] == PARSE_ROLE_OPEN_GROUP &&
                parser->tree.parents[at - 1] < open)
         {
@@ -408,7 +480,8 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
         }
         uint32_t spelled = !ignored->typedefs || out->type_result != NULL ? BUSTER_CHECK_NONE :
                            function ? check_common_ignored_typedef(parser, input, declaration) :
-                           pointer ? check_common_ignored_pointee(parser, input, declaration) : BUSTER_CHECK_NONE;
+                           pointer ? check_common_ignored_pointee(parser, input, declaration) :
+                           check_common_ignored_unnamed(emission, written);
         for (uint32_t steps = 0; spelled < count && out->type_result == NULL && steps < 64; steps += 1)
         {
             const CheckInputAttribute* result = NULL;
