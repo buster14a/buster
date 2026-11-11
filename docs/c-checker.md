@@ -3241,11 +3241,23 @@ What the lowering covers past scalars (#145's programs):
     priority, highest first, joined by `_` (`f.popcnt_sse4.2`). Every reference
     to a version reaches the group's synthetic reference object R, whose
     symbol is `f.ifunc`. A `target_clones` function's own symbol `f` is that
-    reference. Its body is compiled once, at its first version's name (the
-    version, `arch_CPU` for `arch=`, then `.` and its place among the versions
-    that aren't `default`, which takes their count: `f.avx2.0`, `f.default.2`),
-    and the other versions' names are symbols at the same code; `f.ifunc` is
-    another IFUNC at the resolver. A group with a reference, or a
+    reference. Its body is compiled once per version, as clang compiles it,
+    each copy with that version's instruction set and at that version's name:
+    the version, `arch_CPU` for `arch=`, then `.` and its place among the
+    versions that aren't `default`, which takes their count (`f.avx2.0`,
+    `f.default.2`). A repeated version has no copy of its own.
+    `f.ifunc` is another IFUNC at the resolver.
+    - `check_program_target_copies` makes each version's target. The
+      selection puts the copies after their body
+      (`CheckProgram.body_options`), at symbols numbered after the program's
+      (`check_program_target_number`).
+    - A copy shares its body's locals in the lowering
+      (`check_lower_local_body`) and its block-scope statics, as clang's
+      clones do.
+    - A body with inline assembly, a `switch` or a label whose address it may
+      take is still compiled once, with the unit's features. Its versions'
+      names are symbols at that one code: those plans, jump tables and label
+      symbols are a body's own. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -3268,7 +3280,9 @@ What the lowering covers past scalars (#145's programs):
   - *Tests.* `test-checker-driver --target-versions-only` also compiles a unit
     of versions (`target`'s and `target_clones`', external and static) and one
     of their callers (declarations, calls, addresses) by clang and both paths.
-    Every symbol, with its binding, type and definedness, must be clang's; the
+    Every symbol, with its binding, type and definedness, must be clang's, and
+    the defined functions' distinct places of code as many as clang's (a copy
+    per version); the
     scalar and vector objects must be the same bytes; and every mix of the
     objects linked by cc, the direct path's executables and `-g`'s objects must
     run as clang's build. It then runs the resolvers over 24 models of libgcc's
@@ -3276,9 +3290,11 @@ What the lowering covers past scalars (#145's programs):
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
     resolver's result is named among clang's versions' distinct addresses.
-  - *Differences from clang's code.* A `target_clones` body is compiled once,
-    with the unit's features, where clang compiles a copy per version (each is
-    valid there). The resolver is `.text`'s, not a COMDAT section's. Its
+  - *Differences from clang's code.* A `target_clones` body with inline
+    assembly, a `switch` or an address-taken label is compiled once, with the
+    unit's features, where clang compiles a copy per version (each is valid
+    there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
+    resolver is `.text`'s, not a COMDAT section's. Its
     unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
     its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again
     where the next test begins (a row program, `check_program_target_atoms`).

@@ -407,6 +407,12 @@ struct CheckProgramTargetGroup
     uint32_t version_count;
     // Its resolver's options: its versions, or target_clones' versions with their repetitions.
     uint32_t option_count;
+    // target_clones' body copies (check_program_target_copies): where `copies`, its body is compiled once per version
+    // that isn't repeated, each with that version's instruction set (CheckProgram.clone_targets from `clone_first`, an
+    // entry per option: CheckProgram.body_targets' value) and the copies at their own symbols
+    // (CheckProgram.clone_symbols from `clone_first`, 0 for the first option, a repeated one or none).
+    uint32_t clone_first;
+    bool copies;
     bool internal;
     bool resolved;
     bool model;
@@ -509,6 +515,13 @@ struct CheckProgram
     SymbolId* target_symbols;
     uint32_t target_group_count;
     uint32_t target_version_count;
+    // target_clones' copies (CheckProgramTargetGroup.copies): each group's options' instruction sets, whether each has a
+    // copy of its own (not the first, nor a repeated one) and their symbols, from its clone_first; and per body, the option a copy compiles (0 for every other body; null where the program has no copy).
+    uint32_t* clone_targets;
+    uint8_t* clone_copied;
+    SymbolId* clone_symbols;
+    uint32_t clone_option_count;
+    uint32_t* body_options;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
@@ -848,6 +861,7 @@ static bool check_program_target_groups(CheckProgram* program, const CheckProgra
                                         uint32_t initializer_reference_count, Arena* output);
 static void check_program_target_needed(const CheckProgram* program, uint8_t* needed);
 static bool check_program_target_number(CheckProgram* program, Arena* output);
+static bool check_program_target_copies(CheckProgram* program, const PredefinesOptions* predefines, Arena* output);
 // The room a cpu_specific version's features take (check_program_cpu_features_write): more than any CPU's, 712 bytes in
 // c_check_cpu_dispatch.inc.
 #define BUSTER_CHECK_PROGRAM_CPU_FEATURES 1024u
@@ -4118,7 +4132,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
                 const int32_t attribute_cpu = readable ? last_cpu : -1;
-                // A target_clones body is compiled with the unit's features (#1838, c_check_program_target_versions.c).
+                // A target_clones body's instruction sets are its versions' (#1838, check_program_target_copies, below).
                 versions |= attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH && !attribute->ignored;
                 specific = specific == 0 && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC && !attribute->ignored ? attribute : specific;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
@@ -4180,6 +4194,11 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
         {
             program->body_targets[b] = target;
         }
+    }
+    // target_clones' bodies, compiled once per version (#1838).
+    if (valid && program->target_group_count != 0 && options->predefines != NULL)
+    {
+        valid = check_program_target_copies(program, options->predefines, output);
     }
     return valid;
 }

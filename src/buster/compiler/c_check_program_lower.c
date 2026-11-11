@@ -16067,7 +16067,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         const IdentId* token_names = runtimes_merged ? program->parser->tokens.names : NULL;
         // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
         // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
-        for (uint32_t b = 0; b < program->body_count; b += 1)
+        // (The first of bodies of one opening, target_clones' body before its copies, #1838: its locals are theirs.)
+        for (uint32_t b = program->body_count; b-- > 0;)
         {
             shared->opening_bodies[program->bodies[b].opening] = b;
         }
@@ -16318,6 +16319,18 @@ static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool so
 // `sources`, each body's entries' source tokens too: a constant in each copy (check_lower_part and
 // check_lower_part_sources), so that the plain lowering, every compile's without -g, carries none of the tokens' state
 // through its loops: a flag clang can't fold there made it spill more in them, which every compile paid (#426).
+// The body whose locals body `b` has (CheckLowerShared.local_start's slice): its own, or for a copy of target_clones'
+// body (#1838, CheckProgram.body_options), which follows it at its opening, that body's.
+static uint32_t check_lower_local_body(const CheckProgram* program, uint32_t b)
+{
+    uint32_t source = b;
+    while (source != 0 && program->bodies[source - 1].opening == program->bodies[b].opening)
+    {
+        source -= 1;
+    }
+    return source;
+}
+
 static inline __attribute__((always_inline)) void check_lower_part_body(CheckLowerWriter* writer, const CheckLowerShared* shared, CheckLowerPart* part,
                                                                        bool sources, Arena* output, Arena* scratch)
 {
@@ -16649,7 +16662,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             writer->result_object = check_lower_temporary_of(writer, result);
         }
-        for (uint32_t slot = bare ? 0 : shared->local_start[b + 1]; !bare && slot < shared->local_start[b + 2]; slot += 1)
+        const uint32_t locals = check_lower_local_body(program, b);
+        for (uint32_t slot = bare ? 0 : shared->local_start[locals + 1]; !bare && slot < shared->local_start[locals + 2]; slot += 1)
         {
             const uint32_t declaration = shared->local_tokens[slot];
             const uint32_t declared_object = shared->local_objects[slot];
@@ -17025,7 +17039,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     {
                         bindings[l] = (CheckDebugBinding){ .token = BUSTER_CHECK_NONE };
                     }
-                    for (uint32_t slot = shared->local_start[b + 1]; slot < shared->local_start[b + 2]; slot += 1)
+                    for (uint32_t slot = shared->local_start[locals + 1]; slot < shared->local_start[locals + 2]; slot += 1)
                     {
                         const uint32_t local = writer->local_map[shared->local_objects[slot]];
                         if (local < writer->local_count)
@@ -17063,7 +17077,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->call_count = writer->call_count;
         function->argument_count = writer->argument_count;
         part->entries += writer->count;
-        for (uint32_t slot = shared->local_start[b + 1]; slot < shared->local_start[b + 2]; slot += 1)
+        for (uint32_t slot = shared->local_start[locals + 1]; slot < shared->local_start[locals + 2]; slot += 1)
         {
             writer->local_map[shared->local_objects[slot]] = BUSTER_CHECK_NONE;
         }
