@@ -786,6 +786,21 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->permute2)
+    {
+        // A permute of two tables (#1840): the first table, the indices and the second table, the third operand in a
+        // slot of the extra array that its `c` names; its lanes' bytes' log2 in its flags.
+        const uint32_t indices = operation->permute2_swapped ? operands[2] : operands[1];
+        const uint32_t table = operation->permute2_swapped ? operands[1] : operands[2];
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = table;
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], indices, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
     else if (operation->permute != 0)
     {
         // A permute (#1840), its immediate in its flags.

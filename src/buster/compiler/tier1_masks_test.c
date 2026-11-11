@@ -133,6 +133,10 @@ struct Tier1MasksTest
     // The lane operations (#1840, tier1_masks_test_lane_ops): those tried, and those through every stage as the IR's.
     uint32_t lane_op_attempts;
     uint32_t lane_op_rows;
+    // The permutes of two tables (#1840, tier1_masks_test_permute2s): those tried, and those through every stage as the
+    // IR's.
+    uint32_t permute2_attempts;
+    uint32_t permute2_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -5526,6 +5530,118 @@ static void tier1_masks_test_lane_ops(Tier1MasksTest* test)
     free(program);
 }
 
+// The permutes of two tables through the IR to Tier 1 (#1840): vpermt2w to vpermt2q at each width (vpermt2b is VBMI's,
+// which the x86-64-v4 target hasn't), the indices in vvvv and
+// the second table in rm (the permutex2var builtins' rows) or the other way around (__builtin_shufflevector's), each as
+// the program's only row in 4 statements of the input buffer's vectors k, k + 1 and k + 2 (modulo 4), stored into the
+// output's vector k; tier1_masks_test_typed_pipeline takes each through the IR as its permute2, which the interpreter
+// runs at every stage, and Tier 1 natively, against each lane picked from the two tables by its index's low bits.
+static void tier1_masks_test_permute2s(Tier1MasksTest* test)
+{
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the permutes of two tables' memory");
+    uint64_t state = test->random ^ UINT64_C(0x2f6c9a3d81e4b057);
+    for (uint32_t form = 0; ready && form < 4 * 2 * 3; form += 1)
+    {
+        const uint32_t size = form / 6;
+        const uint32_t swapped = (form / 3) % 2;
+        const uint32_t width = form % 3;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const uint32_t lanes = bytes / element;
+        // The x86-64-v4 target's alone: vpermt2b is VBMI's, which test-ir-simd decodes at a target that has it.
+        const uint64_t needed = x86_target_requirement(ir_simd_permute2_forms[size][width]) & ~BUSTER_X86_TARGET_KNOWN;
+        if ((needed & ~test->v4_features) != 0)
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->permute2_attempts += 1;
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        const uint8_t indices_role = swapped != 0 ? BUSTER_TIER0_ROLE_VECTOR(2) : BUSTER_TIER0_ROLE_VECTOR(1);
+        const uint8_t table_role = swapped != 0 ? BUSTER_TIER0_ROLE_VECTOR(1) : BUSTER_TIER0_ROLE_VECTOR(2);
+        row.records[0] = check_vector_lower_record(ir_simd_permute2_forms[size][width], BUSTER_TIER0_ROLE_VECTOR(0), indices_role, table_role);
+        row.record_count = 1;
+        row.operand_count = 3;
+        for (uint32_t o = 0; o < 3; o += 1)
+        {
+            row.operand_classes[o] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_bytes[o] = (uint8_t)bytes;
+        }
+        row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+        row.result_bytes = (uint8_t)bytes;
+        char name[96];
+        snprintf(name, sizeof(name), "permute2 of %u-byte lanes (swapped %u) at %u bytes", element, swapped, bytes);
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t s = 0; s < 4; s += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, s * bytes / 8);
+            for (uint32_t o = 0; o < 3; o += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (s + o) * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        bool ok = tier1_masks_test_expect(test, !program->overflow, "the permute of two tables' program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t s = 0; s < 4; s += 1)
+            {
+                const uint8_t* operands[3] = {
+                    (const uint8_t*)in + s * bytes % 256,
+                    (const uint8_t*)in + (s + 1) * bytes % 256,
+                    (const uint8_t*)in + (s + 2) * bytes % 256,
+                };
+                const uint8_t* first = operands[0];
+                const uint8_t* indices = operands[swapped != 0 ? 2 : 1];
+                const uint8_t* table = operands[swapped != 0 ? 1 : 2];
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
+                {
+                    uint64_t index = 0;
+                    memcpy(&index, indices + lane * element, element);
+                    const uint32_t selected = (uint32_t)(index & (2 * lanes - 1));
+                    memcpy(wanted + s * bytes + lane * element, (selected < lanes ? first : table) + (selected & (lanes - 1)) * element, element);
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a permute of two tables is the IR's permute2, not a machine row");
+        test->permute2_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the permutes of two tables return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            arena_pop_to(&arenas[r], 0);
+        }
+    }
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        arena_release(&arenas[r]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // A C model of an integer lane's conversion (#1840): `raw`, a lane of `from` bytes, to `to` bytes, by C's conversions: a
 // wider lane by its signedness, a narrower one wrapped, or saturated as a signed lane to the narrower one's signed range
 // (`mode` 1, vpmovs) or as an unsigned lane to its unsigned range (2, vpmovus: Intel's manual's unsigned source).
@@ -5893,6 +6009,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
             tier1_masks_test_lane_ops(&test);
+            tier1_masks_test_permute2s(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -5906,7 +6023,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
-                                                                               test.shift_rows + test.mask_vector_rows + test.lane_op_rows),
+                                                                               test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -5951,6 +6068,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                 "every front-end elementwise minimum, maximum and saturation goes through the IR and Tier 1 as the IR's lane_op");
         printf("test-tier1-masks: the front end's elementwise minima, maxima and saturations: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its lane_op\n",
                test.lane_op_rows);
+        tier1_masks_test_expect(&test, test.permute2_attempts == 18 && test.permute2_rows == test.permute2_attempts,
+                                "every permute of two tables goes through the IR and Tier 1 as the IR's permute2");
+        printf("test-tier1-masks: the permutes of two tables: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute2\n",
+               test.permute2_rows);
         printf("test-tier1-masks: the front end's masks to vectors and back: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as vpmovm2 and vpmov2m\n",
                test.mask_vector_rows);
         printf("test-tier1-masks: the front end's shifts by an int: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its shift\n", test.shift_rows);

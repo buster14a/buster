@@ -113,6 +113,11 @@ struct IrSimdTypedOperation
     bool sign_mask;
     // A lane operation (#1840, ir_simd_typed_lane_op): whether the row is one, its flags in `immediate`.
     bool lane_op;
+    // A permute of two tables (#1840, ir_simd_typed_permute2): whether the row is one, its lanes' bytes' log2 in
+    // `immediate`, and whether its indices are its third operand and its second table its second (permute2_swapped:
+    // __builtin_shufflevector's rows) rather than the other way around (the permutex2var builtins').
+    bool permute2;
+    bool permute2_swapped;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1138,6 +1143,58 @@ static IrSimdTypedStatus ir_simd_typed_permute(const Tier0Operation* source, uin
     return status;
 }
 
+// The permutes of two tables (#1840): a row of three vectors of the result's width (16, 32 or 64 bytes) and one record of
+// a vpermt2b to vpermt2q form at that width (ir_simd_permute2_forms), register-direct and undecorated, whose destination
+// is VECTOR(0)'s register, the first table (reg), its indices VECTOR(1) (vvvv) and its second table VECTOR(2) (rm), the
+// permutex2var builtins' rows, or the indices VECTOR(2) and the table VECTOR(1), __builtin_shufflevector's of two vectors:
+// the IR's permute2 of the first table, the indices and the second table, its flags its lanes' bytes' log2. Its features
+// are its form's (VBMI for bytes, BW for words, VL below 64 bytes) and its vectors' moves; otherwise it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_permute2(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 && source->operand_count == 3;
+    for (uint32_t operand = 0; admitted && operand < 3; operand += 1)
+    {
+        admitted = source->operand_classes[operand] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[operand] == bytes;
+    }
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t lanes = 0; admitted && lanes < 4; lanes += 1)
+    {
+        for (uint32_t swapped = 0; swapped < 2; swapped += 1)
+        {
+            const X86Instruction expected = {
+                .form = ir_simd_permute2_forms[lanes][width],
+                .reg = v0,
+                .vvvv = swapped != 0 ? v2 : v1,
+                .rm = swapped != 0 ? v1 : v2,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            if (memcmp(record, &expected, sizeof(expected)) == 0)
+            {
+                candidate.permute2 = true;
+                candidate.permute2_swapped = swapped != 0;
+                candidate.immediate = (uint8_t)lanes;
+                candidate.required_features = ir_typed_vector_moves(bytes, target_features) | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
+            }
+        }
+    }
+    const IrSimdTypedStatus status = candidate.permute2 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 3;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // The conversions (#1840): a row of one record of an extension's or a truncation's form (ir_simd_typed_extensions,
 // ir_simd_typed_truncations), register-direct and undecorated, of one vector of 16, 32 or 64 bytes into VECTOR(0)'s
 // register (__builtin_convertvector's rows): an extension's reg VECTOR(0), its destination, and rm VECTOR(0), its
@@ -1525,6 +1582,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_lane_op(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_permute2(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {
