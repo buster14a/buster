@@ -5418,13 +5418,26 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     // A recovered reading (#1447, an invalid declaration's error, CheckInput.recovered_valid) that meets an error the unit's
     // earlier readings don't hold has errors of its own too: an edited view reaches a definition's head error past the
     // left-out one before it, which the next round leaves out with its definition.
+    // Only an error that made its declaration invalid (CheckInput.invalid_declarations in its top-level declaration): one that
+    // leaves its declaration valid (an attribute's) clang may not give past the round's earlier errors.
     bool fresh_recovered = false;
-    for (uint32_t i = 0; valid && !input.resource && input.recovered_valid && !fresh_recovered && i < input.report_count; i += 1)
+    for (uint32_t i = 0; valid && !input.resource && input.recovered_valid && input.invalid_declarations != NULL && !fresh_recovered && i < input.report_count;
+         i += 1)
     {
         const uint32_t token = input.reports[i].token;
         const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
-        fresh_recovered = input.reports[i].message != CHECK_INPUT_INVALID_USE && at < count && !check_driver_rejected_known(errors, error_count, at) &&
-                          (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
+        const bool fresh = input.reports[i].message != CHECK_INPUT_INVALID_USE && at < count && !check_driver_rejected_known(errors, error_count, at) &&
+                           (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
+        uint32_t top = fresh && token < view_count ? token : BUSTER_CHECK_NONE;
+        for (uint32_t steps = 0; top < view_count && parser->tree.parents[top] < view_count && steps < view_count; steps += 1)
+        {
+            top = parser->tree.parents[top];
+        }
+        const uint32_t first = top < view_count ? check_driver_subtree_start(parser, 0, top) : top;
+        for (uint32_t t = first; !fresh_recovered && top < view_count && t <= top; t += 1)
+        {
+            fresh_recovered = input.invalid_declarations[t] != 0;
+        }
     }
     valid = valid && (selected || (input.report_count != 0 && (!input.recovered_valid || fresh_recovered))) && !input.resource;
     const CheckOptions check_options = { .scalar = scalar };
@@ -5886,6 +5899,18 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             const bool in_body = next_body < body_count && ranges[next_body].begin <= token && token < ranges[next_body].end;
             const uint8_t role = parser->tree.roles[token];
             whole = fallback_view[token] == CHECK_DRIVER_EDIT_KEEP || in_body || (role != PARSE_ROLE_OPEN_STRUCT && role != PARSE_ROLE_OPEN_ENUM);
+        }
+        // Nor where a left-out declaration declares a name a kept one declares too (a function's other declaration): the
+        // kept one's checks against it are gone, and an error it finds alone (multiversioning's attributes) isn't clang's.
+        for (uint32_t token = 0; whole && fallback_view != NULL && token < count; token += 1)
+        {
+            const bool declared = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && first_input->declarations[token] == token;
+            const uint32_t name = parser->tokens.names[token];
+            for (uint32_t other = 0; whole && declared && fallback_view[token] != CHECK_DRIVER_EDIT_KEEP && other < count; other += 1)
+            {
+                whole = !(fallback_view[other] == CHECK_DRIVER_EDIT_KEEP && parser->tokens.kinds[other] == PARSE_KIND_IDENTIFIER &&
+                          parser->tokens.names[other] == name && first_input->declarations[other] == other);
+            }
         }
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
