@@ -8262,23 +8262,26 @@ arguments against the function. The checker now gives these as clang does.
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
   and stores take a segment override. A load or store in `%fs` or `%gs` of an
   integer, a floating value (long double too), a 128-bit integer or a vector,
-  by indirection, member, subscript or name, and an assignment, compound
+  by indirection, member (a bit-field's unit's pieces too), subscript or name, and an assignment, compound
   assignment, increment or decrement of one, takes it (check_lower_access: the
   typed stream's `BUSTER_TYPED_ACCESS_SEGMENT` on its LOAD, STORE or SET, which
   Tier 0 puts on the access's memory operand; docs/tier0.md); a global in one
   goes through its address, as a memory class's does (`lea sym(%rip)` and then
-  `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). Tier 1 falls back to
+  `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). The atomic builtins
+  that a direct plan takes take it too (their LOAD or SET, `lock xadd`, `xchg`,
+  `lock cmpxchg`, a fetch's loop), from the object type's space or the pointer
+  argument's pointee's. Tier 1 falls back to
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
-  type at all: CheckLowerWriter.segments): an aggregate's copy, a bit-field, a
-  complex, half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
-  space (258, whose `36` prefix no 64-bit form of the encoder's has); and so are
-  the accesses whose lvalue doesn't carry the space: a vector's element, read or
-  written (its type loses the vector's space), an atomic builtin's object
-  (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
-  argument), and an asm statement's register output (stored through its
-  address; "an asm output in a segment's address space ... but a memory one").
-  Before, those compiled without the override. A memory asm operand's address is
+  type at all: CheckLowerWriter.segments): an aggregate's copy, a complex,
+  half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
+  space (258, whose `36` prefix no 64-bit form of the encoder's has), atomic
+  builtins of another plan (generic ones by pointer, `__atomic_clear`,
+  `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
+  space: a vector's element, read or written (its type loses the vector's
+  space), and an asm statement's register output (stored through its address;
+  "an asm output in a segment's address space ... but a memory one"). Those and
+  the atomic builtins compiled without the override before #1447's segment work. A memory asm operand's address is
   the template's, without the segment, as clang's is. Taking an address there is
   compiled. Any other space's code is the default space's, as clang's.
 

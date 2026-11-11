@@ -645,21 +645,14 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-vector-element-update", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_gs*p){(*p)[2]++;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-load", "int tested(int __seg_fs*p){return __atomic_load_n(p,5);}",
+        // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
+        // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
+        // which take another plan, are refused.
+        { "segment-atomic-generic-load", "int tested(int __seg_fs*p,int*r){__atomic_load(p,r,5);return *r;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-store", "void tested(int __seg_gs*p){__atomic_store_n(p,3,5);}",
+        { "segment-atomic-generic-exchange", "int tested(int __seg_gs*p,int*v,int*o){__atomic_exchange(p,v,o,5);return *o;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-exchange", "int tested(int __seg_gs*p){return __atomic_exchange_n(p,3,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-compare-exchange", "_Bool tested(int __seg_gs*p,int*e){return __atomic_compare_exchange_n(p,e,1,0,5,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-fetch-add", "int tested(int __seg_fs*p){return __atomic_fetch_add(p,1,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-sync-fetch-add", "int tested(int __seg_gs*p){return __sync_fetch_and_add(p,1);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-c11-atomic-load", "int tested(_Atomic int __seg_fs*p){return __c11_atomic_load(p,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-test-and-set", "_Bool tested(char __seg_fs*p){return __atomic_test_and_set(p,5);}",
+        { "segment-sync-lock-release", "void tested(int __seg_gs*p){__sync_lock_release(p);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-atomic-clear", "void tested(char __seg_gs*p){__atomic_clear(p,5);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -674,18 +667,10 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // bit-field, a complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field", "struct S{int a:3,b:5;};int tested(struct S __seg_gs*p){return p->b;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-store", "struct S{int a:3,b:5;};void tested(struct S __seg_gs*p){p->b=3;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-update", "struct S{int a:3,b:5;};void tested(struct S __seg_fs*p){p->b+=3;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-increment", "struct S{int a:3,b:5;};int tested(struct S __seg_fs*p){return p->b++;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -743,6 +728,36 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "if(syscall(158,0x1001,0UL)!=0)return -3;"
         "return (int)r+window[a-lo]+window[b-lo+8];}",
         "segment-gs-globals", clang);
+    // The atomic builtins a direct plan takes (#1059): loads and stores (a seq_cst store's xchg), lock xadd, xchg,
+    // lock cmpxchg, a bitwise or a minimum's loop of a LOAD and lock cmpxchg, __sync's, C11's, test-and-set's xchg.
+    check_test_program_source(test,
+        "static _Thread_local int ta=5;static _Thread_local long tb=100;static _Thread_local short tc=3;static _Thread_local char td;"
+        "static _Thread_local _Atomic int te=11;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();int __seg_fs*a=(int __seg_fs*)((char*)&ta-tp);"
+        "long __seg_fs*b=(long __seg_fs*)((char*)&tb-tp);short __seg_fs*c=(short __seg_fs*)((char*)&tc-tp);"
+        "char __seg_fs*d=(char __seg_fs*)((char*)&td-tp);_Atomic int __seg_fs*e=(_Atomic int __seg_fs*)((char*)&te-tp);"
+        "int r=__atomic_load_n(a,5);__atomic_store_n(a,r+n,5);__atomic_store_n(a,__atomic_load_n(a,0)+1,3);"
+        "r+=__atomic_fetch_add(a,3,5)+__atomic_sub_fetch(a,1,2)+__atomic_exchange_n(a,7,4);int x=7;"
+        "r+=__atomic_compare_exchange_n(a,&x,n,0,5,5)+x;x=-1;r+=__atomic_compare_exchange_n(a,&x,2,1,2,0)+x;"
+        "r+=(int)__atomic_fetch_or(b,n,5)+(int)__atomic_and_fetch(b,~1L,0)+(int)__atomic_fetch_xor(b,6,5)+(int)__atomic_fetch_nand(b,3,5);"
+        "r+=(int)__sync_fetch_and_sub(b,1)+(int)__sync_val_compare_and_swap(b,tb,9)+__sync_bool_compare_and_swap(b,9,n)+(int)__sync_lock_test_and_set(b,4);"
+        "r+=__atomic_fetch_max(c,(short)n,5)+__atomic_fetch_min(c,(short)-n,5)+__atomic_exchange_n(c,(short)(n*3),5);"
+        "r+=__atomic_test_and_set(d,5)+__atomic_test_and_set(d,5);"
+        "r+=__c11_atomic_load(e,5)+__c11_atomic_fetch_add(e,n,5);__c11_atomic_store(e,4,5);"
+        "return r+ta+(int)tb+tc+td+te;}",
+        "segment-atomics", clang);
+    // Bit-fields: their unit's pieces read and written through %fs (check_lower_bit_unit, check_lower_bit_store), a unit of
+    // 1, 2, 4 and 8 bytes and one of 3 bytes' pieces, signed and unsigned, by assignments, updates and increments.
+    check_test_program_source(test,
+        "struct B{unsigned a:3;int b:5;unsigned c:12;long d:33;unsigned char e:2;};"
+        "struct __attribute__((packed)) P{char x;unsigned y:20;};"
+        "static _Thread_local struct B tb={5,-3,100,-7,1};static _Thread_local struct P tp_={1,0x12345};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();struct B __seg_fs*b=(struct B __seg_fs*)((char*)&tb-tp);"
+        "struct P __seg_fs*p=(struct P __seg_fs*)((char*)&tp_-tp);"
+        "int r=b->a+b->b+b->c+(int)b->d+b->e+p->y;b->a=n;b->b+=n;b->c++;--b->d;b->e=b->a;r+=b->b++;"
+        "p->y^=n*977;r+=p->y+(p->y=n);"
+        "return r+tb.a+tb.b+tb.c+(int)tb.d+tb.e+(int)tp_.y+tp_.x;}",
+        "segment-bit-fields", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
