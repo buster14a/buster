@@ -324,9 +324,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
   arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
   expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a
-  displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Still
-  different: a short-circuited or unreachable statement expression's statements warn, and a comparison as its last
-  value warns as a comparison where clang says "expression result unused".
+  displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Its
+  statements are evaluated as it is (`check_common_statement_roots`): a short-circuited operand's, a constant
+  conditional's other arm's and unreachable code's give none of their runtime or unused-value warnings, as clang's CFG
+  leaves their blocks unreachable. A body with statement expressions keeps its unreachable-code proof
+  (`check_common_unreachable`): the walk starts at each statement expression's first entry too, taken as reached, so
+  code after a `return` inside one is dropped as well. Still different: a comparison as its last value warns as a
+  comparison where clang says "expression result unused".
   A folded shift's warnings take clang's words (#1447, `check_driver_shift_message`): "shifting a negative signed
   value is undefined", and "signed shift result (0x…) requires N bits to represent, but 'T' only has W bits", the
   result's hexadecimal and its significant bits. Its `-Wshift-negative-value` is a runtime one like its counts: the

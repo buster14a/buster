@@ -7889,7 +7889,9 @@ static void check_common_mark_written(const CheckGraph* graph, const CheckStream
 // return, an initializer or a control condition).
 // The control entries a body's first reaches, by the walk check_program_return_flow's second pass makes for
 // -Wreturn-type: a constant branch reaches only its taken edge, a case the arm its value selects, and an
-// indirect jump or asm goto every label it may enter. `seen` and `queue` hold body->count elements each.
+// indirect jump or asm goto every label it may enter. `seen` and `queue` hold body->count elements each. A body's
+// statement expressions' entries, after its own (from entry_count), start at each one's first, taken as reached: whether
+// one is evaluated is its expression's (check_common_statement_roots), and what its exits reach is reached (#1447).
 static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue)
 {
     const CheckControl* entries = program->controls + body->first;
@@ -7898,6 +7900,16 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
     uint32_t tail = 1;
     queue[0] = 0;
     seen[0] = 1;
+    const uint32_t index = (uint32_t)(body - program->bodies);
+    for (uint32_t r = 0; body->entry_count < body->count && program->regions != NULL && r < program->input->region_count; r += 1)
+    {
+        const uint32_t first = program->regions[r].first;
+        if (program->regions[r].body == index && first < body->count && seen[first] == 0)
+        {
+            seen[first] = 1;
+            queue[tail++] = first;
+        }
+    }
     bool labels = false;
     while (head < tail)
     {
@@ -7982,7 +7994,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
     for (uint32_t b = 0; valid && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
-        if (body->count == 0 || body->count != body->entry_count)
+        if (body->count == 0 || body->entry_count == 0)
         {
             continue;
         }
@@ -8367,6 +8379,27 @@ static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckSt
     return mask;
 }
 
+// The statements of the statement expression `node` (a STATEMENT_VALUE, at its `)`) that the source doesn't evaluate: their
+// roots, which no parent reads, taken as unevaluated as it is (#1447: clang's CFG leaves a short-circuited operand's, a
+// constant conditional's other arm's and unreachable code's statement expression's blocks unreachable). Its statements'
+// nodes precede it, from its `(` on; the scan back stops at the first node before that.
+static void check_common_statement_roots(const CheckGraph* graph, const Parser* parser, const uint32_t* parents, uint32_t node, uint8_t* evaluated)
+{
+    const uint32_t close = graph->tokens[node];
+    uint32_t open = BUSTER_CHECK_NONE;
+    for (uint32_t at = close; close < parser->tokens.count && open == BUSTER_CHECK_NONE && at-- > 0;)
+    {
+        open = parser->tree.roles[at] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[at] == close ? at : open;
+    }
+    bool inside = open < close;
+    for (uint32_t at = node; inside && at-- > 0;)
+    {
+        const uint32_t token = graph->tokens[at];
+        inside = token > open;
+        evaluated[at] = inside && token < close && parents[at] == BUSTER_CHECK_NONE ? 0 : evaluated[at];
+    }
+}
+
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch)
 {
@@ -8395,11 +8428,15 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
         }
         for (uint32_t node = graph->count; node-- > 0;)
         {
+            const CheckOp op = graph->ops[node];
+            if (evaluated[node] == 0 && op == CHECK_OP_STATEMENT_VALUE)
+            {
+                check_common_statement_roots(graph, parser, parents, node, evaluated);
+            }
             if (evaluated[node] == 0)
             {
                 continue;
             }
-            const CheckOp op = graph->ops[node];
             const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
