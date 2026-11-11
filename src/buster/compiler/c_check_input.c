@@ -1784,6 +1784,15 @@ struct CheckInputReader
     // ext_vector_type: ProcessDeclAttribute leaves GNU type attributes to a declarator's type) are read without their
     // arguments' values.
     bool tag_attributes;
+    // The attributes being read are a C23 list after a bare tag declaration's name (#1447, check_input_tag_attributes), which
+    // clang's parser refuses and its Sema still applies to the tag, as the tag's own list.
+    bool tag_name_list;
+    // That list's tokens [tag_name_list_first, tag_name_list_end) and the subjects its tag gives, which
+    // check_input_tag_attributes leaves to check_input_tag to read after the identity: the constant reader's way to the
+    // identity (check_constant_tag_finish) reads no attributes. tag_name_list_end is 0 where none waits.
+    uint32_t tag_name_list_first;
+    uint32_t tag_name_list_end;
+    uint32_t tag_name_list_subjects;
     // The constexpr values the initializers' finishes have read, newest first.
     CheckConstexprValue* constexpr_values;
     uint32_t constexpr_count;
@@ -4460,7 +4469,8 @@ static void check_input_tag_attribute_warning(CheckInputReader* reader, const Ch
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = attribute->first + 1,
-        .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+        // (A C23 attribute's scope, which TAG_ATTRIBUTE_PLACE's data doesn't hold, is its token's: the warning names it.)
+        .payload = { .name = attribute->name, .token = kind == CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE && scope_name != 0 ? attribute->first : BUSTER_CHECK_WARNING_NO_SOURCE,
                      .data = kind == CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE ? data : scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
     };
     const CheckWarningNote note =
@@ -4493,14 +4503,55 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     const uint8_t kind = type_kind(reader->types, type);
     const uint32_t keyword = kind == BUSTER_TYPE_KIND_UNION ? 1u : kind == BUSTER_TYPE_KIND_ENUM ? 2u : 0u;
     // A bare declaration's attributes after its name, which nothing takes: clang's parser's reading of them alone, and its
-    // warning of each (check_input_attribute_ignored_lists).
-    for (uint32_t i = after_name; valid && bare && i < after; i += 1)
+    // warning of each (check_input_attribute_ignored_lists). A C23 list there is its parser's error, after which its Sema
+    // applies the list to the tag as the tag's own (#1447): a type attribute's count error, or "cannot be applied to a
+    // declaration" (check_input_attribute_rule's tag_list). The declaration goes on, as clang's does, its errors recovered.
+    // (The list's other attributes are read and checked, but the tag doesn't take them.)
+    for (uint32_t i = after_name; valid && bare && i < after;)
     {
-        if (parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, i, after))
+        // The C23 lists from `i` on, which clang's parser reads together: one error at the first, of a struct's or a union's
+        // right after its name. An enum's, or lists after a GNU one, its parser ignores as a GNU list's, warning of each.
+        const bool lists = parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, i, after);
+        const bool list = lists && i == after_name && kind != BUSTER_TYPE_KIND_ENUM;
+        uint32_t list_end = i;
+        while (list_end < after && parser->tokens.kinds[list_end] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, list_end, after))
         {
-            check_input_report(reader, i, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
-            valid = false;
+            list_end = parser->tree.parents[list_end] < after ? parser->tree.parents[list_end] + 1 : after;
         }
+        for (uint32_t t = i + 2; lists && !list && t < list_end; t += 1)
+        {
+            // Each item's name: the identifier (or keyword) before its arguments, a comma or the list's end, its scope's
+            // three tokens before it (the parser's `::` is two colons).
+            const uint8_t next = t + 1 < list_end ? parser->tokens.kinds[t + 1] : PARSE_KIND_END;
+            const bool scoped = t >= 3 && parser->tokens.kinds[t - 1] == PARSE_KIND_COLON && parser->tokens.kinds[t - 2] == PARSE_KIND_COLON;
+            const bool item = parser->tokens.kinds[t] != PARSE_KIND_L_SQUARE && parser->tokens.kinds[t] != PARSE_KIND_R_SQUARE &&
+                              parser->tokens.kinds[t] != PARSE_KIND_COMMA && parser->tokens.kinds[t] != PARSE_KIND_COLON &&
+                              (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_COMMA || next == PARSE_KIND_R_SQUARE) &&
+                              (scoped || parser->tokens.kinds[t - 1] == PARSE_KIND_L_SQUARE || parser->tokens.kinds[t - 1] == PARSE_KIND_COMMA);
+            if (item)
+            {
+                const CheckInputAttribute ignored = { .first = scoped ? t - 3 : t, .name_token = t, .name = parser->tokens.names[t], .standard = true };
+                check_input_tag_attribute_warning(reader, &ignored, CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE, keyword, BUSTER_CHECK_NONE);
+            }
+            t = item && next == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] : t;
+        }
+        if (lists && !list)
+        {
+            // (Read: the specifiers take nothing of them, as check_input_attribute_ignored_lists marks a GNU list.)
+            memset(reader->ignored + i, 1, list_end - i);
+        }
+        if (list)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, i, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
+            // Read by check_input_tag after the identity, with their subjects' and counts' checks as the tag's own list's
+            // (below).
+            reader->tag_name_list_first = i;
+            reader->tag_name_list_end = list_end;
+            reader->tag_name_list_subjects = kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
+            valid = !reader->output->resource && (reader->output->report_count == before || check_input_recover_reports(reader, before));
+        }
+        i = lists ? list_end : i + 1;
     }
     valid = valid && (!bare || check_input_attribute_ignored_lists(reader, after_name, after, true, keyword, BUSTER_CHECK_NONE));
     // A reference's C23 list before its name, which clang's parser rejects at its first attribute. One after its name is
@@ -4916,7 +4967,27 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
         reader->tag_attributes = false;
         // Before the identity, which completes an enum with a fixed underlying type and its alignment attribute.
         check_input_set_attributes_at(reader->output, token, valid ? attributes : 0);
+        reader->tag_name_list_end = 0;
         type = valid ? check_input_tag_identity(reader, token, end, definition) : 0;
+        // A C23 list after a bare declaration's name (check_input_tag_attributes): read as the tag's, its errors recovered.
+        if (type != 0 && reader->tag_name_list_end != 0)
+        {
+            const uint32_t before = reader->output->report_count;
+            uint32_t list = reader->tag_name_list_first;
+            CheckInputAttributes* listed = 0;
+            reader->tag_attributes = true;
+            reader->tag_name_list = true;
+            const bool read = check_input_read_attributes(reader, &list, reader->tag_name_list_end, &listed);
+            reader->tag_attributes = false;
+            reader->tag_name_list = false;
+            reader->tag_name_list_end = 0;
+            if (read && listed != 0)
+            {
+                (void)check_input_attribute_subjects(reader, listed, reader->tag_name_list_subjects, 0, token, BUSTER_CHECK_NONE);
+            }
+            const bool recovered = !reader->output->resource && (reader->output->report_count == before || check_input_recover_reports(reader, before));
+            type = recovered ? type : 0;
+        }
     }
     return type;
 }
