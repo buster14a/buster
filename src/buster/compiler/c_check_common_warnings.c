@@ -439,6 +439,14 @@ static bool check_common_integer(const TypeTable* types, TypeId type, uint32_t* 
 // Whether a constant integer changes value in an implicit conversion to `target`. Unsigned sources warn only when
 // their high bits are lost; a signed source warns unless the target represents its value, with clang's -1 exception
 // for an unsigned target.
+// Whether either of two types is a _BitInt past 128 bits (#1447), a cold path's: a kind check before its width's.
+static bool check_common_integer_kind_wide(const TypeTable* types, TypeId source, TypeId target)
+{
+    const bool result = type_kind(types, type_unqualified(type_strip_aligned(types, source))) == BUSTER_TYPE_KIND_BIT_INT ||
+                        type_kind(types, type_unqualified(type_strip_aligned(types, target))) == BUSTER_TYPE_KIND_BIT_INT;
+    return result;
+}
+
 static bool check_common_conversion_changes(const TypeTable* types, TypeId source, TypeId target, unsigned __int128 integer, __int128* converted)
 {
     uint32_t source_width = 0;
@@ -4587,11 +4595,16 @@ static bool check_common_same_width(const TypeTable* types, const CheckValue* va
     bool source_signed = false;
     bool target_signed = false;
     bool result = false;
-    if (check_common_integer(types, value->type, &source_width, &source_signed) && check_common_integer(types, target, &target_width, &target_signed) &&
-        source_signed && target_signed && target_width != 0 && target_width < 128 && target_width < source_width)
+    const bool narrow = check_common_integer(types, value->type, &source_width, &source_signed) && check_common_integer(types, target, &target_width, &target_signed);
+    if (narrow && source_signed && target_signed && target_width != 0 && target_width < 128 && target_width < source_width)
     {
         const __int128 original = check_common_integer_bits(value->integer, source_width, source_signed);
         result = original >= ((__int128)1 << (target_width - 1)) && original < ((__int128)1 << target_width);
+    }
+    else if (!narrow && check_common_integer_kind_wide(types, value->type, target))
+    {
+        // A _BitInt past 128 bits on either side (#1447).
+        result = check_wide_same_width(types, value, target);
     }
     return result;
 }
@@ -4635,8 +4648,11 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
     const bool width = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_same_width(types, value, target);
     const uint8_t kind = width ? BUSTER_CHECK_LEAVES_WIDTH : BUSTER_CHECK_LEAVES_INTEGER;
     const bool listed_character = width && (leaves & BUSTER_CHECK_LEAVES_LISTED) != 0 && check_common_character_type(types, target);
-    if (plain && value->constant_kind == CHECK_CONSTANT_INTEGER && (leaves & kind) != 0 && !listed_character &&
-        check_common_conversion_changes(types, value->type, target, value->integer, &converted) &&
+    const bool candidate = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && (leaves & kind) != 0 && !listed_character;
+    // A _BitInt past 128 bits on either side (#1447, c_check_wide.c): its own rules' twin and its decimal digits.
+    bool wide = false;
+    const bool wide_changes = candidate && check_common_integer_kind_wide(types, value->type, target) && check_wide_conversion_changes(types, value, target, &wide);
+    if (candidate && (wide ? wide_changes : check_common_conversion_changes(types, value->type, target, value->integer, &converted)) &&
         !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch))
     {
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
@@ -4653,9 +4669,19 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             check_common_integer(types, target, &target_width, &target_signed);
             check_common_number(original, sizeof(original), check_common_integer_value(value, source_width, source_signed));
             check_common_number(changed, sizeof(changed), converted);
-            const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
-                                                      (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
-                                                      original, changed);
+            const char* original_text = original;
+            const char* changed_text = changed;
+            if (wide)
+            {
+                CheckValue result = *value;
+                check_action_convert_value(types, &result, target, source);
+                original_text = check_wide_text(types, value, scratch);
+                changed_text = check_wide_text(types, &result, scratch);
+            }
+            const char* message = original_text == NULL || changed_text == NULL ? NULL :
+                                  check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
+                                                     (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
+                                                     original_text, changed_text);
             const CheckGraph* graph = &input->graph;
             const uint32_t condition = graph->ops[source] == CHECK_OP_CONDITIONAL ? graph->operand0[source] : BUSTER_CHECK_NONE;
             const uint32_t token = condition < graph->count ? graph->tokens[condition] : graph->tokens[source];
@@ -5054,6 +5080,13 @@ static bool check_common_constant_changes(const TypeTable* types, const CheckStr
         const unsigned __int128 integer = check_common_stream_integer(stream, source, &type);
         __int128 converted = 0;
         result = check_common_conversion_changes(types, type, target, integer, &converted);
+        if (!result && check_common_integer_kind_wide(types, type, target))
+        {
+            // A _BitInt past 128 bits on either side (#1447): its whole value's.
+            bool wide = false;
+            const CheckValue value = check_stream_value(stream, source);
+            result = check_wide_conversion_changes(types, &value, target, &wide) && wide;
+        }
     }
     return result;
 }

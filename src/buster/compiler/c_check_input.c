@@ -348,6 +348,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_VLA_EXTERN,
     CHECK_INPUT_VM_EXTERN,
     CHECK_INPUT_VLA_FIELD,
+    // A block's automatic variable-length array with an initializer but an empty list (#1447): clang's "variable-sized
+    // object may not be initialized", at the outermost bound for a list, else at the name; recovered, the declaration
+    // valid and its initializer unchecked (CheckInputReader.vla_initializer_dropped).
+    CHECK_INPUT_VLA_INITIALIZER,
 
     // A use of an invalid declaration (#1447, check_input_invalid_declare), at its name: no diagnostic of its own, as
     // clang's RecoveryExpr has none, but the uses' and their enclosing expressions' are left out as an undeclared name's
@@ -1962,6 +1966,9 @@ struct CheckInputReader
     bool specifier_names;
     uint32_t specifier_names_mark;
     bool declarator_invalid;
+    // Whether check_input_vla_declaration recovered a block VLA's initializer's error (#1447), whose initializer the
+    // declaration then skips.
+    bool vla_initializer_dropped;
     // Whether the last complete declarator's own type was in error (#1447), not only a parameter of its own function's:
     // clang's parser then declares none of its group's later declarators.
     bool declarator_group_invalid;
@@ -4916,12 +4923,27 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
 
 // GNU C's __auto_type, the type a declaration of one variable takes from its initializer. Until the walk has read the
 // initializer (check_input_auto_type_finish), the declaration's type is this placeholder with the specifiers' const and
-// volatile: no specifiers give it otherwise, as restrict on a type other than a pointer is an error.
+// volatile: no specifiers give it otherwise, as restrict on a type other than a pointer is an error. The specifiers'
+// _Atomic and restrict, which apply to the deduced type (#1844), make it one of three others of the same kind (an
+// integer type with restrict, which no declaration has): `_Atomic __auto_type` is unsigned int's, `__auto_type restrict`
+// long's (check_input_auto_type_qualifiers).
 #define BUSTER_CHECK_AUTO_TYPE (BUSTER_TYPE_INT | BUSTER_TYPE_RESTRICT)
+#define BUSTER_CHECK_AUTO_TYPE_ATOMIC (BUSTER_TYPE_UINT | BUSTER_TYPE_RESTRICT)
+#define BUSTER_CHECK_AUTO_TYPE_RESTRICT (BUSTER_TYPE_LONG | BUSTER_TYPE_RESTRICT)
 
 static bool check_input_auto_type(TypeId type)
 {
-    return (type & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_CHECK_AUTO_TYPE;
+    const TypeId marker = type & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+    return marker == BUSTER_CHECK_AUTO_TYPE || marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC || marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT;
+}
+
+// The qualifiers an __auto_type placeholder asks of its deduced type: its const and volatile, and the _Atomic (as
+// BUSTER_TYPE_KIND_ATOMIC's wrapper, in `*atomic`) or the restrict its marker says.
+static uint32_t check_input_auto_type_qualifiers(TypeId placeholder, bool* atomic)
+{
+    const TypeId marker = placeholder & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+    *atomic = marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC;
+    return (type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) | (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0);
 }
 
 // Where clang reports specifiers that clash with __auto_type, the list's reading having failed at `token`: a second type
@@ -4958,8 +4980,9 @@ static __attribute__((noinline)) uint32_t check_input_auto_type_clash(const Chec
 }
 
 // The rest of a list of specifiers with __auto_type, from `first` to `end`, as clang reads it: _Complex is an error at its
-// keyword; _Atomic, restrict and attributes that change the type are refused by name, as what clang deduces with them
-// isn't modeled yet.
+// keyword; _Atomic and restrict apply to the deduced type (check_input_auto_type_qualifiers), but both together, whose
+// restrict clang reports against `_Atomic(__auto_type)` before deducing, are refused by name at the restrict, and so are
+// attributes that change the type.
 static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, bool complex, bool atomic,
                                                                          uint32_t restrict_token)
 {
@@ -4972,12 +4995,14 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
         complex_token = complex_token == BUSTER_CHECK_NONE && (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2) ? i : complex_token;
         atomic_token = atomic_token == BUSTER_CHECK_NONE && parser->tokens.kinds[i] == PARSE_KIND_ATOMIC ? i : atomic_token;
     }
-    const uint32_t token = complex ? complex_token : atomic ? atomic_token : restrict_token;
-    if (complex || atomic || restrict_token != BUSTER_CHECK_NONE)
+    (void)atomic_token;
+    const bool both = atomic && restrict_token != BUSTER_CHECK_NONE;
+    const uint32_t token = complex ? complex_token : restrict_token;
+    if (complex || both)
     {
         check_input_report(reader, token != BUSTER_CHECK_NONE ? token : first, complex ? CHECK_INPUT_DECLARATION : CHECK_INPUT_UNSUPPORTED);
     }
-    return !complex && !atomic && restrict_token == BUSTER_CHECK_NONE;
+    return !complex && !both;
 }
 
 // Specifiers are retained in source order because their inherited base type precedes declarators semantically,
@@ -5530,7 +5555,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         valid = check_input_auto_type_specifiers(reader, first, i, complex, atomic, (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? restrict_token : BUSTER_CHECK_NONE);
     }
     reader->specifier_restrict = BUSTER_CHECK_NONE;
-    if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0 && valid && !inferred_auto)
+    if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0 && valid && !inferred_auto && auto_type == BUSTER_CHECK_NONE)
     {
         const bool pointer = type_kind(reader->types, base) == BUSTER_TYPE_KIND_POINTER &&
                              type_kind(reader->types, reader->types->types.base[type_index(base)]) != BUSTER_TYPE_KIND_FUNCTION;
@@ -5564,7 +5589,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         }
         base = !valid ? 0 : complex ? check_input_type_result(reader, type_complex(reader->types, base)) : base;
     }
-    if (atomic && valid)
+    // __auto_type's _Atomic is its deduced type's (its placeholder's marker, below).
+    if (atomic && valid && auto_type == BUSTER_CHECK_NONE)
     {
         base = check_input_type_result(reader, type_atomic(reader->types, base));
         noderef = check_input_noderef_wrap(reader, noderef);
@@ -5620,7 +5646,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             check_input_report(reader, auto_type, CHECK_INPUT_UNSUPPORTED);
         }
         valid = base == BUSTER_TYPE_INT;
-        base = BUSTER_CHECK_AUTO_TYPE;
+        base = atomic ? BUSTER_CHECK_AUTO_TYPE_ATOMIC : (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? BUSTER_CHECK_AUTO_TYPE_RESTRICT : BUSTER_CHECK_AUTO_TYPE;
+        qualifiers &= ~(uint32_t)BUSTER_TYPE_RESTRICT;
         reader->specifier_auto_type = auto_type;
     }
     if (inferred_auto)
@@ -10499,7 +10526,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         {
             const uint8_t kind = parser->tokens.kinds[i];
             const bool direct_initializer = parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP;
-            const bool initialized = check_input_has_initializer(parser, i);
+            bool initialized = check_input_has_initializer(parser, i);
             const uint32_t direct_close = direct_initializer ? parser->tree.parents[i] : i;
             const uint32_t direct_end = direct_initializer ? check_input_direct_initializer_end(parser, i + 1, direct_close) : i;
             if (direct_initializer && direct_end < direct_close && (c23_auto || check_input_auto_type(type)))
@@ -10749,7 +10776,25 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_report(reader, name, CHECK_INPUT_BLOCK_EXTERN_INITIALIZER);
                 valid = false;
             }
+            reader->vla_initializer_dropped = false;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
+            {
+                // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
+                uint32_t right = reader->first_child[i];
+                while (right != BUSTER_CHECK_NONE && right < i)
+                {
+                    right = reader->next_child[right];
+                }
+                const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i + 1;
+                for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                {
+                    reader->ignored[skipped] = true;
+                }
+                valid = right != BUSTER_CHECK_NONE;
+                initialized = false;
+                i = end;
+            }
             if (valid && reader->cleanup_attributes && attributes != 0)
             {
                 // GNU's cleanup attribute, which a variable of automatic storage in a block has, and any other declaration
@@ -11835,7 +11880,12 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
     {
         if (check_input_c23_auto_placeholder(types, declared_level))
         {
-            const TypeId base = type_qualify(types, deduced, type_qualifiers(declared_level) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
+            // __auto_type's _Atomic and restrict are the deduced type's (check_input_auto_type_qualifiers).
+            bool atomic = false;
+            const uint32_t qualifiers = check_input_auto_type(declared_level) ? check_input_auto_type_qualifiers(declared_level, &atomic) :
+                                        type_qualifiers(declared_level) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+            const TypeId atomic_base = atomic ? type_atomic(types, deduced) : deduced;
+            const TypeId base = atomic_base != 0 ? type_qualify(types, atomic_base, qualifiers) : 0;
             valid = base != 0;
             *base_out = base;
             result = base;
@@ -11895,7 +11945,8 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
             valid = initializer_kind == BUSTER_TYPE_KIND_POINTER && (level = check_input_c23_auto_level(reader, &top, kind)) != 0;
             if (valid)
             {
-                level->qualifiers = type_qualifiers(declared_level) & ~BUSTER_TYPE_RESTRICT;
+                // A pointer's restrict is its own (`__auto_type *restrict p`, #1844): only the placeholder's marks it.
+                level->qualifiers = type_qualifiers(declared_level);
                 declared_level = types->types.base[type_index(declared_level)];
                 deduced = types->types.base[type_index(deduced)];
             }
