@@ -694,6 +694,19 @@ static void check_program_target_room(const CheckProgram* program, uint64_t* ato
     }
 }
 
+// The resolvers' unwind entries (one per group whose resolver the unit emits, check_program_target_atoms), which the
+// unwind table writes after the functions' and the helpers'.
+static uint32_t check_program_target_frames(const CheckProgram* program)
+{
+    uint32_t frames = 0;
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        frames += group->resolved && program->object_symbols[group->reference] != 0;
+    }
+    return frames;
+}
+
 // The symbol of the version of `option` in group `group`: its own (target's version with a body, CheckProgram.
 // target_symbols, or a target_clones body's first name) or one of the link's from `first` on, or 0.
 static SymbolId check_program_target_symbol(const Link* link, SymbolId first, String8 name)
@@ -797,10 +810,11 @@ static void check_program_target_word(uint8_t* text, uint32_t* length, uint32_t 
 //
 // An option of no condition is taken unconditionally (clang's default, which sorts last), and none after it is reached.
 // Returns false with `code`'s status and reason set.
-static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgram* program, Arena* bytes)
+static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgram* program, UnwindFunction* frames, SymbolId* frame_symbols, Arena* bytes)
 {
     Link* link = &code->link;
     bool valid = true;
+    uint32_t frame_count = 0;
     for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
@@ -861,6 +875,11 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         SymbolId* fixup_targets = fixup_kinds != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, SymbolId, fixup_room) : NULL;
         int32_t* fixup_addends = fixup_targets != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, int32_t, fixup_room) : NULL;
         valid = valid && fixup_addends != NULL;
+        // Its unwind entry's rows (clang's CFI): the CFA at rsp + 16 after the push, at rsp + 8 after each return's pop,
+        // and at rsp + 16 again where the next test (or the trap) begins.
+        EmissionFrameRow* rows = valid && frames != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, EmissionFrameRow, 1 + 2 * (uint64_t)sorted_count) : NULL;
+        valid = valid && (frames == NULL || rows != NULL);
+        uint32_t row_count = 0;
         uint32_t fixups = 0;
         uint32_t length = 0;
         if (valid)
@@ -872,6 +891,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
             fixup_targets[fixups] = indicator;
             fixup_addends[fixups] = -4;
             fixups += 1;
+            if (rows != NULL)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+            }
         }
         bool taken = false;
         for (uint32_t o = 0; valid && !taken && o < sorted_count; o += 1)
@@ -879,6 +902,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
             const CheckProgramTargetOption* option = sorted + o;
             uint32_t branches[5];
             uint32_t branch_count = 0;
+            if (rows != NULL && o != 0)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = length, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+            }
             if (option->cpu_is)
             {
                 // cmp dword [rip + __cpu_model + 4 * field], value; jne next.
@@ -908,6 +935,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
             fixup_targets[fixups] = option->symbol;
             fixup_addends[fixups] = -4;
             fixups += 1;
+            if (rows != NULL)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = length - 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 };
+            }
             for (uint32_t b = 0; b < branch_count; b += 1)
             {
                 check_program_cpu_u32(text, branches[b], length - (branches[b] + 4));
@@ -916,6 +947,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         }
         if (valid && !taken)
         {
+            if (rows != NULL && sorted_count != 0)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = length, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+            }
             static const uint8_t trap[] = { 0x0f, 0x0b };
             check_program_cpu_bytes(text, &length, trap, sizeof(trap));
         }
@@ -930,6 +965,12 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         for (uint32_t d = 0; valid && d < 3; d += 1)
         {
             valid = defined[d] == 0 ? d == 2 && group->clones == 0 : link_define_symbol(link, defined[d], atom, 0, length);
+        }
+        if (valid && frames != NULL)
+        {
+            frames[frame_count] = (UnwindFunction){ .size = length, .open = BUSTER_UNWIND_ROWS, .rows = rows, .row_count = row_count };
+            frame_symbols[frame_count] = resolver;
+            frame_count += 1;
         }
     }
     if (!valid)

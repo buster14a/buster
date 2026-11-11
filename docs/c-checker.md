@@ -3272,8 +3272,11 @@ What the lowering covers past scalars (#145's programs):
     resolver's result is named among clang's versions' distinct addresses.
   - *Differences from clang's code.* A `target_clones` body is compiled once,
     with the unit's features, where clang compiles a copy per version (each is
-    valid there). The resolver is `.text`'s, not a COMDAT section's, and has no
-    unwind entry.
+    valid there). The resolver is `.text`'s, not a COMDAT section's. Its
+    unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
+    its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again
+    where the next test begins (a row program, `check_program_target_atoms`).
+    The models' test unwinds through it from `__cpu_indicator_init`.
   - *`arch=` beyond `__builtin_cpu_is`'s names.* An `arch=` processor that
     `__builtin_cpu_is` doesn't name (`corei7-avx`, `skx`: aliases of
     `-march`'s) is clang's `EmitX86CpuIs` default, a test of the model's
