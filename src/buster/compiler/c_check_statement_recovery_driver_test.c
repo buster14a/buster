@@ -220,6 +220,10 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
         "void n(void) { P: Q: P: ; goto Q; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // An undeclared name in a type name's bound ends the reader's walk; the rounds find the later body's error, under -w
+        // too (#2162).
+        "int f(void) { return _Alignof(int[undecl3]); }\n"
+        "int k(void) { return d; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
