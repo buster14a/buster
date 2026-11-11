@@ -831,7 +831,7 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
 {
     for (uint32_t width = 0; width < 3; width += 1)
     {
-        for (uint32_t flags = 0; flags < 12; flags += 1)
+        for (uint32_t flags = 0; flags < 14; flags += 1)
         {
             const uint64_t mark = input->length;
             const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .vector_constant_count = 4, .extra_count = 1, .constant_count = 1 };
@@ -856,7 +856,7 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             // Flags 8 to 11: a compress (8, 9) or an expand (10, 11) of dwords or quadwords under a constant mask.
             static const uint8_t compress_lanes[2] = { IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
-            const bool compress = flags >= 8;
+            const bool compress = flags >= 8 && flags < 12;
             f.constants[0].low = UINT64_C(0xc3);
             if (compress)
             {
@@ -870,9 +870,10 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
             // A permute2 of each lanes' size, and a ternlog of 4 tables (flags 4 to 7: 0x96, 0xe8, 0xca and 0x3c).
             static const uint8_t ternlog_tables[4] = { 0x96, 0xe8, 0xca, 0x3c };
+            // Flags 12 and 13: an AES round and a last round of two constants, a binary kind.
             const uint32_t kind = flags < 4 ? BUSTER_IR_INTRINSIC_PERMUTE2 : flags < 8 ? BUSTER_IR_INTRINSIC_TERNLOG : flags < 10 ? BUSTER_IR_INTRINSIC_COMPRESS : BUSTER_IR_INTRINSIC_EXPAND;
-            ir_optimize_test_instruction(&f, 4, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(kind, 0));
-            f.flags[4] = flags < 4 ? (uint8_t)flags : flags < 8 ? ternlog_tables[flags - 4] : (uint8_t)(2 + (flags & 1));
+            ir_optimize_test_instruction(&f, 4, IR_INTRINSIC, type, 0, 1, flags >= 12 ? BUSTER_IR_INTRINSIC_AES : ir_intrinsic_ternary_c(kind, 0));
+            f.flags[4] = flags < 4 ? (uint8_t)flags : flags < 8 ? ternlog_tables[flags - 4] : flags < 12 ? (uint8_t)(2 + (flags & 1)) : (uint8_t)(flags - 12);
             ir_optimize_test_instruction(&f, 5, IR_VCMP, mask, 4, 2, IR_ULT);
             f.flags[5] = IR_SIMD_LANE_I8;
             ir_optimize_test_instruction(&f, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -882,7 +883,7 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
-                                    "a constant permute2, ternlog, compress or expand folds through a comparison");
+                                    "a constant permute2, ternlog, compress, expand or AES round folds through a comparison");
             arena_pop_to(vector, 0);
             arena_pop_to(input, mark);
         }
