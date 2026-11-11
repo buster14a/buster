@@ -28,7 +28,7 @@
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
 // main's trigger and the hosted scope the evidence job decides (changes_main_policy), the hosted rows' workflow
 // (.github/workflows/hosted-correctness.yml, which the test job calls for each row: changes_row_policy) and its shards,
-// their list and N alike (changes_shard_policy), and the vector row's probe, target and claims against host_isa.h's
+// their list, their N and the counts the test job gives each row alike (changes_shard_policy), and the vector row's probe, target and claims against host_isa.h's
 // predicate and the build's flags (changes_vector_policy, #2033). The row workflow's steps are not the selector's: a
 // change to that file runs the steps it gates on an output (the performance readers' qualification). The selector is CI
 // tooling outside the compile path and has no vector path: it reads a few hundred lines and files.
@@ -2691,7 +2691,7 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         const char* after;
     } row_mutants[] = {
         { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
-        { "  shards:\n", "  tests:\n" },
+        { "\n  shards:\n", "\n  tests:\n" },
     };
     for (uint32_t i = 0; i < sizeof(row_mutants) / sizeof(row_mutants[0]); i += 1)
     {
@@ -3025,13 +3025,16 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
     }
 }
 
-// The hosted rows' shards (docs/ci.md): the row workflow's shards job and the jobs after it. Its matrix's
-// `shard: [1, ..., N]` must count from 1, and the same N must appear in the job's name (`shard ${{ matrix.shard }} of
-// N)`) and the run step's `--shard "$BUSTER_SHARD/N"`, whose shard is the matrix's (`BUSTER_SHARD: ${{ matrix.shard }}`)
-// or, in the vector row's draws, the item its collector assigned a candidate. `parallel --shard K/N` deals the inventory
-// to N shards, so disagreeing values would leave commands unrun (or run some twice) with every job green. The vector
-// row's items (BUSTER_VECTOR_ITEMS, #2033) are the same N shards, each once, and its first draw starts 3 candidates per
-// item.
+// The hosted rows' shards (docs/ci.md, #2031): each row runs as many shards as its caller's `shards` input says. The row
+// workflow declares the input (a number, required); its shards job's matrix takes the list 1 to N from a lookup,
+// `shard: ${{ fromJSON('[[], [1], [1, 2], ...]')[inputs.shards] }}`, whose element k must be exactly 1 to k; the job's
+// name (`shard ${{ matrix.shard }} of ${{ inputs.shards }})`) takes the same N, and so does the run step, which the
+// vector row's draws share: `--shard "$BUSTER_SHARD/$shards"`, `shards` the input, or in the vector row its items'
+// count. The shard is the matrix's (`BUSTER_SHARD: ${{ matrix.shard }}`) or, in the vector row's draws, the item its
+// collector assigned a candidate. The test job in 9700x.yml must pass `shards:` an expression whose every number
+// (outside its quoted strings) is one the lookup has. `parallel --shard K/N` deals the inventory to N shards, so
+// disagreeing values would leave commands unrun (or run some twice) with every job green. The vector row's items
+// (BUSTER_VECTOR_ITEMS, #2033) are its N shards, each once, and its first draw starts 3 candidates per item.
 static bool changes_vector_items(const char* text, uint32_t shards)
 {
     static const char items[] = "\n  BUSTER_VECTOR_ITEMS: '";
@@ -3068,71 +3071,126 @@ static bool changes_vector_items(const char* text, uint32_t shards)
     return valid && candidates != NULL && next != NULL && candidates < next;
 }
 
-static bool changes_shard_policy(Text row)
+// How many items the vector row's BUSTER_VECTOR_ITEMS names: its words, 0 without the line.
+static uint32_t changes_vector_count(const char* text)
 {
-    const char* text = text_terminated(row);
-    const char* job = strstr(text, "\n  shards:\n");
-    const size_t length = job != NULL ? strlen(job) : 0;
-    static const char list[] = "\n        shard: [";
-    const char* found = length != 0 ? memmem(job, length, list, sizeof(list) - 1) : NULL;
-    uint32_t shards = 0;
-    bool valid = found != NULL;
-    const char* at = valid ? found + sizeof(list) - 1 : NULL;
-    // The list's numbers, each the next from 1, separated by ", " and closed by "]".
-    while (valid && *at != ']')
+    static const char items[] = "\n  BUSTER_VECTOR_ITEMS: '";
+    const char* found = strstr(text, items);
+    const char* at = found != NULL ? found + sizeof(items) - 1 : NULL;
+    uint32_t count = 0;
+    while (at != NULL && *at != '\'' && *at != '\n' && *at != 0)
     {
-        char* end = NULL;
-        const unsigned long value = *at >= '0' && *at <= '9' ? strtoul(at, &end, 10) : 0;
-        valid = value == (unsigned long)shards + 1 && end != NULL && (*end == ']' || (end[0] == ',' && end[1] == ' '));
-        shards += valid;
-        at = valid ? (*end == ']' ? end : end + 2) : at;
+        count += *at != ' ' && (at[1] == ' ' || at[1] == '\'');
+        at += 1;
     }
-    valid = valid && shards != 0 && at[1] == '\n';
-    char pattern[160];
-    snprintf(pattern, sizeof(pattern), "shard ${{ matrix.shard }} of %u)", shards);
-    valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
-    snprintf(pattern, sizeof(pattern), "--shard \"$BUSTER_SHARD/%u\"", shards);
-    valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
-    static const char shard[] = "\n      BUSTER_SHARD: ${{ matrix.shard }}\n";
-    valid = valid && memmem(job, length, shard, sizeof(shard) - 1) != NULL;
-    return valid && changes_vector_items(text, shards);
+    return count;
 }
 
-static void changes_test_shard_policy(ChangesTest* test, Text row)
+static bool changes_shard_policy(Text workflow, Text row)
 {
-    changes_expect(test, changes_shard_policy(row), "shard policy: the row's shard list, job name and command agree", (Text){ 0 });
+    const char* text = text_terminated(row);
+    static const char declared[] = "\n      shards:\n        description: ";
+    static const char typed[] = "\n        type: number\n        required: true\n";
+    const char* input = strstr(text, declared);
+    const char* input_end = input != NULL ? strchr(input + sizeof(declared) - 1, '\n') : NULL;
+    bool valid = input_end != NULL && strncmp(input_end, typed, sizeof(typed) - 1) == 0;
+    const char* job = strstr(text, "\n  shards:\n");
+    static const char lookup[] = "\n        shard: ${{ fromJSON('[";
+    const char* found = valid && job != NULL ? strstr(job, lookup) : NULL;
+    const char* at = found != NULL ? found + sizeof(lookup) - 1 : NULL;
+    // The lookup's elements: the first empty, each next one more, `[1, ..., k]`, separated by ", " and closed by "]".
+    uint32_t elements = 0;
+    valid = at != NULL && strncmp(at, "[]", 2) == 0;
+    at = valid ? at + 2 : at;
+    while (valid && strncmp(at, ", [", 3) == 0)
+    {
+        at += 3;
+        elements += 1;
+        for (uint32_t k = 1; valid && k <= elements; k += 1)
+        {
+            char* end = NULL;
+            const unsigned long value = *at >= '0' && *at <= '9' ? strtoul(at, &end, 10) : 0;
+            const char* separator = k < elements ? ", " : "]";
+            valid = value == k && end != NULL && strncmp(end, separator, strlen(separator)) == 0;
+            at = valid ? end + strlen(separator) : at;
+        }
+    }
+    static const char indexed[] = "]')[inputs.shards] }}\n";
+    valid = valid && elements != 0 && strncmp(at, indexed, sizeof(indexed) - 1) == 0;
+    const size_t length = job != NULL ? strlen(job) : 0;
+    static const char name[] = "shard ${{ matrix.shard }} of ${{ inputs.shards }})";
+    static const char count[] = "\n          shards=${{ inputs.shards }}\n"
+                                "          if [ \"$BUSTER_HOST_ARCH\" = vector ]; then\n"
+                                "              read -r -a items <<< \"$BUSTER_VECTOR_ITEMS\"\n"
+                                "              shards=${#items[@]}\n"
+                                "          fi\n";
+    static const char command[] = "--shard \"$BUSTER_SHARD/$shards\"";
+    static const char shard[] = "\n      BUSTER_SHARD: ${{ matrix.shard }}\n";
+    valid = valid && memmem(job, length, name, sizeof(name) - 1) != NULL && memmem(job, length, count, sizeof(count) - 1) != NULL;
+    valid = valid && memmem(job, length, command, sizeof(command) - 1) != NULL && memmem(job, length, shard, sizeof(shard) - 1) != NULL;
+    // The vector row's items: 1 to its count, which the lookup must have too.
+    const uint32_t items = changes_vector_count(text);
+    valid = valid && items >= 1 && items <= elements && changes_vector_items(text, items);
+    // The caller's `shards:`, in the `with:` of the job that uses the row workflow: each number one the lookup has.
+    const char* caller = strstr(text_terminated(workflow), "\n    uses: ./.github/workflows/hosted-correctness.yml\n    with:\n");
+    const char* with_end = caller != NULL ? strstr(caller + 1, "\n\n") : NULL;
+    static const char passed[] = "\n      shards: ${{ ";
+    const char* given = caller != NULL ? strstr(caller, passed) : NULL;
+    valid = valid && given != NULL && (with_end == NULL || given < with_end);
+    const char* value = valid ? given + sizeof(passed) - 1 : NULL;
+    uint32_t numbers = 0;
+    bool quoted = false;
+    while (valid && *value != '\n' && *value != 0)
+    {
+        quoted = *value == '\'' ? !quoted : quoted;
+        char* end = NULL;
+        const unsigned long number = !quoted && *value >= '0' && *value <= '9' ? strtoul(value, &end, 10) : 0;
+        valid = end == NULL || (number >= 1 && number <= elements);
+        numbers += end != NULL;
+        value = end != NULL ? end : value + 1;
+    }
+    return valid && numbers != 0 && !quoted;
+}
+
+static void changes_test_shard_policy(ChangesTest* test, Text workflow, Text row)
+{
+    changes_expect(test, changes_shard_policy(workflow, row), "shard policy: the row's shard lookup, job name, command, vector items and its caller's counts agree", (Text){ 0 });
     static const struct
     {
+        bool caller;
         const char* before;
         const char* after;
     } mutants[] = {
-        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3]" },
-        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3, 4, 5]" },
-        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 4, 3]" },
-        { "        shard: [1, 2, 3, 4]", "        shard: [0, 1, 2, 3]" },
-        { "--shard \"$BUSTER_SHARD/4\"", "--shard \"$BUSTER_SHARD/5\"" },
-        { "--shard \"$BUSTER_SHARD/4\"", "--shard \"$BUSTER_SHARD/3\"" },
-        { "shard ${{ matrix.shard }} of 4)", "shard ${{ matrix.shard }} of 5)" },
-        { "      BUSTER_SHARD: ${{ matrix.shard }}", "      BUSTER_SHARD: 1" },
-        { "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3'" },
-        { "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 3'" },
-        { "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 4 5'" },
-        { "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '0 1 2 3'" },
-        { "        candidate: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]", "        candidate: [1, 2, 3, 4, 5, 6, 7, 8]" },
+        { false, "[1, 2, 3, 4], ", "[1, 2, 4, 3], " },
+        { false, "[1, 2, 3, 4], ", "[1, 2, 3], " },
+        { false, "[1, 2, 3], ", "" },
+        { false, "fromJSON('[[], [1], ", "fromJSON('[[1], [1], " },
+        { false, "fromJSON('[[], [1], ", "fromJSON('[[], [0], " },
+        { false, "[1, 2, 3, 4, 5, 6, 7, 8]]')", "[1, 2, 3, 4, 5, 6, 7, 8, 8]]')" },
+        { false, "]')[inputs.shards] }}", "]')[inputs.optimization] }}" },
+        { false, "of ${{ inputs.shards }})", "of 4)" },
+        { false, "--shard \"$BUSTER_SHARD/$shards\"", "--shard \"$BUSTER_SHARD/4\"" },
+        { false, "          shards=${{ inputs.shards }}\n", "          shards=4\n" },
+        { false, "              shards=${#items[@]}\n", "              shards=4\n" },
+        { false, "        type: number\n        required: true\n      hosted-tools:", "        type: number\n        required: false\n      hosted-tools:" },
+        { false, "\n      shards:\n        description: ", "\n      shard-count:\n        description: " },
+        { false, "      BUSTER_SHARD: ${{ matrix.shard }}", "      BUSTER_SHARD: 1" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 3'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 4 5'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '0 1 2 3'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 4 5 6 7 8 9'" },
+        { false, "        candidate: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]", "        candidate: [1, 2, 3, 4, 5, 6, 7, 8]" },
+        { true, "      shards: ${{ ", "      shards: ${{ 0 && 1 || " },
+        { true, "      shards: ${{ ", "      shards: ${{ 9 && 1 || " },
+        { true, "      shards: ${{ ", "      shard_count: ${{ " },
     };
-    const char* original = text_terminated(row);
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
-        const char* found = strstr(original, mutants[i].before);
-        Text changed = row;
-        if (found != NULL)
-        {
-            const size_t prefix = (size_t)(found - original);
-            const size_t suffix = prefix + strlen(mutants[i].before);
-            changed = text_concat(text_concat((Text){ .data = row.data, .length = prefix }, text_c(mutants[i].after)),
-                                  (Text){ .data = row.data + suffix, .length = row.length - suffix });
-        }
-        changes_expect(test, found != NULL && !changes_shard_policy(changed), "shard policy rejects a shard list and N that disagree", text_c(mutants[i].after));
+        bool found = false;
+        const Text changed = changes_mutant(mutants[i].caller ? workflow : row, NULL, mutants[i].before, mutants[i].after, &found);
+        const bool rejected = mutants[i].caller ? !changes_shard_policy(changed, row) : !changes_shard_policy(workflow, changed);
+        changes_expect(test, found && rejected, "shard policy rejects a shard lookup, N, vector items or caller's count that disagree", text_c(mutants[i].after));
     }
 }
 
@@ -3351,7 +3409,7 @@ static int changes_self_test(const char* root)
         changes_test_oracle_policy(&test, workflow, row);
         changes_test_main_policy(&test, workflow);
         changes_test_row_policy(&test, row);
-        changes_test_shard_policy(&test, row);
+        changes_test_shard_policy(&test, workflow, row);
     }
     if (row_readable && isa_readable && settings_readable)
     {

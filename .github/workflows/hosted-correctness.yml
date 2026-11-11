@@ -1,7 +1,7 @@
 name: Hosted correctness row
 
 # One row of 9700x.yml's hosted correctness matrix (its `test` job calls this once per host architecture and sanitizer):
-# the row's inventory as 4 shards, a runner each, and, for a row whose compiler can run on any runner, the job that
+# the row's inventory as its `shards` shards, a runner each, and, for a row whose compiler can run on any runner, the job that
 # builds that compiler once for them (#2032; docs/ci.md, "Shared row products"). A native row's shards build their own:
 # a `-march=native` build is the CPU's it was built on, and hosted runners' CPUs differ. The vector row (#2033; docs/ci.md,
 # "The vector row") builds the explicit vector target, which only some hosted CPUs run: its shards are items that each
@@ -19,6 +19,10 @@ on:
         required: true
       optimization:
         description: BUSTER_SANITIZER_OPTIMIZATION
+        type: number
+        required: true
+      shards:
+        description: How many shards, a runner each, the row's inventory runs as, from 1 to 8 (#2031); the vector row's are its items
         type: number
         required: true
       hosted-tools:
@@ -45,7 +49,8 @@ env:
   # build.sh calls (check-call-graph) configure and build in the checkout's tree.
   BUSTER_DEBUG_INFO: '0'
   # The vector row's items (#2033): its shards, the costliest first, the order in which its collectors assign them. Shard
-  # 1 also runs the row's once-only steps, and the costs deal the commands evenly between the four.
+  # 1 also runs the row's once-only steps, and the row's costs (tools/ci/costs/vector-none-O3.costs) deal the commands
+  # between the four. Their count is the row's N, whatever its `shards` input says: the draws are sized for them.
   BUSTER_VECTOR_ITEMS: '1 2 3 4'
 
 jobs:
@@ -148,7 +153,7 @@ jobs:
           retention-days: 14
 
   shards:
-    name: Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of 4)
+    name: Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})
     # A shared row's shards start when its product is published, and fail at once without one (a failed, cancelled or
     # skipped build): no shard falls back to building or fetching it. A native row's shards don't wait: its `compiler`
     # job is skipped. The vector row's shards are its draws' items (draw-1 to draw-4 below), which run these same steps.
@@ -165,12 +170,13 @@ jobs:
       # what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        # Each row's inventory runs as 4 shards, a runner each (`parallel --shard K/4`, dealt by
-        # tools/ci/correctness.costs): a plain row's test step took about 14.5 minutes on one 4-CPU runner, and its
-        # shards take about 2 to 4. The job's name, the run step's `/4` and the vector row's items
-        # (BUSTER_VECTOR_ITEMS) must match this list, which tools/ci/changes.c's self-test checks
-        # (changes_shard_policy).
-        shard: [1, 2, 3, 4]
+        # The row's inventory runs as its `shards` input's N shards, a runner each (`parallel --shard K/N`, dealt by the
+        # row's own costs, tools/ci/costs/ROW.costs, #2031): this lookup's element N is the list 1 to N. A plain row's
+        # test step took about 14.5 minutes on one 4-CPU runner, and its 4 shards take about 4 to 6; the sanitizer rows
+        # cost 2 to 4 times as much, and their caller gives them their own N. The job's name and the run step's N are
+        # the same input (the vector row's draws: its items' count), and tools/ci/changes.c's self-test checks the
+        # lookup, both, the caller's values and the vector row's items (changes_shard_policy).
+        shard: ${{ fromJSON('[[], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.shards] }}
     defaults:
       run:
         shell: bash
@@ -601,10 +607,18 @@ jobs:
           # The driver's in-process checks run the whole compiler per fixture; with a detector they take tens of
           # minutes each, so the command limit leaves room for one on a loaded runner (the job's limit is longer still).
           if [ "$BUSTER_SANITIZER" != none ]; then timeout=7200; fi
-          # This row's shard of the inventory: the runner deals the commands to the 4 shards by their costs, the same
-          # deal on every shard's runner, so that the row's shards run each command once.
+          # This row's shard of the inventory: the runner deals the commands to the row's shards by the row's own costs
+          # (tools/ci/costs/ROW.costs, which tools/ci/costs.c generates from the rows' logs), simulating each shard's
+          # schedule on the runner the costs name, the same deal on every shard's runner, so that the row's shards run
+          # each command once. The row's N is its `shards` input, or, in the vector row's draws, its items' count.
+          shards=${{ inputs.shards }}
+          if [ "$BUSTER_HOST_ARCH" = vector ]; then
+              read -r -a items <<< "$BUSTER_VECTOR_ITEMS"
+              shards=${#items[@]}
+          fi
           "$BUSTER_COMPILER" parallel --github --jobs "$(nproc)" --timeout "$timeout" \
-            --shard "$BUSTER_SHARD/4" --costs tools/ci/correctness.costs < tools/ci/correctness.tests
+            --shard "$BUSTER_SHARD/$shards" \
+            --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs" < tools/ci/correctness.tests
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
               find "$oracle" -type f -mtime +2 -delete
