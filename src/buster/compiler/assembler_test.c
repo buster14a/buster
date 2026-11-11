@@ -115,13 +115,16 @@ static const char asm_test_function[] =
     ".section .rodata\n.balign 8\n.type bias,@object\n"
     "bias: .quad 3\n.size bias, 8\n";
 
-// High bases or XMM registers make both movq encodings equally long; segment offsets must not hide their row.
+// High bases or XMM registers make both movq encodings equally long; segment offsets must not hide their row. SS's
+// override too (#1447), with clang's 36.
 static const char asm_test_segmented_movq[] =
     "segmented_movq:\n"
     "movq %fs:(%r8),%xmm0\nmovq %gs:(%r8),%xmm0\n"
     "movq %fs:(%rax),%xmm8\nmovq %gs:(%rax),%xmm8\n"
     "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
-    "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
+    "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n"
+    "movq %ss:(%r8),%xmm0\nmovq %xmm8,%ss:(%rax)\n"
+    "movl %ss:4(%rdi),%eax\nmovb %al,%ss:(%rsi)\n";
 
 // MMX's registers in both syntaxes and either case (#1846): movq's and movd's forms, the load's and the store's, and the
 // MMX instructions the target table already had (emms, pxor, paddd).
@@ -973,7 +976,7 @@ static void asm_test_code(AsmTest* test)
                              "movq $5, 8(%rax)\nfstpt 176(%r12)\nfldt (%rax)\nfstpl 8(%rsp)\nflds 4(%rsp)\nrep movsb\nrep stosq\nrepe cmpsb\nrepnz scasw\n"
                              "movsl\nlodsq\npushfq\npopfq\ncld",
                        20, "inline code: naked functions' instructions");
-    asm_test_code_pair(test, asm_test_segmented_movq, 8, "inline code: segmented movq encoding choice");
+    asm_test_code_pair(test, asm_test_segmented_movq, 12, "inline code: segmented movq encoding choice");
     // MMX's registers (#1846): movq and movd to and from general registers, memory and each other, by both paths.
     const AsmCode mmx = asm_test_code_pair(test, asm_test_mmx, 17, "inline code: MMX's moves");
     asm_test_check(test, mmx.count == 17 && (mmx.records[2].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_MM_M64 &&

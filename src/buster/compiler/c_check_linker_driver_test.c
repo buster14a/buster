@@ -74,6 +74,9 @@ static void check_test_driver_linker(CheckTest* test, const char* clang, const c
         { { "-Wl,--disable-new-dtags,--enable-new-dtags,-rpath,modern" }, "modern", false },
         { { "-Wl,-rpath," }, "", false },
         { { "-Wl,-rpath,,--rpath,/after,-R" , "-Xlinker", "" }, ":/after:", false },
+        // clang's and GCC's -rpath DIRECTORY, as SQLite's Makefile passes it (#1854): a comma is part of the directory.
+        { { "-rpath", "/bare,comma" }, "/bare,comma", false },
+        { { "-rpath", "/a", "-Wl,-rpath,/b", "-rpath", "-c" }, "/a:/b:-c", false },
     };
     for (uint32_t p = 0; written && p < BUSTER_ARRAY_LENGTH(paths); p += 1)
     {
@@ -149,6 +152,8 @@ static void check_test_driver_linker(CheckTest* test, const char* clang, const c
         { { "-l", "" }, "usage: compiler" },
         { { "-L", "" }, "usage: compiler" },
         { { "-Xlinker" }, "missing argument to linker option '-Xlinker'" },
+        { { "-rpath" }, "missing argument to linker option '-rpath'" },
+        { { "-static", "-rpath", "/x" }, "runtime search paths require dynamic output" },
         { { "-Wl,-rpath" }, "missing argument to linker option '-rpath'" },
         { { "-Wl,-e" }, "missing argument to linker option '-e'" },
         { { "-Wl,-z" }, "missing argument to linker option '-z'" },

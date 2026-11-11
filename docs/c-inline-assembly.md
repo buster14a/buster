@@ -244,9 +244,11 @@ their rows around it, its block's base the frame's base register, its branches
 the function's, and the callee-saved registers it touches pushed by the prologue.
 A function whose body returns (`Tier0AsmBody.leaves`) is still Tier 0's
 (`ir_lower`'s `IR_ERROR_UNSUPPORTED`, which `--tier1` falls back from), as one
-that calls `__builtin_setjmp` is. A template that names an opmask register keeps its helper
-under `--tier1` (`check_asm_names_opmask`): Tier 1's CFG consumer saves no mask
-value around a body, as it saves them around the helper's call.
+that calls `__builtin_setjmp` is. A template that writes opmask registers is a
+body under `--tier1` too: `check_asm_inline_touched` records the ones its records
+write (`CheckProgramAsm.inline_masks`, by `x86_semantics.c`'s opmask effects), and
+Tier 1's CFG consumer saves the masks live in them around the body, as it saves
+them around a call (`IrAsmBody.masks`, `tier1_emit_cfg_asm`).
 `--helper-report` counts each body as the `asm` family's direct form. The
 interpreter (`interpret-c`) refuses a function with a body, as it doesn't run
 machine code.

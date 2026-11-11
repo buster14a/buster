@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only] [--in-process] [--clang-server PATH]
+  --asm-definitions-only | --call-counts-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -123,7 +123,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   "Semantic error recovery", #1447; `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's
-  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447). Its library-builtin comparisons are pinned to Clang
+  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447;
+  `--call-counts-only` runs `c_check_call_count_driver_test.c` alone, calls'
+  and builtins' argument count errors and calls without a prototype, worded
+  and placed as clang's, #1860, #1921, #1994). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
@@ -223,6 +226,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
   pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
+  An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): an
+  assignment condition's `-Wparentheses` is published at the condition's `)` (a `for`'s at its `;`), as clang's
+  CheckBooleanCondition runs once the condition is whole; a bitwise operator's precedence warning and a logical not's
+  at their right operand's end (`check_common_operand_end`); and a call's `-Wformat` from its `)` on, so a statement
+  expression's own warnings and a nested call's come first. A call argument's `-Wformat` is at its callee, the start of
+  the argument (`check_common_argument_start` now reads the node's own `)`). Each costs a warning's climb, nothing on
+  a unit without one.
   Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
   The existing postorder conditional/comma and selected-value facts carry that discard intent through nested
   arms and transparent GNU/generic wrappers, while inner comma and division diagnostics still run.
@@ -248,9 +258,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
-  reads outside a deferred typeof region. And a statement expression in a chosen `_Generic` arm
-  (`_Generic(1, int: ({ u; }))`), whose statements the selection's token range marks unselected, so that
-  `-Wuninitialized` reads none of them (#2023).
+  reads outside a deferred typeof region. A statement expression in a static selection's chosen operand
+  (`_Generic(1, int: ({ u; }))`) is evaluated where the selection is: `check_common_unselected_roots` leaves the
+  chosen operand's tokens, between its top-level commas (`check_common_chosen_span`), out of the selection's range, so
+  its statements, roots of their own, are read by `-Wuninitialized` and an initializer's `-Wconstant-conversion`
+  there is given; in another selection's other operand they stay unselected (#2023).
   `-Wunevaluated-expression` (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr,
   `check_warning_graph_operand`) is on by default, under `-Wunused-value`: the expression operand of a sizeof or an
   alignof of no variable array type, and a `_Generic`'s controlling expression, that has a side effect as
@@ -298,6 +310,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   follow every division and count of their root. Roots the reader adds after what follows their operand (a
   statement's condition, a switch's, or a `for` increment's discard) are taken where their
   operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
+  In a file-scope initializer clang's `DiagRuntimeBehavior` queues the comma's warning to the declarator's end, as it
+  does a folded shift count's (`check_driver_file_initializer_end`, #1943): both are published there, ordered by their
+  nodes' ends (the records' suborder), so that each comes in the order clang builds it (`int z = (1 << 40, 3);`'s
+  count first) and the declarator's constant conversions after them. A comma's static initializer is syntax-only,
+  as `-c` can't compile one yet. A brace initializer's values walk their roots in initializer order, after
+  the plan's literal conversions and before its constant ones (`check_common_initializer_conversions`), as clang
+  queues their runtime warnings while it parses them. Still separate: a comma in a file-scope array bound, which
+  clang refuses as a variable array at file scope and the checker folds.
   A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
   arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
   expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a
