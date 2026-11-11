@@ -860,6 +860,12 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "union V4 [[clang::annotate_type(\"x\")]];\nstruct V6 [[clang::neon_vector_type]];\nint y = undeclared;\n",
         "struct V8 [[foo]];\nunion V9 [[gnu::aligned(8)]] [[clang::btf_type_tag(\"b\")]];\nenum E1 [[clang::neon_vector_type(2)]];\n"
         "struct V10 __attribute__((aligned(8))) [[clang::neon_vector_type(2)]];\nstruct V11 [[clang::neon_vector_type(2, 3)]];\n",
+        // A type name that starts with a GNU attribute (#1447): typeof's and sizeof's, whose attributes are clang's type
+        // warnings, not an expression's names.
+        "typeof(__attribute__((aligned(8))) int) c;\ntypeof(__attribute__((vector_size(8))) int) v;\n_Static_assert(sizeof(v) == 8, \"\");\n"
+        "int s = sizeof(__attribute__((aligned(16))) int);\n"
+        "void f(void) { typeof(__attribute__((aligned(8))) int) d = 0; int t = sizeof(__attribute__((noderef)) int); (void)d; (void)t; }\n"
+        "typeof(__attribute__((unknown_x)) long) u;\n",
         // diagnose_as_builtin (#1447): builtins by name (generic, library, x86's, custom-checked ones), other first arguments,
         // counts, indices (wide, negative, not constant, past the parameters), parameter types (spelled as clang spells
         // the builtin's: __size_t, _Nonnull), subjects, C23 spellings and redeclarations.

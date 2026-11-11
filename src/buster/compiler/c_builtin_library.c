@@ -484,9 +484,19 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
 // `capacity` bytes, NUL-terminated; *sized says whether it has one (and clang adds the spelling without the sugar:
 // "(aka '...')", as it does for FILE and ucontext_t, of the unit's types `named`, which may be NULL). False where it
 // doesn't fit, or the encoding has a code the plain rows don't use.
+static bool cbuiltin_library_spell_as(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length, bool sugared, bool c99,
+                                      const CBuiltinLibraryNamed* named, bool pointer_to, char* buffer, uint32_t capacity, bool* sized);
 static __attribute__((unused)) bool cbuiltin_library_spell(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length,
                                                            bool sugared, bool c99, const CBuiltinLibraryNamed* named, char* buffer, uint32_t capacity,
                                                            bool* sized)
+{
+    return cbuiltin_library_spell_as(encoding, length, attributes, attributes_length, sugared, c99, named, false, buffer, capacity, sized);
+}
+
+// cbuiltin_library_spell's prototype, or with `pointer_to` a pointer to it (#1447: `&malloc`'s "void *(*)(__size_t)",
+// "__size_t (*)(const char *)").
+static bool cbuiltin_library_spell_as(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length, bool sugared, bool c99,
+                                      const CBuiltinLibraryNamed* named, bool pointer_to, char* buffer, uint32_t capacity, bool* sized)
 {
     CBuiltinLibraryText text = {
         .bytes = buffer,
@@ -499,7 +509,7 @@ static __attribute__((unused)) bool cbuiltin_library_spell(const char* encoding,
     *sized = false;
     bool valid = cbuiltin_library_spell_type(encoding, length, &position, sugared, sized, &text);
     const bool pointer = text.length != 0 && text.bytes[text.length - 1] == '*';
-    cbuiltin_library_append(&text, pointer ? "(" : " (");
+    cbuiltin_library_append(&text, pointer_to ? (pointer ? "(*)(" : " (*)(") : pointer ? "(" : " (");
     uint32_t parameters = 0;
     while (valid && position < length && encoding[position] != '.')
     {

@@ -36,6 +36,11 @@ static bool check_warning_option(uint32_t id, String8 option)
         matches |= check_diagnostic_option(option, "-Wnon-gcc");
         matches |= id == CHECK_WARNING_ID_NON_LITERAL_NULL && check_diagnostic_option(option, "-Wconversion");
     }
+    else if (id == CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC)
+    {
+        // -Wunreachable-code's, which -Wunreachable-code-aggressive holds (#1447).
+        matches |= check_diagnostic_option(option, "-Wunreachable-code-aggressive");
+    }
     else if (id == CHECK_WARNING_ID_INITIALIZER_OVERRIDES)
     {
         matches |= check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W") ||

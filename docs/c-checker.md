@@ -931,6 +931,15 @@ too:
   them);
 - an incomplete type, `void`'s too, in a `_Generic` association, which matches
   no control (C2y's extension);
+- an association of array type, or of a qualified type (`const`, `volatile`,
+  `restrict`, an address space, objc_gc's `__weak` or `__strong`, not
+  `_Atomic`), which the controlling expression's lvalue conversion never
+  selects: clang's `-Wunreachable-code-generic-assoc` (on by default, under
+  `-Wunreachable-code`, #1447, `check_generic_unreachable`), "due to lvalue
+  conversion of the controlling expression, association of type 'CI' (aka
+  'const int') will never be selected because it is qualified", at the type
+  name's first token past its qualifiers, once however often it is read
+  (C2y's type operand, which clang doesn't warn for, the parser doesn't take);
 - a static assertion of a floating constant, converted to `_Bool` as clang
   converts it (`check_graph_floating_assertion`).
 
@@ -9640,10 +9649,13 @@ arguments against the function. The checker now gives these as clang does.
     published; a unit's later parse errors are printed.
   - The checks-only attributes (#1447): a C23 attribute in a cast in a
     file-scope `_Generic`'s controlling expression (`objc_gc`'s,
-    `address_space`'s) is "invalid or unsupported declaration". In a
-    `_Generic` association's type
-    their warnings aren't made, and a `typeof` type name that starts with a
-    GNU attribute isn't read as one, as for every attribute there. As everywhere, a
+    `address_space`'s) is "invalid or unsupported declaration". A `_Generic`
+    association's type in a body is read as a cast's
+    (`check_input_selection_type_name`), with its attributes' warnings; one
+    the constant reader reads (a file-scope initializer's) gives none. A
+    `typeof`'s or `sizeof`'s type name that starts with a GNU attribute is
+    read as one (`check_constant_type_start`), with its attributes' type
+    warnings ("'aligned' attribute ignored when parsing type"). As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
@@ -10128,6 +10140,24 @@ enables, which this checker doesn't all give.
   declarators; a union's member is the first of the target's type), in
   `-Wimplicit-enum-enum-cast` and in a failed initializer conversion's error:
   `struct S s = { .lp = c }`'s "initializing 'LP' (aka 'long *')".
+  size_t's `__size_t` sugar (#1447 item 10) in a failed conversion's source:
+  - a sizeof's or alignof's value;
+  - a call's value, of a library builtin that returns size_t;
+  - an arithmetic result, as clang's `UsualArithmeticConversions` keeps the
+    sugar of the operand the result takes its type from
+    (`check_driver_size_sugar`). That is the converted-to side's, a shift's
+    left operand's, a unary operator's, a comma's right operand's and a
+    conditional's arms'. Two operands of one type keep only a sugar both
+    have, so `n + sizeof(int)` of an `unsigned long n` is `'unsigned long'`,
+    and `strlen(s) + 1` is `'__size_t' (aka 'unsigned long')`;
+  - an implicitly declared library builtin's designator, or its address, as
+    its prototype (`check_driver_library_designator`,
+    `cbuiltin_library_spell_as`): `'void *(__size_t)' (aka 'void
+    *(unsigned long)')`, `'__size_t (*)(const char *)'`.
+
+  The other warnings' operands keep their spelling as before. A builtin named
+  outside a call before any call declares it gets its implicit declaration's
+  error after the conversion's, where clang gives it first.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.

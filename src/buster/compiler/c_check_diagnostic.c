@@ -172,6 +172,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TENTATIVE_ARRAY] = { "-Wtentative-definition-array", NULL, "tentative array definition assumed to have one element" },
     // (#1447: its ID assigned past the ones other pull requests take, which their rows fill.)
     [CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE] = { "-Wswift-name-attribute", NULL, "'swift_name' attribute has invalid identifier for the base name" },
+    [CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC] = { "-Wunreachable-code-generic-assoc", "-Wunreachable-code",
+                                                     "association will never be selected" },
+    // (#1953: its ID past -Wunreachable-code-generic-assoc's, 131.)
+    [CHECK_WARNING_ID_UNSEQUENCED] = { "-Wunsequenced", "-Wsequence-point", "multiple unsequenced modifications" },
     [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE] = { "-Wdefault-const-init-var-unsafe", "-Wdefault-const-init-unsafe",
                                                          "default initialization of an object of const type leaves the object uninitialized" },
     [CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE] = { "-Wdefault-const-init-field-unsafe", "-Wdefault-const-init-unsafe",

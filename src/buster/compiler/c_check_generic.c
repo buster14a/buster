@@ -107,6 +107,40 @@ static uint32_t check_generic_masks(const TypeId* keys, TypeId key, bool scalar)
     return matches | (empty << BUSTER_CHECK_GENERIC_GROUP);
 }
 
+// clang's -Wunreachable-code-generic-assoc (#1447, CreateGenericSelectionExpr): an association whose type name [first, end)
+// gives `type` of array type, or qualified (const, volatile, restrict, an address space or objc_gc's, not _Atomic), which
+// the controlling expression's lvalue conversion never selects. At the type name's first token that isn't a qualifier
+// (its TypeLoc's begin), once however often the selection is read.
+static void check_generic_unreachable(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type)
+{
+    const Parser* parser = reader->parser;
+    const TypeId plain = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    const bool array = plain != 0 && type_kind_is_array(type_kind(reader->types, plain));
+    // (An address space's or objc_gc's qualifier is the QUALIFIED wrapper's, which type_strip_aligned looks through.)
+    const bool qualified = plain != 0 && !array && (type_qualifiers(type) != 0 || type_qualifiers(plain) != 0 || type_object_qualifiers(reader->types, type) != 0);
+    uint32_t at = first;
+    while (at + 1 < end && parser->tokens.kinds[at] == PARSE_KIND_QUALIFIER)
+    {
+        at += 1;
+    }
+    if (array || qualified)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC,
+            .kind = CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
+            .token = at,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = end,
+            // (Its typedef's spelling, as the warnings' types take it: `CI` (aka 'const int').)
+            .payload = { .name = check_input_typedef_spelling(reader->output, parser, end), .token = BUSTER_CHECK_WARNING_NO_SOURCE, .first_type = type,
+                         .data = array ? 0u : 1u },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // Validate and append one association, then match the control. Counters count exact compatibility calls, not hash
 // probes; the tests assert the distinct-tag scaling bound. Callers stop on false, preserving their diagnostic order.
 static bool check_generic_association(CheckInputReader* reader, CheckGenericSet* set, TypeId type, bool* matches)
