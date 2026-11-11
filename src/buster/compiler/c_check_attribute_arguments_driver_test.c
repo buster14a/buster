@@ -1959,6 +1959,18 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-Wdelimited-escape-sequence-extension" },
         { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-pedantic-errors" },
         { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", NULL },
+        // The same of an evaluated literal's escapes (#1447): GNU's \e, which the fast decoding takes, at its backslash; the
+        // others, delimited and named ones at the literal while it has no error; a character constant's; by the options and
+        // pragmas.
+        { "const char *a = \"\\e\\E\";\nconst char *b = \"\\x{41}\\o{101}\\u{41}\\N{LATIN CAPITAL LETTER A}\";\nint c = '\\e';\n", "-std=gnu17", "-pedantic" },
+        { "const char *a = \"x\\\\e\\e\";\nconst char *b = \"\\(\\{\\[\\%\";\nint c = '\\E';\n", "-std=gnu17", "-pedantic" },
+        { "const char *a = \"\\x{e9}\" \"\\N{SNOWMAN}\" \"\\u{e9}\";\nint c = '\\x{41}';\n", "-std=gnu23", "-pedantic" },
+        { "const char *a = \"\\e\";\nconst char *b = \"\\u{e9}\";\n", "-std=gnu17", "-pedantic-errors" },
+        { "const char *a = \"\\e\";\nconst char *b = \"\\u{e9}\";\n", "-std=gnu17", "-Wpedantic" },
+        { "const char *a = \"\\e\";\nconst char *b = \"\\u{e9}\";\n", "-std=gnu17", "-Wdelimited-escape-sequence-extension" },
+        { "const char *a = \"\\e\";\nconst char *b = \"\\u{e9}\";\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic warning \"-Wpedantic\"\nconst char *a = \"\\e\";\nint c = '\\e';\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nconst char *a = M(\"\\e\");\n", "-std=gnu17", "-pedantic" },
         // A literal's escape diagnostics show the macro argument it came from (#1447), as clang's literal parsers' do; a numeric
         // constant's don't.
         { "#define M(x) _Static_assert(1, x)\nM(\"\\q\");\n", "-std=gnu17", NULL },

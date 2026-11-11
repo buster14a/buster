@@ -730,15 +730,15 @@ static bool check_literal_unknown_escape(const uint8_t* bytes, uint32_t escape, 
 // is out of range (a hexadecimal or a delimited one's only while `*had_error`, the literal's error state, is clear); a
 // delimited one's empty braces, bad digits and missing brace, and a universal character name's errors
 // (check_literal_unevaluated_ucn) are the unevaluated literals' errors too.
-static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, uint32_t maximum, CheckEscapeDiagnostic* output, uint32_t* count,
-                                               bool* had_error)
+static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, bool pedantic, uint32_t maximum, CheckEscapeDiagnostic* output,
+                                               uint32_t* count, bool* had_error)
 {
     const uint8_t c = escape + 1 < end ? bytes[escape + 1] : '\\';
     uint32_t at = escape + 2 <= end ? escape + 2 : end;
     bool failed = *had_error;
     if (c == 'u' || c == 'U' || c == 'N')
     {
-        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, false, output, count, &failed);
+        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, pedantic, output, count, &failed);
     }
     else if (c == 'x' || c == 'o')
     {
@@ -809,6 +809,11 @@ static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t es
                 check_literal_escape_append(output, count, c == 'x' ? CHECK_ESCAPE_DIAGNOSTIC_HEX_RANGE : CHECK_ESCAPE_DIAGNOSTIC_OCTAL_RANGE, escape, 0, 0);
             }
             failed |= bad;
+            if (delimited && pedantic && !failed)
+            {
+                // -pedantic's, at the literal, of one read whole while the literal has no error (#1447).
+                check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_DELIMITED, 0, 0, 0);
+            }
         }
     }
     else if (c >= '0' && c <= '7')
@@ -833,6 +838,11 @@ static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t es
     {
         check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN, escape, 0, c);
     }
+    else if (pedantic && (c == 'e' || c == 'E' || c == '(' || c == '{' || c == '[' || c == '%'))
+    {
+        // GNU's, -pedantic's "use of non-standard escape character" at its backslash (#1447).
+        check_literal_escape_append(output, count, CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD, escape, 0, c);
+    }
     *had_error = failed;
     return at;
 }
@@ -841,9 +851,12 @@ static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t es
 // constant's spelling, with its prefix and quotes), into `output` (room for BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length), or
 // null to count them alone), their count returned: check_literal_evaluated_escape's of each escape, the code unit's
 // most from the prefix (none, u8: a byte; u: 16 bits; U and L: 32, of no range error). A raw string has no escapes.
-// `*had_error` is carried from token to token, as the unevaluated literals' is. The cold path of a literal the checker
-// refused, or one its extended decoding read (check_literal_strings_extended), of no vector twin.
-static __attribute__((unused)) uint32_t check_literal_evaluated_escapes(const uint8_t* bytes, uint32_t length, bool c23, CheckEscapeDiagnostic* output, bool* had_error)
+// `*had_error` is carried from token to token, as the unevaluated literals' is. `pedantic`: whether to give -pedantic's
+// warnings too (CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD, _DELIMITED and _NAMED). The cold path of a literal the checker
+// refused, one its extended decoding read (check_literal_strings_extended), or one of GNU's \e that -pedantic may word,
+// of no vector twin.
+static __attribute__((unused)) uint32_t check_literal_evaluated_escapes(const uint8_t* bytes, uint32_t length, bool c23, bool pedantic, CheckEscapeDiagnostic* output,
+                                                                       bool* had_error)
 {
     // (Its prefix, L, u, U, u8 and R, holds no quote.)
     uint32_t opening = 0;
@@ -861,7 +874,7 @@ static __attribute__((unused)) uint32_t check_literal_evaluated_escapes(const ui
     while (at < end)
     {
         const uint8_t* backslash = memchr(bytes + at, '\\', end - at);
-        at = backslash != NULL ? check_literal_evaluated_escape(bytes, (uint32_t)(backslash - bytes), end, c23, maximum, output, &count, had_error) : end;
+        at = backslash != NULL ? check_literal_evaluated_escape(bytes, (uint32_t)(backslash - bytes), end, c23, pedantic, maximum, output, &count, had_error) : end;
     }
     return count;
 }

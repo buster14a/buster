@@ -438,6 +438,10 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // GNU's escape sequence (\e, \E, \(, \{, \[ or \%) in an evaluated literal (#1447, -pedantic's -Wpedantic): "use of
+    // non-standard escape character '\c'" at its backslash, payload.name the character and payload.data the backslash's
+    // offset in the token.
+    CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

@@ -923,6 +923,9 @@ struct CheckInput
     bool kr_warning_policy;
     bool kr_warning_quiet;
     bool kr_warning_system;
+    // Whether the command line may give -pedantic's warning of GNU's \e in an evaluated literal (#1447,
+    // check_input_gnu_escapes): the literals the fast decoding read are scanned for one only then, or where a pragma is.
+    bool pedantic_escapes;
     bool kr_warning_errors;
     // The x86 builtins' out-of-range immediate diagnostic is a DefaultError warning whose baseline the command line
     // maps (#1080). Its two possible intrinsic defaults (an ordinary warning at 0, DefaultError at 1) are snapshotted
@@ -5731,15 +5734,18 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     return result && check_input_unevaluated_refused(reader, first, &message_end, open - 1) != BUSTER_CHECK_NONE;
 }
 
-// The unknown escape sequences of the evaluated literal at `token` (#1447), whose spelling is `bytes`: each one's
-// -Wunknown-escape-sequence warning at its backslash (CHECK_WARNING_EVENT_UNKNOWN_ESCAPE), as clang's literal parser
-// gives it. The cold path of a literal the extended decoding read, which has one at least.
+// The escape sequences' warnings of the evaluated literal at `token` (#1447), whose spelling is `bytes`, as clang's literal
+// parser gives them: an unknown one's -Wunknown-escape-sequence warning at its backslash (CHECK_WARNING_EVENT_UNKNOWN_ESCAPE),
+// and -pedantic's, off by default: a GNU escape's -Wpedantic one at its backslash (CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE),
+// and a delimited or named one's -Wdelimited-escape-sequence-extension one at the literal
+// (CHECK_WARNING_EVENT_DELIMITED_ESCAPE). The cold path of a literal the extended decoding read, which has one at least, or
+// of one with a GNU escape where -pedantic's warnings may be given (check_input_gnu_escapes).
 static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
 {
     const uint64_t mark = reader->scratch->length;
     CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
     bool had_error = false;
-    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, diagnostics, &had_error) : 0;
+    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, true, diagnostics, &had_error) : 0;
     reader->output->resource |= length != 0 && diagnostics == NULL;
     // (A character constant's, which the constant evaluator may read again (`once`): each of its escapes', at its first
     // read alone.)
@@ -5752,22 +5758,49 @@ static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInp
     }
     for (uint32_t i = 0; first && i < count; i += 1)
     {
-        if (diagnostics[i].kind == CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN)
+        const uint8_t kind = diagnostics[i].kind;
+        const bool unknown = kind == CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN;
+        const bool nonstandard = kind == CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD;
+        const bool delimited = kind == CHECK_ESCAPE_DIAGNOSTIC_DELIMITED || kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED;
+        if (unknown || nonstandard || delimited)
         {
             const CheckWarningEvent event =
             {
-                .id = CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE,
-                .kind = CHECK_WARNING_EVENT_UNKNOWN_ESCAPE,
+                .id = unknown ? CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE : nonstandard ? CHECK_WARNING_ID_NONSTANDARD_ESCAPE : CHECK_WARNING_ID_DELIMITED_ESCAPE,
+                .kind = unknown ? CHECK_WARNING_EVENT_UNKNOWN_ESCAPE : nonstandard ? CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE : CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
                 .token = token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = unknown ? 0 : BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                 .completion = token + 1,
-                .payload = { .name = diagnostics[i].character, .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = diagnostics[i].offset },
+                .payload = { .name = delimited ? 0 : diagnostics[i].character, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = delimited ? kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED : diagnostics[i].offset },
             };
             check_input_warning_event(reader, &event, NULL, 0);
         }
     }
     arena_pop_to(reader->scratch, mark);
+}
+
+// A literal the fast decoding read, `bytes` its token's spelling, with GNU's \e, which it takes without a word: its
+// -pedantic warning's (check_input_unknown_escapes), where the command line or a pragma may give it (#1447,
+// CheckInput.pedantic_escapes). A memchr for a backslash and a look past it, otherwise.
+static void check_input_gnu_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
+{
+    const bool possible = reader->output->pedantic_escapes || reader->parser->tokens.pragma_count != 0;
+    bool gnu = false;
+    for (const uint8_t* at = possible ? memchr(bytes, '\\', length) : NULL; at != NULL && !gnu;)
+    {
+        const uint32_t next = (uint32_t)(at - bytes) + 1;
+        gnu = next < length && bytes[next] == 'e';
+        // (An escaped backslash is passed whole.)
+        const uint32_t from = next < length && bytes[next] == '\\' ? next + 1 : next;
+        at = from < length ? memchr(bytes + from, '\\', length - from) : NULL;
+    }
+    if (gnu)
+    {
+        check_input_unknown_escapes(reader, token, bytes, length, once);
+    }
 }
 
 // A string literal's tokens from `token` (`count` parts) the fast decoding refused, read again with the escapes clang
@@ -5873,6 +5906,14 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                     literal = check_input_strings_extended(reader, token, parts, count);
                     valid = literal.valid;
                 }
+                else
+                {
+                    // GNU's \e, which the fast decoding takes: its -pedantic warning's.
+                    for (uint32_t i = 0; valid && i < count; i += 1)
+                    {
+                        check_input_gnu_escapes(reader, token + i, parts[i].bytes, parts[i].length, false);
+                    }
+                }
             }
             const TypeId type = valid ? check_input_type_result(reader, type_array(reader->types, literal.element_type, literal.unit_count)) : 0;
             valid &= type != 0;
@@ -5966,6 +6007,10 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
                 {
                     check_input_unknown_escapes(reader, token, bytes, length, true);
                 }
+            }
+            else
+            {
+                check_input_gnu_escapes(reader, token, bytes, length, true);
             }
             if (result->valid && result->characters > 1 && length != 0 && bytes[0] == '\'')
             {

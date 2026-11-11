@@ -359,6 +359,7 @@ static void check_input_warning_policy(CheckInput* input, const PPOptions* optio
     input->odr_severity = (uint8_t)odr.mapped;
     input->odr_quiet = odr.quiet;
     input->odr_system = odr.system_headers;
+    input->pedantic_escapes = check_warning_command_line(options, CHECK_WARNING_ID_NONSTANDARD_ESCAPE, true, false).severity != CHECK_WARNING_IGNORE;
 }
 
 _Static_assert(CHECK_WARNING_WARNING == BUSTER_CHECK_ODR_WARNING && CHECK_WARNING_ERROR == BUSTER_CHECK_ODR_ERROR, "the reader reads -Wodr's severity by value");
