@@ -3972,10 +3972,10 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     // A warning, which the driver prints by preprocessing the unit again for its history: with code after it; and in a
     // unit of directives alone, whose output is empty, after a #if line of 300 expansions, for which the replay's history
     // grows while it runs (parse_test_driver_limits fails that growth too, which the empty output wouldn't show).
-    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only [-W#warnings]\n", false },
     { PARSE_TEST_DRIVER_TEXT,
       "#define A(x) x\n#define B A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)\n#define C B+B+B+B+B+B+B+B\n#define D C+C+C+C\n#if D\n#endif\n#warning only\n", 0, 0,
-      "%s:7:2: warning: only\n", false },
+      "%s:7:2: warning: only [-W#warnings]\n", false },
 };
 
 // Whether a run of case `c` did what it must.

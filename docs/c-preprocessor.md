@@ -3487,7 +3487,7 @@ spellings alone would miss this change (#272).
   (`pp_named_ucn_at`), so a file without a candidate pays nothing more. They
   and `#if`'s C23-extension warning are the preprocessor's warnings that
   follow clang's options and pragmas, with their flags (#1934,
-  `pp_warning_severity`, by `PPWarningGroup`): none under `-w` or in a system
+  `pp_warning_severity`, by `PPWarning`): none under `-w` or in a system
   header without `-Wsystem-headers`, whatever promotes them; then the last
   `-W`/`-Wno-` of the group's names (`-Wunicode`; `-Wc23-extensions` and
   `-Wc2x-extensions`; `-Wdelimited-escape-sequence-extension` and the
@@ -3496,8 +3496,22 @@ spellings alone would miss this change (#272).
   extension, `-pedantic-errors`, unless `-Wno-error=` demotes it; and the
   source's `#pragma clang diagnostic` for the group over all of that, which
   the preprocessor follows through push and pop at any depth
-  (`Preprocessor.warning_mappings`). Its other warnings still print no flag
-  and follow no option. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  (`Preprocessor.warning_mappings`). Every other preprocessor warning does the
+  same (#1790, #1970): each is a kind of `PPWarning` (`pp_warnings`) with its
+  group's flag, the groups that hold it (`-Wunknown-pragmas` under `-Wpragmas`
+  and `-Wall`, `-Wmultichar` under `-Wmost` and `-Wall`), whether it is an
+  extension that `-pedantic-errors` promotes, whether it is on by default,
+  whether it is seen in system headers (`#warning`, clang's
+  ShowInSystemHeader) and whether `-Werror` leaves it a warning
+  (`#pragma message` and `#pragma GCC warning`, DefaultWarnNoWerror).
+  `pp_warning_flag` gives its severity and flag: `[-Wgroup]`,
+  `[-Werror,-Wgroup]` where promoted, and for a warning of no group
+  (poisoning an existing macro, a character constant too long for its type)
+  `[-Werror]` where promoted. `#warning` before C23 is also clang's
+  "#warning is a C23 extension" (`-Wpedantic`), and in C23
+  `-Wpre-c23-compat`'s. Not given yet (#2222): `-Wgnu-line-marker`, whose
+  place clang reads under the numbering before the marker, `#ident`'s
+  `-Wpedantic`, and `-Wempty-translation-unit`. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error.

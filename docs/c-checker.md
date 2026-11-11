@@ -4198,9 +4198,11 @@ A source pragma's `error` mapping stays an ordinary error, while its `fatal` map
 `-Wno-fatal-errors` restores the ordinary budget, and the last of the two options on the command line decides. The
 standalone `-E` command and the source driver's preprocessing, parsing and semantic groups all read the option; the
 standalone `parse` command reads it too, but keeps its generated-prefix behavior after a preprocessing fatal rather
-than parsing the prefix the source driver checks. The preprocessing warnings' own `-Werror` promotion (`#warning`,
-macro redefinition and `#pragma message`) and the stream warnings' option suffix are separate policies and are
-unchanged here.
+than parsing the prefix the source driver checks. The preprocessing warnings (`#warning`,
+macro redefinition, `#pragma message` and the others) follow their own options and pragmas with their flags
+(`pp_warning_flag`, #1790, #1970). An attached note's place
+(a redefinition's "previous definition is here") sets the include context the next diagnostic compares with, so
+that one in the same header as the warning repeats its "In file included from" lines, as clang's do.
 
 The source driver collects preprocessing, parser and checker groups before
 publication (#698). Their order follows expansion-output boundaries and proven
