@@ -77,6 +77,9 @@ struct CheckInitializer
     // A failed conversion's source node plus one (check_init_fail_conversion), or zero: the driver words its error as clang's
     // initialization's (#147).
     uint32_t failed_source;
+    // Its subobject's offset in bits in the initialized object (#1447): the driver finds the member or element it targets
+    // there, whose declarator spells its type (check_common_initializer_spelling).
+    uint64_t failed_offset;
     uint32_t warning_count;
     uint32_t warning_token;
     // A value part whose source is floating (#147): the only plans whose literal conversions the common warnings read
@@ -355,12 +358,13 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
 
 // A subobject's conversion that failed (#147): CHECK_INIT_INVALID at `token` (or its resource failure), its target `type` and
 // its source `node` kept where it is the first failure and an incompatible conversion, for clang's words of it.
-static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node)
+static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node, uint64_t offset)
 {
     if (walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE)
     {
         walker->result->failed_type = type;
         walker->result->failed_source = node + 1;
+        walker->result->failed_offset = offset;
     }
     check_init_fail(walker, diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
 }
@@ -2124,7 +2128,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         check_action_scalar(walker->types, &action, &converted);
         if (converted.diagnostic != CHECK_DIAG_NONE)
         {
-            check_init_fail_conversion(walker, converted.diagnostic, token, element, source_node);
+            check_init_fail_conversion(walker, converted.diagnostic, token, element, source_node, selected->offset);
         }
         else if (walker->static_storage && !check_value_evaluated_constant(&converted.value))
         {
@@ -2164,7 +2168,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         check_action_scalar(walker->types, &action, &converted);
         if (converted.diagnostic != CHECK_DIAG_NONE)
         {
-            check_init_fail_conversion(walker, converted.diagnostic, token, destination, node);
+            check_init_fail_conversion(walker, converted.diagnostic, token, destination, node, selected->offset);
         }
         else if (walker->static_storage)
         {
@@ -2502,7 +2506,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             }
             if (converted.diagnostic != CHECK_DIAG_NONE)
             {
-                check_init_fail_conversion(walker, converted.diagnostic, token, destination, node);
+                check_init_fail_conversion(walker, converted.diagnostic, token, destination, node, selected->offset);
             }
             else if (walker->static_storage && !walker->defer_constants &&
                      !check_value_static_initializer(&converted.value, selected->width != 0))

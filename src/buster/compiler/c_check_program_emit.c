@@ -100,9 +100,12 @@ struct CheckProgramCode
     uint64_t code_bytes;
     // The first of the symbols cpu_dispatch's and cpu_specific's groups add (#1447, check_program_cpu_symbols).
     SymbolId cpu_first;
+    // The first of the symbols the groups of multiversioning by target strings add (#1838, check_program_target_symbols).
+    SymbolId target_first;
 };
 
 #include "c_check_program_cpu_dispatch.c"
+#include "c_check_program_target_versions.c"
 
 // The local symbols whose names the compiler makes are named as clang names them, so that tools and #129's comparison
 // with clang's objects (c_lowering_symbols.c) read them alike: a block-scope static is "function.name", its function's
@@ -1144,7 +1147,8 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
         body->label_offsets[k] += body->label_offsets[k] != UINT32_MAX ? sled : 0;
     }
     const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
-    for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
+    const uint32_t asm_label_count = naked != 0 ? naked->label_count : code->asm_label_count;
+    for (uint32_t k = 0; k < asm_label_count; k += 1)
     {
         body->asm_offsets[k] += body->asm_offsets[k] != UINT32_MAX ? sled : 0;
     }
@@ -1271,7 +1275,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // What the merge reads stays on the lane's scratch; the offsets don't.
     body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
     body->label_offsets = code->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, code->label_count) : 0;
-    body->asm_offsets = naked != 0 && naked->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, naked->label_count) : 0;
+    // A naked function's templates' labels, or its asm bodies' (#1839, EmittedCode.asm_label_records): it has no body.
+    const uint32_t asm_label_count = naked != 0 ? naked->label_count : code->asm_label_count;
+    body->asm_offsets = asm_label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, asm_label_count) : 0;
     const uint64_t rows = run->sources ? (uint64_t)code->source_count + 2 + BUSTER_CHECK_DEBUG_SLACK : 0;
     body->row_offsets = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
@@ -1292,7 +1298,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
+                 (asm_label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
                  (!run->sources || code->local_range_count == 0 || (body->debug_locations != NULL && body->debug_location_first != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
@@ -1384,9 +1390,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
                 body->label_offsets[k] = record == UINT32_MAX ? 0 : record < code->count ? offsets[record] : UINT32_MAX;
             }
             // A template's label may be its code's end.
-            for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
+            for (uint32_t k = 0; k < asm_label_count; k += 1)
             {
-                const uint32_t record = naked->labels[k].record;
+                const uint32_t record = naked != 0 ? naked->labels[k].record : code->asm_label_records[k];
                 body->asm_offsets[k] = record < code->count ? offsets[record] : record == code->count ? (uint32_t)length : UINT32_MAX;
             }
             if (sled != 0)
@@ -2597,6 +2603,15 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
         defined[program->cpu_groups[g].reference] |= program->cpu_groups[g].dispatch != 0;
         defined[program->cpu_groups[g].dispatch] |= program->cpu_groups[g].dispatch != 0;
     }
+    // So are a resolved group's R (or target_clones' f) of multiversioning by target strings (#1838), at its resolver,
+    // and a target_clones body's own symbol's object, at its body.
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        defined[group->reference] |= group->resolved;
+        defined[group->body] |= group->body != 0 && defined[group->clones];
+        defined[group->clones] = group->clones != 0 ? group->resolved : defined[group->clones];
+    }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
         const uint32_t object = program->symbol_objects[s];
@@ -3197,6 +3212,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
             weak[symbol] = symbol != 0 ? 0 : weak[symbol];
         }
+        // Two variables' definitions of one symbol name through an asm label (#1979): clang keeps the later one's storage
+        // alone, which the emission doesn't.
+        if (valid && program->label_refused != 0)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a second definition of a variable's symbol name through an asm label";
+            result->token = program->label_refused - 1;
+            valid = false;
+        }
         if (valid && program->weak_decided && program->weak_refused != 0)
         {
             result->status = CHECK_PROGRAM_UNSUPPORTED;
@@ -3206,6 +3230,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         // cpu_specific's and cpu_dispatch's names (#1447): f.ifunc for the references, f.X for each version's own.
         valid = valid && check_program_cpu_names(program, symbol_names, output);
+        // Multiversioning by target strings' (#1838): f.ifunc for target's references, each version's own name, and
+        // each target_clones body's.
+        valid = valid && check_program_target_names(program, symbol_names, output);
         if (symbol_aliases != 0)
         {
             memset(symbol_aliases, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
@@ -3622,6 +3649,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint64_t cpu_symbols = 0;
     uint64_t cpu_fixups = 0;
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
+    // And multiversioning by target strings' (#1838).
+    check_program_target_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
                                 (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
@@ -3924,6 +3953,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // cpu_specific's and cpu_dispatch's symbols beyond the program's (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_symbols(result, program, output));
+    // Multiversioning by target strings' (#1838).
+    valid = valid && (program->target_group_count == 0 || check_program_target_symbols(result, program, output));
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -4231,6 +4262,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
                 }
             }
+            // Its asm bodies' labels (#1839, EmittedCode.asm_label_records), each at its record's offset in the body: the
+            // program's definitions, as a helper's template's labels are.
+            for (uint32_t k = 0; valid && source_body && !assembly && k < code->asm_label_count; k += 1)
+            {
+                const uint32_t name = code->asm_label_names[k];
+                const SymbolId label = name < asms->name_count ? asm_symbols[name] : 0;
+                valid = label != 0 && body->asm_offsets[k] != UINT32_MAX && link_define_symbol(&result->link, label, atom, body->asm_offsets[k], 0);
+                if (valid)
+                {
+                    result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
+                }
+            }
             // Each label at its resolved offset, after branch sizing, including an absent label's entry placeholder.
             for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
             {
@@ -4272,6 +4315,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
+    // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
+    valid = valid && (program->target_group_count == 0 || check_program_target_atoms(result, program, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
