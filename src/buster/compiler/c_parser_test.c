@@ -627,6 +627,11 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },
     { "int f(void) { int x = 1\nreturn x; }\n", "1:24: expected ';' at end of declaration", 0 },
     { "int a[3 4];\n", "1:9: expected ']'", 0 },
+    // A parameter list whose first parameter starts with an attribute: both paths mark it a function's, in a definition
+    // and in a prototype (#1968).
+    { "int h(__attribute__((aligned(8))) int q) { int x; return q; }\n", "", 0 },
+    { "int p(__attribute__((unused)) int, __attribute__((unused)) char *);\nint (*fp)(__attribute__((unused)) int);\n", "", 0 },
+    { "int k([[maybe_unused]] int q);\nint m([[maybe_unused]] int q, __attribute__((unused)) int r) { return q + r; }\n", "", "c23" },
     // A comma at the top of an array declarator's size or an array designator's index (#1867); one in parentheses or a
     // call's arguments, or in a subscript, is an operator's.
     { "void f(int n, int m) { int u[n, m]; }\n", "1:31: expected ']'", 0 },
@@ -1767,21 +1772,6 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     return failures;
 }
 #endif
-// The role the paths can tell: a function declarator's parentheses look like a call's (both are postfix groups after
-// an operand, with the same tree), so they compare as one.
-static uint8_t parse_test_canonical_role(uint8_t role)
-{
-    uint8_t result = role;
-    if (role == PARSE_ROLE_OPEN_FUNCTION)
-    {
-        result = PARSE_ROLE_OPEN_CALL;
-    }
-    else if (role == PARSE_ROLE_CLOSE_FUNCTION)
-    {
-        result = PARSE_ROLE_CLOSE_CALL;
-    }
-    return result;
-}
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The tokens around `token`, the token itself marked, as one report.
 static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1864,7 +1854,7 @@ static uint32_t parse_test_compare_trees(const Parser* vector, const Parser* sca
     for (uint32_t i = 0; i < count && first == BUSTER_PARSE_NONE; i += 1)
     {
         const bool same = vector->tree.parents[i] == scalar->tree.parents[i] && vector->tree.depths[i] == scalar->tree.depths[i] &&
-                          parse_test_canonical_role(vector->tree.roles[i]) == parse_test_canonical_role(scalar->tree.roles[i]);
+                          vector->tree.roles[i] == scalar->tree.roles[i];
         first = same ? BUSTER_PARSE_NONE : i;
     }
     if (first != BUSTER_PARSE_NONE)
@@ -2377,7 +2367,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
             for (uint32_t i = 0; i < count && first == BUSTER_PARSE_NONE; i += 1)
             {
                 const bool same = kernels->parents[i] == scalar->tree.parents[i] && kernels->node_depths[i] == scalar->tree.depths[i] &&
-                                  parse_test_canonical_role(kernels->roles[i]) == parse_test_canonical_role(scalar->tree.roles[i]);
+                                  kernels->roles[i] == scalar->tree.roles[i];
                 first = same ? BUSTER_PARSE_NONE : i;
             }
             if (first != BUSTER_PARSE_NONE)
@@ -3099,7 +3089,7 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
                 const uint8_t* bytes = pp_location_bytes(&pp, location);
                 const int length = bytes != 0 && end > location ? (int)(end - location < 24 ? end - location : 24) : 0;
                 const bool differ = vector.tree.parents[t] != scalar.tree.parents[t] || vector.tree.depths[t] != scalar.tree.depths[t] ||
-                                    parse_test_canonical_role(vector.tree.roles[t]) != parse_test_canonical_role(scalar.tree.roles[t]);
+                                    vector.tree.roles[t] != scalar.tree.roles[t];
                 printf("%7u %5u  %-24.*s %-14s | %-24s %3u %7d | %-24s %3u %7d%s\n", t, line, length, (const char*)bytes, parse_kind_names[scalar.tokens.kinds[t]],
                        parse_role_names[vector.tree.roles[t]], vector.tree.depths[t], (int)vector.tree.parents[t], parse_role_names[scalar.tree.roles[t]],
                        scalar.tree.depths[t], (int)scalar.tree.parents[t], differ ? "  <<" : "");
