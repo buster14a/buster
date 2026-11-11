@@ -8,7 +8,7 @@ rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
 until the merge queue (#1430) runs the complete suite before each merge and
 pushes to main run no checks at all. Before the nightly mode, which has no
 snapshot to cover them, a push runs all four O3 build modes (plain and three
-sanitizer configurations) across four shards, and all three fuzz campaigns.
+sanitizer configurations) across each row's shards, and all three fuzz campaigns.
 The pre-merge PR matrix, Measurement storage and a no-code exemption do not
 replace a push's own hosted rows.
 
@@ -58,11 +58,15 @@ the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
 CPU without AVX-512 therefore still runs the complete correctness suite.
 
 Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
-runs the row's inventory as 4 shards (`matrix.shard`), a runner each, dealt by
-`parallel --shard K/4 --costs tools/ci/correctness.costs`: the runner deals the
-commands to the shards by their costs on a hosted runner, the costliest first,
-the same deal on every shard's runner, so that a row's shards run every command
-once (docs/commands/parallel.md). Unsharded, a plain row's test step took 14.6
+runs the row's inventory as the row's own number of shards (`matrix.shard`, its
+`shards` input), a runner each, dealt by `parallel --shard K/N --costs
+tools/ci/costs/ROW.costs`: the runner deals the commands to the shards by the
+row's own costs on a hosted runner, the costliest first, each to the shard that
+would end the earliest with it, the same deal on every shard's runner, so that
+a row's shards run every command once (docs/commands/parallel.md). The plain
+rows run as 4 shards, the `x86-64` TSan and MSan rows as 6, the `native` MSan
+row as 5 and the others as 4 (#2031; [Shard costs](commands/ci.md#shard-costs)
+has the tables and the plans). Unsharded, a plain row's test step took 14.6
 minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
 98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
 own, and its shards run that verified product (see "Shared row products"
@@ -92,7 +96,7 @@ The hosted matrix additionally builds the entire compiler with each of
 `BUSTER_SANITIZER=address|thread|memory`, for both host architectures.
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
-are full suites, a row's 4 shards together; the TSan and MSan rows are not
+are full suites, a row's shards together; the TSan and MSan rows are not
 reduced module lists.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
@@ -244,7 +248,7 @@ Benchpress.
 ## Shared row products
 
 A portable row (`x86-64`: plain, ASan, TSan and MSan) builds its compiler once
-for its 4 shards (#2032). The test job calls
+for its shards (#2032). The test job calls
 `.github/workflows/hosted-correctness.yml` for each row. In a portable row, that
 workflow's `compiler` job sets its runner up as a shard does: the verified
 hosted inputs, `setup-hosted.sh`, the sanitizer host report, the fatal policy
@@ -718,7 +722,7 @@ The `address` mode combines ASan, UBSan, bounds and leak checking in one build
 and run; its detector probes verify each kind of failure before the full suite.
 TSan and MSan retain separate builds because their runtimes cannot be combined
 with ASan. Removing the standalone UBSan CI rows saves eight builds and suite
-runs (two architectures, four shards) but removes an independent instrumented
+runs (two architectures, each row's shards) but removes an independent instrumented
 execution: standalone UBSan has a different allocation layout and can continue
 past failures that would stop ASan. `BUSTER_SANITIZER=undefined` remains
 available for targeted investigation.
