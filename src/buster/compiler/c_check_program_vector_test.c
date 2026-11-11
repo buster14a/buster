@@ -935,8 +935,9 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "_Alignas(16) float stream[4];_mm_stream_ps(stream,f);FOLD(stream);return (int)h;}\n"
         },
         // Shuffles of every element size by the baseline's sequences: PSHUFD's and SHUFPD's, SHUFPS's of halves, of pairs
-        // and of three elements and one, unpacks, PSHUFLW's and PSHUFHW's, and with SSSE3 PSHUFB's of any bytes; narrow
-        // results and operands.
+        // and of three elements and one, unpacks, PSHUFLW's and PSHUFHW's, and with SSSE3 PSHUFB's of any bytes, without it
+        // element by element (#1834); narrow results and operands. 32 bytes of bytes and words element by element without
+        // AVX-512 (#1834).
         { "baseline-shuffles",
           "typedef short v8hi __attribute__((vector_size(16)));typedef char v16qi __attribute__((vector_size(16)));"
           "typedef float v2sf __attribute__((vector_size(8)));typedef int v2si __attribute__((vector_size(8)));\n"
@@ -950,12 +951,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "v4sf u[]={__builtin_shufflevector(f,g,0,4,1,5),__builtin_shufflevector(f,g,6,7,2,3),__builtin_shufflevector(f,f,3,2,1,0),__builtin_shufflevector(f,g,7,0,6,1)};FOLD(u);"
           "v2df k[]={__builtin_shufflevector(d,e,1,2),__builtin_shufflevector(d,e,3,1)};FOLD(k);\n"
           "v8hi m[]={__builtin_shufflevector(w,x,0,8,1,9,2,10,3,11),__builtin_shufflevector(w,x,12,4,13,5,14,6,15,7),__builtin_shufflevector(w,w,3,2,1,0,7,7,4,5),"
-          "__builtin_shufflevector(w,x,11,10,9,8,15,14,13,12),__builtin_shufflevector(w,x,2,3,0,1,6,7,4,5)\n"
-          "#ifdef __SSSE3__\n,__builtin_shufflevector(w,x,7,8,1,15,4,4,9,0)\n#endif\n};FOLD(m);\n"
+          "__builtin_shufflevector(w,x,11,10,9,8,15,14,13,12),__builtin_shufflevector(w,x,2,3,0,1,6,7,4,5),__builtin_shufflevector(w,x,7,8,1,15,4,4,9,0),"
+          "__builtin_shufflevector(w,x,0,0,0,0,0,0,0,0),__builtin_shufflevector(w,x,1,2,3,4,5,6,7,8)};FOLD(m);\n"
           "v16qi o[]={__builtin_shufflevector(y,z,0,16,1,17,2,18,3,19,4,20,5,21,6,22,7,23),__builtin_shufflevector(z,y,8,24,9,25,10,26,11,27,12,28,13,29,14,30,15,31),"
-          "__builtin_shufflevector(y,z,2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13)\n"
-          "#ifdef __SSSE3__\n,__builtin_shufflevector(y,z,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(y,z,0,17,2,19,31,5,6,7,16,9,3,3,12,30,14,1)\n"
-          "#endif\n};FOLD(o);\n"
+          "__builtin_shufflevector(y,z,2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13),"
+          "__builtin_shufflevector(y,z,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(y,z,0,17,2,19,31,5,6,7,16,9,3,3,12,30,14,1),"
+          "__builtin_shufflevector(y,z,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14),__builtin_shufflevector(y,z,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5)};FOLD(o);\n"
+          "typedef char v32qi __attribute__((vector_size(32),aligned(16)));typedef short v16hi __attribute__((vector_size(32),aligned(16)));"
+          "v32qi y2=__builtin_shufflevector(y,z,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31),z2=y2+(char)n;"
+          "v16hi w2=(v16hi)y2,x2=(v16hi)z2;"
+          "v32qi o2[]={__builtin_shufflevector(y2,z2,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),"
+          "__builtin_shufflevector(y2,z2,0,33,2,35,63,5,6,7,48,9,3,3,12,62,14,1,16,40,18,19,20,21,22,23,24,25,26,27,28,29,30,32)};FOLD(o2);"
+          "v16hi m2[]={__builtin_shufflevector(w2,x2,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(w2,x2,0,16,1,17,8,24,9,25,31,30,2,2,3,7,4,5)};FOLD(m2);"
+          "v16qi o3=__builtin_shufflevector(y2,z2,31,0,30,1,29,2,28,3,63,32,62,33,61,34,60,35);FOLD(o3);\n"
           "v2sf p=__builtin_shufflevector(f,f,2,3);v4sf pp=__builtin_shufflevector(p,(v2sf){1.0f,2.0f},0,2,1,3);FOLD(p);FOLD(pp);"
           "v2si i2=__builtin_shufflevector((v2si){n,7},(v2si){-3,n*5},3,0);FOLD(i2);return (int)h;}\n"
         },
@@ -1246,15 +1254,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                 const char* source;
                 const char* reason;
             } refused[] = {
-                { 1, "typedef char V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
-                  "vector shuffles of 8-bit elements without SSSE3" },
-                { 1, "typedef short V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,7,8,1,15,4,4,9,0);}",
-                  "vector shuffles of 16-bit elements without SSSE3" },
                 { 1, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
                   "vector minimum and maximum of 64-bit elements without SSE4.2" },
-                { 4, "typedef char V __attribute__((vector_size(32)));V tested(V a,V b){return __builtin_shufflevector(a,b,31,30,29,28,27,26,25,24,23,22,21,20,19,"
-                     "18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
-                  "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512" },
             };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
             {
@@ -1273,7 +1274,10 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         "typedef float F __attribute__((vector_size(32)));typedef int I __attribute__((vector_size(32)));"
         "__attribute__((target(\"avx,no-avx2\"))) int tested(int n){F f,g;unsigned h=2166136261u;fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);g+=1.0f;"
         "F v[]={f+g,f-g,f*g,f/g,-f,f+2.5f};FOLD(v);I c[]={f<g,f>=g,f==g,f!=g};FOLD(c);"
-        "I a=(I)f,b=(I)g;I k[]={a&b,a|b,a^b};FOLD(k);return (int)h;}";
+        "I a=(I)f,b=(I)g;I k[]={a&b,a|b,a^b};FOLD(k);"
+        "F s[]={__builtin_shufflevector(f,g,7,6,5,4,3,2,1,0),__builtin_shufflevector(f,g,0,8,1,9,12,13,2,15)};FOLD(s);"
+        "typedef char C __attribute__((vector_size(32)));C x=(C)a,y=(C)b;"
+        "C t[]={__builtin_shufflevector(x,y,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0)};FOLD(t);return (int)h;}";
     char source[4096];
     snprintf(source, sizeof(source), "%s%s", check_test_vector_types, avx);
     check_test_program_source_native_limits(test, source, "baseline-avx-without-avx2", clang, false, -1, 0, &baseline,
