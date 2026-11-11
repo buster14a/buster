@@ -37,6 +37,53 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        // An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): a
+        // condition's -Wparentheses at its `)` or `;`, a call's -Wformat from its `)`, a bitwise operator's precedence and a
+        // logical not's at their right operand's end; a statement expression's and a nested call's warnings first. A call
+        // argument's -Wformat is at its callee.
+        .name = "enclosing warnings follow their operands' diagnostics",
+        .source = "int printf(const char *, ...);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    if (x = ({ printf(\"%s\", 1); x; })) return 1;\n"
+                  "    if (x = printf(\"%s\", 2)) return 1;\n"
+                  "    while (x = ({ printf(\"%s\", 3); x; })) {}\n"
+                  "    for (; x = ({ printf(\"%d\", \"v\"); 1; }); ) {}\n"
+                  "    do {} while (x = ({ printf(\"%d\", \"w\"); 1; }));\n"
+                  "    printf(\"%s\", ({ printf(\"%d\", \"s\"); 1; }));\n"
+                  "    printf(\"%s\", printf(\"%d\", \"t\"));\n"
+                  "    int a = x & ({ printf(\"%d\", \"u\"); 1; }) == 2;\n"
+                  "    int b = !x == ({ printf(\"%d\", \"y\"); 1; });\n"
+                  "    (void)a; (void)b;\n"
+                  "    return (x = 1) ? printf(\"%s\", 4) : 0;\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 19,
+        .notes = 14,
+    },
+    {
+        .name = "enclosing warnings follow their operands' diagnostics in C23 under -Wextra",
+        .source = "int printf(const char *, ...);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    if (x = ({ printf(\"%s\", 1); x; })) return 1;\n"
+                  "    if (x = printf(\"%s\", 2)) return 1;\n"
+                  "    while (x = ({ printf(\"%s\", 3); x; })) {}\n"
+                  "    for (; x = ({ printf(\"%d\", \"v\"); 1; }); ) {}\n"
+                  "    do {} while (x = ({ printf(\"%d\", \"w\"); 1; }));\n"
+                  "    printf(\"%s\", ({ printf(\"%d\", \"s\"); 1; }));\n"
+                  "    printf(\"%s\", printf(\"%d\", \"t\"));\n"
+                  "    int a = x & ({ printf(\"%d\", \"u\"); 1; }) == 2;\n"
+                  "    int b = !x == ({ printf(\"%d\", \"y\"); 1; });\n"
+                  "    (void)a; (void)b;\n"
+                  "    return (x = 1) ? printf(\"%s\", 4) : 0;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 19,
+        .notes = 14,
+        .c23 = true,
+    },
+    {
         .name = "return flow conservative no-fallthrough and reachable fallthrough",
         .source = "int a(int c){if(c)return 1;return 2;}int b(int c){if(c)return 1;}int d(void){while(1){}}_Noreturn void r(void){while(1){}}\n",
         .warnings = 1,
