@@ -1324,7 +1324,7 @@ static void check_input_unused_labels(CheckInputReader* reader, const CheckLocal
                 .payload = { .name = parser->tokens.names[name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 .suborder = (uint64_t)at + 1,
             };
-            reader->output->resource |= !check_input_warning_event(reader, &warning, NULL, 0);
+            (void)check_input_warning_event(reader, &warning, NULL, 0);
         }
     }
 }
@@ -3872,7 +3872,8 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
         {
             check_input_indirect_gotos(reader);
         }
-        if (!prefix)
+        // (A synthetic control walk's, of no preprocessor, has no warnings.)
+        if (!prefix && reader->pp != NULL)
         {
             check_input_unused_labels(reader, &locals, labels, capacity, begin, limit);
         }
