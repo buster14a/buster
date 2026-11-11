@@ -476,9 +476,11 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "int call_t(void) { return t(); }\n"
         // A repeated version (kept for its index, without a symbol of its own) and a default that isn't last.
         "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { static int m = 5; return x * m; }\n"
-        // A body of vector code, compiled once per version: the avx2, sse4.2 and default ones are called directly too.
+        // A body of vector code, compiled once per version: the avx2, sse4.2 and default ones are called directly too. Its
+        // AVX-512 version is chosen by the feature, not by arch=znver4: a hosted runner's virtual Zen 4 is znver4 to
+        // __builtin_cpu_is but exposes no AVX-512, and that version's copy has EVEX code.
         "typedef float w8 __attribute__((vector_size(32)));\n"
-        "__attribute__((target_clones(\"avx2\", \"arch=znver4\", \"sse4.2\", \"default\"))) int w(int x) { w8 a = { 1, 2, 3, 4, 5, 6, 7, 8 }; "
+        "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x) { w8 a = { 1, 2, 3, 4, 5, 6, 7, 8 }; "
         "a = a * (w8){ x, x, x, x, x, x, x, x }; int y = 0; for (int i = 0; i < 8; i += 1) { y += (int)a[i]; } return y; }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
@@ -495,7 +497,7 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"default\"))) int g(int x);\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x);\n"
         "int call_s(void);\nint call_t(void);\n"
-        "__attribute__((target_clones(\"avx2\", \"arch=znver4\", \"sse4.2\", \"default\"))) int w(int x);\n"
+        "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x);\n"
         // (In one unit with the definition, the direct path's link doesn't take a label of a symbol the unit defines: #2204.
         // The versions compute the same values, so the function itself stands for them there.)
         "#ifndef TARGET_JOINED\n"
