@@ -42,6 +42,24 @@ static void check_test_driver_block_attributes(CheckTest* test, const char* clan
         { "-std=gnu17", "int x;\nvoid f(void) {\n    __attribute__((unused)) a: x = 1;\n    __attribute__(()) b: x = 2;\n    __attribute__((cold)) c: ;\n}\n" },
         { "-std=gnu17", "int x;\nvoid f(void) {\n    l: __attribute__((unused)) x = 1;\n}\n" },
         { "-std=gnu17", "int g(void);\nvoid f(void) {\n    __attribute__((nomerge)) g();\n    __attribute__(()) __attribute__((nomerge)) g();\n}\n" },
+        // C23's clang::likely and clang::unlikely (#2291): any statement's, a label's too, without a word; their count's
+        // error, a declaration's error, the other one in the same statement's error with its note, and an if's branches
+        // both one of them, -Wignored-attributes after the branches' own warnings. C23 attributes before a case or default
+        // label, any of them. clang::builtin_alias, GNU's clang_builtin_alias.
+        { "-std=gnu23", "void g(int c) {\n    if (c) [[clang::likely]] return;\n    else [[clang::unlikely]] {}\n    [[clang::likely]];\n"
+                        "    while (c) [[clang::unlikely]] { c--; }\n    l: [[clang::likely]] ;\n    goto l;\n}\n" },
+        { "-std=gnu17", "void e(int c) {\n    switch (c) {\n    [[clang::likely]] case 1 ? 1 : 0: break;\n    [[maybe_unused]] case 2 ... 3:\n"
+                        "    [[clang::unlikely]] default: ;\n    }\n    switch (c) { case 0: [[clang::likely]] default: break; }\n}\n" },
+        { "-std=gnu23", "void f(void);\nvoid h(int c) {\n    [[clang::likely(1)]] return;\n    [[clang::likely]] int y = c;\n    (void)y;\n}\n"
+                        "[[clang::likely]] int x;\nstruct [[clang::unlikely]] T { int x; };\nvoid k([[clang::likely]] int p);\n" },
+        { "-std=gnu23", "void f(void);\nvoid a(int c) {\n    if (c) if (c > 1) [[clang::likely]] f(); else [[clang::likely]] f(); else [[clang::likely]] f();\n"
+                        "    if (c) [[clang::__likely__]] f(); else [[_Clang::likely]] f();\n"
+                        "    if (c) [[clang::likely]] f(); else if (c) [[clang::likely]] f(); else [[clang::likely]] f();\n"
+                        "    if (c) [[clang::likely]] [[gnu::nomerge]] f(); else [[clang::nomerge, clang::likely]] f();\n"
+                        "    if (c) [[clang::likely, clang::likely]] f(); else [[clang::unlikely]] f();\n"
+                        "    (void)({ if (c) [[clang::unlikely]] f(); else [[clang::unlikely]] f(); 1; });\n}\n" },
+        { "-std=gnu17", "void f(void);\nvoid b(int c) {\n    if (c) [[clang::unlikely]] f();\n    if (c) [[clang::likely]] [[clang::unlikely]] f();\n}\n" },
+        { "-std=gnu23", "[[clang::builtin_alias(__builtin_abs)]] int f(int);\n__attribute__((clang_builtin_alias(__builtin_abs))) int g(int);\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/block-attribute.c", directory);

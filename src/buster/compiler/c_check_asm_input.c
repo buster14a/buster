@@ -58,6 +58,9 @@ struct CheckInputAsm
     uint32_t closing;
     uint32_t statement;
     uint32_t body;
+    // The widest vector register an x, v or Yz operand takes in its function (#2231): 512 bits with AVX-512F, 256 with
+    // AVX, else 128, by the function's features (the unit's, or its target attribute's).
+    uint16_t vector_bits;
     bool basic;
     bool is_volatile;
     bool is_inline;
@@ -96,6 +99,32 @@ struct CheckAsms
 static bool check_asm_text_equal(CheckAsmText text, const char* expected)
 {
     return text.length == strlen(expected) && (text.length == 0 || memcmp(text.bytes, expected, text.length) == 0);
+}
+
+// The widest vector register of the current function's features (#2231, CheckInputAsm.vector_bits), as clang's
+// validateOperandSize reads its feature map (ASTContext::getFunctionFeatureMap): the unit's, or those a target attribute
+// on the function's definition gives (predefines_function_target). Once a body: its statements share it.
+static uint16_t check_input_asm_vector_bits(CheckInputReader* reader)
+{
+    const uint32_t body = reader->function_body;
+    if (reader->asm_vector_bits == 0 || reader->asm_vector_body != body)
+    {
+        X86Target target = reader->pp->options.target;
+        const uint32_t function = body < reader->parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
+        const CheckInputAttribute* attribute = function < reader->parser->tokens.count ?
+            check_input_attribute_of(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET) : NULL;
+        int32_t cpu = -1;
+        const bool version = attribute != NULL && attribute->text.length < UINT32_MAX &&
+                             predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+        if (version)
+        {
+            const PredefinesHost host = predefines_host_of(&reader->pp->options.predefines);
+            target = predefines_function_target(&reader->pp->options.predefines, &host, target, attribute->text.pointer, (uint32_t)attribute->text.length, cpu);
+        }
+        reader->asm_vector_bits = (target.features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 512 : (target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 256 : 128;
+        reader->asm_vector_body = body;
+    }
+    return reader->asm_vector_bits;
 }
 
 static void check_input_asm_mark(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t id)
@@ -530,6 +559,7 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
             .closing = closing,
             .statement = closing + 1,
             .body = reader->function_body,
+            .vector_bits = check_input_asm_vector_bits(reader),
         };
         for (uint32_t token = keyword + 1; token < opening; token += 1)
         {
@@ -1149,8 +1179,40 @@ static bool check_asm_global_register(const CheckInput* input, const CheckStream
            check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
 }
 
+// Whether an operand of `bits` fits its constraint (#2231), as clang's X86TargetInfo::validateOperandSize checks it by the
+// constraint's first letter past `=`, `+` and `&`: k, y, Ym and Yk at most 64 bits; f, t and u 128; x, v and Yz the
+// function's widest vector register (CheckInputAsm.vector_bits); any other (Yi, Yt and Y2 with SSE2, which every target
+// here has) any size.
+static bool check_asm_operand_size_valid(const CheckInputAsm* assembly, const CheckAsmOperand* source, uint64_t bits)
+{
+    const CheckAsmText text = source->constraint;
+    uint32_t at = 0;
+    while (at < text.length && (text.bytes[at] == '=' || text.bytes[at] == '+' || text.bytes[at] == '&'))
+    {
+        at += 1;
+    }
+    const uint8_t first = at < text.length ? text.bytes[at] : 0;
+    const uint8_t second = at + 1 < text.length ? text.bytes[at + 1] : 0;
+    const bool mask = first == 'k' || first == 'y' || (first == 'Y' && (second == 'm' || second == 'k'));
+    const bool stack = first == 'f' || first == 't' || first == 'u';
+    const bool vector = first == 'x' || first == 'v' || (first == 'Y' && second == 'z');
+    const uint64_t limit = mask ? 64 : stack ? 128 : vector ? assembly->vector_bits : UINT64_MAX;
+    return bits <= limit;
+}
+
+static CheckAsmStatus check_asm_operand_checks(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement,
+                                               uint32_t operand, bool whole);
+
+// An operand's checks, clang's: its own, its size's (#2231) and its tie's.
 static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, uint32_t statement, uint32_t operand)
+{
+    return check_asm_operand_checks(result, input, stream, types, statement, operand, true);
+}
+
+// An operand's own checks, and with `whole` its size's and its tie's after them, as clang makes them.
+static CheckAsmStatus check_asm_operand_checks(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement,
+                                               uint32_t operand, bool whole)
 {
     const CheckInputAsm* assembly = input->asm_statements + statement;
     const CheckAsmOperand* source = assembly->operands + operand;
@@ -1199,7 +1261,10 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
         // clang refuses a _BitInt operand of any constraint ("invalid type in asm input", #147), and takes a flag
         // output of any other type, whose size its code generation (and the lowering, by name) limits.
         valid &= check_action_kind(types, type_strip_aligned(types, original.type)) != BUSTER_TYPE_KIND_BIT_INT;
-        if (valid && (source->flags & CHECK_ASM_MATCH) != 0)
+        // The operand's size, by its (converted) type's.
+        const uint64_t bits = type_is_complete(types, value.type) ? type_size(types, value.type) * 8 : 0;
+        valid = valid && (!whole || check_asm_operand_size_valid(assembly, source, bits));
+        if (valid && whole && (source->flags & CHECK_ASM_MATCH) != 0)
         {
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;
             if (valid)
@@ -1258,6 +1323,10 @@ typedef enum CheckAsmError
     // that don't change its value and goes on: "invalid use of a cast in an inline asm context requiring an lvalue
     // [-Winvalid-gnu-asm-cast]".
     CHECK_ASM_ERROR_CAST,
+    // An operand too wide for its constraint (#2231, check_asm_operand_size_valid), after its own checks and before its
+    // tie's: "invalid output|input size for constraint 'C'", the constraint as written.
+    CHECK_ASM_ERROR_OUTPUT_SIZE,
+    CHECK_ASM_ERROR_INPUT_SIZE,
 } CheckAsmError;
 
 // One statement's error (check_asms_diagnose_all): clang gives a statement's first, and returns, but after a cast's.
@@ -1306,7 +1375,15 @@ static CheckAsmError check_asm_operand_error(const CheckInput* input, const Chec
     CheckAsmError result = CHECK_ASM_ERROR_GENERIC;
     *type = value.type;
     *output_type = 0;
-    if (allows_memory && bit_field)
+    // Its own checks pass, so its size's or its tie's fails.
+    CheckAsmCheckedOperand own = { 0 };
+    const bool own_valid = check_asm_operand_checks(&own, input, stream, types, statement, operand, false) == CHECK_ASM_OK;
+    const uint64_t bits = own_valid && type_is_complete(types, own.value.type) ? type_size(types, own.value.type) * 8 : 0;
+    if (own_valid && !check_asm_operand_size_valid(assembly, source, bits))
+    {
+        result = write ? CHECK_ASM_ERROR_OUTPUT_SIZE : CHECK_ASM_ERROR_INPUT_SIZE;
+    }
+    else if (allows_memory && bit_field)
     {
         result = CHECK_ASM_ERROR_BIT_FIELD;
     }

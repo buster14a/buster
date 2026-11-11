@@ -1755,7 +1755,9 @@ ICE eligibility is tracked separately from whether a value happened to fold.
 For example, an immediate floating literal cast to integer can be an ICE;
 an ordinary floating arithmetic expression is not made an ICE merely by
 folding. Source contexts explicitly request integer constant expressions,
-static assertions or constant static initializers.
+static assertions or constant static initializers. A static assertion among a
+structure's or a union's members (#2264) declares no member: the member reader
+steps past it to its `;` and the walk checks it as a block's.
 
 Constant-query answers keep source proof, speculative proof and runtime effects
 separate. A source constant answer does not erase a floating-point exception or
@@ -4028,8 +4030,16 @@ What the lowering covers past scalars (#145's programs):
   declaration where clang must emit it, deferred bodies and data at the
   unit's end; a body's reference names the latest declaration before it,
   static data's the latest where it is emitted). Where only deferred code
-  refers to the object and its references disagree, clang's order of
-  deferred emission decides, which isn't modeled: that is refused by name.
+  refers to the object, clang's order of deferred emission decides, which
+  `check_program_weak_deferred` replays: a deferred function or deferred
+  data is scheduled at the first eager reference to it, or at its definition
+  if that comes later (`GetOrCreateLLVMFunction`, `EmitGlobal`); at the unit's
+  end each one is emitted in that order and the definitions its own
+  references reach first are emitted right after it, depth first
+  (`EmitDeferred`), so `main` calling `g()` before `f()` makes the reference
+  `g`'s. A body's references are taken by token, data's in initializer order.
+  The refusal by name remains only where the replay's record of references
+  ran out of room.
   A defined function's constructor and destructor
   each give an entry of the init or fini array: an atom of a pointer to the
   function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
@@ -5469,7 +5479,10 @@ The later phases are left:
   specifiers', its declarator's, an invalid type's or an unsized array's
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
-  of its names; a dropped part's error counts just before the token after it,
+  of its names (not the words in its attributes' lists, `noinline` or an
+  argument, which declare nothing, #2137: another declaration's attribute that
+  spells the same word outside every body no longer refuses the view); a
+  dropped part's error counts just before the token after it,
   so the definition that follows keeps its unused variables. An error in a
   function definition outside its body (its declarator's, its parameters')
   leaves the whole definition out the same way, to its body's `}`, so its own
@@ -8745,8 +8758,9 @@ arguments against the function. The checker now gives these as clang does.
   Other targets' vector types (`arm_sve_vector_bits`, `riscv_rvv_vector_bits`)
   are clang's target error wherever a declarator's type takes them ("is not
   supported on targets missing 'sve'"), a tag's subject's error elsewhere;
-  `clang_builtin_alias` is always its error on x86-64 ("can only be applied to a
-  ARM, HLSL, SPIR-V or RISC-V builtin"); `blocks(byref)` is a local variable's
+  `clang_builtin_alias`, and C23's `clang::builtin_alias` (#2291), is always
+  its error on x86-64 ("can only be applied to a ARM, HLSL, SPIR-V or RISC-V
+  builtin"); `blocks(byref)` is a local variable's
   (another argument warned of, a static local's or a nonlocal one's an error).
   The statements' hints, which change nothing at -O0, are clang's
   (`check_input_statement_attribute_kinds`): `code_align` and
@@ -8756,7 +8770,17 @@ arguments against the function. The checker now gives these as clang does.
   "expression is not an integer constant expression", and a second code_align
   "conflicting loop attribute" noted at the first; `atomic` before a compound
   statement, its options `remote_memory`, `fine_grained_memory` and
-  `ignore_denormal_mode` (each with `no_` or not). On a declaration each is
+  `ignore_denormal_mode` (each with `no_` or not). C23's `clang::likely` and
+  `clang::unlikely` (#2291) on any statement, a label's or a `case` or
+  `default` label too, without a word; an argument is their count's error, the
+  other one in the same statement's attributes "'clang::unlikely' and
+  'clang::likely' attributes are not compatible" noted at the first, and an
+  `if` whose branches are both likely or both unlikely is -Wignored-attributes'
+  "conflicting attributes 'clang::likely' are ignored" at the then branch's,
+  noted at the else branch's, once the `if` is read (`check_input_statement_likelihood`).
+  After the not-compatible error in a then branch, the rest of that `if` isn't
+  read, so its conflicting-attributes warning, which clang still gives, is
+  lost. On a declaration each is
   "cannot be applied to a declaration". GNU's `assume` is an empty
   statement's ("only applies to empty statements" elsewhere): one argument, a
   conditional expression (an assignment or a comma at its top is "use of this

@@ -3711,7 +3711,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "objc_precise_lifetime",
         // Other targets' vector types, aliases of their builtins, statements' hints (check_input_statement_attribute_kinds),
         // and Blocks' byref variables, whose checks in C on x86-64 are check_input_attribute_annotations'.
-        "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
+        "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "builtin_alias", "likely", "unlikely", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
         // A bit-field's preferred type, whose type check_input_attribute_annotations checks; MSVC's forceinline and
         // forceinline_calls, which it ignores off MSVC's ABI.
         "preferred_type", "forceinline", "forceinline_calls",
@@ -7156,9 +7156,9 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
                                              typedef_name ? CHECK_WARNING_EVENT_INDEPENDENT_POINTER : CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF, located, located);
         attribute->ignored = true;
     }
-    else if (check_input_attribute_equal(spelled, "clang_builtin_alias") && attribute->argument_count == 1)
+    else if ((check_input_attribute_equal(spelled, "clang_builtin_alias") || check_input_attribute_equal(spelled, "builtin_alias")) && attribute->argument_count == 1)
     {
-        // (No builtin of x86-64's is one of its targets'.)
+        // (No builtin of x86-64's is one of its targets'. C23's clang::builtin_alias is the same attribute, #2291.)
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BUILTIN_ALIAS, 0);
         valid = false;
     }
@@ -8671,7 +8671,9 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         const bool vector_bits = (riscv || (generic_name && check_input_attribute_equal(generic_spelled, "arm_sve_vector_bits"))) && !tag_declaration;
         const bool statement_only = generic_name && (check_input_attribute_equal(generic_spelled, "atomic") || check_input_attribute_equal(generic_spelled, "code_align") ||
                                                      check_input_attribute_equal(generic_spelled, "opencl_unroll_hint") ||
-                                                     check_input_attribute_equal(generic_spelled, "assume"));
+                                                     check_input_attribute_equal(generic_spelled, "assume") ||
+                                                     check_input_attribute_equal(generic_spelled, "likely") ||
+                                                     check_input_attribute_equal(generic_spelled, "unlikely"));
         if ((vector_bits || statement_only) && !attribute->ignored)
         {
             check_input_attribute_argument_error(reader, attributes, attribute, attribute->first,

@@ -111,3 +111,25 @@ static void check_test_driver_asm_clobbers(CheckTest* test, const char* clang, c
     };
     check_test_driver_asm_units(test, clang, executable, directory, units, BUSTER_ARRAY_LENGTH(units), "asm clobbers and labels");
 }
+
+// An operand too wide for its constraint (#2231): clang's "invalid output|input size for constraint 'C'" at the operand,
+// the constraint as written, by its first letter past `=`, `+` and `&` (x, v and Yz the function's widest vector register,
+// a target attribute's too; y, k, Ym and Yk 64 bits; f, t and u 128; Yi any), after the operand's own errors and before
+// its tie's, the statement's first alone.
+static void check_test_driver_asm_sizes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const units[] = {
+        "typedef float v8f __attribute__((vector_size(32)));\nvoid a(v8f x) { __asm__(\"\" : : \"x\"(x)); }\nvoid c(v8f x) { __asm__(\"\" : \"=&x\"(x)); }\n"
+        "void d(v8f x) { __asm__(\"\" : : \"xm\"(x)); }\nvoid d2(v8f x) { __asm__(\"\" : : \"mx\"(x)); }\nvoid e(v8f x) { __asm__(\"\" : : \"Yz\"(x)); }\n"
+        "void f(v8f x) { __asm__(\"\" : : \"Yi\"(x)); }\n",
+        "typedef float v4f __attribute__((vector_size(16)));\ntypedef float v8f __attribute__((vector_size(32)));\n"
+        "void g(v4f x) { __asm__(\"\" : : \"y\"(x)); }\nvoid k(v4f x) { __asm__(\"\" : : \"k\"(x)); }\nvoid l(v8f x) { __asm__(\"\" : : \"t\"(x)); }\n"
+        "void m(long double x) { __asm__(\"\" : : \"f\"(x)); }\nvoid q(v8f x) { __asm__(\"\" : : \"Ym\"(x)); }\nvoid r(v4f x) { __asm__(\"\" : : \"Yk\"(x)); }\n",
+        "typedef float v8f __attribute__((vector_size(32)));\ntypedef float v16f __attribute__((vector_size(64)));\n"
+        "__attribute__((target(\"avx\"))) void n(v8f x) { __asm__(\"\" : : \"x\"(x)); }\n__attribute__((target(\"avx\"))) void n2(v16f x) { __asm__(\"\" : : \"v\"(x)); }\n"
+        "__attribute__((target(\"avx512f\"))) void o(v16f x) { __asm__(\"\" : : \"x\"(x)); }\nvoid b(v16f x) { __asm__(\"\" : : \"v\"(x)); }\n",
+        "typedef float v8f __attribute__((vector_size(32)));\nvoid p(v8f x, v8f y) { __asm__(\"\" : \"=x\"(x) : \"x\"(y)); }\n"
+        "void s(v8f x, int y) { __asm__(\"\" : \"=r\"(y) : \"x\"(x), \"0\"(1.0)); }\nvoid t(v8f x) { __asm__(\"\" : : \"x\"(x), \"i\"(missing)); }\n",
+    };
+    check_test_driver_asm_units(test, clang, executable, directory, units, BUSTER_ARRAY_LENGTH(units), "asm operand sizes");
+}

@@ -2066,6 +2066,8 @@ static const char* check_semantic_asm(const Parser* parser, Preprocessor* pp, co
         case CHECK_ASM_ERROR_GENERIC: result = "invalid assembly operand or constraint"; break;
         case CHECK_ASM_ERROR_OUTPUT_LVALUE: result = "invalid lvalue in asm output"; break;
         case CHECK_ASM_ERROR_CAST: result = "invalid use of a cast in an inline asm context requiring an lvalue [-Winvalid-gnu-asm-cast]"; break;
+        case CHECK_ASM_ERROR_OUTPUT_SIZE: result = check_warning_text(scratch, "invalid output size for constraint '%.*s'", constraint_length, constraint); break;
+        case CHECK_ASM_ERROR_INPUT_SIZE: result = check_warning_text(scratch, "invalid input size for constraint '%.*s'", constraint_length, constraint); break;
         case CHECK_ASM_ERROR_INPUT_LVALUE: result = check_warning_text(scratch, "invalid lvalue in asm input for constraint '%.*s'", constraint_length, constraint); break;
         case CHECK_ASM_ERROR_BIT_FIELD:
             result = check_warning_text(scratch, "reference to a bit-field in asm %s with a memory constraint '%.*s'", output ? "input" : "output", constraint_length,
