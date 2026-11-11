@@ -2080,8 +2080,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         {
                             // A pack directive's own Sema warning is at the directive, which the parser consumes before it
                             // reads on (#1849): after its own parser warnings, before the next directive's.
+                            // That is the parser's boundary at the next token, where it handles the annotation, but before the
+                            // next pack directive, whose line it lexes only after.
                             const bool directive = packing != NULL && semantic && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && !packing->align;
-                            pp_diagnose_output_phase(pp, disposition, source, directive ? packing->source_begin + 1 : semantic ? boundary : event->payload.token,
+                            const uint32_t following = directive ? check_input_pack_following(parser, input->pack_pragmas, packing) : UINT32_MAX;
+                            pp_diagnose_output_phase(pp, disposition, source, directive && following < boundary ? following : semantic ? boundary : event->payload.token,
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
                     }

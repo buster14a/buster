@@ -779,6 +779,17 @@ static bool check_input_pack_semantic(const CheckInputPackPragma* record, const 
            (record->align && record->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
 }
 
+// The output position just before the pack directive after `record` (#1849), where its Sema warnings come at the latest;
+// UINT32_MAX for the last one, and for one right after a function's body, whose own warnings at its end the checker
+// publishes at the next parser token, which clang reports before it handles the directive's annotation (a later pack
+// directive's parser warnings then come before this one's Sema ones, where clang's come after).
+static uint32_t check_input_pack_following(const Parser* parser, const CheckInputPackPragmas* history, const CheckInputPackPragma* record)
+{
+    const uint64_t index = (uint64_t)(record - history->records);
+    const bool after_body = record->token != 0 && record->token - 1 < parser->tokens.count && parser->tree.roles[record->token - 1] == PARSE_ROLE_CLOSE_BODY;
+    return !after_body && index + 1 < history->count && history->records[index + 1].source_begin != 0 ? history->records[index + 1].source_begin - 1 : UINT32_MAX;
+}
+
 // Appends a pack record's warning event of `message`, at `source` (#1849).
 static bool check_input_pack_event(CheckWarningBuffer* buffer, const CheckInputPackPragma* record, uint32_t index, uint32_t id, uint32_t message, uint32_t source,
                                    bool end, uint32_t note)
