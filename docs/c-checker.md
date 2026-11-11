@@ -10027,7 +10027,14 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   variable's read can't be skipped; a read in a `&&`'s or `||`'s right
   operand or a conditional's second or third (`x > 0 && g > 0`) can be, as
   clang asks whether some arguments give a constant, and it is an unknown
-  value that a call's evaluation needs only where it reads it. One that names a parameter becomes a program
+  value that a call's evaluation needs only where it reads it. A `volatile`
+  parameter's read is never a constant either (#2383): it is that error, its
+  note at the parameter's name, where it can't be skipped, and an unknown
+  value where it can (`x && a`). A condition's error drops its attribute, as
+  clang drops it, and the reader goes on (phase 1 of semantic error recovery,
+  below), so a later declaration's and a later call's errors are given too.
+  An `enable_if` whose message is empty notes "candidate disabled: <no
+  message provided>". One that names a parameter becomes a program
   (`CheckConditionStep`), from the parse tree in postorder: each largest
   subexpression without a parameter, and each sizeof's or alignof's, is a
   constant the evaluator gives; a parameter is its place and type; the
@@ -10204,9 +10211,8 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
 What isn't clang's yet: an overload call whose candidates fail by an
 argument's conversion has the checker's error, not clang's "no known
 conversion" notes ([#2384](https://github.com/buster14a/buster/issues/2384));
-a condition that reads a `volatile` parameter is accepted, where clang's is
-"never produces a constant expression"
-([#2383](https://github.com/buster14a/buster/issues/2383)); an overload set's address that no candidate matches has
+a `volatile` parameter's read as a comma's left operand in a condition gets
+`-Wunused-value`, which clang doesn't give a volatile read; an overload set's address that no candidate matches has
 the checker's error, not clang's "<overloaded function type>" with its
 candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
 above (a cast to void or to `void *` in a condition gives none of clang's

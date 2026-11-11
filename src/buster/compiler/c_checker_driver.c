@@ -4502,7 +4502,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             else
                             {
-                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", (int)message.length, message.pointer);
+                                // An empty message is clang's "<no message provided>" (#2383).
+                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", message.length != 0 ? (int)message.length : 21,
+                                         message.length != 0 ? message.pointer : "<no message provided>");
                             }
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
