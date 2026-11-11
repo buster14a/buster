@@ -1155,7 +1155,7 @@ static bool check_input_expression_member(CheckInputReader* reader, CheckInputBa
             // `p->y` names an extended vector's lane only through a pointer to one, which only a unit with one has.
             if (!arrow || __builtin_expect(reader->types->ext_vectors, 0))
             {
-                check_input_vector_member(reader, node, token + 1);
+                check_input_vector_member(reader, node, token + 1, arrow);
             }
         }
         check_input_expression_value(reader, token, node);

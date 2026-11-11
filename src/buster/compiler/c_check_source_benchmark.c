@@ -139,6 +139,7 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->builtin_capacity = source->builtin_count;
         graph->vector_members = source->vector_member_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVectorCall, source->vector_member_count) : NULL;
         graph->vector_member_capacity = source->vector_member_count;
+        graph->arrow_vector_members = source->arrow_vector_members;
         graph->x86_calls = source->x86_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckX86Call, source->x86_count) : NULL;
         graph->x86_capacity = source->x86_count;
         graph->overload_candidates = source->overload_candidates;

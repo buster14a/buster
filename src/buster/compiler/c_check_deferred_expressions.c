@@ -717,6 +717,7 @@ static bool check_deferred_expression_append(CheckInputReader* reader, const Che
         to->varargs_count += from->varargs_count;
         to->builtin_count += from->builtin_count;
         to->vector_member_count += from->vector_member_count;
+        to->arrow_vector_members |= from->arrow_vector_members;
         to->x86_count += from->x86_count;
         to->overload_count += from->overload_count;
         to->region_proof_count += from->region_proof_count;

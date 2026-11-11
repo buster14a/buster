@@ -335,6 +335,9 @@ struct CheckGraph
     CheckVectorCall* vector_members;
     uint32_t vector_member_count;
     uint32_t vector_member_capacity;
+    // Whether a `->` node has a record among them (`p->y`, check_vector_arrow): only then does a `->` node's action look
+    // its record up, a unit's many struct members' `->` nodes otherwise paying nothing for it (#2095).
+    bool arrow_vector_members;
     CheckX86Call* x86_calls;
     uint32_t x86_count;
     uint32_t x86_capacity;
@@ -1902,7 +1905,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
         .node = node,
         .context = check_graph_context(graph, node, stream->constant_evaluated != NULL && __builtin_expect(stream->constant_evaluated[node] != 0, 0)),
     };
-    if (__builtin_expect(action->op == CHECK_OP_MEMBER || action->op == CHECK_OP_ARROW, 0) && graph->vector_member_count != 0)
+    if (__builtin_expect(action->op == CHECK_OP_MEMBER || (action->op == CHECK_OP_ARROW && graph->arrow_vector_members), 0) && graph->vector_member_count != 0)
     {
         uint32_t first = 0;
         uint32_t last = graph->vector_member_count;

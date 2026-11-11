@@ -12775,7 +12775,7 @@ static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t t
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_input_run.
-static inline __attribute__((always_inline)) void check_input_vector_member(CheckInputReader* reader, uint32_t node, uint32_t token)
+static inline __attribute__((always_inline)) void check_input_vector_member(CheckInputReader* reader, uint32_t node, uint32_t token, bool arrow)
 {
     CheckGraph* graph = &reader->output->graph;
     const uint32_t name = reader->parser->tokens.names[token];
@@ -12812,6 +12812,7 @@ static inline __attribute__((always_inline)) void check_input_vector_member(Chec
         if (graph->vector_member_count < graph->vector_member_capacity)
         {
             graph->vector_members[graph->vector_member_count++] = (CheckVectorCall){ .node = node, .member = member };
+            graph->arrow_vector_members |= arrow;
         }
         else
         {
@@ -14155,7 +14156,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 // `p->y` names an extended vector's lane only through a pointer to one, which only a unit with one has.
                 if (op == CHECK_OP_MEMBER || __builtin_expect(reader->types->ext_vectors, 0))
                 {
-                    check_input_vector_member(reader, node, token + 1);
+                    check_input_vector_member(reader, node, token + 1, op == CHECK_OP_ARROW);
                 }
             }
             if (check_graph_has_arguments(op))
