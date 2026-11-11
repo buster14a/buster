@@ -24,6 +24,8 @@ runs:
             rm -rf -- "$RUNNER_TEMP/hosted-release-inputs"
             echo 'ready=false' >> "$GITHUB_OUTPUT"
         fi
+    # The preparation publishes this artifact only when the cache didn't verify for it (#2372). When it did, a cache
+    # that fails here (a read error) finds no artifact and fails this setup step, which #2276's re-run retries once.
     - name: Restore this run's verified preparation artifact
       if: steps.verify.outputs.ready != 'true' && inputs.artifact-name != ''
       uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

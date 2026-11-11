@@ -133,6 +133,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
+        case CHECK_INPUT_ASM_LABEL_CONFLICT: result = "conflicting asm label"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
         case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
@@ -2678,13 +2679,14 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
-// The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative array's
-// (#2238), 2 an unused file-scope declaration's.
+// The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative
+// definition's (#2238's array, #2168's const object), 2 an unused file-scope declaration's.
 static uint32_t check_driver_unit_end_class(const CheckWarningEvent* event)
 {
-    const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
-                        event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
-    return event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY ? 1u : unused ? 2u : 0u;
+    const bool unit_end = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+    const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) && unit_end;
+    const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY || (event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT && unit_end);
+    return tentative ? 1u : unused ? 2u : 0u;
 }
 
 // Splits a reader's warning events (`events`) into those published where they stand (`kept`) and the unit-end ones
@@ -5353,6 +5355,17 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const String8 written = check_driver_attribute_spelling(parser, pp, at, false);
                             const String8 bare = check_warning_attribute_normalized(written);
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "expected string literal as argument of '%.*s' attribute", (int)bare.length, bare.pointer);
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ASM_LABEL_CONFLICT)
+                        {
+                            // A redeclaration's other asm label (#2262), its note at the earlier label's string.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t previous = report->note_kind != CHECK_INPUT_NOTE_NONE ? report->note_token : count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = "previous declaration is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u, "conflicting asm label");
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_LOADER_EXTERN || input->reports[index].message == CHECK_INPUT_LOADER_REDECLARATION ||
                                                 input->reports[index].message == CHECK_INPUT_INTERNAL_LINKAGE_FIRST) && token < count)
