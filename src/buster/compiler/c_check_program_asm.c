@@ -1575,6 +1575,10 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_RDPMC, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RDX) },
     { X86_FORM_XGETBV, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RDX) },
     { X86_FORM_SYSCALL, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RCX) | BUSTER_CHECK_ASM_GPR(R11) },
+    // loop decrements rcx (ecx with an address-size prefix) and jrcxz writes nothing: each a branch to the template's own
+    // record, whose rel8 displacement the assembler fixed (asm_assemble_code's fixed branches, #1839's item 4).
+    { X86_FORM_LOOP_REL8, BUSTER_CHECK_ASM_GPR(RCX) },
+    { X86_FORM_JRCXZ_REL8, 0 },
     { X86_FORM_FNSTSW_AX, BUSTER_CHECK_ASM_GPR(RAX) },
     { X86_FORM_FSTSW_AX, BUSTER_CHECK_ASM_GPR(RAX) },
     { X86_FORM_LDMXCSR_M32, 0 },
@@ -1634,6 +1638,18 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         written |= places[k].kind == BUSTER_CHECK_ASM_PAIR ? 1ull << X86_REGISTER_RAX | 1ull << X86_REGISTER_RDX : 0;
         opmask_writes |= places[k].kind == BUSTER_CHECK_ASM_MASK ? 1u << (places[k].reg & 7) : 0;
     }
+    // A loop's or a jrcxz's (#1839's item 4): a rel8 record the assembler gave its displacement to a record of the template's
+    // own (asm_assemble_code's fixed branches). A template of one takes no straight path to a return below.
+    bool fixed = false;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        bool sized = false;
+        for (uint32_t b = 0; b < code->branch_count; b += 1)
+        {
+            sized |= code->branches[b] == r;
+        }
+        fixed |= !sized && x86_form_description(code->records[r].form & BUSTER_X86_FORM_NUMBER)->relative_bytes == 1 && (code->records[r].form & BUSTER_X86_FORM_FIXUP) == 0;
+    }
     for (uint32_t r = 0; placed && r < code->count; r += 1)
     {
         const X86Instruction* record = code->records + r;
@@ -1656,7 +1672,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 branch |= gotos[j].record == k;
             }
-            out = !target && check_asm_return(code->records[k].form);
+            out = !target && !fixed && check_asm_return(code->records[k].form);
             if (branch || target)
             {
                 break;
@@ -1714,6 +1730,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 local |= gotos[j].record == r;
             }
+            // A fixed branch's rel8 form, to the template's own record.
+            local |= x86_form_description(record->form & BUSTER_X86_FORM_NUMBER)->relative_bytes == 1 && (record->form & BUSTER_X86_FORM_FIXUP) == 0;
             const uint32_t control = x86_effects_control(effects);
             placed = (control == BUSTER_X86_CONTROL_NONE || (local && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))) &&
                      (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_STACK_WRITE)) == 0 &&

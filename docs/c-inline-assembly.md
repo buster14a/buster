@@ -580,12 +580,23 @@ instructions, labels and the syntax directives. It refuses:
 
 - every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to any of its labels: the planner assembles
-  these whole too (#1845), as their failure asks (`AsmCode.directive`), so
-  that `leaq 1f(%rip)`, `.`'s address and `loop 1b` are the assembler's own
-  fixups and branches, as clang's;
+  addend, and `loop` and `jrcxz` to its labels with an addend or across a `jmp`
+  or `jcc` that branch sizing sizes: the planner assembles these whole too
+  (#1845), as their failure asks (`AsmCode.directive`), so that `leaq
+  1f(%rip)`, `.`'s address and such a `loop 1b` are the assembler's own fixups
+  and branches, as clang's;
 - undefined numeric labels;
 - what the matcher doesn't take.
+
+A `loop` or a `jrcxz` to a label of the template's own, without an addend and
+with no `jmp` or `jcc` that branch sizing sizes between it and its label, is a
+record whose rel8 displacement the assembler fixes once the records are, by
+their lengths (#1839's item 4: these have no rel32 form, which branch sizing
+would need to grow them, and nothing between them can grow). A body or a
+helper takes it as any record; `check_asm_implicit` gives `loop` its rcx and
+`jrcxz` nothing, and `check_asm_inline_touched` takes it as the template's
+own branch. So `1: addq %rcx, %0; loop 1b` is an asm body in its caller, as
+clang places it.
 
 ### Templates that take directives
 
@@ -1202,7 +1213,7 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` (assembled whole, as templates that take directives are),
+templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels

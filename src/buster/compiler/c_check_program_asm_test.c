@@ -1192,6 +1192,17 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){int a=0,b=0;int f=five(n%7,&a)+five(5,&b);"
         "return (int)(root(n*n+0.25)*4)+(int)(sum(n*0.5L,2.25L)*8)+(int)kept(n*1.5f)+zero(n&3)*3+below((unsigned)n,7u)*5+flag_only()*11+sign(n-9)*13+sign(9-n)*17+sign(0)+f*19+a+b;}",
         "asm-directives-helper", clang);
+    // loop and jrcxz to the template's own labels (#1839's item 4): asm bodies whose rel8 displacements the assembler
+    // fixed, a loop summing rcx's counts down, a jrcxz skipping a store, and a loop and a jrcxz in one template; and one
+    // whose jrcxz jumps over a je (which branch sizing sizes), which the whole assembler takes. clang's build must print
+    // the same.
+    check_test_program_source(test,
+        "static long sum(long n){long s=0;if(n<=0)return 0;__asm__(\"1:\\n\\taddq %%rcx, %0\\n\\tloop 1b\" : \"+r\"(s), \"+c\"(n));return s;}"
+        "static int zero(long n){int r=1;__asm__(\"jrcxz 1f\\n\\tmovl $0, %0\\n1:\" : \"+r\"(r) : \"c\"(n));return r;}"
+        "static long both(long n){long s=0;__asm__(\"jrcxz 2f\\n1:\\n\\tincq %0\\n\\tloop 1b\\n2:\" : \"+r\"(s), \"+c\"(n));return s;}"
+        "static int over(long n){int r=0;__asm__(\"jrcxz 2f\\n1:\\n\\tincl %0\\n\\tcmpl $5, %0\\n\\tje 2f\\n\\tloop 1b\\n2:\" : \"+r\"(r), \"+c\"(n));return r;}"
+        "int tested(int n){long m=(long)((unsigned)n%9u);return (int)sum(m+1)+zero(m)*3+zero(0)*5+(int)both(m)*7+(int)both(0)*11+over(m)*13+over(0)*17;}",
+        "asm-loop-bodies", clang);
     check_test_program_boundary_reason(test, "int tested(int n){asm goto(\".p2align 4\\n\\tleaq %l0(%%rip), %%rax\" : : : \"rax\" : out);return n;out:return -n;}",
                                        "asm-directives-goto-data", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".cfi_startproc\\n\\t.cfi_endproc\");return n;}",
