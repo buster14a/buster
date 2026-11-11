@@ -659,6 +659,7 @@ static const uint32_t executable_section_types[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_INTERP] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_ABI_NOTE] = SHT_NOTE,
     [EXECUTABLE_SECTION_BUILD_ID] = SHT_NOTE,
+    [EXECUTABLE_SECTION_NOTE ... EXECUTABLE_SECTION_DYNSYM - 1] = SHT_NOTE,
     [EXECUTABLE_SECTION_DYNSYM] = SHT_DYNSYM,
     [EXECUTABLE_SECTION_VERSYM] = SHT_GNU_versym,
     [EXECUTABLE_SECTION_VERNEED] = SHT_GNU_verneed,
@@ -712,6 +713,7 @@ static const uint64_t executable_section_flags[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_INTERP] = SHF_ALLOC,
     [EXECUTABLE_SECTION_ABI_NOTE] = SHF_ALLOC,
     [EXECUTABLE_SECTION_BUILD_ID] = SHF_ALLOC,
+    [EXECUTABLE_SECTION_NOTE ... EXECUTABLE_SECTION_DYNSYM - 1] = SHF_ALLOC,
     [EXECUTABLE_SECTION_DYNSYM] = SHF_ALLOC,
     [EXECUTABLE_SECTION_VERSYM] = SHF_ALLOC,
     [EXECUTABLE_SECTION_VERNEED] = SHF_ALLOC,
@@ -786,6 +788,8 @@ static const uint8_t executable_linker_before[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_INTERP] = BUSTER_LINK_CLASS_RODATA,
     [EXECUTABLE_SECTION_ABI_NOTE] = BUSTER_LINK_CLASS_RODATA,
     [EXECUTABLE_SECTION_BUILD_ID] = BUSTER_LINK_CLASS_RODATA,
+    // Atoms' (the note buckets'), which executable_lay_out places among the linker's sections before RODATA's.
+    [EXECUTABLE_SECTION_NOTE ... EXECUTABLE_SECTION_DYNSYM - 1] = BUSTER_LINK_CLASS_COUNT,
     [EXECUTABLE_SECTION_DYNSYM] = BUSTER_LINK_CLASS_RODATA,
     [EXECUTABLE_SECTION_VERSYM] = BUSTER_LINK_CLASS_RODATA,
     [EXECUTABLE_SECTION_VERNEED] = BUSTER_LINK_CLASS_RODATA,
@@ -817,7 +821,14 @@ static const uint8_t executable_linker_before[EXECUTABLE_SECTION_COUNT] = {
 // A .bss atom large enough to carry the image past the 32-bit references' reach goes after the ordinary .bss buckets,
 // in a bucket per alignment of its own: it needs address space but no bytes, and the atoms before it (the runtime's, at
 // ordinary sizes) must stay in that reach.
-#define BUSTER_EXECUTABLE_BUCKETS (BUSTER_EXECUTABLE_NORMAL_BUCKETS + BUSTER_EXECUTABLE_ALIGNMENTS)
+#define BUSTER_EXECUTABLE_OVERSIZED_BUCKETS BUSTER_EXECUTABLE_NORMAL_BUCKETS
+// A read-only atom whose input section is a .note one goes in a note bucket, one per alignment after the oversized .bss
+// ones (executable_bound_sections marks it), each the bytes of a note section of its own (executable_note_section).
+// Every bucket's alignment is still BUSTER_EXECUTABLE_PAGE_LOG2 less its index's remainder by
+// BUSTER_EXECUTABLE_ALIGNMENTS, and the last bucket's index plus one fits ExecutableShared.bound's byte.
+#define BUSTER_EXECUTABLE_NOTE_BUCKETS (BUSTER_EXECUTABLE_OVERSIZED_BUCKETS + BUSTER_EXECUTABLE_ALIGNMENTS)
+#define BUSTER_EXECUTABLE_BUCKETS (BUSTER_EXECUTABLE_NOTE_BUCKETS + BUSTER_EXECUTABLE_ALIGNMENTS)
+_Static_assert(BUSTER_EXECUTABLE_BUCKETS <= UINT8_MAX, "a bucket plus one fits ExecutableShared.bound's byte");
 #define BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 3
 
 // The section each class's atoms go to: in a static executable without the C runtime, EXECUTABLE_SECTION_COUNT for the
@@ -899,6 +910,26 @@ static uint32_t executable_alignment_log2(uint8_t class, uint8_t alignment_log2,
 static uint32_t executable_bucket(uint8_t class, uint32_t alignment_log2)
 {
     return (uint32_t)(class - 1) * BUSTER_EXECUTABLE_ALIGNMENTS + (BUSTER_EXECUTABLE_PAGE_LOG2 - alignment_log2);
+}
+
+// The note bucket of an alignment (BUSTER_EXECUTABLE_NOTE_BUCKETS).
+static uint32_t executable_note_bucket(uint32_t alignment_log2)
+{
+    return BUSTER_EXECUTABLE_NOTE_BUCKETS + (BUSTER_EXECUTABLE_PAGE_LOG2 - alignment_log2);
+}
+
+// The note section of an alignment, its note bucket's, in the same order from a page's down.
+static uint32_t executable_note_section(uint32_t alignment_log2)
+{
+    return EXECUTABLE_SECTION_NOTE + (BUSTER_EXECUTABLE_PAGE_LOG2 - alignment_log2);
+}
+
+_Static_assert(EXECUTABLE_SECTION_DYNSYM - EXECUTABLE_SECTION_NOTE == BUSTER_EXECUTABLE_ALIGNMENTS, "a note section per note bucket");
+
+// Whether a bucket is a note one, whose atoms go in its note section rather than their class's section.
+static bool executable_bucket_is_note(uint32_t bucket)
+{
+    return bucket >= BUSTER_EXECUTABLE_NOTE_BUCKETS && bucket < BUSTER_EXECUTABLE_BUCKETS;
 }
 
 // Whether a .bss atom is large enough to place after the ordinary .bss buckets: one that by itself can carry the image
@@ -1151,8 +1182,9 @@ struct ExecutableSegmentLayout
 };
 
 // Program headers: PT_PHDR, a dynamic PIE's PT_INTERP, a PT_LOAD per segment with bytes, PT_TLS with TLS, a PIE's
-// PT_DYNAMIC, PT_GNU_RELRO with a RELRO segment, PT_GNU_EH_FRAME with .eh_frame_hdr, PT_GNU_STACK and PT_NOTE.
-#define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS 12
+// PT_DYNAMIC, PT_GNU_RELRO with a RELRO segment, PT_GNU_EH_FRAME with .eh_frame_hdr, PT_GNU_STACK and PT_NOTE, and a
+// PT_NOTE per note bucket with bytes but the one that continues the build ID's (executable_write_headers).
+#define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS (12 + BUSTER_EXECUTABLE_ALIGNMENTS)
 // Section headers: the null one, the sections with bytes or memory, and .shstrtab.
 #define BUSTER_EXECUTABLE_MAX_SECTION_HEADERS (EXECUTABLE_SECTION_COUNT + 2)
 
@@ -1182,6 +1214,8 @@ struct ExecutableLayout
     // Each bucket's first image offset and first piece, summed over every lane: the bucket's start.
     uint64_t bucket_address[BUSTER_EXECUTABLE_BUCKETS];
     uint64_t bucket_piece[BUSTER_EXECUTABLE_BUCKETS];
+    // The note sections' names, by section from EXECUTABLE_SECTION_NOTE (ExecutableShared.note_names).
+    String8 note_names[BUSTER_EXECUTABLE_ALIGNMENTS];
     // Where the prioritized init and fini array atoms start, by executable_array_index: their class's start in its
     // section, before its buckets; and their first pieces.
     uint64_t prioritized_address[2];
@@ -1218,6 +1252,15 @@ static const char* executable_section_name(const ExecutableLayout* layout, uint3
     return layout->runtime && section == EXECUTABLE_SECTION_PLT_GOT ? ".iplt" : executable_section_names[section];
 }
 
+// A section's name as .shstrtab holds it: executable_section_name's, but a note section's, its atoms' input section's
+// (ExecutableLayout.note_names), when it has one.
+static String8 executable_section_label(const ExecutableLayout* layout, uint32_t section)
+{
+    const char* name = executable_section_name(layout, section);
+    const bool note = section >= EXECUTABLE_SECTION_NOTE && section < EXECUTABLE_SECTION_DYNSYM && layout->note_names[section - EXECUTABLE_SECTION_NOTE].length != 0;
+    return note ? layout->note_names[section - EXECUTABLE_SECTION_NOTE] : (String8){ .pointer = (char*)name, .length = strlen(name) };
+}
+
 // The counts of one lane's atoms: per bucket, how many, their padded bytes and how many go in the file; per ordered
 // class (executable_class_is_ordered), its atoms' largest alignment; the FDEs in its .eh_frame atoms; and the bytes
 // and pieces of its prioritized init and fini array atoms (link->priorities), by executable_array_index, which no
@@ -1242,9 +1285,10 @@ struct ExecutableCounts
 // and an oversized .bss atom at most BUSTER_EXECUTABLE_MAX_ZERO_FILL_BYTES, so no sum of their sizes wraps without the
 // checks below.
 static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts* counts, uint32_t lanes, uint64_t got_slots, bool dynamic, bool crt, bool runtime,
-                               const uint64_t* linker_bytes, const uint64_t* linker_alignments)
+                               const uint64_t* linker_bytes, const uint64_t* linker_alignments, const String8* note_names)
 {
     *layout = (ExecutableLayout){ 0 };
+    memcpy(layout->note_names, note_names, sizeof(layout->note_names));
     layout->dynamic = dynamic;
     layout->crt = crt;
     layout->runtime = runtime;
@@ -1333,6 +1377,19 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
         }
     }
     section_alignment[EXECUTABLE_SECTION_TEXT] = section_alignment[EXECUTABLE_SECTION_TEXT] < 16 ? 16 : section_alignment[EXECUTABLE_SECTION_TEXT];
+    // The note sections, each its bucket's bytes at its alignment. Each has a PT_NOTE but the one of 4 that follows the
+    // build ID's note directly (with no note section of a larger alignment), which shares the build ID's
+    // (executable_write_headers).
+    uint32_t note_headers = 0;
+    bool note_before = false;
+    for (uint32_t log2 = BUSTER_EXECUTABLE_PAGE_LOG2 + 1; log2-- > 0;)
+    {
+        const uint32_t section = executable_note_section(log2);
+        section_bytes[section] = bytes[executable_note_bucket(log2)];
+        section_alignment[section] = section_bytes[section] != 0 ? 1ull << log2 : 1;
+        note_headers += section_bytes[section] != 0 && (note_before || log2 != 2) ? 1 : 0;
+        note_before = note_before || section_bytes[section] != 0;
+    }
     // The TLS segment starts at its whole alignment, so that offsets in it are offsets in the TLS block, whose start the
     // program aligns to it: its p_vaddr is a multiple of p_align, and the block's distance below the thread pointer,
     // align_up(p_memsz + f, p_align) - f for p_vaddr's remainder f (docs/object-writer-and-linker.md, "Layout"), is
@@ -1352,7 +1409,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
                                                         section_bytes[EXECUTABLE_SECTION_DYNAMIC] + section_bytes[EXECUTABLE_SECTION_GOT] !=
                                                     0;
     layout->has_segment[EXECUTABLE_SEGMENT_RW] = section_bytes[EXECUTABLE_SECTION_DATA] + section_bytes[EXECUTABLE_SECTION_BSS] != 0;
-    layout->program_headers = 4 + (has_tls ? 1 : 0) + (layout->has_segment[EXECUTABLE_SEGMENT_RELRO] ? 1 : 0) + (dynamic ? 1 : 0) +
+    layout->program_headers = 4 + note_headers + (has_tls ? 1 : 0) + (layout->has_segment[EXECUTABLE_SEGMENT_RELRO] ? 1 : 0) + (dynamic ? 1 : 0) +
                               (section_bytes[EXECUTABLE_SECTION_INTERP] != 0 ? 1 : 0) + (section_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR] != 0 ? 1 : 0);
     for (uint32_t segment = EXECUTABLE_SEGMENT_RX; segment < EXECUTABLE_SEGMENTS; segment += 1)
     {
@@ -1435,6 +1492,14 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     {
         while (linker < EXECUTABLE_SECTION_COUNT && (executable_linker_before[linker] == BUSTER_LINK_CLASS_COUNT || executable_linker_before[linker] <= class))
         {
+            // A note section's bucket, among the linker's sections before RODATA's buckets.
+            if (linker >= EXECUTABLE_SECTION_NOTE && linker < EXECUTABLE_SECTION_DYNSYM)
+            {
+                const uint32_t bucket = BUSTER_EXECUTABLE_NOTE_BUCKETS + (linker - EXECUTABLE_SECTION_NOTE);
+                layout->bucket_address[bucket] = layout->sections[linker].address;
+                layout->bucket_piece[bucket] = piece;
+                piece += pieces[bucket];
+            }
             const bool here = executable_linker_before[linker] == class && layout->sections[linker].size != 0;
             layout->section_piece[linker] = here ? piece : layout->section_piece[linker];
             piece += here ? 1 : 0;
@@ -1491,7 +1556,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
         const bool present = layout->sections[section].size != 0;
         layout->section_index[section] = present ? layout->section_header_count - 1 : 0;
         layout->section_header_count += present ? 1 : 0;
-        layout->shstrtab_size += present ? strlen(executable_section_name(layout, section)) + 1 : 0;
+        layout->shstrtab_size += present ? executable_section_label(layout, section).length + 1 : 0;
     }
     layout->shstrtab_offset = offset;
     layout->section_headers_offset = executable_align(offset + layout->shstrtab_size, 8);
@@ -1506,6 +1571,20 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     layout->failure_value = !image_fits ? (overflow ? UINT64_MAX : layout->base + layout->image_size) : (tls_fits ? layout->shstrtab_size : layout->tls_block);
     layout->failure_limit = !image_fits ? BUSTER_EXECUTABLE_MAX_IMAGE_ADDRESS : (tls_fits ? BUSTER_EXECUTABLE_SHSTRTAB_BYTES : BUSTER_EXECUTABLE_MAX_TLS_BYTES);
     return image_fits && tls_fits && names_fit;
+}
+
+// The output section of an atom of `class` at image offset `address`: its class's (executable_class_section's, with
+// `crt`), but a note section for a note atom, a read-only one inside it.
+static uint8_t executable_atom_section(const ExecutableLayout* layout, uint8_t class, uint64_t address, bool crt)
+{
+    uint8_t result = executable_class_section(class, crt);
+    for (uint32_t section = EXECUTABLE_SECTION_NOTE; class == BUSTER_LINK_CLASS_RODATA && section < EXECUTABLE_SECTION_DYNSYM; section += 1)
+    {
+        const ExecutableSectionLayout* notes = &layout->sections[section];
+        const bool inside = notes->size != 0 && address >= notes->address && address - notes->address < notes->size;
+        result = inside ? (uint8_t)section : result;
+    }
+    return result;
 }
 
 // The file offset of an image offset in a section: sections keep their offset's place in a page.
@@ -1635,12 +1714,32 @@ static void executable_write_headers(ExecutableHeaders* headers, const Executabl
     };
     count += 1;
     // The ABI note, when there is one, ends where the build ID's begins: both are 4-aligned and their sizes multiples of 4.
+    // So does the note section of 4 when no note section of a larger alignment is before it, which the same PT_NOTE
+    // then covers, as lld's covers a run of note sections of one alignment; every other note section with bytes has a
+    // PT_NOTE of its own alignment (executable_lay_out counted them).
     const ExecutableSectionLayout* abi_note = &layout->sections[EXECUTABLE_SECTION_ABI_NOTE];
     const ExecutableSectionLayout* note = &layout->sections[EXECUTABLE_SECTION_BUILD_ID];
     const ExecutableSectionLayout* first_note = abi_note->size != 0 ? abi_note : note;
-    program[count] = executable_program_header(layout, PT_NOTE, PF_R, first_note->offset, first_note->address, note->offset + note->size - first_note->offset,
-                                               note->offset + note->size - first_note->offset, 4);
+    bool note_before = false;
+    for (uint32_t section = EXECUTABLE_SECTION_NOTE; section < executable_note_section(2); section += 1)
+    {
+        note_before = note_before || layout->sections[section].size != 0;
+    }
+    const ExecutableSectionLayout* words = &layout->sections[executable_note_section(2)];
+    const bool joined = words->size != 0 && !note_before;
+    const ExecutableSectionLayout* last_note = joined ? words : note;
+    const uint64_t note_bytes = last_note->offset + last_note->size - first_note->offset;
+    program[count] = executable_program_header(layout, PT_NOTE, PF_R, first_note->offset, first_note->address, note_bytes, note_bytes, 4);
     count += 1;
+    for (uint32_t section = EXECUTABLE_SECTION_NOTE; section < EXECUTABLE_SECTION_DYNSYM; section += 1)
+    {
+        const ExecutableSectionLayout* placed = &layout->sections[section];
+        if (placed->size != 0 && !(joined && placed == words))
+        {
+            program[count] = executable_program_header(layout, PT_NOTE, PF_R, placed->offset, placed->address, placed->size, placed->size, placed->alignment);
+            count += 1;
+        }
+    }
     memcpy(headers->headers + sizeof(Elf64_Ehdr), program, count * sizeof(Elf64_Phdr));
 
     const Elf64_Nhdr note_header = {
@@ -1660,9 +1759,10 @@ static void executable_write_headers(ExecutableHeaders* headers, const Executabl
         const ExecutableSectionLayout* placed = &layout->sections[section];
         if (placed->size != 0)
         {
-            const char* section_name = executable_section_name(layout, section);
-            const uint32_t length = (uint32_t)strlen(section_name);
-            memcpy(headers->shstrtab + name, section_name, length + 1);
+            const String8 section_name = executable_section_label(layout, section);
+            const uint32_t length = (uint32_t)section_name.length;
+            memcpy(headers->shstrtab + name, section_name.pointer, length);
+            headers->shstrtab[name + length] = 0;
             const uint8_t linked = executable_section_links[section];
             headers->section_headers[index] = (Elf64_Shdr){
                 .sh_name = name,
@@ -2386,9 +2486,10 @@ struct ExecutableShared
     uint32_t* orders;
     // Whether the output is written in order, which lane 0 does at the end, rather than chunk by chunk.
     bool sequential;
-    // For each atom of a bound section's run, its bucket + 1 (0 for every other atom, and for the whole link without
-    // a bound run of more than one atom): the count and the placement place a marked atom where its own alignment
-    // puts it inside the run, and not in the bucket its class's alone would give it (executable_bound_sections).
+    // For each atom of a bound section's run or a note section's, its bucket + 1 (0 for every other atom, and for the
+    // whole link without a note atom or a bound run of more than one atom): the count and the placement place a marked
+    // atom where its own alignment puts it inside the run, and not in the bucket its class's alone would give it
+    // (executable_bound_sections).
     const uint8_t* bound;
     // For each marked atom, the alignment gap before it inside its run (0 for the run's first member): precomputed
     // where the run's order is known, since the bucket's own atoms keep its offset a multiple of its alignment's —
@@ -2397,6 +2498,9 @@ struct ExecutableShared
     // For a bucket's last marked atom, the padding after it that the bucket's extent needs to stay a multiple of its
     // alignment's, as every other atom's padded size keeps it: layout accounting only — __stop is the member's end.
     const uint32_t* bound_tail;
+    // Each note section's name, by section from EXECUTABLE_SECTION_NOTE: the input section of its first note group
+    // (executable_bound_sections), or none.
+    String8 note_names[BUSTER_EXECUTABLE_ALIGNMENTS];
     ExecutableSymbolCounts* symbol_counts;
     ExecutableHeaders headers;
 };
@@ -2623,6 +2727,65 @@ static uint32_t executable_bound_groups(const Link* link, String8* groups, Symbo
     return count;
 }
 
+// Whether an atom goes in a note section (executable_note_section): a read-only one with bytes whose input section is
+// a .note one, as file-scope asm's `.section .note.NAME,"a",@note` makes, which lld gives an SHT_NOTE output section of
+// that name and a PT_NOTE (#1848). The importer drops foreign objects' SHT_NOTE sections and a C definition can't be
+// placed in one, so only the assembler's atoms are notes; the name, not the input type, decides, as clang's does for a
+// section it names.
+static bool executable_atom_is_note(const LinkAtoms* atoms, AtomId atom)
+{
+    const String8 section = atoms->section[atom];
+    return atoms->class[atom] == BUSTER_LINK_CLASS_RODATA && atoms->size[atom] != 0 && section.length >= 5 && memcmp(section.pointer, ".note", 5) == 0;
+}
+
+// The link's note atoms (executable_atom_is_note): their count. The class bytes are compared 64 at a time, so that only
+// a read-only atom's section name is read, and a link without read-only atoms reads none.
+static uint32_t executable_note_atoms(const LinkAtoms* atoms)
+{
+    uint32_t count = 0;
+    for (AtomId block = 1; block < atoms->count; block += 64)
+    {
+        const uint32_t left = atoms->count - block;
+        const __mmask64 lanes = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
+        const __m512i classes = _mm512_maskz_loadu_epi8(lanes, atoms->class + block);
+        uint64_t rodata = _mm512_mask_cmpeq_epi8_mask(lanes, classes, _mm512_set1_epi8(BUSTER_LINK_CLASS_RODATA));
+        while (rodata != 0)
+        {
+            const AtomId atom = block + (AtomId)__builtin_ctzll(rodata);
+            count += executable_atom_is_note(atoms, atom) ? 1 : 0;
+            rodata &= rodata - 1;
+        }
+    }
+    return count;
+}
+
+// Adds the distinct input sections of the link's note atoms to `groups` (of `count` already, at most `capacity`), each
+// a note group (`note` set, and no bound symbol): returns the groups' count then.
+static uint32_t executable_note_groups(const LinkAtoms* atoms, String8* groups, SymbolId* symbols, uint8_t* note, uint32_t count, uint32_t capacity)
+{
+    uint32_t result = count;
+    for (AtomId atom = 1; atom < atoms->count; atom += 1)
+    {
+        if (executable_atom_is_note(atoms, atom))
+        {
+            const String8 section = atoms->section[atom];
+            bool seen = false;
+            for (uint32_t g = count; !seen && g < result; g += 1)
+            {
+                seen = groups[g].length == section.length && memcmp(groups[g].pointer, section.pointer, section.length) == 0;
+            }
+            if (!seen && result < capacity)
+            {
+                groups[result] = section;
+                symbols[result] = 0;
+                note[result] = 1;
+                result += 1;
+            }
+        }
+    }
+    return result;
+}
+
 // The atom's bucket in the layout: a bound section's member's, the group's (so that the run the section's atoms make
 // is the bucket's last), or another atom's own, from its class and alignment (the largest the placement takes).
 static uint32_t executable_bound_bucket(const LinkAtoms* atoms, AtomId atom, const uint32_t* group_of, const uint32_t* group_bucket, bool crt)
@@ -2647,11 +2810,16 @@ static uint32_t executable_bound_bucket(const LinkAtoms* atoms, AtomId atom, con
 // class — a thread-local one and one that isn't, or an ordered class's, which the order of the runtime's arrays or the
 // unwind records makes — can't be one run of one output section, and fails EXECUTABLE_ERROR_UNSUPPORTED with one of
 // the bound symbols' names; an atom the layout will refuse leaves the order as it is, for the count to report it.
-// False without scratch room.
+// The note atoms (executable_atom_is_note) are runs the same way, one per input section and even of one atom, in the
+// note buckets (BUSTER_EXECUTABLE_NOTE_BUCKETS) by their largest alignment: each bucket is a note section, named in
+// shared->note_names after its first section. Sections of one largest alignment but different names share it, as no
+// fixed section table has room for every name; their notes stay whole, and a PT_NOTE covers them. A link without note
+// atoms or bound sections of more than one atom keeps its order and no marks. False without scratch room.
 static bool executable_bound_sections(Link* link, bool crt, Arena* arena, ExecutableShared* shared, ExecutableResult* result)
 {
     LinkAtoms* atoms = &link->atoms;
-    uint32_t candidates = 0;
+    const uint32_t notes = executable_note_atoms(atoms);
+    uint32_t candidates = notes;
     for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
     {
         const bool bound = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER &&
@@ -2665,8 +2833,14 @@ static bool executable_bound_sections(Link* link, bool crt, Arena* arena, Execut
     uint32_t* group_atoms = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, candidates) : 0;
     uint8_t* group_class = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, candidates) : 0;
     uint8_t* group_alignment = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, candidates) : 0;
-    bool fits = candidates == 0 || (groups != 0 && symbols != 0 && group_of != 0 && group_atoms != 0 && group_class != 0 && group_alignment != 0);
-    const uint32_t group_count = fits && candidates != 0 ? executable_bound_groups(link, groups, symbols, candidates) : 0;
+    uint8_t* group_note = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, candidates) : 0;
+    bool fits = candidates == 0 || (groups != 0 && symbols != 0 && group_of != 0 && group_atoms != 0 && group_class != 0 && group_alignment != 0 && group_note != 0);
+    if (fits && candidates != 0)
+    {
+        memset(group_note, 0, candidates * sizeof(*group_note));
+    }
+    const uint32_t bound_count = fits && candidates != notes ? executable_bound_groups(link, groups, symbols, candidates - notes) : 0;
+    const uint32_t group_count = fits && notes != 0 ? executable_note_groups(atoms, groups, symbols, group_note, bound_count, candidates) : bound_count;
     bool runs = false;
     if (fits && group_count != 0)
     {
@@ -2677,9 +2851,11 @@ static bool executable_bound_sections(Link* link, bool crt, Arena* arena, Execut
         for (AtomId atom = 1; atom < atoms->count; atom += 1)
         {
             const String8 section = atoms->section[atom];
+            const bool note = notes != 0 && executable_atom_is_note(atoms, atom);
             for (uint32_t g = 0; section.length != 0 && g < group_count; g += 1)
             {
-                if (section.length == groups[g].length && memcmp(section.pointer, groups[g].pointer, section.length) == 0)
+                // A note group's members are its note atoms: a writable atom of a .note section stays in its class's.
+                if ((group_note[g] == 0 || note) && section.length == groups[g].length && memcmp(section.pointer, groups[g].pointer, section.length) == 0)
                 {
                     const uint8_t class = atoms->class[atom];
                     group_atoms[g] += 1;
@@ -2707,18 +2883,20 @@ static bool executable_bound_sections(Link* link, bool crt, Arena* arena, Execut
         }
         for (uint32_t g = 0; g < group_count; g += 1)
         {
-            runs = runs || group_atoms[g] > 1;
+            runs = runs || group_atoms[g] > 1 || group_note[g] != 0;
         }
         // The members of the sections of more than one atom, which the run's sort and bound mark: a section's single
-        // atom is a run of its own already, in its own bucket.
+        // atom is a run of its own already, in its own bucket, but for a note section's, which the note buckets take.
         if (runs)
         {
             for (AtomId atom = 1; atom < atoms->count; atom += 1)
             {
                 const String8 section = atoms->section[atom];
+                const bool note = notes != 0 && executable_atom_is_note(atoms, atom);
                 for (uint32_t g = 0; section.length != 0 && g < group_count; g += 1)
                 {
-                    if (group_atoms[g] > 1 && section.length == groups[g].length && memcmp(section.pointer, groups[g].pointer, section.length) == 0)
+                    const bool member = group_note[g] != 0 ? note : group_atoms[g] > 1;
+                    if (member && section.length == groups[g].length && memcmp(section.pointer, groups[g].pointer, section.length) == 0)
                     {
                         group_of[atom] = g + 1;
                     }
@@ -2760,7 +2938,12 @@ static bool executable_bound_sections(Link* link, bool crt, Arena* arena, Execut
         {
             for (uint32_t g = 0; g < group_count; g += 1)
             {
-                group_bucket[g] = executable_bucket(group_class[g], group_alignment[g]);
+                group_bucket[g] = group_note[g] != 0 ? executable_note_bucket(group_alignment[g]) : executable_bucket(group_class[g], group_alignment[g]);
+                const uint32_t note = group_note[g] != 0 ? executable_note_section(group_alignment[g]) - EXECUTABLE_SECTION_NOTE : BUSTER_EXECUTABLE_ALIGNMENTS;
+                if (note < BUSTER_EXECUTABLE_ALIGNMENTS && shared->note_names[note].length == 0)
+                {
+                    shared->note_names[note] = groups[g];
+                }
             }
             for (AtomId atom = 0; atom < atoms->count; atom += 1)
             {
@@ -4811,7 +4994,8 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
             }
             if (!prioritized && executable_in_file(class, size))
             {
-                const uint8_t section = executable_class_section(class, layout->crt);
+                const uint8_t section = executable_bucket_is_note(bucket) ? (uint8_t)(EXECUTABLE_SECTION_NOTE + (bucket - BUSTER_EXECUTABLE_NOTE_BUCKETS))
+                                                                          : executable_class_section(class, layout->crt);
                 placed[run_piece] = (ExecutablePiece){
                     .offset = executable_file_offset(layout, section, run_address),
                     .size = size,
@@ -5665,7 +5849,7 @@ static void executable_write_exports(const Link* link, ExecutableShared* shared,
         uint64_t address = (uint64_t)(int64_t)(int32_t)symbols->reference[symbol];
         if (atom != 0)
         {
-            const uint8_t section = executable_class_section(link->atoms.class[atom], true);
+            const uint8_t section = executable_atom_section(layout, link->atoms.class[atom], link->atoms.address[atom], true);
             shndx = section != EXECUTABLE_SECTION_COUNT ? layout->section_index[section] : SHN_ABS;
             address = link->atoms.address[atom] + symbols->value[symbol];
         }
@@ -6520,7 +6704,7 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
         if (atom != 0)
         {
             const uint8_t class = link->atoms.class[atom];
-            const uint8_t output_section = executable_class_section(class, layout->crt);
+            const uint8_t output_section = executable_atom_section(layout, class, link->atoms.address[atom], layout->crt);
             address = link->atoms.address[atom] + link->symbols.value[symbol];
             address = link_class_is_tls(class) ? address - layout->sections[EXECUTABLE_SECTION_TDATA].address : layout->base + address;
             section = output_section < EXECUTABLE_SECTION_COUNT ? layout->section_index[output_section] : SHN_ABS;
@@ -6916,7 +7100,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     }
     const bool laid_out =
         ok && executable_lay_out(layout, shared->counts, lanes, got_slots + totals.ifunc_stubs + 2 * totals.tlsgd_pairs + (totals.tlsld ? 2 : 0), dynamic,
-                                 dynamic || runtime, runtime, totals.linker_bytes, totals.linker_alignments);
+                                 dynamic || runtime, runtime, totals.linker_bytes, totals.linker_alignments, shared->note_names);
     if (laid_out)
     {
         // The IFUNCs' stubs' slots, after the GOT kinds'.

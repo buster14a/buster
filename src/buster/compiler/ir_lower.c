@@ -76,7 +76,25 @@ static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
     const uint32_t orders = kind == BUSTER_TYPED_LOAD ? 0x27u : 0x29u;
     const uint64_t order = value & BUSTER_TYPED_FENCE_ORDER;
+    // A segment override (#1447) goes to the access's flags (ir_typed_access); the rest is the class's.
+    value &= ~BUSTER_TYPED_ACCESS_SEGMENT;
     return !integer || value == 0 || ((value & ~(uint64_t)(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_ORDER)) == 0 && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0 && (orders >> order & 1) != 0);
+}
+
+// Whether entry `i`'s segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), if it has one, is one the IR carries
+// (BUSTER_IR_SEGMENT): FS's or GS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
+// integer's halves, ir_wide.c, and a wide vector's pieces, ir_vector_split.c, keep their access's flags). An atomic
+// read/modify/write's (ATOMIC_RMW, ATOMIC_CAS), whose IR flags hold its operation where a load's hold the segment, and an
+// access of a long double or a mask, which Tier 1 moves through rows of their own (the x87 stack's, kmov's), are Tier 0's.
+static bool ir_typed_segment_valid(const Tier0Function* input, uint32_t i)
+{
+    const uint8_t kind = input->kinds[i];
+    const uint8_t class = input->classes[i];
+    const uint32_t segment = (uint32_t)(input->values[i] >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
+    const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
+    const bool atomic = kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
+    const bool carried = class != BUSTER_TYPED_CLASS_F80 && class != BUSTER_TYPED_CLASS_MASK;
+    return segment == 0 || (!atomic && (!access || (segment != 3 && carried)));
 }
 
 typedef struct IrTypedPlan IrTypedPlan;
@@ -623,13 +641,20 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink*
 // An integer class's typed access's IR flags (#1059) onto its load or store `id`: an atomic access's marker as
 // BUSTER_IR_ATOMIC and its order, and its natural alignment, which the checker's direct access has proven and the
 // verifier requires of an atomic access. The flags column starts zeroed, which an ordinary access keeps.
+// A segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT) of any class it admits (ir_typed_segment_class) goes to
+// BUSTER_IR_SEGMENT, numbered as the typed stream numbers it.
 static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* sink, uint32_t id, uint8_t class, uint64_t value)
 {
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
+    const uint8_t segment = (uint8_t)((value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) << BUSTER_IR_SEGMENT_SHIFT);
     if (sink->output != 0 && integer && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0)
     {
         sink->output->flags[id] = (uint8_t)(BUSTER_IR_ATOMIC | (value & BUSTER_TYPED_FENCE_ORDER) << BUSTER_IR_ORDER_SHIFT);
         sink->output->alignment_log2[id] = (uint8_t)__builtin_ctz(tier0_class_bytes(class));
+    }
+    if (sink->output != 0 && __builtin_expect(segment != 0, 0))
+    {
+        sink->output->flags[id] |= segment;
     }
 }
 
@@ -729,6 +754,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
             ir_typed_lanes(sink, value, operation->lane);
         }
+    }
+    else if (operation->shift)
+    {
+        // A shift by a scalar count (#1840), its lanes and shift in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
     else if (operation->permute != 0)
     {
@@ -1897,17 +1928,17 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too.
         leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0;
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments || leaves))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || leaves))
     {
         // An asm body that returns from its function (#1839, Tier0AsmBody.leaves), whose function keeps no local and no
         // value in a callee-saved register, as __builtin_setjmp's keeps none, is Tier 0's too.
         // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
         // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
-        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), and a function with segment overrides
-        // (#1447, Tier0Function.segments: loads and stores in __seg_fs or __seg_gs, which the IR doesn't carry yet) are Tier
-        // 0's: ordinary Tier 1 falls back to them. A caller of setjmp's library kin lowers (Tier0Function.calls_returns_twice):
-        // only Tier 1's admission leaves it to Tier 0 (check_tier1_compile, #1847).
+        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), are Tier 0's: ordinary Tier 1 falls
+        // back to them. A function with segment overrides (#1447, Tier0Function.segments) is Tier 1's where each is an
+        // access the IR carries (ir_typed_segment_valid). A caller of setjmp's library kin lowers
+        // (Tier0Function.calls_returns_twice): only Tier 1's admission leaves it to Tier 0 (check_tier1_compile, #1847).
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)
@@ -1942,6 +1973,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         {
             // An indirect variadic call with a static chain (#148): its chain takes r10, the moves' scratch r11 and its al
             // rax, which Tier 1 calls through otherwise (tier1_select_callee_register); Tier 1 falls back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
+            check.instruction = i;
+        }
+        else if (__builtin_expect(input->segments, 0) && !ir_typed_segment_valid(input, i))
+        {
+            // A segment override the IR doesn't carry: Tier 0 compiles the function.
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
