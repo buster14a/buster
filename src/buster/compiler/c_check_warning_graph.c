@@ -269,6 +269,9 @@ struct CheckInterruptCalls
 {
     const uint32_t* interrupts;
     const uint32_t* saving;
+    // Per declaring token, in a unit with CheckInput.redeclaration_links (#1447): bit 0 where interrupt marks its
+    // declaration's chain at it, bit 1 where no_caller_saved_registers does. Null otherwise.
+    const uint8_t* marks;
     const CheckInterruptBody* bodies;
     uint32_t filled;
     uint32_t report_begin;
@@ -279,6 +282,16 @@ static bool check_interrupt_head(const Parser* parser, uint32_t token)
 {
     const uint8_t kind = parser->tokens.kinds[token];
     return kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_FOR;
+}
+
+// Whether the declaration `declaration` of `object`, a function's, has interrupt (`which` 0) or no_caller_saved_registers
+// (1) at it, as clang's redeclarations inherit them from the declaration their lookup found (#147): an earlier declaration
+// of its object has it (CheckInterruptCalls.interrupts or saving), or, in a unit whose lookups found other declarations
+// than their entities' latest, its chain does (CheckInterruptCalls.marks, #1447).
+static bool check_interrupt_marked(const CheckInterruptCalls* calls, uint32_t object, uint32_t declaration, uint32_t which)
+{
+    const uint32_t first = which == 0 ? calls->interrupts[object] : calls->saving[object];
+    return calls->marks != NULL ? (calls->marks[declaration] >> which & 1u) != 0 : first <= declaration;
 }
 
 // Appends a range of a direct call's full expression (#1447, CheckInput.interrupt_ranges): its tokens from `first` to `last`,
@@ -437,7 +450,7 @@ static void check_interrupt_call_report(CheckInputReader* reader, const CheckInt
     {
         invalid = input->reports[r].message == CHECK_INPUT_INTERRUPT_CALLED && input->reports[r].token >= callee_first && input->reports[r].completion < close;
     }
-    if (location < count && function && calls->interrupts[object] <= declaration)
+    if (location < count && function && check_interrupt_marked(calls, object, declaration, 0))
     {
         const uint32_t before = input->report_count;
         check_input_report(reader, location, CHECK_INPUT_INTERRUPT_CALLED);
@@ -448,7 +461,7 @@ static void check_interrupt_call_report(CheckInputReader* reader, const CheckInt
         }
         check_interrupt_full_expression(reader, callee_first, close);
     }
-    else if (location < count && body != NULL && !invalid && !(function && calls->saving[object] <= declaration))
+    else if (location < count && body != NULL && !invalid && !(function && check_interrupt_marked(calls, object, declaration, 1)))
     {
         const uint32_t noted = function ? declaration : builtin < count ? check_interrupt_first_use(parser, parser->tokens.names[builtin], builtin + 1, scalar) :
                                                                         BUSTER_CHECK_NONE;
@@ -634,6 +647,63 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
             }
         }
     }
+    // In a unit whose lookups found other declarations than their entities' latest (#1447, CheckInput.redeclaration_links),
+    // each declaration's marks: its own and those of the declaration it found (the link's, or its object's latest before
+    // it), in source order. A scan of the declaring tokens, the vector path comparing 64 tokens' kinds at a time with
+    // C_BINDING_FUNCTION, the scalar path, its twin, each token's.
+    uint8_t* marks = valid && input->redeclaration_link_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t* latest = marks != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    valid = valid && (input->redeclaration_link_count == 0 || latest != NULL);
+    if (latest != NULL)
+    {
+        memset(marks, 0, (uint64_t)count + 1);
+        memset(latest, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        const uint32_t limit = input->token_count < count ? input->token_count : count;
+        uint32_t link = 0;
+        for (uint32_t first = 0; first < limit; first += 64)
+        {
+            const uint32_t live = limit - first < 64 ? limit - first : 64;
+            uint64_t selected = 0;
+            if (!BUSTER_SCALAR_PATH(parser->options.scalar))
+            {
+                const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
+                const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, input->declaration_kinds + first);
+                selected = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8((char)C_BINDING_FUNCTION));
+            }
+            else
+            {
+                for (uint32_t k = 0; k < live; k += 1)
+                {
+                    selected |= (uint64_t)(input->declaration_kinds[first + k] == C_BINDING_FUNCTION) << k;
+                }
+            }
+            for (; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t d = first + (uint32_t)__builtin_ctzll(selected);
+                const uint32_t object = input->declarations[d] == d ? input->objects[d] : 0;
+                if (object != 0 && object <= count)
+                {
+                    while (link < input->redeclaration_link_count && input->redeclaration_links[link * 2] < d)
+                    {
+                        link += 1;
+                    }
+                    const bool linked = link < input->redeclaration_link_count && input->redeclaration_links[link * 2] == d;
+                    const uint32_t found = linked ? input->redeclaration_links[link * 2 + 1] : latest[object];
+                    const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, d) : NULL;
+                    uint8_t own = 0;
+                    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+                    {
+                        const CheckInputAttribute* attribute = attributes->records + i;
+                        const bool kept = !attribute->ignored && !attribute->subject_ignored && !attribute->specifier_type;
+                        own |= kept && attribute->kind == CHECK_ATTRIBUTE_INTERRUPT ? 1u : 0u;
+                        own |= kept && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_NO_CALLER_SAVED ? 2u : 0u;
+                    }
+                    marks[d] = own | (found < count ? marks[found] : 0u);
+                    latest[object] = d;
+                }
+            }
+        }
+    }
     // The bodies of the functions they mark, in token order.
     const bool bodied = valid && check_sparse_present(input->body_declarations);
     uint32_t body_count = 0;
@@ -642,7 +712,8 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const uint32_t object = declaration < count ? input->objects[declaration] : 0;
-        body_count += object != 0 && object <= count && (interrupts[object] <= declaration || saving[object] <= declaration);
+        body_count += object != 0 && object <= count &&
+                      (marks != NULL ? marks[declaration] != 0 : interrupts[object] <= declaration || saving[object] <= declaration);
     }
     CheckInterruptBody* bodies = valid && body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInterruptBody, body_count) : NULL;
     valid = valid && (body_count == 0 || bodies != NULL);
@@ -652,13 +723,16 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const uint32_t object = declaration < count ? input->objects[declaration] : 0;
-        const bool marked = object != 0 && object <= count && (interrupts[object] <= declaration || saving[object] <= declaration);
+        const bool marked = object != 0 && object <= count &&
+                            (marks != NULL ? marks[declaration] != 0 : interrupts[object] <= declaration || saving[object] <= declaration);
+        const bool interrupted = marks != NULL ? (marks[declaration] & 1u) != 0 : interrupts[object] <= declaration;
         if (marked && filled < body_count)
         {
-            bodies[filled++] = (CheckInterruptBody){ .open = opening, .close = parser->tree.parents[opening], .caller = interrupts[object] <= declaration ? 0u : 1u };
+            bodies[filled++] = (CheckInterruptBody){ .open = opening, .close = parser->tree.parents[opening], .caller = interrupted ? 0u : 1u };
         }
     }
-    const CheckInterruptCalls calls = { .interrupts = interrupts, .saving = saving, .bodies = bodies, .filled = filled, .report_begin = report_begin };
+    const CheckInterruptCalls calls = { .interrupts = interrupts, .saving = saving, .marks = marks, .bodies = bodies, .filled = filled,
+                                        .report_begin = report_begin };
     for (uint32_t first = 0; valid && first < graph->count; first += 16)
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
