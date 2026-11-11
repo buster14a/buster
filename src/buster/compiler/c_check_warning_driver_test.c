@@ -1657,6 +1657,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wsign-compare" },
     },
     {
+        // A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+        // -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+        .name = "uninitialized variables in unevaluated statement expressions",
+        .source = "int f1(void) { int u; (void)sizeof(({ u = 1; })); return u; }\n"
+                  "int f2(void) { int u; (void)sizeof(({ u; })); u = 2; return u; }\n"
+                  "int f3(int n) { int u; (void)(n ? sizeof(({ u; })) : 0); return 0; }\n"
+                  "int f4(void) { int u; (void)({ u = 1; }); return u; }\n"
+                  "int f5(void) { int u; return (int)sizeof ({ u; }); }\n"
+                  "int f6(void) { int u; return (int)sizeof ({ int v = u; v; }) + (int)__alignof__(({ u; })); }\n"
+                  "int f8(void) { int u; return _Generic(1, long: ({ u; }), default: 0); }\n"
+                  "int f9(int n) { return sizeof ({ n; }) + sizeof({ (char)n; }) + sizeof ({ int k = n; k; }) * 2; }\n"
+                  "int f10(int n) { int u; return (int)sizeof(({ ({ u; }); })) + (int)sizeof(({ (void)sizeof(({ u = 1; })); 1; })) + u; }\n",
+        .options = { "-Wall", "-Wno-unevaluated-expression" },
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        // A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+        // -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+        .name = "uninitialized variables in unevaluated statement expressions under -Wextra in C23",
+        .source = "int f1(void) { int u; (void)sizeof(({ u = 1; })); return u; }\n"
+                  "int f2(void) { int u; (void)sizeof(({ u; })); u = 2; return u; }\n"
+                  "int f3(int n) { int u; (void)(n ? sizeof(({ u; })) : 0); return 0; }\n"
+                  "int f4(void) { int u; (void)({ u = 1; }); return u; }\n"
+                  "int f5(void) { int u; return (int)sizeof ({ u; }); }\n"
+                  "int f6(void) { int u; return (int)sizeof ({ int v = u; v; }) + (int)__alignof__(({ u; })); }\n"
+                  "int f8(void) { int u; return _Generic(1, long: ({ u; }), default: 0); }\n"
+                  "int f9(int n) { return sizeof ({ n; }) + sizeof({ (char)n; }) + sizeof ({ int k = n; k; }) * 2; }\n"
+                  "int f10(int n) { int u; return (int)sizeof(({ ({ u; }); })) + (int)sizeof(({ (void)sizeof(({ u = 1; })); 1; })) + u; }\n",
+        .options = { "-Wall", "-Wextra", "-Wno-unevaluated-expression" },
+        .warnings = 3,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
         .name = "typeof statement expressions are unevaluated",
         .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
                   "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
