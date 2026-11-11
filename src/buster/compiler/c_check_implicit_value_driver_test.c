@@ -25,6 +25,14 @@ static const CheckDriverDefaultWarningFixture check_driver_implicit_value_fixtur
         .errors = 2,
         .notes = 2,
     },
+    {
+        // Before C99 the implicit declarations are warnings, so -Werror's errors carry clang's "-Werror," prefix.
+        .name = "implicit declarations before C99, with -Wall",
+        .source = "int g(void) { return abs(1) + foo(2); }\n",
+        .options = { "-std=gnu89", "-Wall" },
+        .warnings = 2,
+        .notes = 1,
+    },
 };
 
 static void check_test_driver_implicit_values(CheckTest* test, const char* clang, const char* executable, const char* directory)
