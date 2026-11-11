@@ -4912,16 +4912,29 @@ static const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER
 #undef BUSTER_X86_VECTOR_FORM_DESCRIPTION
 #undef BUSTER_X86_FORM_DESCRIPTION
 
-// A segment override (thread-local storage) on a form's memory operand, RIP-relative too: the form plus one of these.
-// As a lock or rep prefix is, the override is part of the form, whose template has it as a static byte, FS's 64 or
-// GS's 65 (before the other prefixes, where GNU as puts it): x86_encoder_initialize builds three templates per form, so
+// A segment override on a form's memory operand, RIP-relative too: the form plus one of these. FS and GS are
+// thread-local storage's (clang's address spaces 257 and 256, __seg_fs and __seg_gs), and SS is address space 258's
+// (#1447), whose base 64-bit mode ignores as it ignores DS's, but whose 36 clang still emits. As a lock or rep prefix
+// is, the override is part of the form, whose template has it as a static byte, FS's 64, GS's 65 or SS's 36 (before the
+// other prefixes, where GNU as and clang put it): x86_encoder_initialize builds a template per form and override, so
 // that the vectorized encoder does no more for an override than for any other form. A form without a memory operand
 // takes no operands with one.
 #define BUSTER_X86_FORM_FS X86_FORM_COUNT
 #define BUSTER_X86_FORM_GS (2 * X86_FORM_COUNT)
+#define BUSTER_X86_FORM_SS (3 * X86_FORM_COUNT)
+// A form with SS's override is BUSTER_X86_FORM_SS plus its row, below the fixup flag: the rows below this, the fourth
+// template set's. X86Instruction.form's 15 bits under the flag don't hold four sets of every row (4 * 8,358 forms in
+// 2026-11), so the last rows have no SS form: APX's EVEX forms (from ANDN's, after AVX-512's and the VEX forms', as the
+// assertion below keeps), which no output target of the compiler's selects, and the forms of 16- and 32-bit modes alone,
+// whose SS override is the decorations' (BUSTER_X86_DECORATION_SEGMENT). Its templates were in the table already,
+// unused, between the three sets and their marked copies; the set adds their marked copies, 7,694 entries (492 KB) at the
+// table's end (#1447 has the measurements against an SS prefix record of its own).
+#define BUSTER_X86_FORM_SS_ROWS (0x8000 - BUSTER_X86_FORM_SS)
 // The forms with the segment overrides': an instruction's form is below this.
-#define BUSTER_X86_FORM_TEMPLATES (3 * X86_FORM_COUNT)
-_Static_assert(BUSTER_X86_FORM_TEMPLATES <= 65536, "a form with a segment override fits in X86Instruction.form");
+#define BUSTER_X86_FORM_TEMPLATES 0x8000
+_Static_assert(BUSTER_X86_FORM_SS < BUSTER_X86_FORM_TEMPLATES, "a form with an FS or GS override fits in X86Instruction.form");
+
+_Static_assert(X86_FORM_ANDN_R32_R32_RM32_EVEX <= BUSTER_X86_FORM_SS_ROWS, "every form before APX's EVEX forms has an SS form");
 
 // A marked instruction: one with a symbolic operand, a field (its displacement, its immediate, or both) that the code
 // generator can't fill in before layout. The form, with or without a segment override, plus this flag. The encoders
@@ -4933,15 +4946,21 @@ _Static_assert(BUSTER_X86_FORM_TEMPLATES <= 65536, "a form with a segment overri
 #define BUSTER_X86_FORM_NUMBER (BUSTER_X86_FORM_FIXUP - 1)
 _Static_assert(BUSTER_X86_FORM_TEMPLATES <= BUSTER_X86_FORM_FIXUP, "the fixup flag is past every form with a segment override");
 
-// A form's segment override: 0 for none, 1 for FS and 2 for GS. These two are branches on the rare overrides, so
-// that the scalar encoder pays a compare for them.
+// A segment override's number: a form plus its number times X86_FORM_COUNT is the form with it (and the IR's and the
+// typed stream's segments are numbered so).
+#define BUSTER_X86_SEGMENT_FS 1
+#define BUSTER_X86_SEGMENT_GS 2
+#define BUSTER_X86_SEGMENT_SS 3
+
+// A form's segment override: 0 for none, or BUSTER_X86_SEGMENT_FS, _GS or _SS. These two are branches on the rare
+// overrides, so that the scalar encoder pays a compare for them.
 static uint32_t x86_form_segment(uint32_t form)
 {
     const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
     uint32_t result = 0;
     if (BUSTER_UNLIKELY(number >= BUSTER_X86_FORM_FS))
     {
-        result = number >= BUSTER_X86_FORM_GS ? 2 : 1;
+        result = number >= BUSTER_X86_FORM_SS ? BUSTER_X86_SEGMENT_SS : number >= BUSTER_X86_FORM_GS ? BUSTER_X86_SEGMENT_GS : BUSTER_X86_SEGMENT_FS;
     }
     return result;
 }
@@ -4952,10 +4971,20 @@ static const X86FormDescription* x86_form_description(uint32_t form)
     uint32_t row = form & BUSTER_X86_FORM_NUMBER;
     if (BUSTER_UNLIKELY(row >= BUSTER_X86_FORM_FS))
     {
-        row -= row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_FS;
+        row -= row >= BUSTER_X86_FORM_SS ? BUSTER_X86_FORM_SS : row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_FS;
     }
     return &x86_form_descriptions[row];
 }
+
+// Whether a form (a row of the form table) has a form with the segment override (BUSTER_X86_SEGMENT_FS, _GS or _SS):
+// every row has FS's and GS's, and the rows below BUSTER_X86_FORM_SS_ROWS SS's.
+static __attribute__((unused)) bool x86_form_has_segment(uint32_t row, uint32_t segment)
+{
+    return segment != BUSTER_X86_SEGMENT_SS || row < BUSTER_X86_FORM_SS_ROWS;
+}
+
+// A segment override's prefix byte, by its number.
+static const uint8_t x86_segment_bytes[4] = { 0, 0x64, 0x65, 0x36 };
 
 // The fields of a marked instruction that a fixup patches: X86Instruction's displacement (a memory operand's, or a
 // relative branch's) and its immediate (an imm32, or a 64-bit immediate or address; in 16- and 32-bit modes an imm16 or
@@ -5819,7 +5848,7 @@ static bool build_template_shaped(const X86FormDescription* form, uint32_t segme
     }
     if (segment != 0 && memory)
     {
-        template_append(template, &position, (uint8_t)(0x63 + segment), BUSTER_X86_LAYOUT_STATIC);
+        template_append(template, &position, x86_segment_bytes[segment], BUSTER_X86_LAYOUT_STATIC);
         static_length += 1;
         last_static = position;
     }
@@ -6041,7 +6070,7 @@ static bool build_mode_template(uint32_t form, X86EncoderMode encoder, X86Templa
     return result;
 }
 
-// A 64-bit mode form's template with a segment override (`segment`, FS's 1 or GS's 2), from its template without one and
+// A 64-bit mode form's template with a segment override (`segment`, FS's 1, GS's 2 or SS's 3), from its template without one and
 // that template's shape, as build_mode_template makes it: in 64-bit mode an override changes nothing in a form without
 // a memory operand, and in one with it puts the override's static byte after FWAIT's 9B (or first), every later
 // position one further and the static length one longer, with the same checks. That fits where build_template's would
@@ -6070,7 +6099,7 @@ static void x86_template_with_segment(const X86FormDescription* form, const X86T
                 template->bytes[position] = plain->bytes[position - 1];
             }
             template->layout[at] = BUSTER_X86_LAYOUT_STATIC;
-            template->bytes[at] = (uint8_t)(0x63 + segment);
+            template->bytes[at] = x86_segment_bytes[segment];
             flags += 1;
         }
         flags |= fits ? 0 : BUSTER_X86_TEMPLATE_NO_MEMORY;
@@ -6079,8 +6108,8 @@ static void x86_template_with_segment(const X86FormDescription* form, const X86T
 }
 
 // Builds every form's template for the mode in `templates`, with its halves again the other way around, and the marked
-// forms' copies of them. In 64-bit mode, a form's templates with FS and GS come from its own
-// (x86_template_with_segment), and a form that doesn't fit has all three from build_mode_template, as the table is
+// forms' copies of them. In 64-bit mode, a form's templates with FS, GS and SS come from its own
+// (x86_template_with_segment), and a form that doesn't fit has all four from build_mode_template, as the table is
 // broken.
 static bool build_mode_templates(X86EncoderMode encoder, X86TemplateEntry* templates)
 {
@@ -6094,15 +6123,23 @@ static bool build_mode_templates(X86EncoderMode encoder, X86TemplateEntry* templ
             X86TemplateShape shape;
             if (build_template_shaped(form, 0, X86_ENCODER_MODE_64, &templates[row].template, &shape))
             {
-                x86_template_with_segment(form, &templates[row].template, shape, 1, &templates[BUSTER_X86_FORM_FS + row].template);
-                x86_template_with_segment(form, &templates[row].template, shape, 2, &templates[BUSTER_X86_FORM_GS + row].template);
+                for (uint32_t segment = BUSTER_X86_SEGMENT_FS; segment <= BUSTER_X86_SEGMENT_SS; segment += 1)
+                {
+                    if (x86_form_has_segment(row, segment))
+                    {
+                        x86_template_with_segment(form, &templates[row].template, shape, segment, &templates[segment * X86_FORM_COUNT + row].template);
+                    }
+                }
             }
             else
             {
                 result = false;
-                for (uint32_t segment = 0; segment < 3; segment += 1)
+                for (uint32_t segment = 0; segment <= BUSTER_X86_SEGMENT_SS; segment += 1)
                 {
-                    build_mode_template(segment * X86_FORM_COUNT + row, encoder, &templates[segment * X86_FORM_COUNT + row].template);
+                    if (x86_form_has_segment(row, segment))
+                    {
+                        build_mode_template(segment * X86_FORM_COUNT + row, encoder, &templates[segment * X86_FORM_COUNT + row].template);
+                    }
                 }
             }
         }
@@ -6609,7 +6646,7 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
     // takes one.
     static const uint8_t overrides[8] = { 0, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0 };
     const bool overridable = legacy && x86_form_takes_override(form);
-    const uint8_t override = segment != 0 ? (uint8_t)(0x63 + segment) : overridable ? overrides[(instruction->decorations & BUSTER_X86_DECORATION_SEGMENT) >> 3] : 0;
+    const uint8_t override = segment != 0 ? x86_segment_bytes[segment] : overridable ? overrides[(instruction->decorations & BUSTER_X86_DECORATION_SEGMENT) >> 3] : 0;
     if (override != 0)
     {
         out[length] = override;

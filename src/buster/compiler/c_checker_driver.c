@@ -137,7 +137,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
         case CHECK_INPUT_CONSTEXPR_CONTEXT: result = "constexpr can only be used in variable declarations"; break;
-        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 8388608 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
         case CHECK_INPUT_FP_EVAL_USE: result = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'"; break;
         case CHECK_INPUT_FP_EVAL_TYPE: result = "type is set according to the default eval method for the translation unit"; break;
@@ -3726,7 +3726,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else
                         {
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
+                            // A file-scope declarator's queue keeps the order clang builds its expressions in, the shift
+                            // before a comma that holds it (#1943, check_common_report_comma_left): by its node's end.
+                            if (phase == PP_DIAGNOSTIC_RUNTIME && node < input->graph.count && input->graph.source_positions != NULL)
+                            {
+                                pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[node] + 1);
+                            }
                         }
                     }
                 }
