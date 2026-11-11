@@ -2482,11 +2482,15 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
 // The commands of source files (-E, -fsyntax-only, -c and a link, main_information's): what no unit's main_command
 // takes. It runs after the driver's main_command has returned rather than inside it (#652): that function's frame is 140
 // KB, the inlined locals of the tests' and benchmarks' commands, and a compile run below it touched pages of it that its
-// build's inlining decided, 5 more of them in an empty file's -E after an unrelated change.
-static __attribute__((noinline)) int main_source_command(int argc, char** argv)
+// build's inlining decided, 5 more of them in an empty file's -E after an unrelated change. `advised`: main_driver has
+// advised .bss already (arena_static_base_pages).
+static __attribute__((noinline)) int main_source_command(int argc, char** argv, bool advised)
 {
     int result = 1;
-    arena_static_base_pages();
+    if (!advised)
+    {
+        arena_static_base_pages();
+    }
     arena_limits_fix();
     // Semantic checking and object emission share the same typed source stream in the checker's unit.
     if (main_response_expand(&argc, &argv) && !main_information(argc - 1, argv + 1, &result))
@@ -2524,10 +2528,12 @@ extern int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
 #endif
 static int main_driver(int argc, char** argv)
 {
-    // A source command's .bss in base pages (arena_static_base_pages) before its first write: arena_page_policy's
-    // variables are statics, and their page, written before the advice, took a 2 MB huge page with transparent huge pages
-    // `always` (#1444), one of an empty file's two.
-    if (argc >= 2 && argv[1][0] == '-')
+    // A source command's .bss in base pages (arena_static_base_pages) before the process touches any of it (#1444): with
+    // transparent huge pages `always`, a read of a 2 MB stretch of .bss maps the huge zero page, and a write to it, even
+    // after the advice, then takes a huge page of its own. arena_page_policy's statics shared such a stretch with 220 MB
+    // of others, and took one of an empty file's two huge pages. A test or benchmark keeps its .bss as the kernel gives it.
+    const bool source = argc >= 2 && argv[1][0] == '-';
+    if (source)
     {
         arena_static_base_pages();
     }
@@ -2554,9 +2560,9 @@ static int main_driver(int argc, char** argv)
     // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
     // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
     // compile needs nothing else of.
-    if (!found && argc >= 2 && argv[1][0] == '-')
+    if (!found && source)
     {
-        result = main_source_command(argc, argv);
+        result = main_source_command(argc, argv, true);
         found = true;
     }
     if (!found)
@@ -2605,7 +2611,7 @@ static int main_driver(int argc, char** argv)
     }
     if (!found)
     {
-        result = main_source_command(argc, argv);
+        result = main_source_command(argc, argv, false);
     }
     return result;
 }
