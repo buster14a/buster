@@ -47,7 +47,8 @@ cache's runs) to `tools/clang-server`, and `--differential` also runs each as
 before and fails on a difference ([Served runs](oracle-cache.md#served-runs)). Each unit goes through both paths,
 the vector path with its fallback and the scalar parser alone, which must read
 the same tokens and give the same outcome, and on a unit without errors the same
-tree: the same parent, node depth and role on every token. The tree must keep
+tree: the same parent, node depth and role on every token (a declarator's
+parameter list's parentheses included, a function's on both paths, #1968). The tree must keep
 its invariants (every parent another token or the root, at no greater depth;
 every opener's parent its closer, after it; no cycle), and its postorder and
 subtree sizes must be a depth-first walk's, whose in-order walk gives the tokens
