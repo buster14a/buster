@@ -176,6 +176,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
                                                      "association will never be selected" },
     // (#1953: its ID past -Wunreachable-code-generic-assoc's, 131.)
     [CHECK_WARNING_ID_UNSEQUENCED] = { "-Wunsequenced", "-Wsequence-point", "multiple unsequenced modifications" },
+    [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

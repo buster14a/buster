@@ -177,6 +177,8 @@ enum
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
     // -Wunreachable-code-generic-assoc's, 131.)
     CHECK_WARNING_ID_UNSEQUENCED = 132,
+    // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
+    CHECK_WARNING_ID_STRING_PLUS_INT = 133,
     CHECK_WARNING_ID_COUNT,
 };
 
