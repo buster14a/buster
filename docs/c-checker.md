@@ -10238,6 +10238,17 @@ enables, which this checker doesn't all give.
   error after the conversion's, where clang gives it first.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
+  A failed conversion's source and target print the typedefs a function
+  type's parameters write (#1447 item 5, `check_driver_placed_type`), with
+  clang's a.k.a.: `void (*q)(I)` is `'void (*)(I)' (aka 'void (*)(int)')`.
+  They come by place, from the operand's declaration (through `&`, `*` and
+  subscripts, `check_driver_operand_declaration`), an initialized declarator,
+  or a call's parameter. The places are the declaration's own specifiers,
+  then each nested parameter's, in order (`check_driver_places`, as
+  `__builtin_dump_struct`'s `check_lower_dump_places` reads them;
+  `TypeNames.alias_order`). Where the specifiers the printer prints don't
+  match them, the type prints as before. Only rendering reads them: a clean
+  compile does no work for this.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - A failed static assertion's requirement prints a character constant by its
   value, as clang's `CharacterLiteral::print` does (#1999,
@@ -10253,12 +10264,12 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
-  - A typedef written in a function type's parameters prints canonically:
-    clang prints `void (*fp)(I)` as `'void (*)(I)' (aka 'void (*)(int)')`,
-    this `'void (*)(int)'`. The warning renderer takes one typedef, by type;
-    the `__builtin_dump_struct` printer's places (`check_lower_dump_places`,
-    `TypeNames.alias_order`) spell each parameter's own and would serve here
-    once they read the parser and input rather than a `CheckProgram`.
+  - A typedef written in a function type's parameters prints only in a
+    failed conversion's source and target (below); other warnings print
+    those parameters canonically. A parameter's top-level qualifier, which
+    the function type drops (`void (*pp)(volatile I)`), and a variable
+    array's bound inside a parameter (`int (*)[n]`) print in neither the
+    type nor its a.k.a., where clang's sugar keeps both.
   - An initializer subobject's null pointer warning (`{ .lp = 1-1 }`) prints
     its target canonically: the initializer walk that gives it keeps neither
     the declaration nor its subobject's member.
