@@ -102,8 +102,9 @@ implements this interface;
 [the frozen oracle guide](../../docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
-`./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
-[--part K/N] [options] [file...]`, or `test-preprocessor --tables path...`:
+`./build/compiler test-preprocessor [--clang] [--clang-server PATH [--differential]]
+[--keep] [--seed N] [--count N] [--part K/N] [options] [file...]`, or
+`test-preprocessor --tables path...`:
 
 - without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They run in 32 parts, the
@@ -260,6 +261,13 @@ spellings.
 Every case and file runs with clang's answers to the feature queries
 (`--clang-features`, the oracle's mode), and a check runs a line of queries both
 ways: by default they answer what buster implements.
+
+`--clang-server PATH` sends the oracle cache's runs of `clang`
+(`pp_test_clang_process`'s and the predefines' jobs') to `tools/clang-server`,
+and `--differential` also runs each as before and fails on a difference
+([Served runs](oracle-cache.md#served-runs)). The fuzz batch's clang processes
+and the few checks that start clang themselves (the history's and the system
+warnings' diagnostics) don't run through the cache, and run as before.
 
 `--clang` also compares every case and file with `clang -E` and the same
 options (but `--predefines`, `--location-limit` and `--window-bytes`, ours alone), token spelling by token spelling, and then where clang's line markers

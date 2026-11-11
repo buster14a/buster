@@ -488,7 +488,7 @@ static const char* check_diagnostic_varargs(const CheckInput* input, const Parse
     {
         const CheckVarargsContext* context = &graph->varargs_calls[graph->argument_offsets[report->node]].context;
         const bool function = type_is_valid(types, context->function_type) && type_kind(types, type_strip_aligned(types, context->function_type)) == BUSTER_TYPE_KIND_FUNCTION;
-        const bool win64 = function && type_function_abi_kind(types, type_strip_aligned(types, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
+        const bool win64 = function && type_function_convention(types, type_strip_aligned(types, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
         const bool microsoft = graph->members[report->node] == CBUILTIN_MS_VA_START;
         result = microsoft && !win64 ? "'__builtin_ms_va_start' used in System V ABI function" : !microsoft && win64 ? "'va_start' used in Win64 ABI function" :
                  "'va_start' used in function with fixed args";
