@@ -982,6 +982,17 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t raw = definition != 0 ? (uint32_t)order[definition - 1] : 0;
             const bool emitted = definition != 0 && (raw < full->body_count ? body_selected[raw] : data_selected[raw - full->body_count]);
             candidate.program.alias_states[k] = alias->kind != CHECK_PROGRAM_WEAKREF && alias->base != 0 && !emitted ? BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED : 0;
+            // An alias whose thread-local storage isn't its definition's (#1849): whether the selection's code refers to it.
+            bool referenced = false;
+            for (uint32_t r = 0; alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL && !referenced && r < candidate.program.reference_count; r += 1)
+            {
+                referenced = candidate.program.references[r] == alias->object;
+            }
+            for (uint32_t r = 0; alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL && !referenced && r < candidate.data.reference_count; r += 1)
+            {
+                referenced = candidate.data.references[r] == alias->object;
+            }
+            candidate.program.alias_states[k] |= referenced ? BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED : 0;
             needed[alias->object] |= alias->kind != CHECK_PROGRAM_WEAKREF;
         }
         valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, BUSTER_SCALAR_PATH(scalar), output);
@@ -1018,14 +1029,3 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
 }
 
 #endif
-            // An alias whose thread-local storage isn't its definition's (#1849): whether the selection's code refers to it.
-            bool referenced = false;
-            for (uint32_t r = 0; alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL && !referenced && r < candidate.program.reference_count; r += 1)
-            {
-                referenced = candidate.program.references[r] == alias->object;
-            }
-            for (uint32_t r = 0; alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL && !referenced && r < candidate.data.reference_count; r += 1)
-            {
-                referenced = candidate.data.references[r] == alias->object;
-            }
-            candidate.program.alias_states[k] |= referenced ? BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED : 0;
