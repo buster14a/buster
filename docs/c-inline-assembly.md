@@ -1208,9 +1208,10 @@ templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` (
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
-would make its function Tier 0's), a function with a template that returns or a
-label of a template of no instructions is Tier 0's, and the
-code's certificate (`--verify`) leaves a function with an asm body uncertified.
+would make its function Tier 0's), and a function with a template that returns or a
+label of a template of no instructions is Tier 0's. The
+code's certificate (`--verify`) certifies a function with asm bodies
+([the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
 What the lowering still refuses of what GCC and clang take:
 
