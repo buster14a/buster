@@ -2158,6 +2158,10 @@ struct CheckInputReader
     TypeId function_result;
     uint32_t function_end;
     uint32_t function_body;
+    // The body whose asm statements' vector register width was found last, and that width, 0 before the first (#2231,
+    // check_input_asm_vector_bits): a body's statements share it.
+    uint32_t asm_vector_body;
+    uint16_t asm_vector_bits;
     bool naked_functions;
     // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does binding ask
     // whether a declaration is a version apart (check_input_cpu_dispatch_match).
