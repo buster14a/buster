@@ -331,6 +331,7 @@ static uint32_t lowering_symbols_compare_strings(const LoweringSymbols* a, const
 // static without a label of its own gets the base "function.name": its function's label, from any of its
 // declarations, or its identifier, then its own, as check_program_emit names it (CheckProgramNames). A unit with a
 // compound literal gets ".compoundliteral".
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 static bool lowering_names_of_input(LoweringNames* result, const CheckInput* input, const Parser* parser, const InternTable* identifiers, Arena* arena)
 {
     *result = (LoweringNames){ 0 };
@@ -417,5 +418,6 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     }
     return valid;
 }
+#endif
 
 #endif

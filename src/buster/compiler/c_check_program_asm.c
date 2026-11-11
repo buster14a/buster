@@ -47,7 +47,7 @@
 // rare (main.c's units have 58), and docs/c-inline-assembly.md ("Why it is scalar") measures what one costs a compile.
 //
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
-// target, flag outputs named in their templates, of a size no integer store covers or with other alternatives, f's x87
+// target, flag outputs of a size no integer store covers or with other alternatives, f's x87
 // registers, the MMX, mask
 // and vector register classes and the other letters it doesn't place (A, p, Y, the floating constants), x87 operands
 // and clobbers off the stack's top, symbolic immediates and constants outside their
@@ -126,6 +126,12 @@ struct CheckAsmPlace
     bool read;
     // A flag output's _Atomic object, which its value is exchanged into (check_asm_helper_code).
     bool atomic;
+    // The general register a flag output's name prints (#1846): the one its setcc writes after the template
+    // (check_asm_helper_code's stores[1]), as clang prints the register its code sets the condition into.
+    uint8_t named;
+    // An x87 input whose depth another input's value takes (#1846: two operands at one depth, clang's one register),
+    // which the helper doesn't load.
+    bool shadowed;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -199,6 +205,11 @@ struct CheckProgramAsm
     uint32_t* inline_branches;
     uint32_t* inline_targets;
     uint32_t inline_branch_count;
+    // Whether its template returns (Tier0AsmBody.leaves).
+    bool inline_leaves;
+    // Whether its register operands are its call row's arguments, each in its register (check_asm_inline_code's
+    // `passed`), rather than loads from its block.
+    bool inline_passed;
     bool inlined;
 };
 
@@ -584,6 +595,10 @@ static void check_asm_emit_number(Arena* scratch, int64_t value, bool* valid)
 static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, uint8_t modifier, bool* valid)
 {
     const char* refused = NULL;
+    // A flag output prints as the register its setcc writes after the template, 32 bits wide as clang's (an i32 vreg's)
+    // whatever its object (#1846): `%0` is `%ecx`, `%b0` `%cl`. Its value there is the template's to ignore, as in clang's.
+    const CheckAsmPlace named = { .kind = BUSTER_CHECK_ASM_GENERAL, .reg = place->named, .size = 4 };
+    place = place->kind == BUSTER_CHECK_ASM_FLAG ? &named : place;
     if (place->kind == BUSTER_CHECK_ASM_GENERAL)
     {
         const uint32_t size = modifier == 'b' ? 1 : modifier == 'w' ? 2 : modifier == 'k' ? 4 : modifier == 'q' || modifier == 'V' || modifier == 'a' || modifier == 'A' ? 8 : place->size;
@@ -624,11 +639,6 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
     {
         // Its register, which it hasn't.
         refused = "inline assembly operands of this type in their constraint's registers";
-    }
-    else if (place->kind == BUSTER_CHECK_ASM_FLAG)
-    {
-        // clang prints the register its code sets the condition into after the template, which means nothing in it.
-        refused = "inline assembly flag outputs named in their templates";
     }
     else if (place->kind == BUSTER_CHECK_ASM_X87)
     {
@@ -814,7 +824,7 @@ static bool check_asm_stores(const CheckAsmPlace* place)
 // a `+` operand's), and whether it stores it after the template (an output, popped through the address its slot holds).
 static bool check_asm_x87_loads(const CheckAsmPlace* place)
 {
-    return place->kind == BUSTER_CHECK_ASM_X87 && (!place->written || place->read);
+    return place->kind == BUSTER_CHECK_ASM_X87 && (!place->written || place->read) && !place->shadowed;
 }
 
 static bool check_asm_x87_stores(const CheckAsmPlace* place)
@@ -887,8 +897,9 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
     // the high half's zero for 16 bytes) and the block's address again.
     // An asm goto's exits: a move and a jump each, the last one's falling into the tail, and the tail's move into eax.
     const uint64_t exits = labels != 0 ? 2 * ((uint64_t)labels + 1) - 1 + 1 : 0;
+    // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)).
     const uint64_t records = 2 * (uint64_t)pushes + (block ? 1 : 0) + loads + code->count + exits +
-                             (stored + flags != 0 ? 1 + 2 * (uint64_t)stored + 6 * (uint64_t)flags : 0) + pops + 3;
+                             (stored + flags != 0 ? 1 + 3 * (uint64_t)stored + 6 * (uint64_t)flags : 0) + pops + 3;
     const uint32_t branch_count = code->branch_count + goto_count + labels;
     const uint32_t reference_count = code->reference_count - goto_count;
     X86Instruction* written = records <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records) : 0;
@@ -1068,8 +1079,18 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
             for (uint32_t k = 0; k < count; k += 1)
             {
                 const CheckAsmPlace* place = places + k;
+                bool later = false;
+                for (uint32_t o = k + 1; o < count; o += 1)
+                {
+                    later |= check_asm_x87_stores(places + o) && places[o].reg == depth;
+                }
                 if (check_asm_x87_stores(place) && place->reg == depth)
                 {
+                    // Another output at this depth after it takes the same value (#1846): stored from a copy.
+                    if (later)
+                    {
+                        written[at++] = (X86Instruction){ .form = X86_FORM_FLD_ST, .rm = 0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    }
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE,
                                                       .displacement = (int32_t)place->slot };
                     const uint32_t form = place->size == 4 ? X86_FORM_FSTP_M32 : place->size == 8 ? X86_FORM_FSTP_M64 : X86_FORM_FSTP_M80;
@@ -1116,11 +1137,13 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // none of them is the block's register; then the template's records; the flag outputs' stores while the flags are the
 // template's, each condition's setcc into `stores[1]`, zero-extended, and stored over its object through its address in
 // `stores[0]`; the register outputs' stores, each through its address in `stores[1]`; the x87 outputs', from st(0) down;
-// and the pops of the x87 inputs the template left. No output is in a store's register. Returns the count, and the
-// template's first record in `*first` (its branches' and labels' records are past it), with 0 records without room in
-// `output` (a statement of no records has at least an x87 or a flag output's).
+// and the pops of the x87 inputs the template left. No output is in a store's register. With `passed`, the operands a
+// register holds when the template starts (check_asm_loads') are the call row's arguments instead, which Tier 0 moves into
+// their registers (CheckProgramAsm.inline_passed): the body loads only the x87's. Returns the count, and the template's
+// first record in `*first` (its branches' and labels' records are past it), with 0 records without room in `output` (a
+// statement of no records has at least an x87 or a flag output's).
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
-                                      X86Instruction** records, uint32_t* first, Arena* output)
+                                      bool passed, X86Instruction** records, uint32_t* first, Arena* output)
 {
     uint32_t loads = 0;
     uint32_t stored = 0;
@@ -1131,7 +1154,8 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         stored += check_asm_stores(places + k) || check_asm_x87_stores(places + k);
         flags += check_asm_flag_stores(places + k);
     }
-    const uint64_t capacity = (uint64_t)loads + code->count + 2 * (uint64_t)stored + 5 * (uint64_t)flags + pops;
+    // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)).
+    const uint64_t capacity = (uint64_t)loads + code->count + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops;
     X86Instruction* written = capacity != 0 && capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, capacity) : 0;
     uint32_t at = 0;
     if (written != 0)
@@ -1152,7 +1176,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
-            if (check_asm_loads(place))
+            if (check_asm_loads(place) && !passed)
             {
                 const uint32_t slot = place->written && place->kind != BUSTER_CHECK_ASM_MEMORY ? place->value : place->slot;
                 const uint32_t form = place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? X86_FORM_MOVD_X_RM32 : X86_FORM_MOVQ_X_XM64) :
@@ -1207,8 +1231,18 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
             for (uint32_t k = 0; k < count; k += 1)
             {
                 const CheckAsmPlace* place = places + k;
+                bool later = false;
+                for (uint32_t o = k + 1; o < count; o += 1)
+                {
+                    later |= check_asm_x87_stores(places + o) && places[o].reg == depth;
+                }
                 if (check_asm_x87_stores(place) && place->reg == depth)
                 {
+                    // Another output at this depth after it takes the same value (#1846): stored from a copy.
+                    if (later)
+                    {
+                        written[at++] = (X86Instruction){ .form = X86_FORM_FLD_ST, .rm = 0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    }
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
                                                       .displacement = (int32_t)place->slot };
                     const uint32_t form = place->size == 4 ? X86_FORM_FSTP_M32 : place->size == 8 ? X86_FORM_FSTP_M64 : X86_FORM_FSTP_M80;
@@ -1225,12 +1259,33 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     return at;
 }
 
-// The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
-// (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
-// each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
-// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
-// template's own to its labels, a return, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register holding the frame (rsp, rbp, r15). A form
-// x86_semantics.c doesn't cover takes check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
+// Whether a template's records name an opmask register (k0 to k7) in any field. Tier 1's CFG consumer saves no mask value
+// around an asm body, as it saves them around a call (#1839), so that in a lowering for Tier 1
+// (CheckProgramOptions.asm_bodies) such a template keeps its helper, whose call it saves them around; Tier 0 takes an asm
+// body as a call, whose saves of the mask stack it makes.
+static bool check_asm_names_opmask(const AsmCode* code)
+{
+    bool named = false;
+    for (uint32_t r = 0; !named && r < code->count; r += 1)
+    {
+        X86Instruction record = code->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        for (uint32_t f = 0; f < fields.count; f += 1)
+        {
+            named |= fields.classes[f] == BUSTER_X86_CLASS_OPMASK;
+        }
+        named |= (record.decorations & 0x07) != 0;
+    }
+    return named;
+}
+
+// Whether `form` returns: ret, and its imm16, 16-bit, 32-bit and prefixed forms.
+static bool check_asm_return(uint32_t form)
+{
+    return form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 || form == X86_FORM_RETD ||
+           form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
+}
+
 // The forms common in inline assembly that x86_semantics.c gives only its conservative record (every register, unknown
 // control), with the registers each writes, as the instruction set's references define them: none touches the stack,
 // and each returns to the next instruction (syscall through the kernel). A form of neither keeps its statement's helper.
@@ -1262,9 +1317,19 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_XSETBV, 0 },
     { X86_FORM_VZEROUPPER, BUSTER_TIER0_XMM_ALL },
     { X86_FORM_VZEROALL, BUSTER_TIER0_XMM_ALL },
+    // fxrstor loads xmm0 to xmm15 (and MXCSR) from its area, beside the x87's state.
+    { X86_FORM_FXRSTOR_M, BUSTER_TIER0_XMM_ALL },
+    { X86_FORM_FXRSTOR64_M, BUSTER_TIER0_XMM_ALL },
 };
 #undef BUSTER_CHECK_ASM_GPR
 
+// The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
+// (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
+// each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
+// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
+// template's own to its labels, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register
+// holding the frame (rsp, rbp, r15), but on its way out of the function. A form x86_semantics.c doesn't cover takes
+// check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
 static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors)
 {
     uint64_t written = (uint64_t)(taken & 0xffffu & ~(1u << X86_REGISTER_RSP)) | ((uint64_t)(vectors & 0xffffu) << 16);
@@ -1277,6 +1342,30 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
     {
         const X86Instruction* record = code->records + r;
         const X86Effects* effects = x86_effects(record->form);
+        // A record that leaves the function (#1839): a return, or one on a straight path to a return (no branch among them,
+        // no label after it on the way), which runs only on the way out, as `leave` and `pop %rbx` before a `ret`. Its
+        // effects on the stack, the frame's registers and control are the template's way out of its caller, as in clang's
+        // object, and what it writes no later code of the function reads: it stays out of the checks and of the set.
+        bool out = false;
+        for (uint32_t k = r; !out && k < code->count; k += 1)
+        {
+            bool branch = false;
+            bool target = false;
+            for (uint32_t b = 0; b < code->branch_count; b += 1)
+            {
+                branch |= code->branches[b] == k;
+                target |= k > r && code->targets[b] == k;
+            }
+            out = !target && check_asm_return(code->records[k].form);
+            if (branch || target)
+            {
+                break;
+            }
+        }
+        if (out)
+        {
+            continue;
+        }
         uint64_t reads = 0;
         uint64_t writes = 0;
         x86_instruction_effects_scalar(record, &reads, &writes);
@@ -1288,7 +1377,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
                 implicit += 1;
             }
             // An x87 form (fsqrt, fprem, fxch, fld %st(1), fxsave...) reads and writes the x87's registers, its status
-            // and control words, the flags and memory alone: a general register only by `fnstsw %ax`'s, which the table has.
+            // and control words, the flags and memory alone: a general register only by `fnstsw %ax`'s, and xmm0 to
+            // xmm15 only by fxrstor's, which the table has.
             const char* mnemonic = x86_form_description(record->form)->mnemonic;
             const bool x87 = mnemonic != NULL && mnemonic[0] == 'f' && record->form != X86_FORM_FNSTSW_AX && record->form != X86_FORM_FSTSW_AX;
             placed = implicit < BUSTER_ARRAY_LENGTH(check_asm_implicit) || x87;
@@ -2129,7 +2219,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     // the outputs' (`defs`), alone and with the clobbered x87 registers'; an input in an output's or a clobber's
     // register is popped by the template, and the popped ones lie above the others. The template finds the inputs at
     // their depths, and leaves the outputs, from st(0), above the inputs it didn't pop, which the helper pops after it
-    // stores the outputs (`pops`). Two operands at one depth are refused, as these rules' errors are, by name.
+    // stores the outputs (`pops`). Two inputs or two outputs at one depth are one register's (below).
     // An f input takes the shallowest depth no t or u input, and no f input before it, has at the template's start (an
     // output alone the template pushes): each is in its own register below the fixed ones, which a template refers to by
     // %N whatever the depth (clang's code chooses by its register allocation), and none is popped by the template, as
@@ -2155,16 +2245,38 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     uint32_t uses = 0;
     uint32_t defs = 0;
     uint32_t clobbered = 0;
-    bool doubled = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         const CheckAsmPlace* place = places + k;
         const uint32_t bit = place->kind == BUSTER_CHECK_ASM_X87 ? 1u << place->reg : 0;
         const bool used = bit != 0 && (!place->written || place->read);
         const bool defined = bit != 0 && place->written;
-        doubled |= (used && (uses & bit) != 0) || (defined && (defs & bit) != 0);
         uses |= used ? bit : 0;
         defs |= defined ? bit : 0;
+    }
+    // Two inputs at one depth are one register's, as clang's code makes them (#1846): its value is the first matching
+    // or `+` input's in clang's order of the inputs (the explicit ones, then the `+` outputs'), as LLVM copies the tied
+    // ones last, the first of them last; else the last other input's, the last copy into the register. The others aren't
+    // loaded. Two outputs at one depth each take its value after the template.
+    for (uint32_t depth = 0; valid && reason == NULL && depth < 8 && (uses >> depth & 1) != 0; depth += 1)
+    {
+        uint32_t winner = BUSTER_CHECK_NONE;
+        bool tied_won = false;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            // The inputs in clang's order: the explicit ones, then the `+` outputs'.
+            const uint32_t k = i < statement->input_count ? statement->output_count + i : i - statement->input_count;
+            const CheckAsmPlace* place = places + k;
+            const bool input = place->kind == BUSTER_CHECK_ASM_X87 && place->reg == depth && (!place->written || place->read);
+            const bool tied = input && (place->written || place->tied != BUSTER_CHECK_NONE);
+            winner = input && !tied_won ? k : winner;
+            tied_won |= tied;
+        }
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            CheckAsmPlace* place = places + k;
+            place->shadowed |= place->kind == BUSTER_CHECK_ASM_X87 && place->reg == depth && (!place->written || place->read) && k != winner;
+        }
     }
     for (uint32_t c = 0; valid && reason == NULL && c < statement->clobber_count; c += 1)
     {
@@ -2174,7 +2286,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     // Depths from st(0) without a gap: a mask of low bits (1, 3, 7...), or none.
     const bool stacked = (uses & (uses + 1)) == 0 && ((defs | clobbered) & ((defs | clobbered) + 1)) == 0 && (defs & (defs + 1)) == 0 &&
                          (popped & (popped + 1)) == 0;
-    reason = reason == NULL && (doubled || !stacked) ? "inline assembly's x87 operands and clobbers off the stack's top" : reason;
+    reason = reason == NULL && !stacked ? "inline assembly's x87 operands and clobbers off the stack's top" : reason;
     const uint32_t pops = (uint32_t)__builtin_popcount(uses) - (uint32_t)__builtin_popcount(popped);
     // The operand block: each register output's address (and a `+` one's value), each memory operand's address and each
     // input's value, 8 bytes each, but an x87 long double value's 16.
@@ -2210,6 +2322,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         reason = reg < 0 ? "inline assembly operands past the registers left" : NULL;
         taken |= reg >= 0 ? 1u << reg : 0;
     }
+    // A flag output's name is the register its setcc writes (check_asm_helper_code).
+    for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
+    {
+        places[k].named = places[k].kind == BUSTER_CHECK_ASM_FLAG ? stores[1] : 0;
+    }
     // An asm goto's exit register (check_asm_helper_code): none an output's or a store's, which the tail reads after it is set.
     uint8_t exit = X86_REGISTER_RAX;
     if (valid && reason == NULL && statement->is_goto)
@@ -2237,6 +2354,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     AsmCode code = { 0 };
     AsmResult unit = { 0 };
     bool unit_assembled = false;
+    bool returns = false;
     const uint64_t code_mark = output->length;
     if (valid && reason == NULL)
     {
@@ -2297,20 +2415,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             // A label with no instruction to follow in its template would be a place in the statement's function, which its
             // code (Tier 0's) doesn't mark.
             reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
-            // A template that returns before any branch would leave the helper with its frame still reserved, where clang's
-            // inline emission returns from the enclosing function. Refuse that initial flow by name; a template that jumps
-            // over its return (a called snippet's label) stays admitted, as clang's own asm labels do.
+            // A template that returns before any branch would leave a helper with its frame still reserved, where clang's
+            // inline emission returns from the enclosing function: an asm body's return does that (#1839), and a helper's
+            // is refused by name below. A template that jumps over its return (a called snippet's label) stays admitted,
+            // as clang's own asm labels do.
             for (uint32_t r = 0; reason == NULL && r < code.count; r += 1)
             {
-                const uint16_t form = code.records[r].form;
-                const bool ret = form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 ||
-                                 form == X86_FORM_RETD || form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
+                const bool ret = check_asm_return(code.records[r].form);
                 bool branch = false;
                 for (uint32_t b = 0; b < code.branch_count; b += 1)
                 {
                     branch |= code.branches[b] == r;
                 }
-                reason = ret ? "inline assembly templates that return from their helper" : branch ? NULL : reason;
+                returns = ret;
                 if (ret || branch)
                 {
                     break;
@@ -2403,7 +2520,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             plan->helper = BUSTER_CHECK_NONE;
         }
     }
-    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers &&
+    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers && !program->asm_bodies &&
              !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              check_asm_row(program, s, places, constraints, index, scalar, &row, &valid, output, scratch))
     {
@@ -2418,12 +2535,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     else if (valid && reason == NULL && helped && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              !statement->is_goto && code.reference_count == 0 && code.label_count == 0 &&
+             !(program->asm_bodies && check_asm_names_opmask(&code)) &&
              (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
+        // Its register operands are its call row's arguments (#1839's measurements: a load of the block's slot, which the
+        // lowering stored through a register a moment before, failed store-to-load forwarding once a run), but in a
+        // lowering for Tier 1 (CheckProgramOptions.asm_bodies), whose body call takes the block's address alone and whose
+        // stores into the block are rsp-relative.
+        const bool passed = !program->asm_bodies;
         uint32_t first = 0;
-        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, &records, &first, output);
+        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, output);
+        plan->inline_passed = passed;
         uint32_t* branches = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
         uint32_t* targets = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
         valid = records != 0 && (code.branch_count == 0 || (branches != 0 && targets != 0));
@@ -2439,7 +2563,16 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_records = records;
         plan->inline_count = records_count;
         plan->inline_touched = inline_touched;
+        plan->inline_leaves = returns;
+        for (uint32_t r = 0; r < code.count; r += 1)
+        {
+            plan->inline_leaves |= check_asm_return(code.records[r].form);
+        }
         plan->inlined = valid;
+    }
+    else if (valid && reason == NULL && helped && returns)
+    {
+        reason = "inline assembly templates that return from their helper";
     }
     else if (valid && reason == NULL && helped)
     {

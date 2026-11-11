@@ -546,7 +546,9 @@ It takes instructions, labels and the syntax directives, and refuses:
   whole instead, `asm_assemble`'s unit, c-inline-assembly.md's "Templates that take directives"), and so does a
   `data16` or `rex64` statement, which is a byte of its own (#1115);
 - its numeric labels and `.` but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to its labels;
+  addend, and `loop` and `jrcxz` to its labels, whose failure sets
+  `AsmCode.directive` as a directive's does, for the caller to assemble the
+  source whole (#1845);
 - undefined numeric labels.
 
 Lexing, parsing and matching are `asm_assemble`'s, by `AsmOptions.vectorized`'s
