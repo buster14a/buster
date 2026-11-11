@@ -445,14 +445,14 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"arch=znver4\"))) int f(int x) { return x + 4; }\n"
         "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x) { return x + 42; }\n"
         "__attribute__((target(\"apxf\"))) int f(int x) { return x + 36; }\n"
-        "static __attribute__((target(\"default\"))) int s(void) { return 10; }\n"
-        "static __attribute__((target(\"avx512f\"))) int s(void) { return 20; }\n"
+        "static __attribute__((target(\"default\"))) int s(void) { static int n = 10; return n; }\n"
+        "static __attribute__((target(\"avx512f\"))) int s(void) { static int n = 20; return n; }\n"
         "int call_s(void) { return s(); }\n"
         "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x) { return x * 3; }\n"
         "static __attribute__((target_clones(\"gfni\", \"default\"))) int t(void) { return 7; }\n"
         "int call_t(void) { return t(); }\n"
         // A repeated version (kept for its index, without a symbol of its own) and a default that isn't last.
-        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { return x * 5; }\n"
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { static int m = 5; return x * m; }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
