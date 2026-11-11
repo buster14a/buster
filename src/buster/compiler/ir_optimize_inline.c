@@ -15,7 +15,8 @@
 //
 // #1282 takes SIMD functions, the x86 intrinsic wrappers': a callee's vectors, masks and machine rows are copied with it
 // (its vector constants and rows appended to the caller's, IR_VCONST's index and IrCall.row rebased, a row call staying a
-// call), and so are its stack slots (IR_STACK_ADDR's and IR_LIFETIME's rebased). A call that passes or returns aggregates
+// call), and so are its asm bodies (#1839: appended, IrCall.body rebased, a body call staying a call whose block argument
+// is the callee's slot's rebased address), and its stack slots (IR_STACK_ADDR's and IR_LIFETIME's rebased). A call that passes or returns aggregates
 // by value (#131's ABI records) is inlined where its records are the callee's own: each aggregate argument's bytes are
 // copied into a fresh slot of the caller, whose address the callee's parameter becomes (the callee owns its copy, as the
 // convention's callee does), and an aggregate result's bytes from the address the callee returns into the call's
@@ -167,6 +168,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->constants,
         function->vector_constants,
         function->rows,
+        function->asm_bodies,
         function->slots,
         function->addresses,
         function->calls,
@@ -197,6 +199,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         (uint64_t)function->constant_count * sizeof(IrConstant),
         (uint64_t)function->vector_constant_count * sizeof(IrSimdValue),
         (uint64_t)function->row_count * sizeof(Tier0Operation),
+        (uint64_t)function->asm_body_count * sizeof(IrAsmBody),
         (uint64_t)function->slot_count * sizeof(IrSlot),
         (uint64_t)function->address_count * sizeof(IrAddress),
         (uint64_t)function->call_count * sizeof(IrCall),
@@ -224,7 +227,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
 static bool ir_inline_sizes_valid(const IrFunction* function)
 {
     return function->instruction_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->block_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->extra_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->vector_constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->slot_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->address_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_type_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->parameter_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->row_count <= BUSTER_IR_INLINE_MAX_ITEMS &&
-           function->passed_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->abi_call_count <= BUSTER_IR_INLINE_MAX_ITEMS;
+           function->asm_body_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->passed_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->abi_call_count <= BUSTER_IR_INLINE_MAX_ITEMS;
 }
 
 static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
@@ -246,12 +249,12 @@ static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
     return first < unit->count && unit->symbols[first] == symbol ? first : BUSTER_IR_NONE;
 }
 
-// Whether `node` is a call site: a call of a callee, direct or indirect, but not a row call (#141), which runs its machine
-// row in place of a callee and stays as it is.
+// Whether `node` is a call site: a call of a callee, direct or indirect, but not a row call (#141) or a body call (#1839),
+// which run their machine records in place of a callee and stay as they are.
 static bool ir_inline_site(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
-    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0);
+    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0);
 }
 
 // A call with ABI records (#131) has the convention's shape, which only its records give (a hidden pointer its callee
@@ -528,10 +531,10 @@ static IrInlineBody ir_inline_body(const IrFunction* function)
         {
             // A br is the chain's (ir_inline_chain), between its blocks, and disappears.
             const uint32_t op = function->op[node];
-            body.supported &= op == IR_BR || (ir_inline_cloned(op) && (op != IR_CALL || function->calls[function->b[node]].row != 0));
+            body.supported &= op == IR_BR || (ir_inline_cloned(op) && (op != IR_CALL || function->calls[function->b[node]].row != 0 || function->calls[function->b[node]].body != 0));
             body.size += op != IR_PARAM && op != IR_BR;
         }
-        const uint64_t cost = (uint64_t)body.size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->slot_count;
+        const uint64_t cost = (uint64_t)body.size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->asm_body_count + function->slot_count;
         body.cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1;
     }
     return body;
@@ -727,6 +730,7 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         uint64_t slots = caller->slot_count;
         uint64_t vectors = caller->vector_constant_count;
         uint64_t rows = caller->row_count;
+        uint64_t bodies = caller->asm_body_count;
         uint64_t descriptors = caller->call_count;
         uint64_t extras = caller->extra_count;
         uint64_t types = caller->call_type_count;
@@ -746,7 +750,7 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                          *charged + extra > options.maximum_unit_instructions || constants + callee->constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
                          addresses + callee->address_count + copies.addresses > BUSTER_IR_INLINE_MAX_ITEMS || slots + callee->slot_count + copies.slots > BUSTER_IR_INLINE_MAX_ITEMS ||
                          vectors + callee->vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS || rows + callee->row_count > BUSTER_IR_INLINE_MAX_ITEMS ||
-                         descriptors + callee->call_count > BUSTER_IR_INLINE_MAX_ITEMS || extras + callee->extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         bodies + callee->asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || descriptors + callee->call_count > BUSTER_IR_INLINE_MAX_ITEMS || extras + callee->extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
                          types + callee->call_type_count > BUSTER_IR_INLINE_MAX_ITEMS)
                 {
                     result->decisions[call] = IR_INLINE_GROWTH;
@@ -760,6 +764,7 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                     slots += callee->slot_count + copies.slots;
                     vectors += callee->vector_constant_count;
                     rows += callee->row_count;
+                    bodies += callee->asm_body_count;
                     descriptors += callee->call_count;
                     extras += callee->extra_count;
                     types += callee->call_type_count;
@@ -781,6 +786,7 @@ struct IrInlineBases
     uint32_t slots;
     uint32_t vectors;
     uint32_t rows;
+    uint32_t bodies;
 };
 
 typedef struct IrInlineCursor IrInlineCursor;
@@ -838,7 +844,7 @@ static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* d
 
 // A call's fresh descriptor, argument slice and fixed-type slice at the cursor, its machine row's index rebased by `rows`
 // (a row call of an expansion, #1282), its ABI records' index the caller's (only the caller's own calls have them).
-static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, uint32_t rows, IrInlineCursor* cursor)
+static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, IrInlineBases bases, IrInlineCursor* cursor)
 {
     IrCall descriptor = source->calls[source->b[old]];
     for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
@@ -851,7 +857,8 @@ static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunct
     }
     descriptor.argument_first = cursor->extra;
     descriptor.type_first = cursor->types;
-    descriptor.row += descriptor.row != 0 ? rows : 0;
+    descriptor.row += descriptor.row != 0 ? bases.rows : 0;
+    descriptor.body += descriptor.body != 0 ? bases.bodies : 0;
     cursor->extra += descriptor.argument_count;
     cursor->types += descriptor.parameter_count;
     destination->calls[cursor->descriptors] = descriptor;
@@ -949,7 +956,7 @@ static void ir_inline_expand(const IrFunction* source, uint32_t node, const IrFu
             ir_inline_node(callee, inner, rewritten, cursor->node, inner_values, bases);
             if (callee->op[inner] == IR_CALL)
             {
-                ir_inline_descriptor(callee, inner, rewritten, cursor->node, inner_values, bases.rows, cursor);
+                ir_inline_descriptor(callee, inner, rewritten, cursor->node, inner_values, bases, cursor);
             }
             cursor->node += 1;
         }
@@ -984,6 +991,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         .passed_count = source->passed_count,
         .vector_constant_count = source->vector_constant_count,
         .row_count = source->row_count,
+        .asm_body_count = source->asm_body_count,
     };
     uint32_t call = result->call_offsets[function];
     for (uint32_t node = 0; ok && node < source->instruction_count; node += 1)
@@ -1002,6 +1010,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             sizes.slot_count += callee->slot_count + copies.slots;
             sizes.vector_constant_count += callee->vector_constant_count;
             sizes.row_count += callee->row_count;
+            sizes.asm_body_count += callee->asm_body_count;
             // Its row calls (#1282), the only calls of an expanded body.
             sizes.call_count += callee->call_count;
             sizes.extra_count += callee->extra_count;
@@ -1037,7 +1046,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     if (sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.slot_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
-        sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS)
+        sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS)
     {
         error = IR_ERROR_LIMIT;
     }
@@ -1083,6 +1092,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         {
             memcpy(rewritten.rows, source->rows, (uint64_t)source->row_count * sizeof(Tier0Operation));
         }
+        if (source->asm_body_count != 0)
+        {
+            memcpy(rewritten.asm_bodies, source->asm_bodies, (uint64_t)source->asm_body_count * sizeof(IrAsmBody));
+        }
         if (source->parameter_count != 0)
         {
             memcpy(rewritten.parameter_types, source->parameter_types, source->parameter_count);
@@ -1110,6 +1123,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             .constants = source->constant_count,
             .vectors = source->vector_constant_count,
             .rows = source->row_count,
+            .bodies = source->asm_body_count,
         };
         IrInlineCursor cursor = {
             .addresses = source->address_count,
@@ -1142,6 +1156,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     {
                         memcpy(rewritten.rows + bases.rows, callee->rows, (uint64_t)callee->row_count * sizeof(Tier0Operation));
                     }
+                    if (callee->asm_body_count != 0)
+                    {
+                        memcpy(rewritten.asm_bodies + bases.bodies, callee->asm_bodies, (uint64_t)callee->asm_body_count * sizeof(IrAsmBody));
+                    }
                     // The callee's own rows first, then the copies' fresh ones after its slots and addresses.
                     bases.addresses = cursor.addresses;
                     bases.slots = cursor.slots;
@@ -1151,6 +1169,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     bases.constants += callee->constant_count;
                     bases.vectors += callee->vector_constant_count;
                     bases.rows += callee->row_count;
+                    bases.bodies += callee->asm_body_count;
                 }
                 else
                 {
@@ -1158,7 +1177,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     ir_inline_node(source, node, &rewritten, cursor.node, values, own);
                     if (op == IR_CALL || op == IR_CALL_INDIRECT)
                     {
-                        ir_inline_descriptor(source, node, &rewritten, cursor.node, values, 0, &cursor);
+                        ir_inline_descriptor(source, node, &rewritten, cursor.node, values, own, &cursor);
                     }
                     else if (op == IR_PHI)
                     {
