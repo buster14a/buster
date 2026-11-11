@@ -37,6 +37,53 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        // An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): a
+        // condition's -Wparentheses at its `)` or `;`, a call's -Wformat from its `)`, a bitwise operator's precedence and a
+        // logical not's at their right operand's end; a statement expression's and a nested call's warnings first. A call
+        // argument's -Wformat is at its callee.
+        .name = "enclosing warnings follow their operands' diagnostics",
+        .source = "int printf(const char *, ...);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    if (x = ({ printf(\"%s\", 1); x; })) return 1;\n"
+                  "    if (x = printf(\"%s\", 2)) return 1;\n"
+                  "    while (x = ({ printf(\"%s\", 3); x; })) {}\n"
+                  "    for (; x = ({ printf(\"%d\", \"v\"); 1; }); ) {}\n"
+                  "    do {} while (x = ({ printf(\"%d\", \"w\"); 1; }));\n"
+                  "    printf(\"%s\", ({ printf(\"%d\", \"s\"); 1; }));\n"
+                  "    printf(\"%s\", printf(\"%d\", \"t\"));\n"
+                  "    int a = x & ({ printf(\"%d\", \"u\"); 1; }) == 2;\n"
+                  "    int b = !x == ({ printf(\"%d\", \"y\"); 1; });\n"
+                  "    (void)a; (void)b;\n"
+                  "    return (x = 1) ? printf(\"%s\", 4) : 0;\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 19,
+        .notes = 14,
+    },
+    {
+        .name = "enclosing warnings follow their operands' diagnostics in C23 under -Wextra",
+        .source = "int printf(const char *, ...);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    if (x = ({ printf(\"%s\", 1); x; })) return 1;\n"
+                  "    if (x = printf(\"%s\", 2)) return 1;\n"
+                  "    while (x = ({ printf(\"%s\", 3); x; })) {}\n"
+                  "    for (; x = ({ printf(\"%d\", \"v\"); 1; }); ) {}\n"
+                  "    do {} while (x = ({ printf(\"%d\", \"w\"); 1; }));\n"
+                  "    printf(\"%s\", ({ printf(\"%d\", \"s\"); 1; }));\n"
+                  "    printf(\"%s\", printf(\"%d\", \"t\"));\n"
+                  "    int a = x & ({ printf(\"%d\", \"u\"); 1; }) == 2;\n"
+                  "    int b = !x == ({ printf(\"%d\", \"y\"); 1; });\n"
+                  "    (void)a; (void)b;\n"
+                  "    return (x = 1) ? printf(\"%s\", 4) : 0;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 19,
+        .notes = 14,
+        .c23 = true,
+    },
+    {
         .name = "return flow conservative no-fallthrough and reachable fallthrough",
         .source = "int a(int c){if(c)return 1;return 2;}int b(int c){if(c)return 1;}int d(void){while(1){}}_Noreturn void r(void){while(1){}}\n",
         .warnings = 1,
@@ -467,6 +514,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 12,
     },
     {
+        // A comma's left operand's -Wunused-value in a file-scope initializer is queued to the declarator's end with its
+        // operands' shift counts, in the order clang builds them (#1943); a brace initializer's values walk in
+        // initializer order, before its conversions, in a function too.
+        .name = "comma and shift warnings in initializers in clang's order",
+        .source = "struct T { char a; char b; };\n"
+                  "int z = (1 << 40, 3), y = (2, 1 << 41);\n"
+                  "int w = (2 << 42, 1 << 43, 3);\n"
+                  "char c = (1 << 42, 300);\n"
+                  "struct T s = { (1 << 43, 1), (4, 1 << 44) };\n"
+                  "int arr[2] = { (5, 6), 7 };\n"
+                  "struct T g = { (5, 302), (6, 303) };\n"
+                  "void f(int x) { struct T t = { (1, 300), (2, 301) }; struct T u = { (3, x << 40), 1.5 }; struct T v = { x / 0, (4, x) }; (void)t; (void)u; (void)v;\n"
+                  "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
+        .options = { "-Wall" },
+        .warnings = 34,
+        // (-c can't compile a comma's static initializer yet.)
+        .syntax_only = true,
+    },
+    {
+        .name = "comma warnings in initializers in clang's order without shift counts",
+        .source = "struct T { char a; char b; };\n"
+                  "int z = (1 << 40, 3), y = (2, 1 << 41);\n"
+                  "int w = (2 << 42, 1 << 43, 3);\n"
+                  "char c = (1 << 42, 300);\n"
+                  "struct T s = { (1 << 43, 1), (4, 1 << 44) };\n"
+                  "int arr[2] = { (5, 6), 7 };\n"
+                  "struct T g = { (5, 302), (6, 303) };\n"
+                  "void f(int x) { struct T t = { (1, 300), (2, 301) }; struct T u = { (3, x << 40), 1.5 }; struct T v = { x / 0, (4, x) }; (void)t; (void)u; (void)v;\n"
+                  "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
+        .options = { "-Wno-shift-count-overflow" },
+        .warnings = 24,
+        .c23 = true,
+        .syntax_only = true,
+    },
+    {
         .name = "literal conversions precede constant conversions in one brace initializer",
         .source = "char a[4]={300,1.5,301,2.5};void f(void){char b[4]={303,5.5,304,6.5};int y=7.5;(void)b;(void)y;}\n",
         .warnings = 9,
@@ -701,6 +783,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1; }\n",
         .warnings = 7,
         .compare_warning_text = true,
+    },
+    {
+        // An enum base's const and volatile (#1952): clang's -Wunderlying-cv-qualifier-ignored once per base, at its first
+        // token that isn't a qualifier, a typedef's qualifiers too, and no stand-alone declaration's warning for them.
+        .name = "enum underlying type qualifiers",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .warnings = 13,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "enum underlying type qualifiers under -Wall",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .options = { "-Wall" },
+        .warnings = 13,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "enum underlying type qualifiers under -w",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .options = { "-w" },
+    },
+    {
+        .name = "enum underlying type qualifiers as errors",
+        .source = "enum H : const int { D };\n",
+        .options = { "-Werror=underlying-cv-qualifier-ignored" },
+        .errors = 1,
+    },
+    {
+        .name = "enum underlying type qualifiers disabled",
+        .source = "enum H : const int { D };\n",
+        .options = { "-Wno-underlying-cv-qualifier-ignored" },
     },
     {
         .name = "duplicate declaration specifier group disabled",
@@ -1936,6 +2058,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
                   "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
         .c23 = true,
+    },
+    {
+        // `#pragma pack`'s own warnings (#1849): clang's parser's for malformed directives, at the token they name or past
+        // the line's last, and Sema's at the directive (a bad value, a name and a value to pop, an empty stack's pop,
+        // show's value: the default's 8, a pack value, options align's).
+        .name = "pragma pack syntax and Sema warnings",
+        .source = "#pragma pack(3)\n#pragma pack(push, r, 4)\n#pragma pack(pop, r, 2)\n#pragma pack(pop, nosuch)\n#pragma pack\n"
+                  "#pragma pack(foo)\n#pragma pack(push, 4) extra\n#pragma pack(pop, 32)\n#pragma pack(push, 4\n#pragma pack(push, r, x)\n"
+                  "#pragma pack(+)\n#pragma pack(show)\n#pragma pack(2)\n#pragma pack(show)\n#pragma options align=packed\n#pragma pack(show)\n"
+                  "#pragma pack(pop)\n#pragma pack(pop)\nstruct S { char c; int i; };\nint main(void) { return sizeof(struct S) != 6; }\n",
+        .warnings = 14,
+    },
+    {
+        // A push left open at the unit's end (#1849): one warning each, the innermost first, the innermost with clang's
+        // note at the reset that left the default value.
+        .name = "pragma pack pushes left open at the end",
+        .source = "#pragma pack(push, 4)\n#pragma pack(push, inner, 1)\nstruct S { char c; int i; };\n#pragma pack()\n"
+                  "int main(void) { return sizeof(struct S) != 5; }\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        // The note of a push that no directive set a value after has no place (#1849), which the oracle's count of
+        // located notes leaves out; the complete output compares it.
+        .name = "pragma pack push left open without a value",
+        .source = "#pragma pack(push)\nint main(void) { return 0; }\n",
+        .warnings = 1,
+    },
+    {
+        // Sema's show after a function comes after the function's own warnings (#1849): clang handles the annotation at
+        // the top level.
+        .name = "pragma pack show after a function's warnings",
+        .source = "#pragma pack(push, 2)\nint main(void) { int x; return 0; }\n#pragma pack(show)\n#pragma pack(pop)\n",
+        .options = { "-Wall" },
+        .warnings = 2,
     },
 };
 
