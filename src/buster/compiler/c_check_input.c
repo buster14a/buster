@@ -943,6 +943,11 @@ struct CheckInput
     // pragma's own error stays an error, as clang's does.
     bool fatal_errors;
     uint8_t* explicit_abis;
+    // Type sugar (#1447, c_types_sugar.c): the nodes, and each declaring token's (0 for none). declared_sugar is null,
+    // and the table empty, until a declarator writes sugar the canonical type doesn't keep, which few units do
+    // (check_input_declarator_sugar).
+    TypeSugarTable sugar;
+    uint32_t* declared_sugar;
     uint32_t* objects;
     // A declaring token's flags and linkage, a byte a token (BUSTER_CHECK_BITS_*, #1167).
     uint8_t* declaration_bits;
@@ -7171,6 +7176,8 @@ static uint32_t check_input_attribute_group_close(const Parser* parser, uint32_t
     return open != UINT32_MAX ? parser->tree.parents[open] : UINT32_MAX;
 }
 
+#include "c_check_type_sugar_input.c"
+
 // clang's warnings of a declarator's function types' attributes (#147), which its GetFullTypeForDeclarator gives as it
 // builds the declarator's type, before ProcessDeclAttributes warns of the declaration's attributes: `common` the
 // specifiers', `own` the declarator's, split at `split` (its name, or where it would be) into its chunks' (a group's,
@@ -8144,6 +8151,17 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     }
                     type = check_input_declarator_abi(reader, frame->common_attributes, type, &abi_origin, false);
                     type = check_input_declarator_abi(reader, frame->attributes, type, &abi_origin, false);
+                    // The declaration's type sugar where its lists write a convention (#1447), and none where they don't
+                    // over a name that had some.
+                    const CheckInputAttributes* specifiers = frame->parameter ? frame->common_attributes : run->common_attributes;
+                    if (__builtin_expect(!frame->parameter && (check_input_sugar_list(specifiers) || check_input_sugar_list(frame->attributes)), 0))
+                    {
+                        check_input_declarator_sugar(reader, frame, specifiers, parts, reverse, type);
+                    }
+                    else if (__builtin_expect(reader->output->declared_sugar != NULL && !frame->parameter && frame->name != BUSTER_CHECK_NONE, 0))
+                    {
+                        reader->output->declared_sugar[frame->name] = 0;
+                    }
                 }
                 valid = type != 0;
                 const bool alignas_parameter = frame->parameter && ((frame->common_attributes != 0 && frame->common_attributes->has_alignas) ||
@@ -10332,6 +10350,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         const CheckNoderefType* noderef = reader->declarator_noderef;
         // (The specifiers' function-type attributes have had their warnings with the declarator's, check_input_declarator_step.)
         type = check_input_declarator_abi(reader, attributes, type, &abi_origin, false);
+        // Its sugar over the type its specifiers' convention makes (#1447).
+        if (__builtin_expect(reader->output->declared_sugar != NULL, 0) && name < reader->output->token_count && reader->output->declared_sugar[name] != 0 &&
+            reader->output->sugar.canonical[reader->output->declared_sugar[name]] != type)
+        {
+            reader->output->declared_sugar[name] = check_input_sugar_retype(reader, reader->output->declared_sugar[name], type);
+        }
         valid &= check_input_declarator_conventions(reader, type, is_typedef, attributes, name);
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
         {

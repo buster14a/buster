@@ -1077,6 +1077,75 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
     return check_driver_warning_type_at(parser, pp, input, types, spell, scratch, type, spelling, BUSTER_CHECK_NONE, 0);
 }
 
+// The type sugar of a warning operand (#1447, c_types_sugar.c): its declaration's (CheckInput.declared_sugar), through the
+// addresses, indirections and subscripts whose levels the sugar's printer finds (type_sugar_print); 0 for none.
+static uint32_t check_driver_operand_sugar(const CheckInput* input, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t result = 0;
+    bool walking = input->declared_sugar != NULL;
+    for (uint32_t steps = 0; walking && node < graph->count && steps < 16; steps += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t token = graph->tokens[node];
+        const uint32_t declaration = op == CHECK_OP_VALUE && token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+        result = declaration < input->token_count ? input->declared_sugar[declaration] : 0;
+        walking = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT;
+        node = walking ? graph->operand0[node] : node;
+    }
+    return result;
+}
+
+// A warning's type as its declaration's sugar writes it (#1447, type_sugar_print), quoted: `'MS void (*)(void)'`, with
+// each MACRO node's list resolved by the macro that writes it (check_driver_attribute_macro). Like clang's, no a.k.a.:
+// desugarForDiagnostic doesn't look through attributed, macro-qualified or parenthesized types. Empty where `sugar` is 0
+// or doesn't describe `type`, where the caller prints it as before.
+static String8 check_driver_sugar_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, CheckWarningSpelling* spell,
+                                       Arena* scratch, TypeId type, uint32_t sugar)
+{
+    String8 result = { 0 };
+    if (sugar != 0 && input != NULL && input->declared_sugar != NULL && type != 0 && check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+    {
+        uint32_t tokens[8];
+        String8 texts[8];
+        const uint32_t count = type_sugar_macro_tokens(types, &input->sugar, sugar, type, tokens, 8);
+        const bool history = count != 0 && pp_history_ensure(pp);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            // (A MACRO node's word is its list's token plus one.)
+            const uint32_t token = tokens[i] - 1;
+            const bool list = token + 1 < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE &&
+                              parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
+            const uint32_t close = list ? parser->tree.parents[token + 1] : token;
+            texts[i] = history && token < parser->tokens.count && close < parser->tokens.count ? check_driver_attribute_macro(parser, pp, token, close) : (String8){ 0 };
+        }
+        const TypeNames names = {
+            .bytes = spell->bytes,
+            .lengths = spell->lengths,
+            .count = spell->count,
+            .anonymous = spell->anonymous,
+            .anonymous_count = spell->anonymous_count,
+            .sugar_macro_tokens = tokens,
+            .sugar_macro_texts = texts,
+            .sugar_macro_count = count,
+        };
+        const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+        const String8 text = type_sugar_print(types, &input->sugar, scratch, sugar, type, (String8){ 0 }, &names, options);
+        const char* quoted = text.length != 0 ? check_warning_text(scratch, "'%.*s'", (int)text.length, text.pointer) : NULL;
+        result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
+    }
+    return result;
+}
+
+// A warning operand's type (check_driver_warning_type), as its sugar writes it where it has some and no typedef or typeof
+// spelling (check_driver_sugar_type).
+static String8 check_driver_warning_type_sugared(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling, uint32_t sugar)
+{
+    const String8 sugared = spelling == 0 ? check_driver_sugar_type(parser, pp, input, types, spell, scratch, type, sugar) : (String8){ 0 };
+    return sugared.length != 0 ? sugared : check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
+}
+
 // An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
 static String8 check_warning_attribute_normalized(String8 name)
 {

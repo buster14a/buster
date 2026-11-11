@@ -3083,20 +3083,24 @@ static uint32_t check_driver_parameter_place(const Parser* parser, const CheckIn
     return result;
 }
 
-// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef) as clang words it (#147,
+// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef, or `target_sugar`'s
+// sugar) as clang words it (#147,
 // Sema::DiagnoseAssignmentResult): its kind's words (check_driver_conversion_kind), its `action`'s (0 initializing, 1
 // assigning, 2 returning, 3 passing, each putting the target or the source first as clang's does), the fix-it's
 // (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint8_t action, Arena* scratch)
+                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
+                                                 uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if (source < stream->count && target != 0)
     {
         const TypeId value = check_stream_type(stream, source);
         const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
-        const String8 to = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
-        const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, source_spelling);
+        // Each as its declaration's sugar writes it, where it has some (#1447).
+        const String8 to = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
+        const String8 from = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
@@ -3170,7 +3174,8 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool narrow = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
-                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling, 0, scratch) :
+                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
+                                                                whole && input->declared_sugar != NULL ? input->declared_sugar[declaration] : 0, 0, scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
@@ -3202,6 +3207,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t source = BUSTER_CHECK_NONE;
     TypeId target = 0;
     uint32_t target_spelling = 0;
+    uint32_t target_sugar = 0;
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
@@ -3213,6 +3219,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
             at = check_sparse_get(input->initializer_nodes, declaration) == node ? declaration : at;
         }
         target = check_input_object_spelling(types, input, parser, at, graph->types[node], graph->types[node], &target_spelling);
+        target_sugar = input->declared_sugar != NULL && at < input->token_count ? input->declared_sugar[at] : 0;
     }
     else if (applies && op == CHECK_OP_ASSIGN)
     {
@@ -3226,6 +3233,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
         target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
         target = member ? lvalue : target;
+        target_sugar = member ? 0 : check_driver_operand_sugar(input, stream, left);
     }
     else if (applies && returning)
     {
@@ -3268,7 +3276,8 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         }
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
-    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, action, scratch) : NULL;
+    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar, action,
+                                                                 scratch) : NULL;
     *located = result != NULL ? at : *located;
     return result;
 }
