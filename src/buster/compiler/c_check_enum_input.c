@@ -142,7 +142,7 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
     return valid;
 }
 
-// C23's redefinition of an enum (#1447, N3037), at file scope: the second body is an anonymous enum's
+// C23's redefinition of an enum (#1447, N3037), in any scope (#1826): the second body is an anonymous enum's
 // (check_input_tag_identity), whose enumerators of an earlier one's names are no redefinitions but names both declare,
 // which their uses find ambiguous; once complete, it is compared with the earlier enum (check_tag_enum_compatible). Only a
 // unit that defines an enum twice in one scope takes this, so it has no vector twin.

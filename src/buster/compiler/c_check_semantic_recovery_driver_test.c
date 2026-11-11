@@ -440,6 +440,14 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void) { int p[-1], r; int s = r; (void)s; }\n"
         "int x = undeclared;\n",
         "typedef int T, U[-1], V;\nV v;\n",
+        // C23's enum redefinitions in a block, and a third and fourth definition (#1826): compatible ones are taken, and an
+        // ambiguous use lists every candidate, a block's qualified by its function (`g(int, char *)::B`, `k()::P`).
+        "/* gnu23 only */\n"
+        "enum X { A, B };\nenum X { A, C };\nenum X { A, D };\nenum X { A, E };\nint u = A;\n"
+        "void f(void) { enum Z { Z1 }; enum Z { Z1 }; int w = Z1; (void)w; }\n"
+        "void g(int x, char *y) { enum Y { B, C }; enum Y { B, D }; int v = B; (void)x; (void)y; (void)v; }\n"
+        "int k(void) { enum W { P, Q }; enum W { P, R }; enum W { P, S }; return P; }\n"
+        "int z = undeclared;\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or

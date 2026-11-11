@@ -4678,11 +4678,11 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool again = !c23 && earlier_tag != 0 && type_is_complete(reader->types, earlier) &&
                            (kind != BUSTER_TYPE_KIND_ENUM || (earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
                             (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
-        // An enum's, at file scope (#1447, check_tag_enum_compatible): one without a fixed type after one without, or one
+        // An enum's, in any scope (#1447, check_tag_enum_compatible): one without a fixed type after one without, or one
         // listed again with its fixed base. Its body is an anonymous enum's whose enumerators of the earlier one's names
-        // are ambiguous (check_tag_enum_ambiguous), compared with the earlier once complete. (A block's notes name its
-        // function, `f()::X`, which the reader doesn't spell: it still refuses there.)
-        const bool enum_again = c23 && earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(reader->types, earlier) && depth == 0 &&
+        // are ambiguous (check_tag_enum_ambiguous), compared with the earlier once complete. (A block's ambiguity notes
+        // name its function, `g(int)::B`: check_driver_function_scope, #1826.)
+        const bool enum_again = c23 && earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(reader->types, earlier) &&
                                 ((earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
                                  (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
         const bool compatible = c23 && earlier_tag != 0 && (kind != BUSTER_TYPE_KIND_ENUM || enum_again) && type_is_complete(reader->types, earlier);
