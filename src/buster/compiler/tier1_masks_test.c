@@ -123,6 +123,13 @@ struct Tier1MasksTest
     // The conversions (#1840, tier1_masks_test_conversions): those tried, and those through every stage as the IR's.
     uint32_t convert_attempts;
     uint32_t convert_rows;
+    // The shifts by an int (#1840, tier1_masks_test_shifts): those tried, and those through every stage as the IR's.
+    uint32_t shift_attempts;
+    uint32_t shift_rows;
+    // The masks to vectors and back (#1840, tier1_masks_test_mask_vectors): those tried, and those through every stage as
+    // the IR's.
+    uint32_t mask_vector_attempts;
+    uint32_t mask_vector_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -5239,6 +5246,234 @@ static void tier1_masks_test_permutes(Tier1MasksTest* test)
     free(program);
 }
 
+// The front end's shifts by an int through the IR to Tier 1 (#1840): every CHECK_X86_LOWER_SHIFT rule, as the program's
+// only row in 4 statements of the input buffer's vector k shifted by a count, stored into the output's vector k, twice:
+// the count an I32 loaded from the input's last slot (5, the lanes' bits less 1, their bits, and 65537, which a 16-bit
+// lane's count would wrap to 1, one per input), which Tier 1 moves by vmovd; and a constant count per statement (1, the
+// lanes' bits less 1, their bits plus 1, and 300, past an immediate's 255), which it folds into the immediate form.
+// tier1_masks_test_typed_pipeline takes each through the IR as its shift, which the interpreter runs at every stage, and
+// Tier 1 natively, against C's shifts of each lane by the count read unsigned, 0 or the sign past the lane's bits.
+static void tier1_masks_test_shifts(Tier1MasksTest* test)
+{
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the shifts' memory");
+    uint64_t state = test->random ^ UINT64_C(0x3c6ef372fe94f82b);
+    const uint32_t count_slot = BUSTER_TIER1_MASKS_TEST_IN / 8 - 1;
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const char* name = rule->name;
+        const size_t prefix = sizeof("__builtin_ia32_ps") - 1;
+        if (rule->family != CHECK_X86_LOWER_SHIFT || strncmp(name, "__builtin_ia32_ps", prefix) != 0 || strlen(name) < prefix + 3)
+        {
+            continue;
+        }
+        const uint32_t kind = name[prefix] == 'l' ? 0 : name[prefix + 1] == 'l' ? 1 : 2;
+        const uint32_t size = name[prefix + 2] == 'w' ? 2 : name[prefix + 2] == 'd' ? 4 : 8;
+        const uint32_t bits = 8 * size;
+        const uint32_t loaded[4] = { 5, bits - 1, bits, 65537 };
+        const uint32_t constants[4] = { 1, bits - 1, bits + 1, 300 };
+        for (uint32_t constant = 0; constant < 2; constant += 1)
+        {
+            const uint64_t output_mark = test->output.length;
+            test->shift_attempts += 1;
+            Tier0Operation row;
+            const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL;
+            char label[128];
+            snprintf(label, sizeof(label), "%s (%s counts)", name, constant != 0 ? "constant" : "loaded");
+            const uint32_t bytes = rule->bytes;
+            bool ok = tier1_masks_test_expect(test, made && row.operand_count == 2 && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's shift's row");
+            program->count = 0;
+            program->overflow = false;
+            program->rows = true;
+            program->objects = false;
+            for (uint32_t k = 0; ok && k < 4; k += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                if (constant != 0)
+                {
+                    tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, constants[k]);
+                }
+                else
+                {
+                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, count_slot);
+                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_I32, 0);
+                }
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the shift's program fits");
+            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+            functions[0].operations = &row;
+            functions[0].operation_count = 1;
+            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+            {
+                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+                tier0_test_mask_inputs(in, &state);
+                // The loaded count's slot: its low 32 bits the count, its high ones what the I32 load doesn't read.
+                in[count_slot] = (in[count_slot] & UINT64_C(0xffffffff00000000)) | loaded[input % 4];
+                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+                for (uint32_t k = 0; k < 4; k += 1)
+                {
+                    const uint8_t* a = (const uint8_t*)in + k * bytes % 256;
+                    const uint32_t c = constant != 0 ? constants[k] : loaded[input % 4];
+                    for (uint32_t lane = 0; lane < bytes / size; lane += 1)
+                    {
+                        uint64_t raw = 0;
+                        memcpy(&raw, a + lane * size, size);
+                        const int64_t signed_value = size == 2 ? (int16_t)raw : size == 4 ? (int32_t)raw : (int64_t)raw;
+                        const uint64_t value = kind == 0 ? (c >= bits ? 0 : raw << c) :
+                                               kind == 1 ? (c >= bits ? 0 : raw >> c) :
+                                                           (uint64_t)(c >= bits ? (signed_value < 0 ? -1 : 0) : signed_value >> c);
+                        memcpy(wanted + k * bytes + lane * size, &value, size);
+                    }
+                }
+            }
+            bool machine = false;
+            ok = ok && tier1_masks_test_typed_pipeline(test, label, functions, true, inputs, expected, arenas, &machine);
+            ok = ok && tier1_masks_test_expect(test, !machine, "a shift by an int is the IR's shift, not a machine row");
+            test->shift_rows += ok;
+            tier1_masks_test_expect(test, test->scratch.length == 0, "the shifts return the scratch arena");
+            arena_pop_to(&test->output, output_mark);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                arena_pop_to(&arenas[k], 0);
+            }
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
+// The front end's masks to vectors and back through the IR to Tier 1 (#1840): every MASK_VECTOR rule (vpmovm2b to
+// vpmovm2q) and VECTOR_MASK rule (vpmovb2m to vpmovq2m) at each width, as the opmask conversion leaves its row, the
+// program's only row in 4 statements: a mask from the input's word k into a vector stored at the output's vector k, or
+// the input's vector k into a mask stored, zero-extended, at the output's word k. tier1_masks_test_typed_pipeline takes
+// each through the IR as its vselect of ones and zeros or its comparison less than zero, which the interpreter runs at
+// every stage, and Tier 1 natively as the single instruction, against a model from Intel's manual: each lane all ones
+// where its mask bit is set, and each mask bit its lane's sign bit.
+static void tier1_masks_test_mask_vectors(Tier1MasksTest* test)
+{
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the mask conversions' memory");
+    uint64_t state = test->random ^ UINT64_C(0x510e527fade682d1);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool expand = rule->family == CHECK_X86_LOWER_MASK_VECTOR;
+        if (!expand && rule->family != CHECK_X86_LOWER_VECTOR_MASK)
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->mask_vector_attempts += 1;
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &target);
+        const uint32_t bytes = rule->bytes;
+        const uint32_t lanes = bytes / rule->element;
+        const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+        static const uint8_t integers[9] = { 0, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_U16, 0, BUSTER_TYPED_CLASS_U32, 0, 0, 0, BUSTER_TYPED_CLASS_U64 };
+        bool ok = tier1_masks_test_expect(test, made && row.operand_count == 1, "the front end's mask conversion's row, in the mask class at x86-64-v4");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            if (expand)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, mask_bytes);
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+            }
+            else
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, integers[mask_bytes], mask_bytes);
+                if (mask_bytes != 8)
+                {
+                    tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+            }
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the mask conversion's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                if (expand)
+                {
+                    for (uint32_t lane = 0; lane < lanes; lane += 1)
+                    {
+                        memset(wanted + k * bytes + lane * rule->element, (in[k] >> lane & 1) != 0 ? 0xff : 0, rule->element);
+                    }
+                }
+                else
+                {
+                    const uint8_t* a = (const uint8_t*)in + k * bytes % 256;
+                    uint64_t bits = 0;
+                    for (uint32_t lane = 0; lane < lanes; lane += 1)
+                    {
+                        bits |= (uint64_t)(a[lane * rule->element + rule->element - 1] >> 7) << lane;
+                    }
+                    memcpy(wanted + 8 * k, &bits, 8);
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a mask conversion is the IR's, not a machine row");
+        test->mask_vector_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the mask conversions return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // A C model of an integer lane's conversion (#1840): `raw`, a lane of `from` bytes, to `to` bytes, by C's conversions: a
 // wider lane by its signedness, a narrower one wrapped, or saturated as a signed lane to the narrower one's signed range
 // (`mode` 1, vpmovs) or as an unsigned lane to its unsigned range (2, vpmovus: Intel's manual's unsigned source).
@@ -5603,6 +5838,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_widths(&test);
             tier1_masks_test_permutes(&test);
             tier1_masks_test_conversions(&test);
+            tier1_masks_test_shifts(&test);
+            tier1_masks_test_mask_vectors(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -5615,7 +5852,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows),
+            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
+                                                                               test.shift_rows + test.mask_vector_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -5652,6 +5890,13 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                test.width_rows);
         printf("test-tier1-masks: the front end's conversions: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its extend and truncate\n",
                test.convert_rows);
+        tier1_masks_test_expect(&test, test.shift_attempts == 2 * 27 && test.shift_rows == test.shift_attempts,
+                                "every front-end shift by an int goes through the IR and Tier 1 as the IR's shift, by a register and by an immediate");
+        tier1_masks_test_expect(&test, test.mask_vector_attempts == 24 && test.mask_vector_rows == test.mask_vector_attempts,
+                                "every front-end mask to vector and back goes through the IR and Tier 1 as the IR's select or comparison");
+        printf("test-tier1-masks: the front end's masks to vectors and back: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as vpmovm2 and vpmov2m\n",
+               test.mask_vector_rows);
+        printf("test-tier1-masks: the front end's shifts by an int: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its shift\n", test.shift_rows);
         printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
                "shuffle_lanes\n",
                test.permute_rows);

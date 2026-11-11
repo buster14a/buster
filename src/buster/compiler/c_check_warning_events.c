@@ -150,6 +150,12 @@ enum
     // An enum's fixed underlying type with const or volatile, which it drops (#1952, clang's ActOnTag):
     // -Wunderlying-cv-qualifier-ignored, on by default.
     CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER = 122,
+    // A `#pragma pack (push, ...)` left open at the unit's end, or a pack value an included file changes (#1849, clang's
+    // DiagnoseUnterminatedPragmaAlignPack): -Wpragma-pack, on by default, under -Wpragmas.
+    CHECK_WARNING_ID_PRAGMA_PACK = 123,
+    // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
+    // of no option.
+    CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -432,6 +438,10 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
+    // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
+    // or "(null)" for another token, as clang streams the token's IdentifierInfo.
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -486,6 +496,18 @@ typedef enum CheckWarningCompletion
     CHECK_WARNING_COMPLETION_COUNT,
 } CheckWarningCompletion;
 
+// The order of the warnings completed at the translation unit's end, as their `suborder` (#2141): clang's
+// Sema::ActOnEndOfTranslationUnit diagnoses unterminated pack pushes, then #pragma weak's undeclared identifiers, then
+// internal functions used but not defined, and the unused file-scope declarations last. Those keep suborder 0, which
+// orders after every nonzero one at the same boundary.
+typedef enum CheckWarningUnitEnd
+{
+    CHECK_WARNING_UNIT_END_UNUSED,
+    CHECK_WARNING_UNIT_END_PACK,
+    CHECK_WARNING_UNIT_END_WEAK,
+    CHECK_WARNING_UNIT_END_UNDEFINED,
+} CheckWarningUnitEnd;
+
 // Per-event source policy is independent of the ID: GNU array-bound folds warn by default, whereas an accepted
 // nonstandard ICE fold can start ignored under the same -Wgnu-folding-constant policy. Completion/lookahead is also
 // independent of the diagnostic location: a later preprocessing diagnostic can precede an earlier source warning.
@@ -500,7 +522,7 @@ typedef enum CheckWarningCompletion
 // after a definition), its token the attribute's that made it, for its policy's place.
 #define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
-// `#pragma options align` or `#pragma align` warning).
+// `#pragma pack`, `#pragma options align` or `#pragma align` warning, whose payload.name is its CheckPackMessage).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its

@@ -189,15 +189,16 @@ GOT. The native run gives each symbol a GOT slot and the thread-locals a block
 of their own, which FS points at for the entry's call alone. An `access` check
 before the programs compiles every global kind of every class by each access:
 both paths alike, with the access's references, and validation's rule. A
-`segments` check (#1447) compiles `LOAD`, `STORE` and `SET` with FS and GS
+`segments` check (#1447) compiles `LOAD`, `STORE` and `SET` with FS, GS and SS
 overrides (`Tier0Function.segments`) for every integer and floating class, at
 `[p]`, `[p + 8]` and `[p + i * size]`, a seq_cst store, and copies of long
 double, the 128-bit integers and vectors (EVEX and SSE/AVX transports) from and
 to a segment: both paths alike, each record the stripped twin's but for the
 override on the access's memory operand, and validation's rules for the marker
-(a constant's top bits are its own; the segment 3 is refused).
+(a constant's top bits are its own; SS's 3 is an override).
 A child runs them, `%fs` at the thread's base and `%gs` set by `arch_prctl`, on
-addresses that hold the data only through the segment. It calls them through
+addresses that hold the data only through the segment; SS's base is 0 in 64-bit
+mode, so its cases run on the data's own addresses. It calls them through
 `tier0_test_segment_call`, which turns off `-fsanitize=function`: that check
 reads a signature in the 8 bytes before the entry, which generated code lacks
 and which is unmapped before the first case's page (#2077). After

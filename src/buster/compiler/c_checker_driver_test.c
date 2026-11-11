@@ -84,6 +84,13 @@ struct CheckDriverRunModes
     uint64_t in_process_runs;
     uint64_t served_runs;
     uint64_t child_runs;
+    // What the runs cost (#2263): the served runs' wall time, the server's requests past their limit (each stopped the
+    // server, and its run ran as a child), and the children's wall time from fork to reap and CPU time (wait4's, theirs
+    // and their own children's).
+    uint64_t served_nanoseconds;
+    uint64_t stalls;
+    uint64_t child_nanoseconds;
+    uint64_t child_cpu_nanoseconds;
     uint64_t differences;
     uint64_t sweep_fixtures;
     uint64_t sweep_nanoseconds;
@@ -180,6 +187,7 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
     size_t length = 0;
     *text = NULL;
     check_driver_run_modes.child_runs += 1;
+    const uint64_t begun = check_test_driver_nanoseconds();
     if (captured != NULL)
     {
         fflush(NULL);
@@ -210,11 +218,18 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
         }
     }
     pid_t waited = -1;
+    struct rusage usage = { 0 };
     do
     {
-        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        waited = child > 0 ? wait4(child, &status, 0, &usage) : -1;
     }
     while (waited < 0 && child > 0 && errno == EINTR);
+    if (child > 0 && waited == child)
+    {
+        check_driver_run_modes.child_nanoseconds += check_test_driver_nanoseconds() - begun;
+        check_driver_run_modes.child_cpu_nanoseconds += ((uint64_t)usage.ru_utime.tv_sec + (uint64_t)usage.ru_stime.tv_sec) * 1000000000 +
+                                                        ((uint64_t)usage.ru_utime.tv_usec + (uint64_t)usage.ru_stime.tv_usec) * 1000;
+    }
     const bool read = captured != NULL && waited == child && pp_test_read_output(captured, text, &length);
     if (captured != NULL)
     {
@@ -279,7 +294,8 @@ static bool check_test_driver_run_in_process(char* const* arguments, char** text
 }
 
 // The oracle clang's `arguments` through the server (oracle_server_run), with this process's working directory and
-// environment: the selected stream into *text (the caller frees it), the exit status, or -1.
+// environment, within the server's limit: the selected stream into *text (the caller frees it), the exit status, or -1
+// if the server couldn't take it.
 static int check_test_driver_clang_request(char* const* arguments, char** text, bool stdout_capture)
 {
     CheckDriverRunModes* modes = &check_driver_run_modes;
@@ -289,11 +305,18 @@ static int check_test_driver_clang_request(char* const* arguments, char** text, 
     uint64_t output_length = 0;
     uint64_t errors_length = 0;
     const bool placed = getcwd(directory, sizeof(directory)) != NULL;
+    const uint64_t begun = check_test_driver_nanoseconds();
     const int status = placed ? oracle_server_run(&modes->server, arguments, environ, directory, NULL, stdout_capture ? 1u : 2u, 0, &output, &output_length, &errors, &errors_length) : -1;
     *text = stdout_capture ? output : errors;
     if (status >= 0)
     {
         modes->served_runs += 1;
+        modes->served_nanoseconds += check_test_driver_nanoseconds() - begun;
+    }
+    if (placed && modes->server.stalled)
+    {
+        modes->stalls += 1;
+        fprintf(stderr, "run modes: the clang server gave no answer within its limit: stopped, and the run runs as a child\n");
     }
     return status;
 }
@@ -470,7 +493,14 @@ static int check_test_driver_spawn_stream(char* const* arguments, char** text, b
     }
     else if (clang && !modes->differential)
     {
+        // A run the server couldn't take (it ended, or ran past its limit) runs as a child, as without the server.
         status = check_test_driver_clang_request(arguments, text, stdout_capture);
+        if (status < 0)
+        {
+            free(*text);
+            *text = NULL;
+            status = check_test_driver_child(arguments, text, stdout_capture, true);
+        }
     }
     else if (clang)
     {
@@ -830,11 +860,14 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
 // A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
-// review): a long double's, in its depth's slot, which later expressions share. Both paths refuse it by name, and compile
-// the same function with no value held across its setjmp.
+// review): a deep expression's, in its depth's slot, which later expressions share. Both paths refuse it by name, and
+// compile a long double held across setjmp, whose slot the call snapshots (#1843), and a function with no value held.
 static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char* const sources[2] = {
+    static const char* const sources[3] = {
+        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
+        "int run(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j)\n"
+        "{ int r = a + (b * (c - (d + (e * (f - (g + (h * (i - (j + __builtin_setjmp(buf)))))))))); if (r == 0) jump(); return r; }\n",
         "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
         "long double run(long double x) { long double r = x + __builtin_setjmp(buf); if (r == x) jump(); return r; }\n",
         "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
@@ -844,7 +877,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
     char object[256];
     snprintf(source, sizeof(source), "%s/setjmp_held.c", directory);
     snprintf(object, sizeof(object), "%s/setjmp_held.o", directory);
-    for (uint32_t s = 0; s < 2; s += 1)
+    for (uint32_t s = 0; s < 3; s += 1)
     {
         const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
         for (uint32_t path = 0; written && path < 2; path += 1)
@@ -854,12 +887,12 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
             char* text = NULL;
             const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
             const bool refused = status == 1 && text != NULL &&
-                                 strstr(text, "unsupported: a long double, __int128, vector or mask value, or a deep expression's, held across a call in a function "
-                                              "that calls __builtin_setjmp") != NULL;
+                                 strstr(text, "unsupported: a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp") != NULL;
             const bool compiled = status == 0;
             check_test_expect(test, s == 0 ? refused : compiled,
-                              s == 0 ? (path == 0 ? "a long double held across __builtin_setjmp is refused by name" : "the same, scalar")
-                                     : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
+                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp is refused by name" : "the same, scalar")
+                              : s == 1 ? (path == 0 ? "a long double held across __builtin_setjmp compiles" : "the same, scalar")
+                                       : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
             free(text);
         }
         check_test_expect(test, written, "setjmp's held-value sources written");
@@ -1748,6 +1781,116 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
         if (status == 0 && !same)
         {
             fprintf(stderr, "record dumps by %s:\n%s\nclang's build:\n%s\n", option_names[path], captured, expected);
+        }
+    }
+    unlink(source);
+    for (uint32_t o = 0; o < 5; o += 1)
+    {
+        unlink(outputs[o]);
+    }
+}
+
+// __builtin_dump_struct's rest of the arguments converted as a call's (#1842): complex values to a complex or a real
+// printer parameter, of each floating type and of int, a real one to a complex parameter, complex values through the
+// variadic part, a call's complex value evaluated again for each line, a transparent union's parameter of each of its
+// members, of a void pointer and of the union itself, and _Atomic aggregates' parameters (8 and 4 bytes, lock-free, of a
+// plain and of an _Atomic argument), beside a complex long double's and an _Atomic int's, whose reads each line evaluates
+// again (their atomic plans past the nodes' own, CheckLowerInitializers.extra_atomics): by the direct path, by --scalar
+// and by --tier1 with and without it, each printing what clang -O0's build does.
+static void check_test_driver_dump_struct_rest(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] =
+        "#include <stdarg.h>\n"
+        "#include <stdio.h>\n"
+        "struct S { int a; double b; };\n"
+        "struct A { int x; int y; };\n"
+        "struct B { char x[3]; };\n"
+        "typedef union __attribute__((transparent_union)) { int* i; const char* c; } U;\n"
+        "static int calls;\n"
+        "static int pr(_Complex double z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g,%g)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pf(_Complex float z, int k, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g,%g,%d)\", __real__ z, __imag__ z, k); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pl(_Complex long double z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%Lg,%Lg)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pi(_Complex int z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%d,%d)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pd(double d, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g)\", d); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pv(int k, ...) { va_list ap; va_start(ap, k); _Complex double z = va_arg(ap, _Complex double); printf(\"<%d|%g,%g>\", k, __real__ z, __imag__ z); calls++; va_end(ap); return 0; }\n"
+        "static int pvf(int k, ...) { va_list ap; va_start(ap, k); _Complex float z = va_arg(ap, _Complex float); _Complex long double w = va_arg(ap, _Complex long double); printf(\"<%d|%g,%g|%Lg,%Lg>\", k, __real__ z, __imag__ z, __real__ w, __imag__ w); calls++; va_end(ap); return 0; }\n"
+        "static int pu(U u, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"[%d]\", *u.i); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pa(_Atomic struct A a, const char* f, ...) { struct A v = a; va_list ap; va_start(ap, f); printf(\"[%d,%d]\", v.x, v.y); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pb(_Atomic struct B a, const char* f, ...) { struct B v = a; va_list ap; va_start(ap, f); printf(\"[%d%d%d]\", v.x[0], v.x[1], v.x[2]); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pk(int k, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"{%d}\", k); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static _Complex double next(int* n) { *n += 1; return *n + 0.5i; }\n"
+        "int main(void) {\n"
+        "    struct S s = { 1, 2.5 };\n"
+        "    _Complex double z = 1.0 + 2.0i;\n"
+        "    _Complex float zf = 3.0f - 1.0if;\n"
+        "    int n = 0;\n"
+        "    __builtin_dump_struct(&s, pr, z);\n"
+        "    __builtin_dump_struct(&s, pr, zf);\n"
+        "    __builtin_dump_struct(&s, pf, z, 7);\n"
+        "    __builtin_dump_struct(&s, pl, (_Complex long double)(5.0L + 6.0iL));\n"
+        "    __builtin_dump_struct(&s, pi, (_Complex int)(3 + 4i));\n"
+        "    __builtin_dump_struct(&s, pr, 9);\n"
+        "    __builtin_dump_struct(&s, pd, z);\n"
+        "    __builtin_dump_struct(&s, pr, next(&n));\n"
+        "    __builtin_dump_struct(&s, pv, 1, z);\n"
+        "    __builtin_dump_struct(&s, pvf, 2, zf, (_Complex long double)(7.0L - 8.0iL));\n"
+        "    int k = 42;\n"
+        "    U u;\n"
+        "    u.i = &k;\n"
+        "    struct A a = { 3, 4 };\n"
+        "    struct B b = { { 5, 6, 7 } };\n"
+        "    _Atomic struct A aa = a;\n"
+        "    __builtin_dump_struct(&s, pu, &k);\n"
+        "    __builtin_dump_struct(&s, pu, u);\n"
+        "    __builtin_dump_struct(&s, pu, (const char*)&k);\n"
+        "    __builtin_dump_struct(&s, pu, (void*)&k);\n"
+        "    __builtin_dump_struct(&s, pa, a);\n"
+        "    __builtin_dump_struct(&s, pb, b);\n"
+        "    __builtin_dump_struct(&s, pa, aa);\n"
+        "    _Atomic int ai = 7;\n"
+        "    __builtin_dump_struct(&s, pk, ai);\n"
+        "    printf(\"n=%d calls=%d\\n\", n, calls);\n"
+        "    return 0;\n"
+        "}\n";
+    char source[256];
+    char outputs[5][256];
+    snprintf(source, sizeof(source), "%s/dump_struct_rest.c", directory);
+    for (uint32_t o = 0; o < 5; o += 1)
+    {
+        snprintf(outputs[o], sizeof(outputs[o]), "%s/dump_struct_rest-%u", directory, o);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the dumps' rest program written");
+    char* text = NULL;
+    char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
+    const int built = written ? check_test_driver_spawn(reference, &text) : 1;
+    free(text);
+    static char expected[4096];
+    static char captured[4096];
+    const bool ran = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+    check_test_expect(test, ran && strlen(expected) > 1000, "clang's build of the dumps' rest runs");
+    static const char* const option_names[] = { "the direct path", "--scalar", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; ran && path < 4; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-w", "-o", outputs[path], source, NULL };
+        char* scalar[] = { (char*)executable, "--scalar", "-w", "-o", outputs[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-w", "-o", outputs[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-w", "-o", outputs[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? scalar : path == 2 ? tier1 : tier1_scalar;
+        text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        const bool same = status == 0 && check_test_driver_capture(outputs[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0;
+        char description[256];
+        snprintf(description, sizeof(description), "the dumps' rest by %s print what clang's build does", option_names[path]);
+        check_test_expect(test, same, description);
+        if (status == 0 && !same)
+        {
+            fprintf(stderr, "dumps' rest by %s:\n%s\nclang's build:\n%s\n", option_names[path], captured, expected);
         }
     }
     unlink(source);
@@ -8010,6 +8153,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_enum_cast_driver_test.c"
 #include "c_check_type_safety_driver_test.c"
 #include "c_check_objc_bridge_driver_test.c"
+#include "c_check_swift_attribute_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
@@ -9008,6 +9152,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_ignored_pragmas(&test, clang, executable, directory);
+                check_test_driver_pack_includes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9073,6 +9218,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_swift_attributes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_patchable(&test, clang, executable, directory);
                 check_test_driver_cpu_dispatch(&test, clang, executable, directory);
                 check_test_driver_target_versions(&test, clang, executable, directory);
@@ -9099,6 +9248,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_implicit(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_unknown_builtins(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9179,6 +9332,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_dump_struct(&test, clang, executable, directory);
+                check_test_driver_dump_struct_rest(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9294,6 +9448,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_segments(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_vectors(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -9343,6 +9501,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_rows(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_shared(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9516,6 +9678,14 @@ static int run_checker_driver_tests(int argc, char** argv)
            modes->in_process ? "in-process" : "as children", modes->server.path != NULL ? "through the server (" : "as children",
            modes->server.path != NULL ? modes->server.version : "", modes->server.path != NULL ? ")" : "", modes->differential ? ", differential" : "",
            modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
+    const double served_seconds = (double)modes->served_nanoseconds / 1e9;
+    const double child_seconds = (double)modes->child_nanoseconds / 1e9;
+    const double child_cpu_seconds = (double)modes->child_cpu_nanoseconds / 1e9;
+    printf("checker-driver: run costs: served %.3f s (%.3f ms each), %" PRIu64 " past the server's limit; children %.3f s wall (%.3f ms each), %.3f s CPU "
+           "(%.3f ms each)\n",
+           served_seconds, modes->served_runs != 0 ? served_seconds * 1e3 / (double)modes->served_runs : 0.0, modes->stalls, child_seconds,
+           modes->child_runs != 0 ? child_seconds * 1e3 / (double)modes->child_runs : 0.0, child_cpu_seconds,
+           modes->child_runs != 0 ? child_cpu_seconds * 1e3 / (double)modes->child_runs : 0.0);
     oracle_cache_report(oracle, "test-checker-driver");
     if (check_driver_part.count > 1)
     {
