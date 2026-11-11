@@ -2094,6 +2094,17 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wall" },
         .warnings = 2,
     },
+    {
+        // The unit's end in clang's Sema::ActOnEndOfTranslationUnit order (#2141): an unterminated pack push, #pragma
+        // weak's undeclared identifier, an internal function used but not defined, then the unused file-scope
+        // declarations, each after the function's own unused local.
+        .name = "unit end warnings in clang's order",
+        .source = "#pragma weak nothere\n#pragma pack(push, 4)\nstatic int unused(void) { return 0; }\nstatic int unused_var;\n"
+                  "static void declared(void);\nint main(void) { int x; declared(); return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 6,
+        .notes = 1,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
