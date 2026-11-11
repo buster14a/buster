@@ -1188,7 +1188,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         // __builtin_elementwise_min, _max and _abs of integers without their instructions (#1834): SSE2's compares and
         // blends, unsigned elements biased by their sign bits, unsigned words' saturating subtractions, bytes' and words'
         // absolute values of each and its negation and the others' by their signs; qwords' minima and maxima with SSE4.2's
-        // PCMPGTQ, 32 bytes with AVX2. Each pair has equal elements and the most negative one.
+        // PCMPGTQ, without it a compare's mask and a blend's row; 32 bytes with AVX2. Each pair has equal elements and the
+        // most negative one.
         { "baseline-min-max-abs",
           "typedef signed char sb __attribute__((vector_size(16)));typedef short sw __attribute__((vector_size(16)));"
           "typedef unsigned ud __attribute__((vector_size(16)));typedef unsigned long long uq __attribute__((vector_size(16)));"
@@ -1202,9 +1203,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "int tested(int n){unsigned h=2166136261u;V(sb,1)V(v16qu,2)V(sw,3)V(v8hu,4)V(v4si,5)V(ud,6)V(v2di,7)V(uq,8)V(sb8,9)V(uw4,10)V(sd2,11)\n"
           "M(sb,a1,b1);M(v16qu,a2,b2);M(sw,a3,b3);M(v8hu,a4,b4);M(v4si,a5,b5);M(ud,a6,b6);M(sb8,a9,b9);M(uw4,a10,b10);M(sd2,a11,b11);\n"
           "A(sb,a1);A(sw,a3);A(v4si,a5);A(v2di,a7);A(sb8,b9);A(sd2,b11);\n"
-          "#ifdef __SSE4_2__\n"
           "M(v2di,a7,b7);M(uq,a8,b8);\n"
-          "#endif\n"
           "#ifdef __AVX2__\n"
           "V(sb32,12)V(uw16,13)V(ud8,14)V(v4di,15)V(uq4,16)V(ub32,17)\n"
           "M(sb32,a12,b12);M(uw16,a13,b13);M(ud8,a14,b14);M(v4di,a15,b15);M(uq4,a16,b16);M(ub32,a17,b17);A(sb32,a12);A(v4di,a15);\n"
@@ -1338,23 +1337,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         }
         if (parsed)
         {
-            // Without AVX-512, what the baseline's rows refuse by name (#775), at each level that hasn't the instructions.
-            static const struct
-            {
-                uint32_t levels;
-                const char* source;
-                const char* reason;
-            } refused[] = {
-                { 1, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
-                  "vector minimum and maximum of 64-bit elements without SSE4.2" },
-            };
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
-            {
-                if ((refused[i].levels >> level & 1) != 0)
-                {
-                    check_test_program_boundary_target(test, refused[i].source, "baseline-refusal", true, false, 0, 0, refused[i].reason, &target);
-                }
-            }
+            // The builtins the baseline's rows still refuse by name (#775) are c_check_program_vector_builtins_test.c's
+            // refusals; the operators' and shuffles' sequences take every one (#1834).
         }
     }
     check_test_program_build_release();
