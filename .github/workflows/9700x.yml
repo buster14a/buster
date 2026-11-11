@@ -275,6 +275,9 @@ jobs:
       # inventory's own build.sh calls (check-call-graph) share the build's tree.
       BUSTER_DEBUG_INFO: '0'
       BUSTER_ORACLE_CACHE: check
+      # The native plain row also runs each of the semantic driver's in-process and served runs as a child and fails on
+      # a difference (test-checker-driver --differential, #2071); the other rows run them in-process and served alone.
+      BUSTER_DRIVER_DIFFERENTIAL: ${{ matrix.host_arch == 'native' && matrix.sanitizer == 'none' && '1' || '' }}
     steps:
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -359,6 +362,17 @@ jobs:
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
           bash tools/build-preprocessor-pragma-oracle.sh "$oracle"
+          # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), where this
+          # toolchain lets it hold one copy of LLVM (status 77: not the official release's static LLVM); without it the
+          # oracle clang runs as children.
+          server="$RUNNER_TEMP/clang-server"
+          served=0
+          bash tools/clang-server/build.sh "$server" || served=$?
+          if [ "$served" -eq 77 ]; then
+              echo "::notice::No clang server for this toolchain: the semantic driver's checks run the oracle clang as children."
+          elif [ "$served" -ne 0 ]; then
+              exit "$served"
+          fi
           # A compile per CPU: build.sh's default, one per physical core, is two on these runners' two cores of two
           # threads, which left the address row's build waiting on CPU (#2030).
           ./build.sh --config Release --jobs "$(nproc)"
@@ -370,6 +384,9 @@ jobs:
           test "$(find build -maxdepth 1 -type f -executable | wc -l)" -eq 1
           printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
+          if [ "$served" -eq 0 ]; then
+              printf 'BUSTER_CLANG_SERVER=%s\n' "$server" >> "$GITHUB_ENV"
+          fi
           clang --version
           llvm-config --version
 

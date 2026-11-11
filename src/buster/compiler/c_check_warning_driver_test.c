@@ -695,6 +695,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "duplicate specifiers in operand type names",
+        .source = "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+                  "_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+                  "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1; }\n",
+        .warnings = 7,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
@@ -1861,6 +1869,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
+    // test-checker-driver reports this sweep's time with each run mode (#2071, check_driver_run_modes).
+    const uint64_t began = check_test_driver_nanoseconds();
     char source[PATH_MAX];
     char objects[4][PATH_MAX];
     snprintf(source, sizeof(source), "%s/default-warning.c", directory);
@@ -1985,6 +1995,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
         }
     }
     unlink(source);
+    check_driver_run_modes.sweep_fixtures += fixture_count;
+    check_driver_run_modes.sweep_nanoseconds += check_test_driver_nanoseconds() - began;
 }
 
 static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)

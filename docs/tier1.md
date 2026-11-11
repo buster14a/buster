@@ -364,7 +364,9 @@ inliner takes it as a callee, as LLVM's `isInlineViable` doesn't.
 against clang -O0's build. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
-bits. The IR's switches and selects of floating
+bits. Asm statements placed in their callers are Tier 1's as asm bodies (#1839,
+[the selection guide](tier1-selection.md)'s "Asm bodies"), but a template that
+returns from its function, whose function is Tier 0's. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and

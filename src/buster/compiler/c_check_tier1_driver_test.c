@@ -2986,6 +2986,264 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
     unlink(reference);
 }
 
+// The asm bodies' fixture (#1839): asm statements placed in their callers as asm bodies, which --tier1 compiles itself
+// (TIER1_RULE_ASM), each function Tier 1's: cpuid in a loop of eight live values (rbx a callee-saved register the
+// prologue saves) and in always_inline wrappers beside rdtsc's, musl's syscall wrappers' shapes (r10, r8 and r9 explicit
+// register variables) on system calls whose results don't vary, the x87's fsqrt on `+t` and fprem's loop with the
+// status word in %ax, flag outputs, a template's own loop (`1: decl; jnz 1b`), a bswap and an lfence (Tier 0's rows,
+// asm bodies under --tier1), callee-saved clobbers inside a loop of live values across a call, xmm clobbers beside live
+// floating values, and rsp's alignment at the template. Clang -O0's build is its oracle.
+static const char check_test_tier1_asm_source[] =
+    "int printf(const char* format, ...);\n"
+    "static inline __attribute__((always_inline)) unsigned long tier1_rdtsc(void)\n"
+    "{\n"
+    "    unsigned lo, hi;\n"
+    "    __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));\n"
+    "    return (unsigned long)hi << 32 | lo;\n"
+    "}\n"
+    "static inline __attribute__((always_inline)) unsigned tier1_vendor(void)\n"
+    "{\n"
+    "    unsigned a, b, c, d;\n"
+    "    __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(0u), \"c\"(0u));\n"
+    "    return ((b == 0x756e6547u) | (b == 0x68747541u)) + (a != 0);\n"
+    "}\n"
+    "unsigned __attribute__((noinline)) tier1_cpuid(unsigned n, unsigned a1, unsigned a2, unsigned a3, unsigned a4, unsigned a5, unsigned a6, unsigned a7)\n"
+    "{\n"
+    "    unsigned total = 0;\n"
+    "    for (unsigned i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        unsigned a, b, c, d;\n"
+    "        __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(0u), \"c\"(0u));\n"
+    "        total += (b == 0x756e6547u || b == 0x68747541u) + (a != 0) + a1 + a2 + a3 + a4 + a5 + a6 + a7 + i;\n"
+    "        a1 += 1;\n"
+    "        a2 += 2;\n"
+    "        a3 += a1;\n"
+    "        a4 ^= a2;\n"
+    "        a5 += a4;\n"
+    "        a6 -= a5;\n"
+    "        a7 *= 3;\n"
+    "    }\n"
+    "    return total + tier1_vendor() + (tier1_rdtsc() != 0);\n"
+    "}\n"
+    "static long tier1_syscall1(long n, long a)\n"
+    "{\n"
+    "    unsigned long ret;\n"
+    "    __asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a) : \"rcx\", \"r11\", \"memory\");\n"
+    "    return (long)ret;\n"
+    "}\n"
+    "static long tier1_syscall6(long n, long a, long b, long c, long d, long e, long f)\n"
+    "{\n"
+    "    unsigned long ret;\n"
+    "    register long r10 __asm__(\"r10\") = d;\n"
+    "    register long r8 __asm__(\"r8\") = e;\n"
+    "    register long r9 __asm__(\"r9\") = f;\n"
+    "    __asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a), \"S\"(b), \"d\"(c), \"r\"(r10), \"r\"(r8), \"r\"(r9) : \"rcx\", \"r11\", \"memory\");\n"
+    "    return (long)ret;\n"
+    "}\n"
+    "static long double tier1_sqrtl(long double x)\n"
+    "{\n"
+    "    __asm__(\"fsqrt\" : \"+t\"(x));\n"
+    "    return x;\n"
+    "}\n"
+    "static long double tier1_fmodl(long double x, long double y)\n"
+    "{\n"
+    "    unsigned short status;\n"
+    "    do\n"
+    "    {\n"
+    "        __asm__(\"fprem; fnstsw %%ax\" : \"+t\"(x), \"=a\"(status) : \"u\"(y));\n"
+    "    } while (status & 0x400);\n"
+    "    return x;\n"
+    "}\n"
+    "static int tier1_flags(long a, long b)\n"
+    "{\n"
+    "    int below, zero, sign;\n"
+    "    __asm__(\"cmpq %3, %4\" : \"=@ccb\"(below), \"=@ccz\"(zero), \"=@ccs\"(sign) : \"r\"(b), \"r\"(a));\n"
+    "    return below * 4 + zero * 2 + sign;\n"
+    "}\n"
+    "static int tier1_count(int n)\n"
+    "{\n"
+    "    int r = n;\n"
+    "    __asm__(\"1: decl %0; jnz 1b\" : \"+r\"(r));\n"
+    "    return r + n;\n"
+    "}\n"
+    "static unsigned tier1_swap(unsigned x, unsigned y)\n"
+    "{\n"
+    "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+    "    __asm__ volatile(\"lfence\" ::: \"memory\");\n"
+    "    return x + y;\n"
+    "}\n"
+    "static int __attribute__((noinline)) tier1_callee(int x)\n"
+    "{\n"
+    "    return x * 3 + 1;\n"
+    "}\n"
+    "static long tier1_callee_saved(long n)\n"
+    "{\n"
+    "    long a = n, b = n * 2, c = n * 3, d = n * 4, e = n * 5, f = n * 6, g = n * 7, h = n * 8;\n"
+    "    long total = 0;\n"
+    "    for (long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        total += tier1_callee((int)(a + i));\n"
+    "        __asm__ volatile(\"movq $1, %%rbx; movq $2, %%r12; movq $3, %%r13; movq $4, %%r14\" ::: \"rbx\", \"r12\", \"r13\", \"r14\");\n"
+    "        total += a + b + c + d + e + f + g + h;\n"
+    "        a += 1;\n"
+    "        h ^= a;\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "static double tier1_vectors(double x, int k)\n"
+    "{\n"
+    "    double y = x * 2.0;\n"
+    "    float z = (float)x + 0.5f;\n"
+    "    long r = k;\n"
+    "    __asm__ volatile(\"xorps %%xmm0, %%xmm0; xorps %%xmm1, %%xmm1; xorps %%xmm2, %%xmm2; addq $3, %0\" : \"+r\"(r) : : \"xmm0\", \"xmm1\", \"xmm2\");\n"
+    "    return y + x + (double)r + (double)z;\n"
+    "}\n"
+    "static int tier1_aligned(void)\n"
+    "{\n"
+    "    unsigned long sp;\n"
+    "    __asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));\n"
+    "    return (int)(sp & 15);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    printf(\"cpuid %u\\n\", tier1_cpuid(7, 1, 2, 3, 4, 5, 6, 7));\n"
+    "    printf(\"syscall %ld %ld\\n\", tier1_syscall1(3, -1), tier1_syscall6(100000, 1, 2, 3, 4, 5, 6));\n"
+    "    printf(\"x87 %.6Lf %.6Lf\\n\", tier1_sqrtl(2.0L), tier1_fmodl(1000.75L, 7.25L));\n"
+    "    printf(\"flags %d %d %d %d\\n\", tier1_flags(1, 2), tier1_flags(2, 2), tier1_flags(-5, 3), tier1_flags(7, -1));\n"
+    "    printf(\"count %d swap %u\\n\", tier1_count(10), tier1_swap(0x01020304u, 5));\n"
+    "    printf(\"saved %ld\\n\", tier1_callee_saved(9));\n"
+    "    printf(\"vectors %.3f aligned %d\\n\", tier1_vectors(1.25, 4), tier1_aligned());\n"
+    "    return 0;\n"
+    "}\n";
+
+// The asm bodies' fixture (#1839) compiled by --tier1 --verify into an executable by each path, with and without
+// rematerialization, with no function refused: it must print what clang -O0's build prints. Its -c object's
+// tier1_cpuid holds its cpuid among its own records, with no call, and pushes rbx in its prologue.
+static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    char object[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-asm.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-clang", directory);
+    snprintf(object, sizeof(object), "%s/tier1-asm.o", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_asm_source, sizeof(check_test_tier1_asm_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the asm bodies' fixture runs");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-asm-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", program, rematerialize != 0, path != 0, false, false, NULL, &build);
+            check_test_expect(test, compiled, "the asm bodies' fixture compiles by --tier1, every function Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's asm bodies print clang -O0's build's output");
+            unlink(program);
+        }
+    }
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "", object, true, path != 0, true, false, NULL, &build);
+        X86Decoded records[512];
+        uint32_t offsets[512];
+        uint32_t types[512];
+        uint32_t relocations = 0;
+        const uint32_t decoded = compiled ? check_test_tier1_function(object, "tier1_cpuid", records, 512, offsets, types, &relocations) : 0;
+        uint32_t cpuids = 0;
+        uint32_t calls = 0;
+        bool pushed = false;
+        for (uint32_t r = 0; r < decoded; r += 1)
+        {
+            const X86Instruction* record = &records[r].instruction;
+            cpuids += record->form == X86_FORM_CPUID;
+            calls += record->form == X86_FORM_CALL_REL32 || record->form == X86_FORM_CALL_RM64;
+            pushed |= r < 4 && (record->form == X86_FORM_PUSH_R64 || record->form == X86_FORM_PUSH_RM64) && (record->reg == X86_REGISTER_RBX || record->rm == X86_REGISTER_RBX);
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "asm bodies (%s path, --tier1): tier1_cpuid's own records hold %u cpuids and %u calls, rbx %s by its prologue", path != 0 ? "scalar" : "vector", cpuids,
+                 calls, pushed ? "pushed" : "not pushed");
+        check_test_expect(test, compiled && decoded != 0 && cpuids == 2 && calls == 0 && pushed, message);
+        unlink(object);
+    }
+    unlink(unit);
+    unlink(reference);
+}
+
+// The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a
+// function Tier 1 compiles. Tier 1's CFG consumer saves no mask value around an asm body, so such a template keeps its
+// helper (check_asm_names_opmask), whose call saves them; the masks then pick the lanes the sum adds.
+static const char check_test_tier1_asm_masks_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) int tier1_kept(const int* p, int x)\n"
+    "{\n"
+    "    __m512i v = _mm512_loadu_si512(p);\n"
+    "    __mmask16 m = _mm512_cmpgt_epi32_mask(v, _mm512_set1_epi32(x));\n"
+    "    __mmask16 n = _mm512_cmplt_epi32_mask(v, _mm512_set1_epi32(x + 6));\n"
+    "    __asm__ volatile(\"xorl %%eax, %%eax\\n\\tkmovw %%eax, %%k1\\n\\tkmovw %%eax, %%k2\\n\\tkmovw %%eax, %%k3\\n\\tkmovw %%eax, %%k4\\n\\t\"\n"
+    "                     \"kmovw %%eax, %%k5\\n\\tkmovw %%eax, %%k6\\n\\tkmovw %%eax, %%k7\"\n"
+    "                     ::: \"eax\", \"k1\", \"k2\", \"k3\", \"k4\", \"k5\", \"k6\", \"k7\");\n"
+    "    return _mm512_mask_reduce_add_epi32(m & n, v) + __builtin_popcount(m) * 100 + __builtin_popcount(n) * 10000;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int a[16];\n"
+    "    for (int i = 0; i < 16; i += 1)\n"
+    "    {\n"
+    "        a[i] = i * 3 - 7;\n"
+    "    }\n"
+    "    printf(\"kept %d %d\\n\", tier1_kept(a, 2), tier1_kept(a, -5));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The opmask fixture above by --tier1 --verify for x86-64-v4, by each path, with and without rematerialization: it
+// compiles, tier1_kept Tier 1's, and where the host has AVX-512 F, BW, DQ and VL prints clang -O0's build's output.
+static void check_test_driver_tier1_asm_masks(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-asm-masks.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-masks-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_asm_masks_source, sizeof(check_test_tier1_asm_masks_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-march=x86-64-v4", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, referenced, "clang builds the asm bodies' opmask fixture");
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool host = (x86_target_native().features & needed) == needed;
+    char expected[256] = { 0 };
+    const bool ran = referenced && host && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, !host || ran, "clang's build of the asm bodies' opmask fixture runs");
+    for (uint32_t rematerialize = 0; referenced && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-asm-masks-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "tier1_kept", program, rematerialize != 0, path != 0, false, false, "-march=x86-64-v4", &build);
+            check_test_expect(test, compiled, "the asm bodies' opmask fixture compiles by --tier1, tier1_kept Tier 1's");
+            char actual[256] = { 0 };
+            check_test_expect(test, !host || (compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0),
+                              "Tier 1 keeps the masks live across a template that writes k1 to k7, as clang -O0's build does");
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(reference);
+}
+
 // A fixture of two units sharing a header, `name`.h (#789, #141): its unit by --tier1 -c, by each path with and without
 // rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
 // build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the

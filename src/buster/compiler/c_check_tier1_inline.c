@@ -163,7 +163,7 @@ static void check_tier1_inline_reach(CheckTier1Lane* lane, const CheckTier1Inlin
 {
     for (uint32_t node = 0; node < function->instruction_count; node += 1)
     {
-        const bool direct = function->op[node] == IR_CALL && function->calls[function->b[node]].row == 0 && function->a[node] < inlining->symbol_count;
+        const bool direct = function->op[node] == IR_CALL && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0 && function->a[node] < inlining->symbol_count;
         const uint32_t b = direct ? inlining->bodies[function->a[node]] : 0;
         bool known = b == 0 || b - 1 == caller;
         bool taken = false;

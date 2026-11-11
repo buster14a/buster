@@ -9117,15 +9117,46 @@ static void check_lower_dump_field_address(CheckLowerWriter* writer, uint32_t ba
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, base);
 }
 
-// What a value of `type` passed to a dump's printer needs that isn't lowered here: an aggregate's, a 128-bit integer's, a
-// half-precision value's, any type check_lower_call_passed refuses; a vector passes as a call's does. NULL where none.
+// What a value of `type` passed to a dump's printer needs that isn't lowered here: check_lower_passed's (a half-precision
+// value passes as a call's does, check_lower_call_halves'), a transparent union's or an _Atomic aggregate's, which a
+// call converts as an argument's conversion says; NULL where none. A struct's, a union's, a complex value's, a 128-bit
+// integer's and a vector's pass as a call's do (check_lower_dump_argument).
 static const char* check_lower_dump_passed(CheckLowerWriter* writer, TypeId type)
 {
-    const char* passed = check_lower_call_passed(writer, type);
-    const bool vector = check_lower_vector_of(writer, type) != 0;
-    const bool refused = passed != NULL || check_lower_aggregate(writer, type) || (check_lower_wide(writer, type) && !vector) || check_lower_quad(writer, type) ||
-                         check_lower_class(writer, type) == UINT8_MAX;
-    return refused ? "__builtin_dump_struct whose printer takes an aggregate, a 128-bit or a half-precision value" : NULL;
+    const char* passed = check_lower_passed(writer, type);
+    const bool converted = check_lower_aggregate(writer, type) &&
+                           (check_lower_transparent(writer, type) != 0 || check_action_kind(writer->program->types, type) == BUSTER_TYPE_KIND_ATOMIC);
+    return passed != NULL ? passed : converted ? "__builtin_dump_struct whose printer takes a transparent union or an _Atomic aggregate" : NULL;
+}
+
+// An argument of `type` of a dump's printer's call, as check_lower_call_body records a call's: a struct's, a union's or a
+// complex value's bytes at its address, a 128-bit integer's or a vector's in an object of its own, a half-precision
+// value's as an F32's, any other its class's value.
+static void check_lower_dump_argument(CheckLowerWriter* writer, TypeId type)
+{
+    const bool aggregate = check_lower_aggregate(writer, type);
+    const uint32_t vector = check_lower_vector_of(writer, type);
+    const bool wide = check_lower_wide(writer, type) || vector != 0;
+    writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(writer->program->types, type) : vector != 0 ? vector : wide ? 16 : 0;
+    writer->aggregates |= aggregate || wide;
+    writer->argument_classes[writer->argument_count++] = wide ? BUSTER_TYPED_CLASS_U64 :
+                                                         check_lower_half_of(writer, type) != CHECK_HALF_NONE ? BUSTER_TYPED_CLASS_F32 : check_lower_value_class(writer, type);
+}
+
+// The value of an argument of `type` as a dump's printer's call passes it (check_lower_dump_argument's), after its
+// operand's evaluation (the tasks run in the reverse of their pushes).
+static void check_lower_dump_value(CheckLowerWriter* writer, TypeId type)
+{
+    if (check_lower_wide(writer, type) || check_lower_vector_of(writer, type) != 0)
+    {
+        const uint32_t local = check_lower_temporary_of(writer, type);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, type), local);
+    }
+    else if (check_lower_half_of(writer, type) != CHECK_HALF_NONE)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, check_lower_class(writer, type), 0);
+    }
 }
 
 // __builtin_dump_struct(pointer, printer, rest...) at run time (#148): its calls of the printer, as clang's
@@ -9176,17 +9207,24 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                      type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_HALF ? BUSTER_TYPE_DOUBLE :
                      kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM ? type_promote(types, type) : type;
         refused = addresses[r] ? NULL : check_lower_dump_passed(writer, targets[r]);
-        refused = refused == NULL && check_lower_vector_of(writer, targets[r]) != 0 ? "__builtin_dump_struct whose other arguments are vectors" : refused;
     }
     const TypeId format = rest < parameters ? parameter_types[rest] : BUSTER_TYPE_ULONG;
     if (valid && refused == NULL && type_kind(types, type_strip_aligned(types, format)) != BUSTER_TYPE_KIND_POINTER && format != BUSTER_TYPE_ULONG)
     {
         refused = "__builtin_dump_struct whose printer's format parameter is no pointer";
     }
-    const bool aggregate_result = valid && result != BUSTER_TYPE_VOID && type_unqualified(type_strip_aligned(types, result)) != BUSTER_TYPE_VOID &&
-                                  (check_lower_aggregate(writer, result) || check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0 ||
-                                   check_lower_class(writer, result) >= BUSTER_TYPED_CLASSES);
-    refused = refused == NULL && aggregate_result ? "__builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" : refused;
+    // A struct, union or complex result lands in an object of the call's, a 128-bit integer or a vector in one of its own
+    // (check_lower_call_body's), and each is discarded.
+    const bool returns = valid && result != BUSTER_TYPE_VOID && type_unqualified(type_strip_aligned(types, result)) != BUSTER_TYPE_VOID;
+    const bool aggregate_result = returns && check_lower_aggregate(writer, result);
+    const bool wide_result = returns && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0);
+    const char* returned = !returns ? NULL : aggregate_result ? check_lower_by_value(writer, result, true) :
+                                             check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
+    refused = refused == NULL ? returned : refused;
+    for (uint32_t p = 0; valid && refused == NULL && p < parameters; p += 1)
+    {
+        refused = check_lower_dump_passed(writer, parameter_types[p]);
+    }
     // A record in a segment's space (#1447), whose fields' loads would take no override (its first argument's pointee).
     refused = refused == NULL && __builtin_expect(writer->segments, 0) && check_lower_segment(types, check_lower_atomic_pointee(writer, node))
                   ? "__builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)"
@@ -9213,8 +9251,15 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
     else
     {
         CheckLowerAbi* abi = writer->abi;
-        const uint8_t result_class = type_unqualified(type_strip_aligned(types, result)) == BUSTER_TYPE_VOID ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, result);
+        const uint8_t result_class = !returns || aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, result);
         const uint32_t base = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        // The result's object, which every call's result lands in (a callee takes a hidden result pointer as aligned to
+        // the result's canonical type, check_lower_call_body's).
+        const uint32_t declared = aggregate_result ? type_alignment_log2(types, result) : 0;
+        const uint32_t canonical = aggregate_result ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
+        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
+                                wide_result ? check_lower_temporary_of(writer, result) : BUSTER_CHECK_NONE;
+        writer->aggregates |= aggregate_result || wide_result;
         for (uint32_t l = dump->line_count; l-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const CheckLowerDumpLine* line = dump->lines + l;
@@ -9229,7 +9274,7 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             writer->call_first[call] = writer->argument_count;
             writer->call_counts[call] = arguments;
             writer->call_variadic[call] = variadic;
-            writer->call_result_objects[call] = 0;
+            writer->call_result_objects[call] = object != BUSTER_CHECK_NONE ? object + 1 : 0;
             abi->first[abi->count] = abi->argument_count;
             abi->results[abi->count] = result;
             abi->counts[abi->count] = arguments;
@@ -9239,11 +9284,8 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             {
                 const CheckLowerDumpOperand* operand = a > rest ? dump->operands + line->first + (a - rest - 1) : NULL;
                 const TypeId type = a < rest ? targets[a] : a == rest ? format : operand->kind == CHECK_LOWER_DUMP_VALUE ? operand->promoted : BUSTER_TYPE_ULONG;
-                const uint32_t vector = check_lower_vector_of(writer, type);
                 abi->arguments[abi->argument_count++] = type;
-                writer->argument_sizes[writer->argument_count] = vector;
-                writer->aggregates |= vector != 0;
-                writer->argument_classes[writer->argument_count++] = vector != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, type);
+                check_lower_dump_argument(writer, type);
             }
             if (result_class != BUSTER_TYPED_CLASS_VOID)
             {
@@ -9283,9 +9325,11 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                 else
                 {
                     const uint8_t class = check_lower_class(writer, operand->type);
-                    if (check_lower_vector_of(writer, operand->promoted) != 0)
+                    if (check_lower_vector_of(writer, operand->promoted) != 0 || check_lower_wide(writer, operand->promoted))
                     {
-                        // A vector passes from an object of its bytes, as a call's.
+                        // A vector or a 128-bit integer passes from an object of its bytes, as a call's
+                        // (check_lower_dump_argument's); clang's formats print a 128-bit field by its address, so only
+                        // a vector reaches here today.
                         const uint32_t local = check_lower_temporary_of(writer, operand->promoted);
                         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, operand->promoted), local);
@@ -9301,6 +9345,10 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             check_lower_dump_string_address(writer, dump, line->format);
             for (uint32_t r = rest; r-- > 0;)
             {
+                if (!addresses[r])
+                {
+                    check_lower_dump_value(writer, targets[r]);
+                }
                 check_lower_operand(writer, node, 3 + 2 + r, addresses[r], targets[r]);
             }
             if (!direct)

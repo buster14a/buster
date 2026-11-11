@@ -586,13 +586,42 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "_Complex _Complex _Bool y1;\nint float y2;\n_Complex _Bool _Complex y3;\nint float y4;\n_BitInt(8) _Complex z;\n"
         "int plain = undeclared_var;\nstruct S;\n_Complex _Complex struct S y5;\nint float y6;\nenum E5 : _Complex _Bool { A5 };\n",
         // The operand readers in a body, a cast, sizeof, a parameter and a member, and a list's end's errors after its
-        // repeated specifiers' warnings. (No error that stops the reader: after a parameter's recovered error, one drops
-        // the later bodies' warnings, #1835.)
+        // repeated specifiers' warnings.
         "int f(typeof(_Complex _Bool) p, _Atomic(int float) q) { typeof(_Complex _Bool) a = 1; _Atomic(long float) b = 2;\n"
         "  return (int)(typeof(int float))a + sizeof(typeof(unsigned float)) + p + q + b; }\n"
         "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
         "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
         "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
+        // A recovered error in a definition's head, a specifier's or an attribute's, and then errors that stop the reader
+        // (#1835): the later bodies keep their warnings, and the definitions' own bodies theirs, since clang gives those
+        // errors before the body opens its scope; a body with an error of its own loses its unused variables.
+        "int f(long float q) { int v; return q; }\n__attribute__((section(1))) int g(void) { int w; return 0; }\n"
+        "int h(__attribute__((aligned(3))) int q) { int x; return q; }\nint p(__attribute__((aligned(3))) int q);\n"
+        "void k(long float r) { int y = undeclJ; }\nint a = undeclI;\nstatic int s(void) { int u; return 0; }\nint m(void) { int z; return z; }\n",
+        // A repeated specifier in an operand reader's type name (#1836): a typeof's, an _Atomic's, sizeof's, a cast's and
+        // an enum's base, warned as clang's DeclSpec warns, a dropped _Complex's too.
+        "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+        "enum F : _Complex _Complex _Bool { B };\nenum G : short short { C };\n_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+        "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1 + _Alignof(_Complex _Complex double); }\n"
+        "typeof(typeof(signed int signed) const const) u;\n",
+        // A typeof specifier's sugar in a warning's type (#1837), as clang prints it: a type name's, a typedef name's, a nested
+        // typeof's and one name's expression's, qualified, a sibling declarator's, a parameter's and a body's local.
+        "typedef long L;\n"
+        "struct S { int a; };\n"
+        "int x;\n"
+        "typeof(long) m1; char *p1 = &m1;\n"
+        "__typeof__(unsigned) m2; char *p2 = &m2;\n"
+        "typeof(L) m4; char *p4 = &m4;\n"
+        "typeof(int *) m5; char *p5 = &m5;\n"
+        "typeof(x) m6; char *p6 = &m6;\n"
+        "const typeof(long) m7; char *p7 = &m7;\n"
+        "typeof(struct S) m8; char *p8 = &m8;\n"
+        "typeof(typeof(long)) m9; char *p9 = &m9;\n"
+        "typeof(_Bool) m10; char *p10 = &m10;\n"
+        "typeof(long) a11, *b11; char *p11 = &a11;\n"
+        "int f(typeof(short) q) { char *p = &q; return *p; }\n"
+        "typedef typeof(long) TL; TL m13; char *p13 = &m13;\n"
+        "int g(void) { typeof(unsigned char) c = 1; int *q = &c; return *q; }\n",
         // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
         // void are quiet, a block's extern too; reading its value is the error. A dereference's or subscript's of a void
         // pointer still warns, and a void value in a comma's, conditional's or selection's operand is quiet.
@@ -680,8 +709,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int counter;\nenum { WIDTH = 8 };\ntypeof(countr) y;\nint *py = &y;\n_BitInt(WIDTHX) w;\nint f(int n)\n{\n"
         "    int unused;\n    int v[countr + n];\n    if (n = 2) return sizeof(typeof(countr)) + sizeof v;\n    return (int)w;\n"
         "}\n",
-        // One that no correction takes still ends the unit's checking, after each name of its expression, as clang reports
-        // them: a bound's, a typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
+        // One that no correction takes is clang's error at each name of its expression, in its order: a bound's, a
+        // typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
         // _BitInt's is no type specifier, as clang drops it: its parser's error follows, a declaration's at its first
         // declarator's name (C23's own words, and a C23 parameter's name a type's), a member's or a type name's at the end
         // of the list.
@@ -696,6 +725,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int s = sizeof(_BitInt(zzz));\n",
         "int a[3] = { [zzz] = 1, [yyy] = 2 };\n",
         "enum { W = 1 };\nint a[3] = { [W ... zzz + yyy] = 1 };\n",
+        // A declaration's last declarator whose bound or typeof has undeclared names that no correction takes is invalid,
+        // as clang's, and stays bound, its uses quiet (#1447, check_input_declarator_recover_names, the specifiers'
+        // typeof): the unit goes on with its later errors and warnings, at file scope and in a body. A typedef's, a type
+        // name's or a designator's still ends the walk, and so does a declarator before another, whose rest clang's parser
+        // skips (`int a[zzz], b;` declares no b).
+        "typeof(zzz) x; int *p = &x; int y(void) { return x.foo + sizeof x; }\n",
+        "int a[zzz]; int *p = a; int f(void) { int u; return sizeof a + a[1]; }\n",
+        "int f(void) { int v[zzz]; return v[0] + nope; }\n",
+        "int f(void) { typeof(zzz) v; int u; return v + nope; }\n",
+        "int a[zzz]; int b[yyy]; int g(int n) { if (n = 2) return 1; return 0; }\n",
+        "typeof(zzz) x; typeof(yyy) w; int f(void) { int unused; return 0; }\n",
+        "int a[zzz]; int a[3];\n",
+        "static int a[zzz]; int f(void) { return a[0]; }\n",
         // A declarator's constant that fails ends the walk with clang's error in its words (#1447,
         // check_input_constant_failure_report), as an attribute argument's: a missing member, `->` of no pointer and a
         // member access's base, pointer arithmetic on an incomplete pointee, `sizeof` of an incomplete type, a call's
