@@ -5221,6 +5221,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "FOLD(a);FOLD(b);FOLD(c);FOLD(d);FOLD(e);FOLD(f);FOLD(gq);FOLD(a++);FOLD(--c);FOLD(a);FOLD(c);Q big=1e40;big++;FOLD(big);"
             "Q half=0.5;Q g=half--;FOLD(g);FOLD(half);return (int)(h%1000003)+(int)(a*4)+(int)(c*4);}",
             "float128-increments", clang);
+        // Complex values' ++ and -- of aggregate parts (#1447): a _Complex __float128's and a complex _BitInt's past 128
+        // bits, whose real part alone is stepped (a -0.0 imaginary part stays -0.0), prefix and postfix, of locals and
+        // through a pointer; a postfix one's value a copy of the object before it.
+        check_test_program_source(test,
+            "typedef _Complex __float128 CQ;typedef __float128 Q;typedef _BitInt(200) B;typedef __typeof__((_Complex char)0+(B)0) CB;"
+            "static unsigned long fold(unsigned long h,Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return ((h^w[0])*1099511628211ul)^(w[1]*31u);}\n"
+            "static unsigned long foldz(unsigned long h,CQ z){return fold(fold(h,__real__ z),__imag__ z);}\n"
+            "static unsigned long foldb(unsigned long h,CB z){return ((h^(unsigned long)(__real__ z>>3))*1099511628211ul)^(unsigned long)(__imag__ z>>130)^(unsigned long)__imag__ z;}\n"
+            "static CQ step(CQ*p){return (*p)++;}\n"
+            "int tested(int n){unsigned long h=2166136261u;CQ a=n;__imag__ a=-0.0Q;CQ c=a/4,*p=&c;CQ b=a++;CQ d=++a;CQ e=c--;CQ f=--c;"
+            "h=foldz(h,a);h=foldz(h,b);h=foldz(h,c);h=foldz(h,d);h=foldz(h,e);h=foldz(h,f);h=foldz(h,step(p));h=foldz(h,--*p);"
+            "CB x=(B)n<<150;__imag__ x=-(B)n<<140;CB y=x--;CB z=++x;x++;CB w=x--;--x;"
+            "h=foldb(h,x);h=foldb(h,y);h=foldb(h,z);h=foldb(h,w);return (int)(h%1000003)+(int)__real__ a;}",
+            "complex-aggregate-increments", clang);
         // A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
         // after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
         // refused and the other was an address of 0.

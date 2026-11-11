@@ -9382,9 +9382,10 @@ enables, which this checker doesn't all give.
   (`check_action_steppable`). A real type (a complete enumeration's), a pointer
   or a complex type is stepped: a complex one's real part by one, as C2y's and
   clang's are (`check_lower_complex_update_emit`, a postfix one's value a copy
-  of the object before it; a complex of aggregate parts, past 128 bits, stays
-  "increments of complex values" in lowering; a `__float128` is stepped with
-  `__addtf3` or `__subtf3`, `check_lower_quad_update_emit`). Any other is "cannot increment value of type
+  of the object before it; a complex of aggregate parts, a `_Complex __float128`
+  or a complex `_BitInt` past 128 bits, has its real part stepped by one of its
+  element type, `check_lower_complex_parts_update_emit`, #1447; a `__float128`
+  is stepped with `__addtf3` or `__subtf3`, `check_lower_quad_update_emit`). Any other is "cannot increment value of type
   T" (or "decrement"), an array's and a const record's too; a vector's, a
   record's and a function's are among them. T is the operand's type with its
   qualifiers, an `_Atomic` one's value type, spelled with the typedef its
