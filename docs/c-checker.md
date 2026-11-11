@@ -5877,7 +5877,15 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. A divisor `-Wdivision-by-zero` reads
+`-Wdangling-else` and `-Wuninitialized`. `-Wsizeof-array-decay` (#2264, on by
+default, `check_common_sizeof_array_decay`) is clang's
+`warnOnSizeofOnArrayDecay`: `sizeof` of a binary operator, through
+parentheses, whose operand is an array decayed to the operator's own type
+(`sizeof(a + 1)`, `sizeof(0, a)`, `sizeof(p = a)`), "sizeof on pointer
+operation will return size of 'int *' instead of 'int[10]'" at the operator,
+once for each such operand, the array's type as written; published past the
+`sizeof`'s `)`, after its operand's `-Wunevaluated-expression`. Not alignof's
+operand. A divisor `-Wdivision-by-zero` reads
 as clang's EvaluateAsInt does (`check_common_zero_divisor`): an integer
 constant, or, through integer casts, a const non-volatile object whose
 completed initializer's receipt (`CheckInput.const_values`) gives zero

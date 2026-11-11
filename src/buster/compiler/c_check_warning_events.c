@@ -189,6 +189,9 @@ enum
     // GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast): -Wgnu-union-cast, an extension off by
     // default, under -Wgnu and -Wpedantic. (Its ID past -Wc++-compat's, 136.)
     CHECK_WARNING_ID_GNU_UNION_CAST = 137,
+    // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
+    // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 138,
     CHECK_WARNING_ID_COUNT,
 };
 

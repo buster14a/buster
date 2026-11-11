@@ -184,6 +184,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
                                                   "default initialization of an object of const type is incompatible with C++" },
     [CHECK_WARNING_ID_CXX_COMPAT] = { "-Wc++-compat", NULL, "-Wc++-compat is on" },
     [CHECK_WARNING_ID_GNU_UNION_CAST] = { "-Wgnu-union-cast", "-Wgnu", "cast to union type is a GNU extension" },
+    [CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY] = { "-Wsizeof-array-decay", NULL, "sizeof on pointer operation will return size of a pointer" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
