@@ -1269,7 +1269,12 @@ static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLow
         Tier0Operation* row = rows;
         uint32_t count = 1;
         CheckVectorConstants constants = { 0 };
-        const char* reason = ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, row) :
+        // Qwords' minimum and maximum without SSE4.2 are a chain of two rows too: a mask's and a blend's of it and the
+        // piece's x and y (check_vector_baseline_extreme_pair, #1834).
+        const bool pair = arguments == 2 && !ldexp && !floating && check_vector_baseline_extreme_pair(&writer->target, builtin, piece, rows);
+        count = pair ? 2 : count;
+        const char* reason = pair ? NULL :
+                             ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, row) :
                              floating ? check_vector_floating_rows(&writer->target, builtin, piece, rows, &count, &constants) :
                                         check_vector_elementwise_shape_row(&writer->target, builtin, piece, arguments, negated, row, &constants);
         if (reason != NULL)

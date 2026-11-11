@@ -12667,12 +12667,38 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         // A scalar's fused multiply-add without FMA or AVX-512F is the C library's, as clang's code calls it (#1834).
         const uint64_t fused = BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F);
         const bool library = scalars && builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3 && (target->features & fused) == 0;
-        reason = library ? NULL :
+        // Qwords' minimum and maximum without SSE4.2 are two rows (check_vector_baseline_extreme_pair, #1834).
+        Tier0Operation pair_rows[2];
+        const bool pair = vectors && arguments == 2 && check_vector_baseline_extreme_pair(target, builtin, check_vector_builtin_shape(types, result), pair_rows);
+        reason = library || pair ? NULL :
                  vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, &constants) :
                  scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
                  check_lower_transport_type(types, result) ? check_lower_transport_refusal(types, result, CHECK_LOWER_TRANSPORT_BUILTIN) :
                            "elementwise builtins of scalars";
-        if (library)
+        if (pair)
+        {
+            // a and b set into temporaries, each row's operands loaded from them: the mask's row, then the blend's of the
+            // mask, a and b. Pushed last first.
+            const uint32_t temporaries[2] = { check_lower_temporary_of(writer, result), check_lower_temporary_of(writer, result) };
+            for (uint32_t r = 2; r-- > 0;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, pair_rows + r));
+                for (uint32_t a = 2; a-- > 0;)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, temporaries[a]);
+                }
+            }
+            for (uint32_t a = 0; a < 2; a += 1)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, temporaries[a]);
+            }
+            for (uint32_t a = 2; a-- > 0;)
+            {
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+            writer->vectors = true;
+        }
+        else if (library)
         {
             const TypeId parameters[3] = { result, result, result };
             const CBuiltinLibraryId function = scalar == BUSTER_TYPED_CLASS_F32 ? CBUILTIN_LIBRARY_FMAF : CBUILTIN_LIBRARY_FMA;
