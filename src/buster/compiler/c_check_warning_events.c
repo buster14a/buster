@@ -438,6 +438,10 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
+    // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
+    // or "(null)" for another token, as clang streams the token's IdentifierInfo.
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

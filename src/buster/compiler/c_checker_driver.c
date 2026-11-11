@@ -331,6 +331,10 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             snprintf(text, capacity, "expected a class method selector with single argument, e.g., 'colorWithCGColor:'");
             break;
         case CHECK_ARGUMENT_EXPECTED_COMMA: snprintf(text, capacity, "expected ','"); break;
+        case CHECK_ARGUMENT_REQUIRED_AFTER: snprintf(text, capacity, "argument required after attribute"); break;
+        case CHECK_ARGUMENT_SWIFT_ASYNC_NONE:
+            snprintf(text, capacity, "'swift_async' attribute must be applied to a function annotated with non-'none' attribute 'swift_async'");
+            break;
         case CHECK_ARGUMENT_TYPE_TAG_INITIALIZER:
             snprintf(text, capacity, "'type_tag_for_datatype' attribute requires the initializer to be an integer constant expression");
             break;
