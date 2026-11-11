@@ -5082,6 +5082,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "cl l=n*0.25L+1.0Li;cl l1=l--;++l;acc^=fold((double)__real__ l)*37^fold((double)__real__ l1)*41^fold((double)__imag__ l)*43;"
             "return (int)acc;}",
             "complex-increments", clang);
+        // __auto_type's _Atomic and restrict, its deduced type's (#1844): an atomic int's compound assignments and a const
+        // atomic double's value, a restrict pointer's and a pointer declarator's restrict, and two declarators of one type.
+        check_test_program_source(test,
+            "int tested(int n){int v=n;_Atomic __auto_type a=v;a+=2;a*=3;__auto_type restrict p=&v;*p+=a;const _Atomic __auto_type b=n*1.25;"
+            "__auto_type*restrict q=&v;volatile _Atomic __auto_type c=n,d=n+1;c+=d;return a+*p+*q+(int)(b*4)+c+(int)sizeof(_Atomic(long)[2]);}",
+            "auto-type-qualifiers", clang);
         // Complex values passed and returned (in xmm registers, in st0 and st1, on the stack), in structs, read by va_arg,
         // through a function pointer, and in arrays.
         check_test_program_source(test,
