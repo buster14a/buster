@@ -546,6 +546,25 @@ static void check_action_diagnose(CheckActionResult* result, CheckDiagnostic dia
     }
 }
 
+// A builtin's wrong argument count (#1860), the count clang names: `expected`, the bound the call breaks (0x3f at most), with
+// `bound` where clang words it as one ("expected at least" for too few, "at most" for too many). The operand carries
+// them, with 0x80 that marks it present, for the driver's words (check_driver_call_count). A count past 0x3f keeps the
+// generic operand.
+static void check_action_diagnose_expected(CheckActionResult* result, uint32_t expected, bool bound)
+{
+    const uint32_t operand = expected <= 0x3fu ? 0x80u | (bound ? 0x40u : 0u) | expected : 0u;
+    check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, operand);
+}
+
+// `count` arguments where the builtin takes `minimum` to `maximum` (UINT32_MAX for no bound), as clang's checkArgCountRange
+// and checkArgCountAtLeast word them: too few is "expected at least" only where there is no maximum, too many "at most"
+// where the two differ.
+static void check_action_diagnose_count(CheckActionResult* result, uint32_t count, uint32_t minimum, uint32_t maximum)
+{
+    const bool few = count < minimum;
+    check_action_diagnose_expected(result, few ? minimum : maximum, few ? maximum == UINT32_MAX : minimum != maximum);
+}
+
 #include "c_check_provenance.c"
 
 static bool check_action_truth(const TypeTable* table, const CheckValue* value, bool* truth)

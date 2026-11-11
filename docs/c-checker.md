@@ -845,6 +845,30 @@ prototype still checks its own argument count. Other no-prototype calls use
 default argument promotions. The call graph carries the known signature and
 source token explicitly; the type table does not grow a new function kind.
 
+Argument counts are worded and placed as clang's (#1860, #1921, #1994,
+`check_driver_call_count`). A call with a prototype says "too few/too many
+arguments to function call, expected [at least] N, have M", too many at the
+first extra argument, with "'h' declared here" where the callee is a
+function's name (through parentheses and `&`); where that declaration names
+its only parameter, clang's "single argument 'a' was not specified", "at
+least argument 'a' must be specified" and "expected single argument 'a', have
+M arguments". The constant reader's calls (a `typeof`'s, an array bound's, an
+unevaluated operand's) say the same (`check_constant_failure_error`). A
+builtin's check carries the count clang names in its diagnostic's operand
+(`check_action_diagnose_count`): exact, "at least" where it has no maximum
+(shufflevector, the legacy `__sync` builtins, prefetch's variadic prototype),
+and "at most" for too many where its count is a range, at the call's `)` as
+clang's `checkArgCountRange` puts it; a scoped atomic's count includes its
+scope. The unary, overflow and complex part builtins, whose graph takes only
+their count, are the reader's `CHECK_INPUT_BUILTIN_ARGUMENT_COUNT`. A K&R call's
+warnings are clang's places: passing arguments without a prototype at the
+call's `(`, naming a direct callee (`'knr'`) and "a function" otherwise; a
+known definition's too few or too many at the `)`, with `[-Werror]` under
+`-Werror`. Differences left: the diagnostics of an argument's own
+subexpressions (a comma's `-Wunused-value`) are dropped with a call's count
+error, and after a declaration constant's error in a body, the body's later
+errors are not given.
+
 The producer receives all incoming parameters in their promoted ABI types,
 then converts changed ones into separate locals of their declared types.
 That two-pass layout keeps the incoming ABI-local prefix contiguous, including

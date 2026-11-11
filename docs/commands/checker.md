@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only] [--in-process] [--clang-server PATH]
+  --asm-definitions-only | --call-counts-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -123,7 +123,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   "Semantic error recovery", #1447; `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's
-  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447). Its library-builtin comparisons are pinned to Clang
+  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447;
+  `--call-counts-only` runs `c_check_call_count_driver_test.c` alone, calls'
+  and builtins' argument count errors and calls without a prototype, worded
+  and placed as clang's, #1860, #1921, #1994). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
