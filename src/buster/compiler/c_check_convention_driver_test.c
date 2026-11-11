@@ -280,6 +280,30 @@ static void check_test_driver_convention_diagnostics(CheckTest* test, const char
         // The convention's error once per function, at its first incompatible parameter (clang's hasCheckedSwiftCall, #1447).
         { "void f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
         { "void f(int *__attribute__((swift_indirect_result)) a, int *__attribute__((swift_indirect_result)) b, int x);\n", "-std=gnu23" },
+        // The function chunk nearest the name of a pointer's or an array's declarator (#1447): the declaration's specifiers'
+        // and trailing conventions, but not one in the pointer's own chunk, which applies after clang builds it.
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "__attribute__((swiftcall)) void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "__attribute__((swiftcall)) void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "void (__attribute__((swiftcall)) *p)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "void (__attribute__((swiftcall)) *p)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "typedef void (*T)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)); T t;\n", "-std=gnu17" },
+        { "typedef void (*T)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)); T t;\n", "-std=gnu23" },
+        { "void (*a[2])(void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*a[2])(void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (*a[2])(__attribute__((swift_context)) void *c, void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*a[2])(__attribute__((swift_context)) void *c, void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (* const p)(__attribute__((swift_context)) void *c) __attribute__((swiftasynccall));\n", "-std=gnu17" },
+        { "void (* const p)(__attribute__((swift_context)) void *c) __attribute__((swiftasynccall));\n", "-std=gnu23" },
+        { "void ((*p))(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void ((*p))(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)), (*q)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)), (*q)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "void (*p)(__attribute__((swift_async_context)) void *c);\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_async_context)) void *c);\n", "-std=gnu23" },
         // A function chunk farther from the name than the nearest has no convention where clang builds it (#1447): its
         // Swift ABIs are checked as System V's, whatever conventions the declaration gives.
         { "void (*f(void))(__attribute__((swift_context)) void *) __attribute__((swiftcall));\n", "-std=gnu17" },

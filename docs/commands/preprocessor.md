@@ -22,9 +22,12 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
-- `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
-  unit's token stream from its files' refined tokens (C23's `#embed` among its
-  directives), and `./build/compiler -E` (as `clang -E`, with `-dM` and `--embed-dir=`).
+- `src/buster/compiler/c_preprocessor.c` supplies the shared preprocessor state,
+  declarations, feature tables and reader helpers; `c_preprocessor_impl.c`
+  contains its private implementation and generated predefines. Together they
+  produce one translation unit's token stream from its files' refined tokens
+  (C23's `#embed` among its directives), and supply `./build/compiler -E` output
+  (as `clang -E`, with `-dM` and `--embed-dir=`).
   `src/buster/include` holds the compiler's own freestanding headers, which
   `--buster-headers` puts where clang's resource directory goes (the default),
   with clang's after them for the headers they don't supply (never for a name
@@ -60,8 +63,10 @@ requirements. [Command index](README.md).
   and refuses the others where their last option turns them on
   (`pp_take_family`, `pp_settle_families`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
-  records macro expansion history in cold records and compressed output runs;
-  `pp_diagnose_output` renders a diagnostic for an output-token index.
+  holds the shared history reader and diagnostic declarations.
+  `c_preprocessor_history_impl.c`, included by `c_preprocessor_impl.c`, records
+  macro expansion history in cold records and compressed output runs and
+  renders diagnostics; `pp_diagnose_output` accepts an output-token index.
   With `PPOptions.defer_history` a unit records none while it runs: its
   diagnostics, and `pp_history_ensure` for a later reader, record it by
   preprocessing the unit again (`docs/c-preprocessor.md`, "Deferred history").

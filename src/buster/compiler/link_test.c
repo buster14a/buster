@@ -58,7 +58,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 #define BUSTER_LINK_TEST_REPORTED 3
 // splitmix64's increment, and what each check's sequence starts from, scrambled with --seed N (link_program_scramble,
 // so that nearby seeds don't share a sequence).
@@ -634,7 +634,8 @@ static bool link_test_capacity(void)
     link_test_release(&arenas);
     return link_test_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // link_check_lanes against link_check (#87): from the same state, each of 1, 2, 3 and 8 lanes must answer as link_check
 // does and record the same error. Returns link_check's answer, counting each lane count that differs in `mismatches`.
 typedef struct LinkTestCheck LinkTestCheck;
@@ -2297,7 +2298,8 @@ static bool link_test_run(const LinkTestImage* image, uint8_t* output, uint64_t*
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether two links hold the same records: the same counts, columns and bytes.
 static bool link_test_same(const Link* a, const Link* b)
 {
@@ -2327,7 +2329,8 @@ static bool link_test_same(const Link* a, const Link* b)
              memcmp(a->fixups.wide_addends, b->fixups.wide_addends, a->fixups.wide_count * sizeof(int64_t)) == 0;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Loads and runs a generated program, with its TLS segment off its alignment if `misaligned`: whether it exits with
 // status 0 having written exactly `expected`.
 static bool link_test_runs(LinkTestTally* tally, const LinkProgram* program, const uint8_t* expected, const char* what, bool misaligned)
@@ -2374,7 +2377,7 @@ static bool link_test_runs_otherwise(const LinkProgram* program, const uint8_t* 
     scratch_end(scratch);
     return result;
 }
-
+#endif
 // The programs check's sets of options, from --seed and --functions: what each is called, and the directory
 // --print-assembly writes its program to.
 #define BUSTER_LINK_TEST_PROGRAMS 7
@@ -2396,7 +2399,7 @@ static const char* const link_test_program_directories[BUSTER_LINK_TEST_PROGRAMS
     "libc-defaults",
     "libc-units-no-sizes",
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void link_test_program_options(LinkProgramOptions* options, uint64_t seed, uint32_t functions)
 {
     const LinkProgramOptions defaults = link_program_default_options();
@@ -2440,7 +2443,7 @@ static void link_test_program_options(LinkProgramOptions* options, uint64_t seed
     options[6].sizes = false;
     options[6].libc = true;
 }
-
+#endif
 // The shared libraries' sets (LinkProgramOptions.shared): the two that call libc, as libraries, from seeds of their own.
 // The other checks that take test-link's sets bind and write executables, so these are apart.
 #define BUSTER_LINK_TEST_SHARED_PROGRAMS 2
@@ -2452,7 +2455,7 @@ static const char* const link_test_shared_directories[BUSTER_LINK_TEST_SHARED_PR
     "shared-defaults",
     "shared-units-no-sizes",
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void link_test_shared_options(LinkProgramOptions* options, uint64_t seed, uint32_t functions)
 {
     LinkProgramOptions sets[BUSTER_LINK_TEST_PROGRAMS];
@@ -2464,10 +2467,11 @@ static void link_test_shared_options(LinkProgramOptions* options, uint64_t seed,
         options[i].shared = true;
     }
 }
-
+#endif
 // test-link's sets, then the shared libraries', with each one's name and directory: the sets the programs check, the
 // object writer's checks and --print-assembly take.
 #define BUSTER_LINK_TEST_ALL_PROGRAMS (BUSTER_LINK_TEST_PROGRAMS + BUSTER_LINK_TEST_SHARED_PROGRAMS)
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static void link_test_all_options(LinkProgramOptions* options, const char** names, const char** directories, uint64_t seed, uint32_t functions)
 {
     link_test_program_options(options, seed, functions);
@@ -2980,3 +2984,4 @@ static int run_link_tests(int argc, char** argv)
     }
     return result;
 }
+#endif

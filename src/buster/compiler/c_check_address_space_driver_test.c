@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // The address-space qualifiers and objc_gc's (#1447, CheckInputAttribute.space and type_extend): original fixtures whose
-// whole diagnostic output is compared with clang's on both paths, at each warning policy, with -fsyntax-only and -c (but
-// for the segments' accesses, which the lowering refuses). Include after c_check_warning_driver_test.c
+// whole diagnostic output is compared with clang's on both paths, at each warning policy, with -fsyntax-only and -c.
+// Include after c_check_warning_driver_test.c
 // (check_test_driver_warning_fixtures).
 
 static const CheckDriverDefaultWarningFixture check_driver_address_space_fixtures[] =
@@ -346,12 +346,11 @@ static const CheckDriverDefaultWarningFixture check_driver_address_space_fixture
         .errors = 1,
     },
     {
-        // __seg_gs's and __seg_fs's loads and stores, which the lowering refuses (-fsyntax-only alone).
+        // __seg_gs's and __seg_fs's loads and stores, which take the segment's override (#1447), at -c too.
         .name = "segment accesses",
         .source = "struct S { int a, b; };\n"
                   "int f(__seg_gs int *p) { return *p + p[1]; }\n"
                   "void g(__seg_fs struct S *s, int v) { s->b = v; }\n",
-        .syntax_only = true,
     },
 };
 
