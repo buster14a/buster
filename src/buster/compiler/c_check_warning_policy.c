@@ -74,6 +74,11 @@ static bool check_warning_option(uint32_t id, String8 option)
     const bool enum_conversion = id == CHECK_WARNING_ID_ENUM_ENUM_CONVERSION || id == CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL ||
                                  id == CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION || id == CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST;
     matches |= enum_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
+    // -Wpointer-to-int-cast holds -Wpointer-to-enum-cast and -Wvoid-pointer-to-int-cast, which both hold
+    // -Wvoid-pointer-to-enum-cast (#1943).
+    matches |= id == CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST &&
+               (check_diagnostic_option(option, "-Wpointer-to-int-cast") || check_diagnostic_option(option, "-Wvoid-pointer-to-int-cast"));
+    matches |= id == CHECK_WARNING_ID_POINTER_TO_ENUM_CAST && check_diagnostic_option(option, "-Wpointer-to-int-cast");
     return matches;
 }
 

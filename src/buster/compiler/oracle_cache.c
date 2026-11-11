@@ -104,6 +104,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -153,7 +154,10 @@ typedef enum OracleMode
 
 // What runs through a cache did: took an entry, ran, found their entry stale, and ran without being kept (a compiler's
 // run without SOURCE_DATE_EPOCH or whose tracing missed something, a file that couldn't be read, more roots than
-// BUSTER_ORACLE_ROOTS, an entry that couldn't be written).
+// BUSTER_ORACLE_ROOTS, an entry that couldn't be written). Then, whatever the cache's mode, the runs that ran as children
+// and what they cost (#2263): their wall time from their start to their reap, their processes' CPU time (theirs and their
+// own children's, wait4's), and this process's time in fork. A slow process start shows as wall time well above the CPU
+// time, or as time in fork; a slow tool, as CPU time per run.
 typedef struct OracleCounts OracleCounts;
 struct OracleCounts
 {
@@ -161,6 +165,10 @@ struct OracleCounts
     uint64_t run;
     uint64_t stale;
     uint64_t unkept;
+    uint64_t children;
+    uint64_t child_nanoseconds;
+    uint64_t child_cpu_nanoseconds;
+    uint64_t fork_nanoseconds;
 };
 
 // A cache: its mode, its directory, the host's part of every key, and its counts (in shared memory if it could be
@@ -887,7 +895,13 @@ static void oracle_count(uint64_t* count)
     __atomic_fetch_add(count, 1, __ATOMIC_RELAXED);
 }
 
-// A line of what the cache did, if it is on: runs that took an entry, ran, found theirs stale, and weren't kept.
+static void oracle_add(uint64_t* total, uint64_t amount)
+{
+    __atomic_fetch_add(total, amount, __ATOMIC_RELAXED);
+}
+
+// A line of what the cache did, if it is on: runs that took an entry, ran, found theirs stale, and weren't kept. Then,
+// if any ran as children, a line of how many and what they cost (OracleCounts).
 static void oracle_cache_report(const OracleCache* cache, const char* test)
 {
     if (cache->mode != ORACLE_MODE_OFF)
@@ -896,6 +910,15 @@ static void oracle_cache_report(const OracleCache* cache, const char* test)
                cache->directory, (unsigned long long)__atomic_load_n(&cache->counts->taken, __ATOMIC_RELAXED),
                (unsigned long long)__atomic_load_n(&cache->counts->run, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&cache->counts->stale, __ATOMIC_RELAXED),
                (unsigned long long)__atomic_load_n(&cache->counts->unkept, __ATOMIC_RELAXED));
+    }
+    const uint64_t children = __atomic_load_n(&cache->counts->children, __ATOMIC_RELAXED);
+    if (children != 0)
+    {
+        const double wall = (double)__atomic_load_n(&cache->counts->child_nanoseconds, __ATOMIC_RELAXED) / 1e9;
+        const double cpu = (double)__atomic_load_n(&cache->counts->child_cpu_nanoseconds, __ATOMIC_RELAXED) / 1e9;
+        const double forks = (double)__atomic_load_n(&cache->counts->fork_nanoseconds, __ATOMIC_RELAXED) / 1e9;
+        printf("%s: oracle runs as children: %llu, %.3f s wall (%.3f ms each), %.3f s CPU (%.3f ms each), %.3f s in fork (%.3f ms each)\n", test,
+               (unsigned long long)children, wall, wall * 1e3 / (double)children, cpu, cpu * 1e3 / (double)children, forks, forks * 1e3 / (double)children);
     }
 }
 
@@ -2496,10 +2519,15 @@ static bool oracle_run_spawn(OracleRun* run, bool traced)
     result = result && input >= 0 && run->output_descriptor >= 0 && run->errors_descriptor >= 0 && socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0;
     sockets[1] = oracle_high(sockets[1]);
     result = result && sockets[1] >= 0;
+    const uint64_t forking = oracle_now();
     const pid_t pid = result ? fork() : -1;
     if (pid == 0)
     {
         oracle_child(run, input, sockets[1], traced ? &program : 0, environment);
+    }
+    if (pid > 0)
+    {
+        oracle_add(&run->cache->counts->fork_nanoseconds, oracle_now() - forking);
     }
     if (sockets[1] >= 0)
     {
@@ -2551,8 +2579,8 @@ static bool oracle_ended(pid_t pid)
 // Waits for the run's process to end while it answers the traced runs' calls (its own and the others' this process
 // has under way, so that they go on too): a poll on its pidfd and their listeners, a millisecond at a time without a
 // pidfd, up to its time limit on the monotonic clock, past which its process group is killed; then what its group
-// left running is killed before it is reaped. The wait status into `status`; false if it couldn't be waited for, or was
-// killed for its time (OracleRun.killed).
+// left running is killed before it is reaped, counted with its wall and CPU time (OracleCounts). The wait status into
+// `status`; false if it couldn't be waited for, or was killed for its time (OracleRun.killed).
 static bool oracle_run_wait(OracleRun* run, int* status)
 {
     const uint64_t deadline = run->started + (uint64_t)run->timeout * 1000000000;
@@ -2620,11 +2648,21 @@ static bool oracle_run_wait(OracleRun* run, int* status)
         kill(-run->pid, SIGKILL);
     }
     pid_t waited = run->pid > 0 ? -1 : 0;
+    struct rusage usage = { 0 };
     do
     {
-        waited = run->pid > 0 ? waitpid(run->pid, status, 0) : 0;
+        waited = run->pid > 0 ? wait4(run->pid, status, 0, &usage) : 0;
     }
     while (waited < 0 && errno == EINTR);
+    if (run->pid > 0 && waited == run->pid)
+    {
+        OracleCounts* counts = run->cache->counts;
+        const uint64_t cpu = ((uint64_t)usage.ru_utime.tv_sec + (uint64_t)usage.ru_stime.tv_sec) * 1000000000 +
+                             ((uint64_t)usage.ru_utime.tv_usec + (uint64_t)usage.ru_stime.tv_usec) * 1000;
+        oracle_count(&counts->children);
+        oracle_add(&counts->child_nanoseconds, oracle_now() - run->started);
+        oracle_add(&counts->child_cpu_nanoseconds, cpu);
+    }
     run->killed = killed;
     return run->pid > 0 && waited == run->pid && !killed;
 }
@@ -2677,10 +2715,12 @@ static void oracle_run_close(OracleRun* run)
     oracle_looks_release(&run->looks);
 }
 
-// The run's own state before it starts, its result empty.
+// The run's own state before it starts, its result empty. A cache that was never opened (a zeroed one, off) counts in
+// its own counts.
 static void oracle_run_reset(OracleRun* run)
 {
     run->cache = run->cache != 0 ? run->cache : oracle_cache();
+    run->cache->counts = run->cache->counts != 0 ? run->cache->counts : &run->cache->own;
     run->status = 0;
     run->output = 0;
     run->output_length = 0;
@@ -3930,8 +3970,11 @@ static OracleTake oracle_run_take(OracleRun* run)
 // starts as it first needs it (oracle_server_start), on a socket (send's MSG_NOSIGNAL: a server that ended fails a
 // request rather than raising SIGPIPE), that only that process uses: a forked child closes its copy of the socket,
 // which leaves its parent's server as it was, and starts its own. A request the server can't answer (a crash in clang
-// ends it), or doesn't answer within a time limit the client gives it, stops it, and the next request starts another,
-// at most BUSTER_ORACLE_SERVER_STARTS times in a process.
+// ends it), or doesn't answer within its time limit, stops it, and the next request starts another, at most
+// BUSTER_ORACLE_SERVER_STARTS times in a process. Every request has a limit: the run's own, or the server's
+// (OracleServer.seconds, BUSTER_ORACLE_SERVER_SECONDS by default), as does the server's first answer, so that a server
+// that stalls costs its client that limit and the run then runs as a child, rather than hanging until the command's own
+// limit (#2263).
 //
 // A test given --clang-server sends the oracle runs of its clang (oracle_serve, by argument 0's name) to the server
 // where they fit: no files the run writes, no time limit (the cache's timed runs, none of them these tests' clang's,
@@ -3943,22 +3986,37 @@ static OracleTake oracle_run_take(OracleRun* run)
 // or run, traced and kept): that result is the run's, and a difference from the server's fails the test
 // (oracle_serve_end).
 
-// How many times a process starts its server, and how many differences a test prints.
+// How many times a process starts its server, how many differences a test prints, and the seconds a request without a
+// time limit of its own may take: a clang run the server answers in milliseconds, and one that slowed twentyfold on a
+// hosted runner (#2263) in seconds.
 #define BUSTER_ORACLE_SERVER_STARTS 4
 #define BUSTER_ORACLE_SERVER_SHOWN 8
+#define BUSTER_ORACLE_SERVER_SECONDS 60
 
 typedef struct OracleServer OracleServer;
 struct OracleServer
 {
-    // The server's executable (its user's), then its process, the process that started it, its socket (or -1), how many
-    // times that process started it, and its clang libraries' release (CLANG_VERSION_STRING; empty until it answered).
+    // The server's executable (its user's) and the seconds a request without a time limit of its own may take (0:
+    // BUSTER_ORACLE_SERVER_SECONDS), then its process, the process that started it, its socket (or -1), how many times
+    // that process started it, its clang libraries' release (CLANG_VERSION_STRING; empty until it answered), and whether
+    // the last request ran past its limit (oracle_server_run).
     const char* path;
+    uint32_t seconds;
     pid_t pid;
     pid_t owner;
     int socket;
     uint32_t starts;
     char version[64];
+    bool stalled;
 };
+
+// The deadline (oracle_now's nanoseconds) of a request to the server that may take `timeout` seconds (0: the server's
+// limit).
+static uint64_t oracle_server_deadline(const OracleServer* server, uint32_t timeout)
+{
+    const uint32_t seconds = timeout != 0 ? timeout : server->seconds != 0 ? server->seconds : BUSTER_ORACLE_SERVER_SECONDS;
+    return oracle_now() + (uint64_t)seconds * 1000000000;
+}
 
 // Sends all `size` bytes of `data` on the server's socket: false if it can't, the server having ended.
 static bool oracle_server_send(int socket, const void* data, size_t size)
@@ -4038,8 +4096,9 @@ static void oracle_server_stop(OracleServer* server)
 
 // Starts the process's server if it isn't running, at most BUSTER_ORACLE_SERVER_STARTS times: the server's process with
 // one end of a socket pair as its standard input and output and no other descriptor of this process's but its standard
-// error, then its first answer, the release of its clang libraries (a request of no arguments). A forked child's copy
-// of its parent's server isn't its own: it closes that (oracle_server_stop) and starts one. Whether the server runs.
+// error, then its first answer, the release of its clang libraries (a request of no arguments), within the server's
+// limit (oracle_server_deadline). A forked child's copy of its parent's server isn't its own: it closes that
+// (oracle_server_stop) and starts one. Whether the server runs.
 static bool oracle_server_start(OracleServer* server)
 {
     if (server->socket >= 0 && server->owner != getpid())
@@ -4079,9 +4138,10 @@ static bool oracle_server_start(OracleServer* server)
         int32_t status = -1;
         uint32_t length = 0;
         const int socket = server->socket;
-        const bool answered = socket >= 0 && oracle_server_send(socket, header, sizeof(header)) && oracle_server_receive(socket, &status, sizeof(status), UINT64_MAX) &&
-                              oracle_server_receive(socket, &length, sizeof(length), UINT64_MAX) && status == 0 && length != 0 && length < sizeof(server->version) &&
-                              oracle_server_receive(socket, server->version, length, UINT64_MAX);
+        const uint64_t deadline = oracle_server_deadline(server, 0);
+        const bool answered = socket >= 0 && oracle_server_send(socket, header, sizeof(header)) && oracle_server_receive(socket, &status, sizeof(status), deadline) &&
+                              oracle_server_receive(socket, &length, sizeof(length), deadline) && status == 0 && length != 0 && length < sizeof(server->version) &&
+                              oracle_server_receive(socket, server->version, length, deadline);
         server->version[answered ? length : 0] = 0;
         if (!answered)
         {
@@ -4094,14 +4154,15 @@ static bool oracle_server_start(OracleServer* server)
 // One run through the server: `arguments` (argument 0 the clang's name, as execvp finds it) in `directory`, an absolute
 // path, with exactly `environment`, its standard input `input` (an absolute path, or null: /dev/null), and the streams
 // in `streams` (1: standard output, 2: standard error, 3: both) captured into *output and *errors (malloc's, each with a
-// NUL after its bytes, or null where not captured; the caller frees them), within `timeout` seconds (0: none). The run's
-// exit status (the low 8 bits a clang process's would have), or -1 if the server couldn't take it: it couldn't start,
-// or it ended without a reply (a crash in clang ends it), or didn't reply in time; it is then stopped (killed, where it
-// is still running the request), and the next request starts another.
+// NUL after its bytes, or null where not captured; the caller frees them), within `timeout` seconds from its sending (0:
+// the server's limit, oracle_server_deadline). The run's exit status (the low 8 bits a clang process's would have), or
+// -1 if the server couldn't take it: it couldn't start, or it ended without a reply (a crash in clang ends it), or didn't
+// reply in time (OracleServer.stalled); it is then stopped (killed, where it is still running the request), and the
+// next request starts another.
 static int oracle_server_run(OracleServer* server, char* const* arguments, char* const* environment, const char* directory, const char* input, uint32_t streams,
                              uint32_t timeout, char** output, uint64_t* output_length, char** errors, uint64_t* errors_length)
 {
-    const uint64_t deadline = timeout != 0 ? oracle_now() + (uint64_t)timeout * 1000000000 : UINT64_MAX;
+    server->stalled = false;
     *output = 0;
     *output_length = 0;
     *errors = 0;
@@ -4118,6 +4179,7 @@ static int oracle_server_run(OracleServer* server, char* const* arguments, char*
     }
     const uint32_t header[3] = { count, streams | (input != 0 ? 4u : 0u), variables };
     const bool started = oracle_server_start(server);
+    const uint64_t deadline = oracle_server_deadline(server, timeout);
     bool sent = started && oracle_server_send(server->socket, header, sizeof(header)) && oracle_server_send_text(server->socket, directory);
     sent = sent && (input == 0 || oracle_server_send_text(server->socket, input));
     for (uint32_t i = 0; sent && i < count; i += 1)
@@ -4154,6 +4216,7 @@ static int oracle_server_run(OracleServer* server, char* const* arguments, char*
         *output_length = 0;
         *errors_length = 0;
     }
+    server->stalled = sent && !received && oracle_now() >= deadline;
     if (started && !received)
     {
         oracle_server_stop(server);
@@ -4163,7 +4226,9 @@ static int oracle_server_run(OracleServer* server, char* const* arguments, char*
 
 // What a process's served runs did, in shared memory so that a test's forked parts add to them: runs whose result was
 // the server's, runs that ran both ways (--differential) and how many of those differed, runs that fit but that the
-// server couldn't take, which ran as children, and the server's answers.
+// server couldn't take, which ran as children, and the server's answers; then the wall time from sending a request to
+// its answer, summed over the answers, and the requests that ran past their limit (OracleServer.stalled), which stopped
+// the server (#2263).
 typedef struct OracleServeCounts OracleServeCounts;
 struct OracleServeCounts
 {
@@ -4172,7 +4237,10 @@ struct OracleServeCounts
     uint64_t differences;
     uint64_t unserved;
     uint64_t answers;
+    uint64_t answer_nanoseconds;
+    uint64_t stalls;
 };
+
 
 // The process's clang server for its oracle runs (oracle_serve): the server, the clang it stands for (argument 0's name),
 // --differential, whether its release was checked against the clang's and whether they differ, and its counts.
@@ -4195,6 +4263,23 @@ static OracleServing oracle_serving = {
     },
     .counts = &oracle_serving.own,
 };
+
+// Counts a request to the process's server that began at `begun` (oracle_now's) and gave `status` (oracle_server_run's):
+// an answer and its time, or a request past its limit.
+static void oracle_serve_count(uint64_t begun, int status)
+{
+    OracleServeCounts* counts = oracle_serving.counts;
+    if (status >= 0)
+    {
+        oracle_count(&counts->answers);
+        oracle_add(&counts->answer_nanoseconds, oracle_now() - begun);
+    }
+    if (oracle_serving.server.stalled)
+    {
+        oracle_count(&counts->stalls);
+        fprintf(stderr, "clang server: %s gave no answer within its limit: stopped, and the run runs as a child\n", oracle_serving.server.path);
+    }
+}
 
 // Sends the process's oracle runs of `tool` (argument 0's name) to the clang server `path` (null: none), with
 // `differential` each also run as before and compared, its counts from zero: before the test's runs and the processes
@@ -4316,8 +4401,8 @@ static bool oracle_run_servable(const OracleRun* run)
 }
 
 // The run through the server, with its directory and input as its child would find them (each from this process's
-// directory), its result into its served fields (OracleRun.answered, served_status a wait status): false if the server
-// couldn't take it.
+// directory), its result into its served fields (OracleRun.answered, served_status a wait status), within the server's
+// limit (oracle_server_deadline): false if the server couldn't take it, when the run runs as a child.
 static bool oracle_run_serve(OracleRun* run)
 {
     char here[BUSTER_ORACLE_PATH_BYTES];
@@ -4333,14 +4418,15 @@ static bool oracle_run_serve(OracleRun* run)
     const bool ready = directory_length > 0 && (size_t)directory_length < sizeof(directory) && input_length >= 0 && (size_t)input_length < sizeof(input) &&
                        oracle_serve_ready();
     char* const* environment = run->environment != 0 ? run->environment : environ;
+    const uint64_t begun = oracle_now();
     const int status = ready ? oracle_server_run(&oracle_serving.server, run->arguments, environment, directory, reads ? input : 0, 3, 0, &run->served_output,
                                                  &run->served_output_length, &run->served_errors, &run->served_errors_length)
                              : -1;
     run->answered = status >= 0;
     run->served_status = run->answered ? status << 8 : -1;
-    if (run->answered)
+    if (ready)
     {
-        oracle_count(&oracle_serving.counts->answers);
+        oracle_serve_count(begun, status);
     }
     return run->answered;
 }
@@ -4439,7 +4525,8 @@ static __attribute__((unused)) bool oracle_serve_takes(char* const* arguments, b
 }
 
 // A run outside the cache that the server takes (oracle_serve_takes): `arguments` in this process's directory and
-// environment, its standard input `input` (an absolute path, or null: /dev/null), within `timeout` seconds (0: none), its
+// environment, its standard input `input` (an absolute path, or null: /dev/null), within `timeout` seconds (0: the
+// server's limit, oracle_server_deadline), its
 // streams into *output and *errors (oracle_server_run's; the caller frees them). Its exit status, or -1 if the server
 // couldn't take it or didn't answer in time, when the caller runs it as a child. Counted as served or not served,
 // unless `both` (--differential), when oracle_serve_compare counts it.
@@ -4452,11 +4539,12 @@ static __attribute__((unused)) int oracle_serve_command(char* const* arguments, 
     *output_length = 0;
     *errors = 0;
     *errors_length = 0;
+    const uint64_t begun = oracle_now();
     const int status = ready ? oracle_server_run(&oracle_serving.server, arguments, environ, directory, input, 3, timeout, output, output_length, errors, errors_length) : -1;
     OracleServeCounts* counts = oracle_serving.counts;
-    if (status >= 0)
+    if (ready)
     {
-        oracle_count(&counts->answers);
+        oracle_serve_count(begun, status);
     }
     if (!both)
     {
@@ -4466,7 +4554,7 @@ static __attribute__((unused)) int oracle_serve_command(char* const* arguments, 
 }
 
 // The test's line of what its clang server did, if it has one: its release and runs served, compared and differing, and
-// those that fit but ran as children; then the server stopped. False if a run differed, the server's clang isn't the
+// those that fit but ran as children; its answers' time, and the requests past their limit; then the server stopped. False if a run differed, the server's clang isn't the
 // clang's release, or runs needed the server and it answered none. Unused in the units without such a test.
 static __attribute__((unused)) bool oracle_serve_end(const char* test)
 {
@@ -4477,12 +4565,17 @@ static __attribute__((unused)) bool oracle_serve_end(const char* test)
     const uint64_t differences = __atomic_load_n(&counts->differences, __ATOMIC_RELAXED);
     const uint64_t unserved = __atomic_load_n(&counts->unserved, __ATOMIC_RELAXED);
     const uint64_t answers = __atomic_load_n(&counts->answers, __ATOMIC_RELAXED);
+    const double answering = (double)__atomic_load_n(&counts->answer_nanoseconds, __ATOMIC_RELAXED) / 1e9;
+    const uint64_t stalls = __atomic_load_n(&counts->stalls, __ATOMIC_RELAXED);
     const bool answered = served + compared + unserved == 0 || answers != 0;
     if (serving->server.path != 0)
     {
-        printf("%s: clang server (%s, clang %s%s): %llu runs served, %llu run both ways, %llu differ, %llu not served\n", test, serving->server.path,
-               serving->server.version[0] != 0 ? serving->server.version : "?", serving->differential ? ", differential" : "", (unsigned long long)served,
-               (unsigned long long)compared, (unsigned long long)differences, (unsigned long long)unserved);
+        printf("%s: clang server (%s, clang %s%s): %llu runs served, %llu run both ways, %llu differ, %llu not served; %llu answers in %.3f s (%.3f ms each), "
+               "%llu past their time limit (%u s for a run without one)\n",
+               test, serving->server.path, serving->server.version[0] != 0 ? serving->server.version : "?", serving->differential ? ", differential" : "",
+               (unsigned long long)served, (unsigned long long)compared, (unsigned long long)differences, (unsigned long long)unserved, (unsigned long long)answers,
+               answering, answers != 0 ? answering * 1e3 / (double)answers : 0.0, (unsigned long long)stalls,
+               serving->server.seconds != 0 ? serving->server.seconds : BUSTER_ORACLE_SERVER_SECONDS);
     }
     oracle_server_stop(&serving->server);
     return differences == 0 && !serving->mismatched && answered;
