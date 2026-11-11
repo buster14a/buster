@@ -24,7 +24,8 @@ static void check_test_program_asm_room(CheckTest* test)
         "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
         "int flagged(int a, float x){__int128 z;__asm__(\"cmpl $0, %2\" : \"=r\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
         "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}"
-        "int counted(int n){__asm__(\".Lcount%=:\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(n));return n;}";
+        "int counted(int n){__asm__(\".Lcount%=:\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(n));return n;}"
+        "int jumped(int n){asm goto(\"testl %0, %0\\n\\tjz %l1\" : : \"r\"(n) : : zero);return 1;zero:return 0;}";
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -53,7 +54,7 @@ static void check_test_program_asm_room(CheckTest* test)
                      check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                      check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
-        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 5;
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 6;
         char description[256];
         snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
@@ -82,8 +83,9 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
-                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 1 && helpers.count == 1;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the named label is an asm body",
+                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 1 && planned.plans[5].reason == NULL &&
+                                 planned.plans[5].inlined && planned.plans[5].helper == BUSTER_CHECK_NONE && planned.plans[5].inline_branch_count == 2 && helpers.count == 1;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the named label and the asm goto are asm bodies",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
@@ -811,6 +813,19 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){unsigned long long wide=((unsigned long long)(unsigned)n*2654435761u<<17)^0x123456789abcdefull;"
         "return mask_not((unsigned short)(n*977))+mask_byte((unsigned char)(n*31))*3+(int)mask_add((unsigned)n*40503u,0x10001u*(unsigned)n)+(int)(mask_shift(wide)>>7)+mask_tied((unsigned short)(n*12345))*5+mask_general((unsigned short)(n+77))*7;}",
         "asm-opmask", clang, masks_native);
+    // Explicit register variables in the other classes' registers (#1846, the owner's decision on #1447): mm2, k3 and
+    // st, each the register its template names explicitly too (the MMX one copied out through mm2, the opmask one through
+    // k3), whatever the constraint's letter, as clang's code places them.
+    check_test_program_source(test,
+        "static long mmx_variable(long x){register long m __asm__(\"mm2\")=x;long o;__asm__(\"paddd %1, %1\\n\\tmovq %%mm2, %0\" : \"=r\"(o), \"+y\"(m));long r=o+m;__asm__ volatile(\"emms\");return r;}"
+        "static long double x87_variable(long double x){register long double s __asm__(\"st\")=x;__asm__(\"fsqrt\" : \"+t\"(s));return s;}"
+        "int tested(int n){return (int)mmx_variable(n*3+1)+(int)(x87_variable((long double)(n*n))*4);}",
+        "asm-register-variable-mmx-x87", clang);
+    check_test_program_source_native(test,
+        "static __attribute__((target(\"avx512f\"))) unsigned short mask_variable(unsigned short x){register unsigned short k __asm__(\"k3\")=x;unsigned o;"
+        "__asm__(\"knotw %1, %1\\n\\tkmovw %%k3, %0\" : \"=r\"(o), \"+k\"(k));return (unsigned short)(o+k);}"
+        "int tested(int n){return mask_variable((unsigned short)(n*977));}",
+        "asm-register-variable-opmask", clang, masks_native);
     check_test_program_boundary_reason(test, "int tested(int n){unsigned short m=(unsigned short)n;__asm__(\"knotw %0, %0\" : \"+k\"(m));return m;}",
                                        "asm-opmask-baseline", true, false, 0, 1, "inline assembly opmask operands without AVX-512F");
     check_test_program_boundary_reason(test, "__attribute__((target(\"avx512f\"))) int tested(int n){unsigned m=(unsigned)n;__asm__(\"knotd %0, %0\" : \"+k\"(m));return (int)m;}",
@@ -1293,8 +1308,14 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-mmx", clang);
     check_test_program_boundary_reason(test, "int tested(int n){long m=n;__asm__(\"movq %q0, %0\" : \"+y\"(m));return (int)m;}",
                                        "asm-mmx-modifier", true, false, 0, 1, "this inline assembly operand modifier");
-    check_test_program_boundary_reason(test, "int tested(int n){long m=n;long double x=n;__asm__(\"\" : \"+y\"(m), \"+t\"(x));return (int)m+(int)x;}",
-                                       "asm-mmx-x87", true, false, 0, 2, "inline assembly x87 and MMX operands in one statement");
+    // MMX and x87 operands in one statement (#1846, the owner's decision on #1447): the x87's loaded first and the MMX
+    // ones after, the MMX outputs stored first, as clang's code orders them; the x87 output's bytes, whatever the MMX
+    // load left on its stack, are the same instructions' as clang's, compared bit for bit.
+    check_test_program_source(test,
+        "static long both(long m, long double* x){__asm__(\"paddd %0, %0\\n\\tfsqrt\" : \"+y\"(m), \"+t\"(*x));__asm__ volatile(\"emms\");return m;}"
+        "int tested(int n){long double x=(long double)(n*n);long m=both(n*3+1,&x);unsigned char b[10];__builtin_memcpy(b,&x,10);"
+        "int s=0;for(int i=0;i<10;i++)s=s*31+b[i];return (int)m+s;}",
+        "asm-mmx-x87", clang);
     check_test_program_source(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));__asm__ volatile(\"emms\");return (int)m;}",
                               "asm-mmx-directives", clang);
     check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",

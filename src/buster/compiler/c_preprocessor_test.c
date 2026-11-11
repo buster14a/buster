@@ -5285,6 +5285,21 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
             .warnings = true,
         },
         {
+            // A `\u` or `\U` clang reads whole that starts a token, of a character below U+00A0 or a surrogate (#1447): its
+            // error at the backslash, whatever its digits' form; none of one past U+00A0 or past U+10FFFF.
+            .name = "a \\u or \\U of a basic or control character, or a surrogate",
+            .source = "\\u0041x g\\uD800 \\u0024a \\u0001b \\u{41}d e\\u0041 \\u{D800}h \\u007Fi \\u00e9j \\U00110000\n",
+            .standard = "gnu17",
+            .expected = "1:1: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:10: error: invalid universal character\n"
+                        "1:17: error: character '$' cannot be specified by a universal character name\n"
+                        "1:25: error: universal character name refers to a control character\n"
+                        "1:33: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:42: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:49: error: invalid universal character\n"
+                        "1:59: error: universal character name refers to a control character\n",
+        },
+        {
             // -pedantic's warning that a named UCN is clang's extension (#1447): one that starts a token, its name exactly
             // Unicode's, at its backslash and before its character's error; none within an identifier, of a name that isn't
             // Unicode's, in a skipped group, or in a macro's expansion (its definition's once).

@@ -2925,7 +2925,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     arena_pop_to(reserved, 0);
     Arena* columns = column_bytes != 0 && reserved->base != 0 ? reserved : scratch;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
-    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
+    // (And the resolvers' of multiversioning by target strings, #1838, after them.)
+    const uint32_t target_frames = unwind && program->target_group_count != 0 ? check_program_target_frames(program) : 0;
+    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) + target_frames : 0;
     CheckEmitRun run = {
         .program = program,
         .parser = parser,
@@ -3826,6 +3828,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     // And multiversioning by target strings' (#1838).
     check_program_target_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
+    // And `#pragma weak A = T`'s symbols of undeclared A's (#1849, check_program_define_pragma_aliases), a name each.
+    for (uint32_t i = 0; program->input->symbol_pragmas != NULL && i < program->input->symbol_pragmas->count; i += 1)
+    {
+        cpu_symbols += program->input->symbol_pragmas->records[i].alias_target != BUSTER_CHECK_NONE ? 1u : 0u;
+    }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
                                 (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
@@ -3907,7 +3914,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 // an inline-only function, which has no symbol, and then no label).
                 const uint32_t function = opening < input->token_count ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
                 const uint32_t function_object = function != BUSTER_CHECK_NONE ? input->objects[function] : 0;
-                const SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                // (A multiversioned function's are clang's: its versions' references reach the group's IFUNC, #1838.)
+                SymbolId version_symbol = 0;
+                if (program->target_group_count != 0 && check_program_target_static_context(program, function_object, &version_symbol))
+                {
+                    function_symbol = version_symbol;
+                }
                 const String8 label = function_symbol != 0 ? symbol_names[function_symbol] : (String8){ 0 };
                 const uint32_t function_identifier = function != BUSTER_CHECK_NONE ? parser->tokens.names[function] : 0;
                 const uint8_t* context = label.length != 0 ? (const uint8_t*)label.pointer : intern_bytes(identifiers, function_identifier);
@@ -4492,7 +4505,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
     // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
-    valid = valid && (program->target_group_count == 0 || check_program_target_atoms(result, program, bytes));
+    const uint64_t target_first = frames - target_frames;
+    SymbolId* target_frame_symbols = valid && target_frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, target_frames) : 0;
+    valid = valid && (target_frames == 0 || target_frame_symbols != 0);
+    valid = valid && (program->target_group_count == 0 ||
+                      check_program_target_atoms(result, program, target_frames != 0 ? run.frames + target_first : NULL, target_frame_symbols, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
@@ -4510,7 +4527,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = atom != 0;
         for (uint32_t f = 0; valid && f < frames; f += 1)
         {
-            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : helpers->items[f - count].symbol;
+            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : f < target_first ? helpers->items[f - count].symbol :
+                                    target_frame_symbols[f - target_first];
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
         }
     }
@@ -4751,6 +4769,42 @@ static bool check_program_define_aliases(CheckProgramCode* code, const CheckProg
             code->status = atom == 0 ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
             code->reason = atom == 0 ? "an alias or ifunc whose definition isn't emitted" : "an alias's or ifunc's symbol couldn't be defined at its definition";
             code->token = alias->attribute;
+        }
+    }
+    return valid;
+}
+
+// `#pragma weak A = T` whose A the unit never declares (#1849, CheckInputSymbolPragma.alias_target): a weak symbol A of
+// its own at T's definition, of T's type and size, as clang's clone of T's declaration is. No C reference names A, so it
+// is a symbol of the object alone, added once T's atom exists. Units with no such directive pay one test.
+static bool check_program_define_pragma_aliases(CheckProgramCode* code, const CheckProgram* program)
+{
+    const CheckInput* input = program->input;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const InternTable* identifiers = program->identifiers != NULL ? program->identifiers :
+                                     program->parser->preprocessor != NULL ? program->parser->preprocessor->table : NULL;
+    Link* link = &code->link;
+    bool valid = true;
+    for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t object = record->alias_target < input->token_count ? input->objects[record->alias_target] : 0;
+        const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+        const SymbolId base = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+        const AtomId atom = base != 0 && base < link->symbols.count ? link->symbols.atom[base] : 0;
+        // A unit of several (#777) without T's definition leaves the alias to the unit with it.
+        if (record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
+        {
+            const NameId name = link_add_name(link, intern_bytes(identifiers, record->name), intern_length(identifiers, record->name));
+            const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK);
+            const SymbolId symbol = name != 0 ? link_add_symbol(link, name, atom, link->symbols.value[base], link->symbols.size[base], flags, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            valid = symbol != 0;
+            if (!valid)
+            {
+                code->status = CHECK_PROGRAM_BACKEND;
+                code->reason = "a '#pragma weak' alias's symbol couldn't be defined at its target's definition";
+                code->token = record->token;
+            }
         }
     }
     return valid;
@@ -5052,7 +5106,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             code->reason = constant ? "inline assembly .comm of a read-only definition" : "a .comm of a definition whose static data wasn't emitted";
         }
     }
-    valid = valid && check_program_define_aliases(code, program);
+    valid = valid && check_program_define_aliases(code, program) && check_program_define_pragma_aliases(code, program);
     // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
     // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
     // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.
