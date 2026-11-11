@@ -3605,6 +3605,12 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
                             location = tier1_emit_cfg_slot(emitted, where, &offset) ? tier1_cert_emitted_frame(&build, offset, tier1_cert_emitted_width(emitted, v)) : BUSTER_CERT_NONE;
                             valid = location != BUSTER_CERT_NONE;
                         }
+                        if (!valid && getenv("B4_DEBUG") != 0)
+                        {
+                            const uint32_t dn = emitted->value_nodes[v];
+                            fprintf(stderr, "B4 entry fact b=%u v=%u node=%u op=%u type=%u kind=%u where=%u class=%u width=%u wide=%d offset=%d\n", b, v, dn, (unsigned)function->op[dn], (unsigned)function->type[dn], (unsigned)kind, where,
+                                    (unsigned)emitted->cfg_input.classes[v], (unsigned)tier1_cert_emitted_width(emitted, v), (int)build.wide, offset);
+                        }
                         facts[fill[b]++] = (Tier1CertFact){
                             .value = v,
                             .location = location,
