@@ -2303,7 +2303,7 @@ static bool pp_warning_group_named(uint32_t g, const char* name, uint32_t length
 // The severity a warning of group `group` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
 // First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
 // without -Wsystem-headers, unless the group is seen there (PPWarningGroupName.system). Then the command line's: its last -W or -Wno- of the group's names (pp_warning_group_named), or
-// for one off by default -pedantic or -pedantic-errors, promoted by -Werror, -Werror= of the group, or -pedantic-errors of
+// for -Wpedantic's -pedantic or -pedantic-errors, promoted by -Werror, -Werror= of the group, or -pedantic-errors of
 // an extension, unless -Wno-error= of it demotes it (-Werror not one -Werror leaves alone). The source's #pragma clang diagnostic for it replaces that
 // (Preprocessor.warning_mappings).
 static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, uint32_t location)
@@ -2320,7 +2320,8 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, ui
         const uint32_t length = (uint32_t)strlen(option);
         const bool pedantic = strcmp(option, "-pedantic") == 0 || strcmp(option, "-pedantic-errors") == 0;
         const bool on = (length > 2 && option[0] == '-' && option[1] == 'W' && strncmp(option, "-Wno-", 5) != 0 && strncmp(option, "-Werror", 7) != 0 &&
-                         pp_warning_group_named(group, option + 2, length - 2)) || (pedantic && !info->on);
+                         pp_warning_group_named(group, option + 2, length - 2)) ||
+                        (pedantic && pp_warning_group_named(group, "pedantic", 8));
         const bool off = strncmp(option, "-Wno-", 5) == 0 && strncmp(option, "-Wno-error", 10) != 0 && pp_warning_group_named(group, option + 5, length - 5);
         const bool promote = strncmp(option, "-Werror=", 8) == 0 && pp_warning_group_named(group, option + 8, length - 8);
         const bool demote = strncmp(option, "-Wno-error=", 11) == 0 && pp_warning_group_named(group, option + 11, length - 11);
