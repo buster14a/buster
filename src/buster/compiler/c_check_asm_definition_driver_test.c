@@ -159,6 +159,55 @@ static bool check_test_asm_definition_code_temporary(const char* path, char* fou
     return kept;
 }
 
+// The code of the functions `names` names (words separated by spaces) in the object at `path`, into `lines`: each one's
+// size and bytes, and its code's relocations by offset in it, type, target and addend (#1845: naked functions, whose
+// code is the user's, clang's byte for byte). False when it doesn't read or fit.
+static bool check_test_asm_definition_naked_code(const char* path, const char* names, char* lines, uint64_t capacity)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    CheckTestElf elf = { 0 };
+    bool valid = arena.base != 0 && capacity != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, path));
+    uint64_t used = 0;
+    lines[0] = 0;
+    for (uint64_t i = 1; valid && i < elf.symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = &elf.symbols[i];
+        const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+        const bool chosen = ELF64_ST_TYPE(symbol->st_info) == STT_FUNC && name != 0 && check_test_asm_definition_named(names, name) &&
+                            symbol->st_shndx < elf.section_count;
+        const Elf64_Shdr* code = chosen ? &elf.sections[symbol->st_shndx] : 0;
+        valid = !chosen || (check_test_elf_range(elf.file, code->sh_offset, code->sh_size) && symbol->st_value <= code->sh_size &&
+                            symbol->st_size <= code->sh_size - symbol->st_value);
+        char line[512];
+        int at = chosen && valid ? snprintf(line, sizeof(line), "%s size %llu:", name, (unsigned long long)symbol->st_size) : 0;
+        for (uint64_t b = 0; chosen && valid && b < symbol->st_size && at < (int)sizeof(line) - 4; b += 1)
+        {
+            at += snprintf(line + at, sizeof(line) - (size_t)at, " %02x", (unsigned)(uint8_t)elf.file.pointer[code->sh_offset + symbol->st_value + b]);
+        }
+        valid = !chosen || (valid && check_test_asm_definition_append(lines, capacity, &used, line) && check_test_asm_definition_append(lines, capacity, &used, "\n"));
+        for (uint32_t s = 1; chosen && valid && s < elf.section_count; s += 1)
+        {
+            const Elf64_Shdr* table = &elf.sections[s];
+            const bool applies = table->sh_type == SHT_RELA && table->sh_info == symbol->st_shndx;
+            valid = !applies || (table->sh_entsize == sizeof(Elf64_Rela) && check_test_elf_range(elf.file, table->sh_offset, table->sh_size));
+            const Elf64_Rela* relocations = applies && valid ? (const Elf64_Rela*)(elf.file.pointer + table->sh_offset) : 0;
+            for (uint64_t r = 0; valid && relocations != 0 && r < table->sh_size / sizeof(Elf64_Rela); r += 1)
+            {
+                const uint64_t offset = relocations[r].r_offset;
+                if (offset >= symbol->st_value && offset - symbol->st_value < symbol->st_size)
+                {
+                    snprintf(line, sizeof(line), "%s+%llu relocation %u of %s%+lld\n", name, (unsigned long long)(offset - symbol->st_value),
+                             (unsigned)ELF64_R_TYPE(relocations[r].r_info), check_test_asm_definition_target(&elf, ELF64_R_SYM(relocations[r].r_info)),
+                             (long long)relocations[r].r_addend);
+                    valid = check_test_asm_definition_append(lines, capacity, &used, line);
+                }
+            }
+        }
+    }
+    arena_release(&arena);
+    return valid;
+}
+
 static void check_test_driver_asm_definitions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -276,6 +325,19 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "}\n"
           "double bar(double a, double b) { return a + b + 42; }\n"
           "int tally(void) { static int n; return ++n; }\n" },
+        // Naked functions (#1845): an empty one, clang's function of no bytes with an FDE of no range, and operands that
+        // name static objects, printed RIP-relative ("m"(g), an element's and a member's, an asm label's, a static's,
+        // H's second word; "i"(&g) with a).
+        { "naked functions' symbols and empty bodies", "main",
+          "#include <stdio.h>\n"
+          "int g = 5;\nint arr[4] = { 1, 2, 3, 4 };\nstruct S { int a; long b; } st = { 1, 2 };\nint lab __asm__(\"renamed\") = 9;\nstatic int sg = 3;\n"
+          "__attribute__((naked)) void empty(void) { }\n"
+          "__attribute__((naked)) int get_g(void) {\n"
+          "    __asm__(\"movl %0, %%eax\\n\\taddl %1, %%eax\\n\\taddl %2, %%eax\\n\\taddl %3, %%eax\\n\\tret\" : : \"m\"(g), \"m\"(arr[3]), \"m\"(lab), \"m\"(sg));\n"
+          "}\n"
+          "__attribute__((naked)) long get_b(void) { __asm__(\"movq %H0, %%rax\\n\\tret\" : : \"m\"(st)); }\n"
+          "__attribute__((naked)) int* address_g(void) { __asm__(\"leaq %a0, %%rax\\n\\tret\" : : \"i\"(&g)); }\n"
+          "int main(void) { printf(\"%d %ld %d %d\\n\", get_g(), get_b(), *address_g(), sg); return 0; }\n" },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
@@ -383,6 +445,44 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         unlink(path);
         unlink(output);
     }
+    // Naked functions' code (#1845): an empty one, and operands that name a static object or a function, by every
+    // modifier clang prints them with, absolute ones included (which a PIE can't link): -c's objects, by both paths, have
+    // clang's bytes and relocations in each.
+    static const char naked[] =
+        "int g = 5;\nint arr[4] = { 1, 2, 3, 4 };\nstruct S { int a; long b; } st = { 1, 2 };\nint lab __asm__(\"renamed\") = 9;\nstatic int sg = 3;\n"
+        "void fn(void) { }\n"
+        "__attribute__((naked)) void empty(void) { }\n"
+        "__attribute__((naked)) void a1(void) { __asm__(\"movq %0, %%rax\\n\\tmovq %c0, %%rax\\n\\tmovq %P0, %%rax\\n\\tmovq %a0, %%rax\\n\\tret\" : : \"i\"(&g)); }\n"
+        "__attribute__((naked)) void a2(void) { __asm__(\"movq %0, %%rax\\n\\tmovq %c1, %%rax\\n\\tret\" : : \"i\"(&arr[2]), \"i\"(&st.b)); }\n"
+        "__attribute__((naked)) void a3(void) {\n"
+        "    __asm__(\"movl %0, %%eax\\n\\tmovl %1, %%eax\\n\\tmovq %2, %%rax\\n\\tmovl %3, %%eax\\n\\tmovl %4, %%eax\\n\\tret\" : : \"m\"(g), \"m\"(arr[3]), \"m\"(st.b),\n"
+        "            \"m\"(lab), \"m\"(sg));\n"
+        "}\n"
+        "__attribute__((naked)) void a4(void) { __asm__(\"call %P0\\n\\tjmp %c0\\n\\tleaq %a1, %%rax\\n\\tmovq %H2, %%rax\\n\\tret\" : : \"i\"(fn), \"i\"(&g), \"m\"(st)); }\n";
+    char naked_path[512];
+    char naked_objects[3][512];
+    char naked_code[3][4096];
+    snprintf(naked_path, sizeof(naked_path), "%s/asm-naked-code.c", directory);
+    const bool naked_written = parse_test_write(naked_path, naked, sizeof(naked) - 1);
+    for (uint32_t p = 0; naked_written && p < 3; p += 1)
+    {
+        snprintf(naked_objects[p], sizeof(naked_objects[p]), "%s/asm-naked-code-%u.o", directory, p);
+        char* text = NULL;
+        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-c", naked_path, "-o", naked_objects[p], p == 2 ? "--scalar" : NULL, NULL };
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        char description[1024];
+        snprintf(description, sizeof(description), "naked functions' code compiles by %s: %s", p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path",
+                 text != NULL ? text : "");
+        free(text);
+        naked_code[p][0] = 0;
+        check_test_expect(test, compiled && check_test_asm_definition_naked_code(naked_objects[p], "empty a1 a2 a3 a4", naked_code[p], sizeof(naked_code[p])),
+                          description);
+        snprintf(description, sizeof(description), "naked functions' code is clang's, by the %s path:\n%s\nclang:\n%s", p == 1 ? "vector" : "scalar", naked_code[p],
+                 naked_code[0]);
+        check_test_expect(test, p == 0 || (naked_code[0][0] != 0 && strcmp(naked_code[p], naked_code[0]) == 0), description);
+        unlink(naked_objects[p]);
+    }
+    unlink(naked_path);
     // The `.L` labels of code (#1845): a per-statement helper template's, a naked function's and `&&label`'s are
     // temporaries, which -c's object leaves out as clang's assembler does, on both paths (the helpers' own function
     // symbols stay); the objects still link and run as clang's build.
