@@ -492,6 +492,18 @@ typedef enum CheckWarningCompletion
     CHECK_WARNING_COMPLETION_COUNT,
 } CheckWarningCompletion;
 
+// The order of the warnings completed at the translation unit's end, as their `suborder` (#2141): clang's
+// Sema::ActOnEndOfTranslationUnit diagnoses unterminated pack pushes, then #pragma weak's undeclared identifiers, then
+// internal functions used but not defined, and the unused file-scope declarations last. Those keep suborder 0, which
+// orders after every nonzero one at the same boundary.
+typedef enum CheckWarningUnitEnd
+{
+    CHECK_WARNING_UNIT_END_UNUSED,
+    CHECK_WARNING_UNIT_END_PACK,
+    CHECK_WARNING_UNIT_END_WEAK,
+    CHECK_WARNING_UNIT_END_UNDEFINED,
+} CheckWarningUnitEnd;
+
 // Per-event source policy is independent of the ID: GNU array-bound folds warn by default, whereas an accepted
 // nonstandard ICE fold can start ignored under the same -Wgnu-folding-constant policy. Completion/lookahead is also
 // independent of the diagnostic location: a later preprocessing diagnostic can precede an earlier source warning.

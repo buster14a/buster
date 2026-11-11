@@ -1218,6 +1218,12 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "FOLD(c7);FOLD(c8);FOLD(d7);FOLD(e7);FOLD(d8);FOLD(e8);\n"
           "return (int)h;}\n"
         },
+        // Divisions of floating vectors narrower than a register (#1834): the divisor's lanes past its own 1.0f.
+        { "baseline-narrow-division",
+          "typedef float f2 __attribute__((vector_size(8)));typedef float f1 __attribute__((vector_size(4)));typedef double d1 __attribute__((vector_size(8)));\n"
+          "int tested(int n){unsigned h=2166136261u;f2 a={(float)n,7.5f},b={3.0f,-0.25f};f1 c={(float)n*1.5f},e={-2.0f};d1 g={(double)n/3},k={0.1};"
+          "f2 x=a/b;f1 y=c/e;d1 z=g/k;f2 w=b/(f2){(float)(n*n+1),2.0f};FOLD(x);FOLD(y);FOLD(z);FOLD(w);return (int)h;}\n"
+        },
         // Conversions between unsigned or 64-bit integers and floats or doubles without AVX-512 (#1834), element by
         // element as C converts each: in range, the most negative and the largest values and halfway cases among them.
         { "baseline-integer-floating-conversions",

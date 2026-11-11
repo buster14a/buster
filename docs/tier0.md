@@ -689,6 +689,9 @@ at the target's forms, by both of the checker's paths:
 - A shuffle no row of these sequences takes (of bytes and words without SSSE3, of 32-byte vectors of them without
   AVX-512, of any 32-byte vectors without AVX2) runs element by element through memory, as a wide vector's does
   (`check_lower_transport_shuffle`, #1834).
+- A division of floats or doubles narrower than a register divides its divisor with 1.0f in the lanes past its own
+  (`pcmpeqd`, `pslld` 25, `psrld` 2 and the unpacks, #1834), so that the zero lanes Tier 0 loads raise no FE_INVALID;
+  clang's code divides 0 by 0 there and raises it, a spurious exception this doesn't reproduce.
 - A `__builtin_convertvector` between integers and floats or doubles that no row of SSE's or AVX's takes (of unsigned
   integers, and of 64-bit ones without AVX-512DQ) converts element by element, as C converts each scalar
   (`check_lower_transport_convertvector`, #1834): clang's sequences compute the same values.

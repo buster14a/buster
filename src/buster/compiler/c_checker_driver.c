@@ -2525,6 +2525,42 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// `events` split for clang's end of the translation unit (#2141): `unit_end` gets its unused file-scope declarations,
+// which Sema::ActOnEndOfTranslationUnit diagnoses only where no error has occurred (a warning -Werror promoted
+// included), and `rest` every other event, in order. A view without such an event is `rest` itself, with no copy.
+// Whether there was room.
+static bool check_driver_unit_end_split(const CheckWarningEvents* events, Arena* scratch, CheckWarningEvents* rest, CheckWarningEvents* unit_end)
+{
+    *rest = *events;
+    *unit_end = (CheckWarningEvents){ .notes = events->notes, .note_count = events->note_count };
+    uint32_t ending = 0;
+    for (uint32_t i = 0; i < events->count; i += 1)
+    {
+        const CheckWarningEvent* event = events->events + i;
+        ending += (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+                  event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+    }
+    CheckWarningEvent* split = ending != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, events->count) : NULL;
+    const bool valid = ending == 0 || split != NULL;
+    if (ending != 0 && valid)
+    {
+        uint32_t front = 0;
+        uint32_t back = events->count - ending;
+        for (uint32_t i = 0; i < events->count; i += 1)
+        {
+            const CheckWarningEvent* event = events->events + i;
+            const bool late = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+                              event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+            split[late ? back++ : front++] = *event;
+        }
+        rest->events = split;
+        rest->count = events->count - ending;
+        unit_end->events = split + rest->count;
+        unit_end->count = ending;
+    }
+    return valid;
+}
+
 // Whether `token` is inside a function's body, between its braces: a definition's head is under its body's `}` in the
 // tree too, so the body's `{` decides. Only a recovered report's scope asks it (check_driver_error_scoped).
 static bool check_driver_in_body(const Parser* parser, uint32_t token)
@@ -8930,16 +8966,49 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 };
                                 // A static object's braced subobject whose conversion clang warns of and makes, where its value is
                                 // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
-                                if (conversion != NULL && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
+                                // Once at its place (#1812): a compound literal's own declaration and the array it initializes
+                                // check the same body, each failure at the same subobject, which clang reports once.
+                                const char* nonconstant = check_driver_initializer_message(CHECK_INIT_NON_CONSTANT);
+                                bool given_before = false;
+                                for (uint32_t d = 0; conversion != NULL && d < additional_count; d += 1)
+                                {
+                                    given_before |= additional[d].repeated && additional[d].token == place && additional[d].message == nonconstant;
+                                }
+                                if (conversion != NULL && !given_before && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
                                     check_input_bit(input.declaration_bits, failure.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
                                     check_init_value_nonconstant(&stream, &types, failure.failed_type, failure.failed_source - 1))
                                 {
                                     // (Repeated: at the conversion's own place, which the reports' walk would keep alone.)
-                                    additional[additional_count++] = (CheckDriverDiagnostic){ place, check_driver_initializer_message(CHECK_INIT_NON_CONSTANT), place,
-                                                                                              failure.completion, true };
+                                    additional[additional_count++] = (CheckDriverDiagnostic){ place, nonconstant, place, failure.completion, true };
                                 }
                             }
                         }
+                        // A file-scope array's recovered mismatch with the compound literal it is initialized by (#1812, "cannot
+                        // initialize array of type ... with array of type ..."), whose body holds a value that is no constant:
+                        // clang's literal is invalid then, and its initialization gives no error of its own.
+                        uint32_t kept_reports = 0;
+                        for (uint32_t r = 0; r < input.report_count; r += 1)
+                        {
+                            const CheckInputReport* report = input.reports + r;
+                            const bool candidate = report->recovered && report->message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH && report->token < input.token_count &&
+                                                   check_input_bit(input.declaration_bits, report->token, BUSTER_CHECK_BITS_STATIC) != 0 &&
+                                                   check_sparse_get(input.declaration_bodies, report->token) >= input.token_count;
+                            bool nonconstant_body = false;
+                            for (uint32_t d = 0; candidate && d < additional_count; d += 1)
+                            {
+                                nonconstant_body |= additional[d].token > report->token && additional[d].token < report->completion &&
+                                                    additional[d].message == check_driver_initializer_message(CHECK_INIT_NON_CONSTANT);
+                            }
+                            for (uint32_t u = 0; candidate && u < input.report_count; u += 1)
+                            {
+                                nonconstant_body |= input.reports[u].message == CHECK_INPUT_CONSTANT_INITIALIZER && input.reports[u].token > report->token &&
+                                                    input.reports[u].token < report->completion;
+                            }
+                            input.reports[kept_reports] = *report;
+                            kept_reports += !nonconstant_body;
+                            input.recovered_published -= nonconstant_body;
+                        }
+                        input.report_count = kept_reports;
                         if (diagnosed)
                         {
                             excess_tokens = warnings.tokens;
@@ -9108,9 +9177,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     const bool unit_errors = pp->errors != 0 || parse_failed || input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
                     const bool located = input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
                     const uint32_t* error_counts = located ? check_driver_error_counts(checking, &input, &stream, &types, additional, additional_count, scratch) : NULL;
+                    CheckWarningEvents kept_warnings;
                     CheckWarningEvents input_warnings;
+                    CheckWarningEvents unit_end_warnings;
                     const bool unit_end_ready = (!located || error_counts != NULL) &&
-                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings);
+                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &kept_warnings) &&
+                        check_driver_unit_end_split(&kept_warnings, scratch, &input_warnings, &unit_end_warnings);
                     if (!unit_end_ready ||
                         !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
@@ -9156,6 +9228,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         result = pp->errors != 0 ? 1 : result;
                     }
+                    // The unused file-scope declarations, last at the unit's end and only where no error occurred before them,
+                    // the internal functions used but not defined included (#2141).
+                    if (unit_end_ready && pp->errors == 0 && unit_end_warnings.count != 0 &&
+                        !check_driver_warning_events_at(checking, pp, &input, &types, &unit_end_warnings, repairing ? &repair : NULL, publication_end, scratch))
+                    {
+                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
+                    }
+                    result = pp->errors != 0 || driver_fatal ? 1 : result;
                     if (program_checked)
                     {
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
