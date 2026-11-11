@@ -11571,6 +11571,22 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
     return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
 }
 
+// Whether clang's code computes a floating elementwise builtin of a vector of floats or doubles (`result`) by the C
+// library's function for each element at the unit's target (#1834): the roundings (ceil ... round) without SSE4.1's
+// ROUNDPS and ROUNDPD, and the fused multiply-add (fmaf or fma) without FMA, as its legalization scalarizes them.
+static bool check_lower_vector_library(const CheckLowerWriter* writer, CBuiltinId builtin, TypeId result)
+{
+    const TypeTable* types = writer->program->types;
+    const uint8_t kind = type_kind(types, type_conversion_operand(types, result));
+    const CheckVectorShape shape = check_vector_builtin_shape(types, result);
+    const uint64_t features = writer->target.features;
+    const bool vector = (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && shape.floating && !shape.bfloat && shape.element >= 4;
+    const bool rounding = builtin >= CBUILTIN_ELEMENTWISE_CEIL && builtin <= CBUILTIN_ELEMENTWISE_ROUND &&
+                          (features & (BUSTER_X86_FEATURE(SSE41) | BUSTER_X86_FEATURE(AVX512F))) == 0;
+    const bool fused = builtin == CBUILTIN_ELEMENTWISE_FMA && (features & (BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F))) == 0;
+    return vector && (rounding || fused);
+}
+
 // Pushes the instructions of an address `offset` bytes into frame object `object`, which run in the reverse of their
 // pushes: LOCAL_ADDRESS, then the offset's PTR_ADD.
 static void check_lower_element_address(CheckLowerWriter* writer, uint32_t object, uint32_t offset)
@@ -11653,10 +11669,11 @@ static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CB
         const bool d = shape.element == 8;
         const uint8_t element_class = d ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
         const TypeId element = d ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_FLOAT;
-        const TypeId parameters[2] = { element, element };
-        const CheckLowerRuntime runtime = check_lower_libm_function(builtin, element_class);
-        uint32_t operands[2] = { 0, 0 };
-        for (uint32_t a = 0; a < arguments && a < 2; a += 1)
+        const TypeId parameters[3] = { element, element, element };
+        const CheckLowerRuntime runtime = builtin == CBUILTIN_ELEMENTWISE_FMA ? check_lower_library_runtime(d ? CBUILTIN_LIBRARY_FMA : CBUILTIN_LIBRARY_FMAF) :
+                                                                                check_lower_libm_function(builtin, element_class);
+        uint32_t operands[3] = { 0, 0, 0 };
+        for (uint32_t a = 0; a < arguments && a < 3; a += 1)
         {
             operands[a] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         }
@@ -11850,21 +11867,46 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
     const TypeId exponent = ldexp ? stream->argument_conversions[first + 1].type : 0;
     Tier0Operation row;
     Tier0Operation tail;
+    Tier0Operation chain[BUSTER_CHECK_VECTOR_FLOATING_ROWS];
+    uint32_t count = 1;
     CheckVectorConstants constants = { 0 };
     const char* reason = NULL;
     if (bytes != 0)
     {
         reason = ldexp && check_lower_vector_of(writer, exponent) == 0 ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
-                 ldexp ? check_vector_ldexp_row(types, &writer->target, result, exponent, &row) :
-                         check_vector_floating_row(types, builtin, result, &row, &constants);
-        if (reason == NULL)
+                 ldexp ? check_vector_ldexp_row(types, &writer->target, result, exponent, chain) :
+                         check_vector_floating_rows(&writer->target, builtin, check_vector_builtin_shape(types, result), chain, &count, &constants);
+        if (reason == NULL && count == 1)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, &row));
-            check_lower_row_constants(writer, &row, &constants, arguments);
+            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, chain));
+            check_lower_row_constants(writer, chain, &constants, arguments);
             for (uint32_t a = arguments; a-- > 0;)
             {
                 check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
             }
+            writer->vectors = true;
+        }
+        else if (reason == NULL)
+        {
+            // A chain of rows (check_vector_baseline_floating_rows' IEEE maxima and minima without AVX): x and y set into
+            // temporaries, the first row of them and its constants, then each other row of the previous one's result, x
+            // and y. Pushed last first.
+            const uint32_t x = check_lower_temporary_of(writer, result);
+            const uint32_t y = check_lower_temporary_of(writer, result);
+            for (uint32_t k = count; k-- > 1;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, chain + k));
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, y);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, x);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, chain));
+            check_lower_row_constants(writer, chain, &constants, arguments);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, y);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, x);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, y);
+            check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, x);
+            check_lower_operand(writer, node, 3, false, stream->argument_conversions[first].type);
             writer->vectors = true;
         }
     }
@@ -12141,12 +12183,13 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
               (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && (check_lower_transport_type(types, stream->argument_conversions[first + 1].type) ||
                                                                       check_lower_vector_wide(writer, stream->argument_conversions[first + 1].type)))) &&
              (check_builtin_vector_elementwise(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP) &&
-             !check_lower_libm_builtin(builtin) && !check_lower_strict_round(graph, node, builtin) && builtin != CBUILTIN_ELEMENTWISE_PDEP &&
+             !check_lower_libm_builtin(builtin) && !check_lower_strict_round(graph, node, builtin) && !check_lower_vector_library(writer, builtin, result) &&
+             builtin != CBUILTIN_ELEMENTWISE_PDEP &&
              builtin != CBUILTIN_ELEMENTWISE_PEXT && builtin != CBUILTIN_ELEMENTWISE_CLMUL)
     {
         check_lower_transport_elementwise(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if (check_lower_libm_builtin(builtin) || check_lower_strict_round(graph, node, builtin))
+    else if (check_lower_libm_builtin(builtin) || check_lower_strict_round(graph, node, builtin) || check_lower_vector_library(writer, builtin, result))
     {
         check_lower_vector_calls(writer, node, builtin, effect->evaluated_argument_count);
     }
@@ -15658,7 +15701,10 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         counts->transport_entries += room;
         counts->transport_locals += room != 0 ? 12 : 0;
     }
-    if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
+    // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
+    // (check_lower_vector_library), which the bound counts whatever the target.
+    const bool library = (member >= CBUILTIN_ELEMENTWISE_CEIL && member <= CBUILTIN_ELEMENTWISE_ROUND) || member == CBUILTIN_ELEMENTWISE_FMA;
+    if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member) || library) &&
         (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
     {
         const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
@@ -15761,8 +15807,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint32_t nodes = input != 0 ? input->graph.count : 0;
     // A libm builtin of a vector (check_lower_vector_calls) calls the C library's function once an element, past what the
     // per-node bounds below give a node (#934's review): its lanes' calls and their arguments, and each call's entries, its
-    // SET and CALL, an argument's LOAD, and the element addresses of each argument and of the result (up to 13 with two
-    // arguments).
+    // SET and CALL, an argument's LOAD, and the element addresses of each argument and of the result (up to 17 with
+    // three, a fused multiply-add's: check_lower_vector_library).
     const CheckLowerNodeCounts node_counts = BUSTER_SCALAR_PATH(scalar) ? check_lower_node_counts_scalar(program) : check_lower_node_counts(program);
     const uint32_t builtin_count = node_counts.builtins;
     const uint32_t atomic_capacity = node_counts.atomics;
@@ -15791,7 +15837,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                                                                                                                 (CheckLowerLimbRoom){ 0 };
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 6 + asm_labels * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
-                                limb_room.entries + lane_calls * 13 + node_counts.transport_entries + 32;
+                                limb_room.entries + lane_calls * 17 + node_counts.transport_entries + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.

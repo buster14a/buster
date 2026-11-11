@@ -657,6 +657,16 @@ at the target's forms, by both of the checker's paths:
   unsigned words' are `psubusw` with `paddw` or `psubw`. Absolute values without SSSE3 (or AVX-512's of qwords) are
   bytes' `pminub` and words' `pmaxsw` of each and its negation, and dwords' and qwords' xor with their sign less it
   (`check_vector_baseline_absolute`).
+  The floating elementwise builtins of vectors without AVX-512 (`check_vector_baseline_floating_rows`, #1834) are SSE's
+  and AVX's sequences of clang's code, operand for operand so that NaN payloads and zeros' signs are its: SSE4.1's
+  `roundps` and `roundpd` (round's of the value plus the largest value below 0.5 of its sign), canonicalize's multiply
+  by 1.0, copysign's masks, maxnum's and minnum's `maxps` of y and x with y where x is a NaN, and the IEEE maxima and
+  minima (`maximum`, `minimum` and their `_num` forms) `maxps` of x and y, its sign bit fixed by x's, then the NaNs'
+  operands selected: with AVX by `vblendvps`, without it by a chain of rows, each of the previous row's result, x and
+  y (`check_vector_baseline_select_row`). Without SSE4.1 the roundings, and without FMA the fused multiply-add, are the
+  C library's `ceilf` ... `round`, `fmaf` and `fma` an element (`check_lower_vector_library`), as clang's code calls
+  them. A fused multiply-add's product has b's register as its destination, as clang's `vfmadd213` does, so that of
+  two NaNs b's is the result.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
