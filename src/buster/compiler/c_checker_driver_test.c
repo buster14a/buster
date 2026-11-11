@@ -289,7 +289,7 @@ static int check_test_driver_clang_request(char* const* arguments, char** text, 
     uint64_t output_length = 0;
     uint64_t errors_length = 0;
     const bool placed = getcwd(directory, sizeof(directory)) != NULL;
-    const int status = placed ? oracle_server_run(&modes->server, arguments, environ, directory, NULL, stdout_capture ? 1u : 2u, &output, &output_length, &errors, &errors_length) : -1;
+    const int status = placed ? oracle_server_run(&modes->server, arguments, environ, directory, NULL, stdout_capture ? 1u : 2u, 0, &output, &output_length, &errors, &errors_length) : -1;
     *text = stdout_capture ? output : errors;
     if (status >= 0)
     {

@@ -88,7 +88,10 @@
 //     written; in check mode a served run that differs from its entry, stale; --differential's runs both ways and a
 //     difference that fails; a server that ends in a run, the run as a child and another server for the next; a
 //     forked child's server of its own; a server whose release isn't the tool's, serving none; and runs that don't
-//     fit, not served.
+//     fit, not served;
+//   - served runs outside the cache (oracle_serve_takes, oracle_serve_command): served and counted, a server past the
+//     run's time limit stopped and another started for the next, and --differential's comparison of two results, a
+//     difference counted, which fails the test.
 // It prints its checks and failures and exits with status 1 if any fail.
 
 #include "buster/compiler/test_paths.h"
@@ -1499,8 +1502,9 @@ static const char oracle_test_helper[] =
 // A clang server of the test's own (oracle_test_served), on the protocol of tools/clang-server's clang_server.cpp: it
 // runs each request as a child of its own (argument 0 a path), in the request's directory with exactly its environment
 // and standard input, so that its answers are the run's. The request's ORACLE_TEST_SERVER says otherwise: `lie` adds a
-// line to its output, `crash` ends the server without a reply. Its release is ORACLE_TEST_SERVER_VERSION's, as it
-// started, or "oracle-test 1", which the test's program gives for -dumpversion.
+// line to its output, `crash` ends the server without a reply, `stall` stops it without one until it is killed. Its
+// release is ORACLE_TEST_SERVER_VERSION's, as it started, or "oracle-test 1", which the test's program gives for
+// -dumpversion.
 static const char oracle_test_server[] =
     "#define _GNU_SOURCE\n"
     "#include <fcntl.h>\n"
@@ -1531,6 +1535,7 @@ static const char oracle_test_server[] =
     "        const char* mode = \"\";\n"
     "        for (uint32_t i = 0; i < header[2]; i += 1) { environment[i] = text(); if (environment[i] && strncmp(environment[i], \"ORACLE_TEST_SERVER=\", 19) == 0) mode = environment[i] + 19; }\n"
     "        if (strcmp(mode, \"crash\") == 0) return 1;\n"
+    "        if (strcmp(mode, \"stall\") == 0) for (;;) pause();\n"
     "        const int output = memfd_create(\"output\", 0), errors = memfd_create(\"errors\", 0);\n"
     "        const pid_t child = fork();\n"
     "        if (child == 0)\n"
@@ -3891,6 +3896,71 @@ static bool oracle_test_served_text(const OracleRun* run, const char* text)
     return WIFEXITED(run->status) && WEXITSTATUS(run->status) == 0 && run->output != 0 && strcmp(run->output, text) == 0 && run->errors != 0 && run->errors[0] == 0;
 }
 
+// Served runs outside the cache (oracle_cache.c's --- Served runs outside the cache ---), through the test's server
+// `server` standing for the test's program, whose `cat` of `input` is the run: the server takes the program's runs that
+// fit and no other tool's, serves one, counted as served; a server that doesn't answer within the run's time limit
+// (ORACLE_TEST_SERVER=stall) is stopped, the run counted as not served, and the next is served by another; with
+// --differential a run counts as neither, and the comparison of its two results counts them, a difference failing the
+// test (the test makes one on purpose).
+static void oracle_test_served_commands(OracleTest* test, const char* server, const char* input, bool ready)
+{
+    char* cat[] = { test->helper, "cat", 0 };
+    char* response[] = { test->helper, "cat", "@served-response", 0 };
+    char* shell[] = { "sh", "-c", "cat", 0 };
+    char* output = 0;
+    char* errors = 0;
+    uint64_t output_length = 0;
+    uint64_t errors_length = 0;
+    bool both = true;
+
+    // Taken where the run fits, and served.
+    oracle_serve(server, test->helper, false);
+    const bool fits = oracle_serve_takes(cat, &both) && !both && !oracle_serve_takes(shell, &both) && !oracle_serve_takes(response, &both);
+    int status = ready ? oracle_serve_command(cat, input, 0, false, &output, &output_length, &errors, &errors_length) : -1;
+    const bool served = status == 0 && output != 0 && output_length == 13 && strcmp(output, "served bytes\n") == 0 && errors != 0 && errors_length == 0;
+    free(output);
+    free(errors);
+    oracle_test_expect(test, fits && served && oracle_serving.counts->served == 1 && oracle_serving.counts->unserved == 0,
+                       "served outside the cache: the tool's runs that fit taken, another tool's and a response file not, and a run served");
+
+    // Past the run's time limit: the server stopped, the run not served, and the next served by another.
+    const pid_t first = oracle_serving.server.pid;
+    const uint64_t begun = oracle_now();
+    const bool stalling = setenv("ORACLE_TEST_SERVER", "stall", 1) == 0;
+    status = ready && stalling ? oracle_serve_command(cat, input, 1, false, &output, &output_length, &errors, &errors_length) : 0;
+    const uint64_t waited = oracle_now() - begun;
+    unsetenv("ORACLE_TEST_SERVER");
+    const bool stopped = status == -1 && output == 0 && errors == 0 && oracle_serving.server.pid == 0 && waited >= 900000000 && oracle_serving.counts->unserved == 1;
+    status = ready ? oracle_serve_command(cat, input, 1, false, &output, &output_length, &errors, &errors_length) : -1;
+    const bool again = status == 0 && output != 0 && strcmp(output, "served bytes\n") == 0 && oracle_serving.server.pid != first && oracle_serving.server.starts == 2;
+    free(output);
+    free(errors);
+    oracle_test_expect(test, stopped && again && oracle_serving.counts->served == 2 && oracle_serve_end("oracle test"),
+                       "served outside the cache: a server past the run's time limit stopped, and the next run served by another");
+
+    // --differential: neither served nor not served, counted by the comparison; a difference fails the test.
+    oracle_serve(server, test->helper, true);
+    const bool differential = oracle_serve_takes(cat, &both) && both;
+    status = ready ? oracle_serve_command(cat, input, 0, true, &output, &output_length, &errors, &errors_length) : -1;
+    const char* const served_texts[2] = { output, errors };
+    const uint64_t served_lengths[2] = { output_length, errors_length };
+    const char* const texts[2] = { "served bytes\n", "" };
+    const uint64_t lengths[2] = { 13, 0 };
+    const char* const other_texts[2] = { "other bytes\n", "" };
+    const uint64_t other_lengths[2] = { 12, 0 };
+    oracle_serve_compare("oracle test: served outside the cache", cat, input, 0, texts, lengths, status >= 0 ? status << 8 : -1, served_texts, served_lengths);
+    const bool alike = oracle_serving.counts->compared == 1 && oracle_serving.counts->differences == 0;
+    printf("oracle cache: a run outside the cache that differs on purpose, which the next lines report:\n");
+    fflush(stdout);
+    oracle_serve_compare("oracle test: served outside the cache", cat, input, 0, other_texts, other_lengths, status >= 0 ? status << 8 : -1, served_texts, served_lengths);
+    free(output);
+    free(errors);
+    const uint64_t counted = oracle_serving.counts->served + oracle_serving.counts->unserved;
+    oracle_test_expect(test, differential && status == 0 && alike && oracle_serving.counts->compared == 2 && oracle_serving.counts->differences == 1 && counted == 0 &&
+                                 !oracle_serve_end("oracle test"),
+                       "served outside the cache: --differential's runs counted by their comparison, a difference failing the test");
+}
+
 // Served runs (oracle_serve, oracle_cache.c's --- Served runs ---), with a server of the test's own (oracle_test_server)
 // standing for the test's program, whose `cat` of a run's input is the run: served with the cache off; in use mode an
 // entry taken where one fits and otherwise served, no entry written; in check mode a served run that differs from the
@@ -4049,6 +4119,8 @@ static void oracle_test_served(OracleTest* test)
     oracle_run_release(&run);
     oracle_test_expect(test, unserved && oracle_serving.counts->served == 0 && oracle_serving.counts->unserved == 0 && oracle_serve_end("oracle test"),
                        "served: another tool's run, a response file, process statistics, clang's debugging variables, a time limit and a written file, not served");
+
+    oracle_test_served_commands(test, server, input, ready);
 
     oracle_serve(0, 0, false);
     unlink(input);
