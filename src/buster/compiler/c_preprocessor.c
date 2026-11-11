@@ -5554,6 +5554,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
     { "maybe_unused", 202106 },
+    { "nodiscard", 202003 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
