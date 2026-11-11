@@ -5327,7 +5327,7 @@ static void check_test_driver_tier1_segments(CheckTest* test, const char* clang,
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-segments", "segments'", check_test_tier1_segments_header, check_test_tier1_segments_source,
                                   check_test_tier1_segments_other_source, NULL, true, 0);
-    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-segments-v3", "segments' (x86-64-v3)", check_test_tier1_segments_header,
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-segments", "segments' (x86-64-v3)", check_test_tier1_segments_header,
                                   check_test_tier1_segments_source, check_test_tier1_segments_other_source, "-march=x86-64-v3", true, 0);
 }
 
