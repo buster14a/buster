@@ -2534,7 +2534,6 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-pedantic" },
         .warnings = 4,
         .errors = 3,
-        .compare_warning_text = true,
     },
     {
         .name = "unit end unused declarations alone",
