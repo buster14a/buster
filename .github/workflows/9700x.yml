@@ -203,14 +203,16 @@ jobs:
           persist-credentials: false
 
       - name: Test the nightly glue and the 9700X's caches against fixtures
-        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, without
-        # network access (tools/ci/nightly.c's own self-test runs in `changes`).
+        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, and the
+        # hosted vector row's draws (tools/ci/vector-draw.sh), without network access (tools/ci/nightly.c's own
+        # self-test runs in `changes`).
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
           bash tests/ci/nightly.sh
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
+          bash tests/ci/vector-draw.sh
 
       - name: Decide reuse and hardware admission
         id: decide

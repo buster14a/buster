@@ -3028,9 +3028,10 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
 // The hosted rows' shards (docs/ci.md): the row workflow's shards job and the jobs after it. Its matrix's
 // `shard: [1, ..., N]` must count from 1, and the same N must appear in the job's name (`shard ${{ matrix.shard }} of
 // N)`) and the run step's `--shard "$BUSTER_SHARD/N"`, whose shard is the matrix's (`BUSTER_SHARD: ${{ matrix.shard }}`)
-// or, in the vector row's draws, the item a candidate claimed. `parallel --shard K/N` deals the inventory to N shards,
-// so disagreeing values would leave commands unrun (or run some twice) with every job green. The vector row's items
-// (BUSTER_VECTOR_ITEMS, #2033) are the same N shards, each once, and its first draw starts 3 candidates per item.
+// or, in the vector row's draws, the item its collector assigned a candidate. `parallel --shard K/N` deals the inventory
+// to N shards, so disagreeing values would leave commands unrun (or run some twice) with every job green. The vector
+// row's items (BUSTER_VECTOR_ITEMS, #2033) are the same N shards, each once, and its first draw starts 3 candidates per
+// item.
 static bool changes_vector_items(const char* text, uint32_t shards)
 {
     static const char items[] = "\n  BUSTER_VECTOR_ITEMS: '";
@@ -3194,10 +3195,12 @@ static Text changes_feature_name(Text macro)
 // x86-64-v4 and then each macro's feature, in that order, each on a line that prints the name it asks for; and it is
 // built with the flags that cmake/BusterSettings.cmake gives BUSTER_HOST_ARCH=vector, character for character. A
 // feature added to the predicate without the probe, or flags changed in one place alone, fail here, before a runner
-// could pass a CPU the build's code doesn't run on. The claims are this run attempt's (the prefix's
-// GITHUB_RUN_ATTEMPT) and never overwrite one another; the draws run the shards' own steps (`*row-steps`); and the
-// verdict waits for every draw and collector, even after a failure. This pins the repository's spelling, as the other
-// policies do.
+// could pass a CPU the build's code doesn't run on. The draws' records are this run attempt's (the prefix's
+// GITHUB_RUN_ATTEMPT) and never overwrite one another; candidates take only what their draw's collector assigns
+// (tools/ci/vector-draw.sh take), which one job publishes once (assign); the draws run the shards' own steps
+// (`*row-steps`) and the collectors theirs; and the verdict waits for every draw and collector, even after a failure,
+// and reads every attempt's records. This pins the repository's spelling, as the other policies do;
+// tests/ci/vector-draw.sh tests the script.
 static bool changes_vector_policy(Text row, Text host_isa, Text settings)
 {
     const TextList predicate = changes_predicate_macros(host_isa, "#if ");
@@ -3243,38 +3246,46 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
     }
     static const char* const required[] = {
         "\n          printf 'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
-        "\n          prefix=\"vector-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION-$GITHUB_RUN_ATTEMPT\"\n          # This draw's candidates' jobs",
-        "\n          records=\"$RUNNER_TEMP/vector-records\"\n          prefix=\"vector-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION-$GITHUB_RUN_ATTEMPT\"\n",
-        "\n          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-*\n",
+        "\n          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
+        "\n          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
+        "\n          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*\n",
         "\n    steps: &row-steps\n",
+        "\n    steps: &collect-steps\n",
         "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]\n    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n",
         "\n          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then\n",
-        "\n          [ \"${#failed[@]}\" -eq 0 ] && [ \"${#incomplete[@]}\" -eq 0 ]\n",
     };
     for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
     {
         valid = valid && strstr(text, required[i]) != NULL;
     }
-    // Each draw runs the shards' steps; each claim, and every other vector record, refuses to overwrite one.
+    // Each draw runs the shards' steps, and each collector the first's; every vector record refuses to overwrite one.
     uint32_t draws = 0;
     for (const char* step = strstr(text, "\n    steps: *row-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *row-steps\n"))
     {
         draws += 1;
     }
-    uint32_t claims = 0;
-    for (const char* claim = strstr(text, "outputs.prefix }}-"); valid && claim != NULL; claim = strstr(claim + 1, "outputs.prefix }}-"))
+    uint32_t collectors = 0;
+    for (const char* step = strstr(text, "\n    steps: *collect-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *collect-steps\n"))
     {
-        const char* next = strstr(claim, "\n      - ");
-        const char* overwrite = strstr(claim, "\n          overwrite: false\n");
-        valid = overwrite != NULL && (next == NULL || overwrite < next);
-        claims += strncmp(claim, "outputs.prefix }}-claim-", 24) == 0;
+        collectors += 1;
     }
-    return valid && draws == 4 && claims == 3;
+    uint32_t records = 0;
+    for (const char* record = strstr(text, "outputs.prefix }}-"); valid && record != NULL; record = strstr(record + 1, "outputs.prefix }}-"))
+    {
+        const char* next = strstr(record, "\n      - ");
+        const char* overwrite = strstr(record, "\n          overwrite: false\n");
+        valid = overwrite != NULL && (next == NULL || overwrite < next);
+        records += 1;
+    }
+    return valid && draws == 4 && collectors == 2 && records == 3;
 }
 
 static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_isa, Text settings)
 {
-    changes_expect(test, changes_vector_policy(row, host_isa, settings), "vector policy: the probe and the build's vector target are host_isa.h's predicate; claims per attempt", (Text){ 0 });
+    changes_expect(test, changes_vector_policy(row, host_isa, settings), "vector policy: the probe and the build's vector target are host_isa.h's predicate; items assigned per attempt", (Text){ 0 });
     static const struct
     {
         uint32_t file;
@@ -3292,15 +3303,17 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 2, "-mavx512bitalg -mavx512vnni)", "-mavx512bitalg -mavx512vnni -mavx512ifma)", "build flags the probe isn't built with" },
         { 0, "-mavx512bitalg -mavx512vnni \"$draw/probe.c\"", "-mavx512bitalg \"$draw/probe.c\"", "a probe built without a flag of the build's" },
         { 2, "set(host_flags -march=x86-64-v4 ", "set(host_flags -march=znver5 ", "a vector target of one CPU model" },
-        { 0, "'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "claims shared between attempts" },
-        { 0, "          prefix=\"vector-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION-$GITHUB_RUN_ATTEMPT\"", "          prefix=\"vector-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION-1\"", "a collector that reads another attempt's claims" },
-        { 0, "          records=\"$RUNNER_TEMP/vector-records\"\n          prefix=\"vector-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION-$GITHUB_RUN_ATTEMPT\"", "          records=\"$RUNNER_TEMP/vector-records\"\n          prefix=\"vector-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION-1\"", "a verdict that reads another attempt's evidence" },
-        { 0, "outputs.prefix }}-claim-${{ steps.free.outputs.second }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false", "outputs.prefix }}-claim-${{ steps.free.outputs.second }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: true", "a claim that overwrites another" },
+        { 0, "'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "records shared between attempts" },
+        { 0, "-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}", "-yes", "a verdict published as qualified whatever the probe found" },
+        { 0, "          bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "          true ", "candidates that take an item without an assignment" },
+        { 0, "          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false", "          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: true", "an assignment that overwrites another" },
+        { 0, "-evidence-${{ env.BUSTER_SHARD }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false", "-evidence-${{ env.BUSTER_SHARD }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: true", "evidence that overwrites another" },
         { 0, "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: *row-steps\n", "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: []\n", "a draw without the shards' steps" },
+        { 0, "      BUSTER_DRAW_NEXT: '5'\n    steps: *collect-steps\n", "      BUSTER_DRAW_NEXT: '5'\n    steps: []\n", "a collector without the first's steps" },
         { 0, "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]", "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3]", "a verdict before the last draw" },
         { 0, "    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "    if: inputs.host_arch == 'vector'\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "a verdict skipped after a failure" },
+        { 0, "          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*", "          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-*", "a verdict blind to the attempt a rerun keeps" },
         { 0, "          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then", "          if false; then", "a scalar vector row" },
-        { 0, "          [ \"${#failed[@]}\" -eq 0 ] && [ \"${#incomplete[@]}\" -eq 0 ]", "          [ \"${#failed[@]}\" -eq 0 ]", "an incomplete row that passes" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
@@ -3308,7 +3321,7 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         const Text original = mutants[i].file == 0 ? row : mutants[i].file == 1 ? host_isa : settings;
         const Text changed = changes_mutant(original, NULL, mutants[i].before, mutants[i].after, &found);
         const bool valid = changes_vector_policy(mutants[i].file == 0 ? changed : row, mutants[i].file == 1 ? changed : host_isa, mutants[i].file == 2 ? changed : settings);
-        changes_expect(test, found && !valid, "vector policy rejects a probe, target or claim out of step", text_c(mutants[i].name));
+        changes_expect(test, found && !valid, "vector policy rejects a probe, target or assignment out of step", text_c(mutants[i].name));
     }
 }
 

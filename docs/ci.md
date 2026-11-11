@@ -387,10 +387,11 @@ path compiled for x86-64-v4 with generic tuning, not `znver5`'s code
 generation: the 9700X still runs native correctness of the measured `znver5`
 build in the nightly window.
 
-**Draws** (`.github/workflows/hosted-correctness.yml`, `draw-1` to `draw-4`).
-A hosted VM belongs to the job it runs, so the candidate that probes is the one
-that works. Each draw starts generic candidates, which run the shards' own
-steps (`*row-steps`), each step gated on the shard the candidate holds:
+**Draws** (`.github/workflows/hosted-correctness.yml`, `draw-1` to `draw-4`, and
+`tools/ci/vector-draw.sh`). A hosted VM belongs to the job it runs, so the
+candidate that probes is the one that works. Each draw starts generic
+candidates, which run the shards' own steps (`*row-steps`), each step gated on
+the shard the candidate holds:
 
 1. **Probe**, before the checkout: a C probe, built by the image's `cc` with
    the target's flags, whose `#if` is the predicate itself, asks
@@ -399,71 +400,80 @@ steps (`*row-steps`), each step gated on the shard the candidate holds:
    its model. A probe that stops (a CPU without AVX2 may meet an instruction
    the flags let it use) doesn't qualify either. Its record: the level, the
    candidate, the runner, the CPU model, the verdict and the missing features.
-2. **Claim**: a qualifying candidate lists the claims so far (the run's
-   artifacts) and uploads its record as `vector-SANITIZER-OOPT-ATTEMPT-claim-ITEM`
-   for the costliest free item (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1 also
-   runs the row's once-only steps, and the costs deal the rest evenly). An
-   artifact's name is unique in its run, so of the candidates that upload one
-   item's claim, one succeeds (`overwrite: false`); a candidate whose upload
-   failed tries the next free item, three at most. A failed try is expected,
-   and the run lists its error.
-3. **Run or redraw**: the claimed item becomes the candidate's shard
-   (`BUSTER_SHARD`), and it builds the compiler and runs the shard as any
-   shard does, after the confirmation below. A candidate without one ends
-   within seconds, successfully, as a redraw, so that rerunning the failed
-   jobs reruns only real failures. Every candidate uploads its record with its
-   decision (`-draw-LEVEL-CANDIDATE`).
+2. **Publish**: every candidate uploads its record as
+   `vector-SANITIZER-OOPT-ATTEMPT-probe-LEVEL-CANDIDATE-yes|no`.
+3. **Take or redraw**: a qualifying candidate waits for its draw's assignment
+   and takes the item it names as its shard (`BUSTER_SHARD`). It builds the
+   compiler and runs the shard as any shard does, after the confirmation below.
+   A candidate without an item ends within seconds, successfully, as a redraw,
+   so that rerunning the failed jobs reruns only real failures. Every candidate
+   uploads its record with its decision (`-draw-LEVEL-CANDIDATE`).
 
-**Collectors** (`collect-1` to `collect-3`) start with their draw and poll the
-run every 5 s, through the artifacts and jobs APIs (`actions: read`), until
-every item is claimed or every candidate has decided (its job ended or
-recorded its draw), at most 25 minutes. They never wait for a claimed item's
-tests. The next draw starts candidates for the items still unclaimed alone: 3
-per item in the first draw (12), then 4, 5 and 5 per missing item. With draws
-independent, as #2033's 24 runs measured, a binomial model gives:
+**The claim is a rendezvous by rank**, the design's fallback. Its first
+candidate was artifact-name uniqueness: GitHub refuses an upload under a name
+the run already has, and the candidates would have claimed an item by
+uploading its name. The race fixture (below) disproved it on 2026-11-11 (run
+42993863311): when 16 jobs uploaded one name within the same second, all 16
+uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
+name. So no candidate claims anything. Each draw's **collector**
+(`collect-1` to `collect-3`, and the verdict's reading after the last) starts
+with its draw and polls the run every 5 s, through the artifacts and jobs APIs
+(`actions: read`). It waits until as many candidates qualified as items are
+missing, or every candidate has published its verdict or ended, at most 25
+minutes. Then it assigns: the qualifying candidates, by their numbers, get the
+missing items, the costliest first (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1
+also runs the row's once-only steps, and the costs deal the rest evenly). One
+job decides, and it uploads the decision once, as an artifact whose name holds
+it: `-assign-LEVEL-ITEMxCANDIDATE...`. Nothing can take an item twice. It never
+waits for an item's tests. The next draw starts candidates for the items still
+missing alone: 3 per item in the first draw (12), then 4, 5 and 5 per missing
+item. With draws independent, as #2033's 24 runs measured, a binomial model
+gives:
 
 | Rate of qualifying CPUs | Runs needing a 2nd draw | a 3rd | a 4th | Still short after 4 |
 | --- | ---: | ---: | ---: | ---: |
 | 41% (busiest hours) | 20.5% | 2.3% | 0.16% | 0.011% |
 | 59% (sampled mean) | 1.8% | 0.045% | 0.0005% | ~0 |
 
-**Evidence and verdict.** Before its suite, a claimed item confirms that the
-build's target selects `BUSTER_HOST_VECTOR=1` and runs `benchmark-lexer` on
-`x86_64_encoder.c`, which a scalar build refuses: the vector lexer lexes all
-592 KB on this CPU, no part needing the scalar lexer, and the tokens must match
-the scalar twin's. Once every step passed, it uploads its evidence
-(`-evidence-ITEM`): the probe's verdict and CPU, the target,
-`BUSTER_HOST_VECTOR=1`, the kernels' run and the suite's pass. The `verdict` job
-requires exactly one passing qualified execution of each item: one claim, one
-candidate's record saying so, and evidence from the claim's runner. Its summary
+**Evidence and verdict.** Before its suite, an item's candidate confirms that
+the build's target selects `BUSTER_HOST_VECTOR=1` and runs `benchmark-lexer`
+on `x86_64_encoder.c`, which a scalar build refuses: the vector lexer lexes
+all 592 KB on this CPU, no part needing the scalar lexer, and the tokens must
+match the scalar twin's. Once every step passed, it uploads its evidence
+(`-evidence-ITEM`): the probe's verdict and CPU, its decision, the target,
+`BUSTER_HOST_VECTOR=1`, the kernels' run and the suite's pass. The `verdict`
+job (`vector-draw.sh verdict`) requires exactly one passing qualified
+execution of each item by the candidate its assignment names. Its summary
 lists every candidate's CPU and decision and every item's runner. An item no
-candidate claimed fails it as **incomplete: no qualifying CPU drawn**, which is
+candidate held fails it as **incomplete: no qualifying CPU drawn**, which is
 not a test failure; an item whose run failed fails as such (its candidate's job
 failed too).
 
-**Attempts and reruns.** Claims, records and evidence carry the run attempt,
-so every attempt claims and runs each item afresh. Rerunning a failed item's
-job reruns the draws after it, which draw for every item of the new attempt.
-After an incomplete verdict, the draws all passed: re-run all jobs to draw
-again.
+**Attempts and reruns.** Every record carries the run attempt. Rerunning all
+jobs draws and assigns every item afresh. Rerunning the failed jobs reruns no
+collector, so the earlier attempt's assignments stand: an item's candidate
+reruns it on a new runner, and if that runner doesn't qualify, the job fails,
+saying that no test failed and to rerun the failed jobs again. After an
+incomplete verdict the draws all passed: re-run all jobs to draw again.
 
-**Permissions and the claim's race fixture.** Nothing needs write access: the
-claims are the run's own artifacts, which a fork's pull request can upload too.
-GitHub documents that an upload under a name the run already has fails, not
-that the refusal is atomic when several jobs upload at once.
+**Permissions and the race fixture.** Nothing needs write access: every record
+is the run's own artifact, which a fork's pull request can upload too.
 `.github/workflows/vector-claim-race.yml`, on pull requests that change the
-row workflow or the fixture and on dispatch, races 16 jobs, each on its own
-runner, at 4 shared instants to upload one name each, and requires one
-successful upload per round, one artifact by its name, holding the winner's
-record. If it ever finds two, the claim moves to its fallback: each candidate
-publishes its probe's verdict and items go to qualifying candidates by rank.
-Duplicating each item's candidates instead would repeat about 77% of the
-vector work at a 59% rate.
+draws (the row workflow, `tools/ci/vector-draw.sh`) or the fixture and on
+dispatch, runs 16 racers, each on its own runner, as one draw's candidates at
+one instant, through the same script: about half qualify (by a hash of the
+racer and the run), the collector assigns the 4 items, and the judge requires
+each assigned item taken by exactly the racer its assignment names, only by a
+qualifying racer, no racer taking two, and min(4, qualifying racers) items
+assigned. Its control round uploads one name from every racer at once and
+reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
+collector, candidates (reruns among them) and verdict against a fake `gh`;
+the PR's `evidence` job runs it.
 
 **Sharing the product next (#2032).** The explicit target makes the row's 4
 builds one configuration. The build runs the executable (the baked tables), so
 it needs a qualifying CPU too: the next step makes the build an item that the
-first draw's candidates claim first, and the claimed shards install its
+first draw's collector assigns first, and the shards' candidates install its
 product with `tools/ci/hosted-product.sh` once their own probes qualified,
 with the probe's verdict in the product's checks in place of `portable`'s.
 
