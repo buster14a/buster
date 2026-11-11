@@ -172,7 +172,7 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
 # tokens. -target and its triple (clang's default) go to both. clang's runs go to the job's clang server where it built
-# one (#2071), compared as the cases' parts' are.
+# one (#2071), compared as the cases' parts' are, but the guard counts' (-print-stats, LLVM's counters), as children.
 mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
 test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
@@ -197,10 +197,12 @@ test "${#host_flags[@]}" -gt 0
 # to 4 parts by their weights (pp_test_sections), one CPU each, which the runner packs beside the other commands:
 # whole, on 2 CPUs, the command took 295 s on a hosted runner and 44 s on the 9700X, the list's longest. The four
 # parts together run each check once. A part's fuzz workers and clang processes run on its CPU (--jobs, and
-# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs. The oracle cache's clang runs and
-# the fuzz batch's go to the job's clang server where it built one (#2071), and with BUSTER_DRIVER_DIFFERENTIAL each
-# also runs as before: a difference fails the command. The release fixture's wrapper script, another program, runs its
-# clang as before.
+# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs. The oracle cache's clang runs, the
+# fuzz batch's and the checks' own (the history's and system warnings' diagnostics, the directives' commands) go to the
+# job's clang server where it built one (#2071), and with BUSTER_DRIVER_DIFFERENTIAL each also runs as before: a
+# difference fails the command. A forked part stops its own server as it ends, so that its CPU time is the command's.
+# The release fixture's wrapper script and the predefines' shell commands, through other programs, the location option's
+# nested runs of the compiler and the guard counts (-print-stats, LLVM's counters) run their clang as before.
 "$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 # --part's refusals, each before any check runs: no value, a part outside 1 to N, N past the checks' 128, other than
 # digits on either side of one '/', and a second --part.

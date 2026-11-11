@@ -3929,13 +3929,14 @@ static OracleTake oracle_run_take(OracleRun* run)
 // the cache's tracing. OracleServer is its client, which test-checker-driver's --clang-server shares: a server a process
 // starts as it first needs it (oracle_server_start), on a socket (send's MSG_NOSIGNAL: a server that ended fails a
 // request rather than raising SIGPIPE), that only that process uses: a forked child closes its copy of the socket,
-// which leaves its parent's server as it was, and starts its own. A request the server can't answer (a crash in clang
+// which leaves its parent's server as it was, and starts its own, which it stops as it ends (oracle_serve_exit, a
+// test's part's test_process_exit), so that the server's CPU time is the child's. A request the server can't answer (a crash in clang
 // ends it), or doesn't answer within a time limit the client gives it, stops it, and the next request starts another,
 // at most BUSTER_ORACLE_SERVER_STARTS times in a process.
 //
 // A test given --clang-server sends the oracle runs of its clang (oracle_serve, by argument 0's name) to the server
 // where they fit: no files the run writes, no time limit (the cache's timed runs, none of them these tests' clang's,
-// stay children), and the server's clang libraries the clang's release (`clang -dumpversion`, checked once). A served
+// stay children), and the server's clang libraries the clang's release (`clang -dumpversion`, found once). A served
 // run keeps the cache's contract by not entering it: the server isn't traced, so its result can't be an entry, whose
 // every dependency a later take checks. In use mode a run takes an entry as before, and where none fits is served rather
 // than run, writing none; in check mode it is served and compared with the entry it would have taken, stale where that
@@ -4175,13 +4176,15 @@ struct OracleServeCounts
 };
 
 // The process's clang server for its oracle runs (oracle_serve): the server, the clang it stands for (argument 0's name),
-// --differential, whether its release was checked against the clang's and whether they differ, and its counts.
+// --differential, whether the clang's release was found (`clang -dumpversion`, once, as the test set the server up),
+// whether the server's was checked against it and whether they differ, the clang's release, and its counts.
 typedef struct OracleServing OracleServing;
 struct OracleServing
 {
     OracleServer server;
     const char* tool;
     bool differential;
+    bool found;
     bool released;
     bool mismatched;
     char release[64];
@@ -4195,29 +4198,6 @@ static OracleServing oracle_serving = {
     },
     .counts = &oracle_serving.own,
 };
-
-// Sends the process's oracle runs of `tool` (argument 0's name) to the clang server `path` (null: none), with
-// `differential` each also run as before and compared, its counts from zero: before the test's runs and the processes
-// it forks. A server it had before is stopped. Unused in the units without such a test.
-static __attribute__((unused)) void oracle_serve(const char* path, const char* tool, bool differential)
-{
-    OracleServing* serving = &oracle_serving;
-    oracle_server_stop(&serving->server);
-    if (serving->counts != &serving->own)
-    {
-        munmap(serving->counts, sizeof(OracleServeCounts));
-    }
-    *serving = (OracleServing){
-        .server = {
-            .path = path,
-            .socket = -1,
-        },
-        .tool = tool,
-        .differential = differential,
-    };
-    void* shared = path != 0 ? mmap(0, sizeof(OracleServeCounts), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    serving->counts = shared != MAP_FAILED ? shared : &serving->own;
-}
 
 // The first line `tool -dumpversion` prints, its release ("23.1.6"), into `release`: false if it can't run.
 static bool oracle_tool_release(const char* tool, char* release, size_t capacity)
@@ -4263,8 +4243,35 @@ static bool oracle_tool_release(const char* tool, char* release, size_t capacity
     return pid > 0 && waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && release[0] != 0;
 }
 
-// Whether the process's server can take a run: it runs (oracle_server_start) and, checked once, its clang libraries are
-// the clang's release. One that isn't takes no runs, and the test fails (oracle_serve_end).
+// Sends the process's oracle runs of `tool` (argument 0's name) to the clang server `path` (null: none), with
+// `differential` each also run as before and compared, its counts from zero: before the test's runs and the processes
+// it forks. A server it had before is stopped. The clang's release is found here, once (oracle_tool_release), so that
+// the parts the test forks, each of which starts a server of its own, check their servers' releases against it rather
+// than each run `clang -dumpversion` (oracle_serve_ready). Unused in the units without such a test.
+static __attribute__((unused)) void oracle_serve(const char* path, const char* tool, bool differential)
+{
+    OracleServing* serving = &oracle_serving;
+    oracle_server_stop(&serving->server);
+    if (serving->counts != &serving->own)
+    {
+        munmap(serving->counts, sizeof(OracleServeCounts));
+    }
+    *serving = (OracleServing){
+        .server = {
+            .path = path,
+            .socket = -1,
+        },
+        .tool = tool,
+        .differential = differential,
+    };
+    void* shared = path != 0 ? mmap(0, sizeof(OracleServeCounts), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    serving->counts = shared != MAP_FAILED ? shared : &serving->own;
+    serving->found = path != 0 && tool != 0 && oracle_tool_release(tool, serving->release, sizeof(serving->release));
+}
+
+// Whether the process's server can take a run: it runs (oracle_server_start) and, checked once in each process, its
+// clang libraries are the clang's release (oracle_serve's). One that isn't takes no runs, and the test fails
+// (oracle_serve_end).
 static bool oracle_serve_ready(void)
 {
     OracleServing* serving = &oracle_serving;
@@ -4272,7 +4279,7 @@ static bool oracle_serve_ready(void)
     if (started && !serving->released)
     {
         serving->released = true;
-        serving->mismatched = !oracle_tool_release(serving->tool, serving->release, sizeof(serving->release)) || strcmp(serving->release, serving->server.version) != 0;
+        serving->mismatched = !serving->found || strcmp(serving->release, serving->server.version) != 0;
         if (serving->mismatched)
         {
             fprintf(stderr, "clang server: %s's clang libraries are %s, and %s is %s: its runs run as children\n", serving->server.path, serving->server.version,
@@ -4285,16 +4292,22 @@ static bool oracle_serve_ready(void)
 // Whether a clang command line runs in the server as in a clang process: not one that clang's main reads before its
 // driver, which the server doesn't (a response file's `@`, a -cc1 tool's first argument); nor one that reports its
 // process's statistics or times (-fproc-stat-report, -ftime-report, -ftime-trace), which would be the server's process's
-// and differ between any two runs anyway; nor one whose environment sets what clang's main reads for the driver's
-// debugging outputs and overrides (CC_PRINT_*, CC_LOG_DIAGNOSTICS*, CCC_*) or to spawn its cc1 job.
+// and differ between any two runs anyway; nor one that prints or saves LLVM's statistics (cc1's -print-stats and
+// -stats-file, the driver's -save-stats, LLVM's -stats, each alone or after -Xclang= or -mllvm=): they are the process's
+// counters, which the server's runs add to one after another (HeaderSearch's "#includes skipped due to the
+// multi-include optimization", which test-preprocessor's guard counts read, gave 1, 2 and 3 for three runs of one file);
+// nor one whose environment sets what clang's main reads for the driver's debugging outputs and overrides (CC_PRINT_*,
+// CC_LOG_DIAGNOSTICS*, CCC_*) or to spawn its cc1 job.
 static bool oracle_server_fits(char* const* arguments, char* const* environment)
 {
     bool fits = arguments[0] != 0 && (arguments[1] == 0 || strncmp(arguments[1], "-cc1", 4) != 0);
     for (uint32_t a = 1; fits && arguments[a] != 0; a += 1)
     {
         const char* argument = arguments[a];
+        const char* option = strncmp(argument, "-Xclang=", 8) == 0 ? argument + 8 : strncmp(argument, "-mllvm=", 7) == 0 ? argument + 7 : argument;
         fits = argument[0] != '@' && strncmp(argument, "-fproc-stat-report", 18) != 0 && strncmp(argument, "-ftime-report", 13) != 0 &&
-               strncmp(argument, "-ftime-trace", 12) != 0;
+               strncmp(argument, "-ftime-trace", 12) != 0 && strcmp(option, "-print-stats") != 0 && strncmp(option, "-stats-file", 11) != 0 &&
+               strcmp(option, "-stats") != 0 && strncmp(argument, "-save-stats", 11) != 0;
     }
     for (uint32_t v = 0; fits && environment[v] != 0; v += 1)
     {
@@ -4420,31 +4433,35 @@ static void oracle_run_compare_served(OracleRun* run, bool finished)
 
 // --- Served runs outside the cache ---
 //
-// A test that starts its clang itself, outside the cache (preprocessor_fuzz_clang_process's fuzz batches), sends those
-// runs to the process's server through these: oracle_serve_takes says whether the server takes a command line, and
-// oracle_serve_command runs it there, with a time limit the client keeps (oracle_server_run stops the server at the
-// limit). Its runs write no files of their own, and none enter the cache. With --differential the test runs each one
-// as a child too, which gives the run's result, and compares the two (oracle_serve_compare).
+// A test that starts its clang itself, outside the cache, sends those runs to the process's server through these:
+// oracle_serve_takes says whether the server takes a command line, and oracle_serve_command runs it there, with a time
+// limit the client keeps (oracle_server_run stops the server at the limit): preprocessor_fuzz_clang_process's fuzz
+// batches, with a child of their own for the runs it doesn't take. oracle_serve_child is the whole of such a run for
+// the tests' other children (test-preprocessor's history and system warnings' diagnostics, its directives' commands):
+// served where the server takes it, and otherwise a child it starts itself (oracle_command_child). Its runs write no
+// files of their own, and none enter the cache. With --differential each also runs as a child, which gives the run's
+// result, and the two are compared (oracle_serve_compare).
 
-// Whether the process's clang server takes `arguments`, a run outside the cache that writes no files of its own: one of
-// the server's clang's (argument 0 its name) that it runs as a clang process would, in this process's environment
-// (oracle_server_fits). *both is whether the run also runs as a child (--differential). Unused in the units without such
-// a run.
-static __attribute__((unused)) bool oracle_serve_takes(char* const* arguments, bool* both)
+// Whether the process's clang server takes `arguments` with `environment` (null: this process's), a run outside the
+// cache that writes no files of its own: one of the server's clang's (argument 0 its name) that it runs as a clang
+// process would (oracle_server_fits). *both is whether the run also runs as a child (--differential). Unused in the
+// units without such a run.
+static __attribute__((unused)) bool oracle_serve_takes(char* const* arguments, char* const* environment, bool* both)
 {
     const OracleServing* serving = &oracle_serving;
     const bool named = serving->server.path != 0 && serving->tool != 0 && !serving->mismatched && arguments[0] != 0 && strcmp(arguments[0], serving->tool) == 0;
     *both = serving->differential;
-    return named && oracle_server_fits(arguments, environ);
+    return named && oracle_server_fits(arguments, environment != 0 ? environment : environ);
 }
 
-// A run outside the cache that the server takes (oracle_serve_takes): `arguments` in this process's directory and
-// environment, its standard input `input` (an absolute path, or null: /dev/null), within `timeout` seconds (0: none), its
-// streams into *output and *errors (oracle_server_run's; the caller frees them). Its exit status, or -1 if the server
-// couldn't take it or didn't answer in time, when the caller runs it as a child. Counted as served or not served,
-// unless `both` (--differential), when oracle_serve_compare counts it.
-static __attribute__((unused)) int oracle_serve_command(char* const* arguments, const char* input, uint32_t timeout, bool both, char** output, uint64_t* output_length,
-                                                         char** errors, uint64_t* errors_length)
+// A run outside the cache that the server takes (oracle_serve_takes): `arguments` in this process's directory with
+// `environment` (null: this process's), its standard input `input` (an absolute path, or null: /dev/null), within
+// `timeout` seconds (0: none), the streams in `streams` (oracle_server_run's: 1 standard output, 2 errors, 3 both, each
+// other discarded) into *output and *errors (oracle_server_run's; the caller frees them). Its exit status, or -1 if the
+// server couldn't take it or didn't answer in time, when the caller runs it as a child. Counted as served or not
+// served, unless `both` (--differential), when oracle_serve_compare counts it.
+static __attribute__((unused)) int oracle_serve_command(char* const* arguments, char* const* environment, const char* input, uint32_t streams, uint32_t timeout, bool both,
+                                                         char** output, uint64_t* output_length, char** errors, uint64_t* errors_length)
 {
     char directory[BUSTER_ORACLE_PATH_BYTES];
     const bool ready = getcwd(directory, sizeof(directory)) != 0 && oracle_serve_ready();
@@ -4452,7 +4469,8 @@ static __attribute__((unused)) int oracle_serve_command(char* const* arguments, 
     *output_length = 0;
     *errors = 0;
     *errors_length = 0;
-    const int status = ready ? oracle_server_run(&oracle_serving.server, arguments, environ, directory, input, 3, timeout, output, output_length, errors, errors_length) : -1;
+    char* const* variables = environment != 0 ? environment : environ;
+    const int status = ready ? oracle_server_run(&oracle_serving.server, arguments, variables, directory, input, streams, timeout, output, output_length, errors, errors_length) : -1;
     OracleServeCounts* counts = oracle_serving.counts;
     if (status >= 0)
     {
@@ -4463,6 +4481,115 @@ static __attribute__((unused)) int oracle_serve_command(char* const* arguments, 
         oracle_count(status >= 0 ? &counts->served : &counts->unserved);
     }
     return status;
+}
+
+// `arguments` as a child, argument 0 the program as execvp finds it, in this process's directory with `environment`
+// (null: this process's), its standard input /dev/null, the streams in `streams` (1 standard output, 2 errors, 3 both)
+// captured into *output and *errors (malloc's, each with a NUL after its bytes, or null where not captured; the caller
+// frees them) and the others to /dev/null, as the server runs a request (oracle_server_run). Waited for. Its wait
+// status, or -1 if it couldn't start or its captures couldn't be read (with no capture). Unused in the units without
+// such a run.
+static __attribute__((unused)) int oracle_command_child(char* const* arguments, char* const* environment, uint32_t streams, char** output, uint64_t* output_length,
+                                                         char** errors, uint64_t* errors_length)
+{
+    const int empty = oracle_high(open("/dev/null", O_RDWR | O_CLOEXEC));
+    const int captures[2] = {
+        (streams & 1) != 0 ? oracle_capture() : -1,
+        (streams & 2) != 0 ? oracle_capture() : -1,
+    };
+    char* const* variables = environment != 0 ? environment : environ;
+    const bool ready = empty >= 0 && ((streams & 1) == 0 || captures[0] >= 0) && ((streams & 2) == 0 || captures[1] >= 0);
+    fflush(0);
+    const pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        if (dup2(empty, STDIN_FILENO) == STDIN_FILENO && dup2(captures[0] >= 0 ? captures[0] : empty, STDOUT_FILENO) == STDOUT_FILENO &&
+            dup2(captures[1] >= 0 ? captures[1] : empty, STDERR_FILENO) == STDERR_FILENO)
+        {
+            // execvp's search and the program's environment are `environment`'s, as the server's run has it.
+            environ = (char**)variables;
+            execvp(arguments[0], arguments);
+        }
+        _exit(127);
+    }
+    int status = 0;
+    pid_t waited = child > 0 ? -1 : 0;
+    while (child > 0 && waited < 0)
+    {
+        waited = waitpid(child, &status, 0);
+        waited = waited < 0 && errno != EINTR ? 0 : waited;
+    }
+    char** const texts[2] = { output, errors };
+    uint64_t* const lengths[2] = { output_length, errors_length };
+    bool read = child > 0 && waited == child;
+    for (uint32_t c = 0; c < 2; c += 1)
+    {
+        *texts[c] = 0;
+        *lengths[c] = 0;
+        read = read && (captures[c] < 0 || oracle_read_capture(captures[c], texts[c], lengths[c]));
+    }
+    for (uint32_t c = 0; !read && c < 2; c += 1)
+    {
+        free(*texts[c]);
+        *texts[c] = 0;
+        *lengths[c] = 0;
+    }
+    const int descriptors[3] = { empty, captures[0], captures[1] };
+    for (uint32_t d = 0; d < 3; d += 1)
+    {
+        if (descriptors[d] >= 0)
+        {
+            close(descriptors[d]);
+        }
+    }
+    return read ? status : -1;
+}
+
+// A run outside the cache that a test would start as a child of its own: `arguments` (argument 0 the program, as
+// execvp finds it) in this process's directory with `environment` (null: this process's), its standard input
+// /dev/null, the streams in `streams` (1 standard output, 2 errors, 3 both) into *output and *errors (malloc's, each
+// with a NUL after its bytes, or null where not captured; the caller frees them), the others discarded. Served where
+// the process's server takes it (oracle_serve_takes), and otherwise, or where the server couldn't take it, a child
+// (oracle_command_child). With --differential it runs both ways: the child's result is the run's, and the server's is
+// compared with it, `purpose` naming the run where they differ (oracle_serve_compare). Its exit status, or -1 if it
+// couldn't run or didn't exit. Unused in the units without such a run.
+static __attribute__((unused)) int oracle_serve_child(const char* purpose, char* const* arguments, char* const* environment, uint32_t streams, char** output,
+                                                       uint64_t* output_length, char** errors, uint64_t* errors_length)
+{
+    bool both = false;
+    const bool takes = oracle_serve_takes(arguments, environment, &both);
+    char* served[2] = { 0, 0 };
+    uint64_t served_lengths[2] = { 0, 0 };
+    const int served_status = takes ? oracle_serve_command(arguments, environment, 0, streams, 0, both, &served[0], &served_lengths[0], &served[1], &served_lengths[1]) : -1;
+    const bool child = !takes || both || served_status < 0;
+    char* texts[2] = { 0, 0 };
+    uint64_t lengths[2] = { 0, 0 };
+    const int status = child ? oracle_command_child(arguments, environment, streams, &texts[0], &lengths[0], &texts[1], &lengths[1]) : served_status << 8;
+    if (takes && both)
+    {
+        const char* const results[2] = { texts[0], texts[1] };
+        const char* const answers[2] = { served[0], served[1] };
+        oracle_serve_compare(purpose, arguments, 0, status, results, lengths, served_status >= 0 ? served_status << 8 : -1, answers, served_lengths);
+    }
+    *output = child ? texts[0] : served[0];
+    *output_length = child ? lengths[0] : served_lengths[0];
+    *errors = child ? texts[1] : served[1];
+    *errors_length = child ? lengths[1] : served_lengths[1];
+    if (child)
+    {
+        free(served[0]);
+        free(served[1]);
+    }
+    return status >= 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Before a forked process ends (test_process_exit, a test's part): the server it started itself (oracle_server_start)
+// stopped, killed and waited for, so that its CPU time is the process's, which the parent's wait for the process adds
+// to its own, rather than an orphan's that ends at its socket's end outside the command's processes. A copy of its
+// parent's socket is only closed, which leaves the parent's server as it was. One wait for each server, at the end.
+static __attribute__((unused)) void oracle_serve_exit(void)
+{
+    oracle_server_stop(&oracle_serving.server);
 }
 
 // The test's line of what its clang server did, if it has one: its release and runs served, compared and differing, and
