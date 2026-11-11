@@ -1755,12 +1755,93 @@ static bool check_target_feature_falls(CheckX86DiagnosticWalk* walk, CheckTarget
            (entry->kind != CHECK_CONTROL_EVALUATE || !check_target_feature_dead_end(walk, emission, entry->node));
 }
 
+// A body's visited controls as check_target_feature_cleanup_emitted asks about them, so that each record's question is
+// two binary searches, not a scan of the body's controls (#1370: a body of many cleanups and many statements cost their
+// product): the visited controls' tokens, sorted, each in a key's high half; the visited pairs of consecutive controls
+// whose code joins (the first falls into the second, check_target_feature_falls) across a span of tokens, from the
+// first's token to the second's, the span's start in a key's high half and its end in the low, sorted by start, with the
+// greatest end of each prefix of them. Reserved from scratch before the body's walk (whose calls' run must stay
+// contiguous after it), filled after it; each sort's result in one of its two buffers.
+typedef struct CheckTargetFeatureEmitted CheckTargetFeatureEmitted;
+struct CheckTargetFeatureEmitted
+{
+    uint64_t* buffers[4];
+    const uint64_t* tokens;
+    const uint64_t* joins;
+    uint32_t* reach;
+    uint32_t token_count;
+    uint32_t join_count;
+    bool ready;
+};
+
+static CheckTargetFeatureEmitted check_target_feature_emitted_reserve(Arena* scratch, uint32_t count)
+{
+    CheckTargetFeatureEmitted index = { 0 };
+    const uint32_t room = count != 0 ? count : 1;
+    index.ready = true;
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        index.buffers[i] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
+        index.ready = index.ready && index.buffers[i] != 0;
+    }
+    index.reach = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room);
+    index.ready = index.ready && index.reach != 0;
+    return index;
+}
+
+// Fills the index from the walk's visited controls: one pass over the body, the two sorts (c_bindings_sort's stable
+// radix sort by the high half), and the prefix maxima.
+static void check_target_feature_emitted_fill(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, CheckTargetFeatureEmitted* index)
+{
+    CheckProgram* program = walk->program;
+    const CheckInput* input = program->input;
+    const CheckProgramBody* body = walk->body;
+    const CheckControl* controls = program->controls + body->first;
+    const uint64_t first = (uint64_t)input->graph.count + body->first;
+    uint64_t* tokens = index->buffers[0];
+    uint64_t* joins = index->buffers[2];
+    uint32_t token_count = 0;
+    uint32_t join_count = 0;
+    uint32_t token_varying = 0;
+    uint32_t join_varying = 0;
+    for (uint32_t i = 0; index->ready && i < body->count; i += 1)
+    {
+        const bool seen = walk->seen[first + i] != 0;
+        if (seen)
+        {
+            tokens[token_count] = (uint64_t)controls[i].token << 32 | i;
+            token_varying |= controls[i].token ^ (uint32_t)(tokens[0] >> 32);
+            token_count += 1;
+        }
+        if (seen && i != 0 && walk->seen[first + i - 1] != 0 && controls[i - 1].token < controls[i].token && check_target_feature_falls(walk, emission, i - 1))
+        {
+            joins[join_count] = (uint64_t)controls[i - 1].token << 32 | controls[i].token;
+            join_varying |= controls[i - 1].token ^ (uint32_t)(joins[0] >> 32);
+            join_count += 1;
+        }
+    }
+    if (index->ready)
+    {
+        index->tokens = c_bindings_sort(tokens, index->buffers[1], token_count, true, token_varying);
+        index->joins = c_bindings_sort(joins, index->buffers[3], join_count, true, join_varying);
+        uint32_t reach = 0;
+        for (uint32_t j = 0; j < join_count; j += 1)
+        {
+            reach = reach > (uint32_t)index->joins[j] ? reach : (uint32_t)index->joins[j];
+            index->reach[j] = reach;
+        }
+    }
+    index->token_count = token_count;
+    index->join_count = join_count;
+}
+
 // Whether cleanup `record`'s declaration was emitted — then its call runs at each exit of its scope the walk reached;
 // clang's EmitVarDecl registers it where the declaration's statement emits, and never where that statement's code is
 // left out (a dead path, or a jump that enters its scope past it). A declaration with no controls of its own emits
 // where the code of the statement before it goes on into the one after it: a visited control inside its tokens, or a
-// visited pair of controls the walk's code joins across its first token.
-static bool check_target_feature_cleanup_emitted(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, uint32_t record)
+// visited pair of controls the walk's code joins across its first token (the body's index of them, `index`).
+static bool check_target_feature_cleanup_emitted(CheckX86DiagnosticWalk* walk, CheckTargetFeatureEmission* emission, const CheckTargetFeatureEmitted* index,
+                                                 uint32_t record)
 {
     CheckProgram* program = walk->program;
     const CheckInput* input = program->input;
@@ -1771,15 +1852,28 @@ static bool check_target_feature_cleanup_emitted(CheckX86DiagnosticWalk* walk, C
     uint32_t high = 0;
     check_target_feature_extent(emission, program, input->cleanups[record].declaration, &low, &high);
     bool emitted = controls[0].token < input->token_count && low < controls[0].token && walk->seen[first] != 0;
-    for (uint32_t i = 0; !emitted && i < body->count; i += 1)
+    // The first visited control at the declaration's first token or after it, which is inside it up to its last.
+    uint32_t below = 0;
+    uint32_t above = index->token_count;
+    while (below < above)
     {
-        emitted = walk->seen[first + i] != 0 && low <= controls[i].token && controls[i].token <= high;
+        const uint32_t middle = below + (above - below) / 2;
+        const bool before = (uint32_t)(index->tokens[middle] >> 32) < low;
+        below = before ? middle + 1 : below;
+        above = before ? above : middle;
     }
-    for (uint32_t i = 1; !emitted && i < body->count; i += 1)
+    emitted = emitted || (below < index->token_count && (uint32_t)(index->tokens[below] >> 32) <= high);
+    // The joins that start at the first token or before it: one of them ends past it where their greatest end does.
+    below = 0;
+    above = index->join_count;
+    while (below < above)
     {
-        emitted = walk->seen[first + i] != 0 && walk->seen[first + i - 1] != 0 && controls[i - 1].token <= low &&
-                  low < controls[i].token && check_target_feature_falls(walk, emission, i - 1);
+        const uint32_t middle = below + (above - below) / 2;
+        const bool at_or_before = (uint32_t)(index->joins[middle] >> 32) <= low;
+        below = at_or_before ? middle + 1 : below;
+        above = at_or_before ? above : middle;
     }
+    emitted = emitted || (below != 0 && index->reach[below - 1] > low);
     return emitted;
 }
 
@@ -1978,13 +2072,14 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     walk.seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, items);
                     walk.stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, items);
                     walk.cleanup_tags = input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
+                    walk.cleanup_links = input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
                     // The dead-end analysis's: each node at most twice on its stack, before and after its operands.
                     emission.bits = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->graph.count);
                     emission.capacity = (uint64_t)input->graph.count * 2;
                     emission.stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, emission.capacity);
                     emission.regions = program->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->region_count) : 0;
                     emission.options = pp;
-                    valid = walk.seen != 0 && walk.stack != 0 && (input->cleanup_count == 0 || walk.cleanup_tags != 0) && emission.bits != 0 &&
+                    valid = walk.seen != 0 && walk.stack != 0 && (input->cleanup_count == 0 || (walk.cleanup_tags != 0 && walk.cleanup_links != 0)) && emission.bits != 0 &&
                             emission.stack != 0 && (program->region_count == 0 || emission.regions != 0);
                     if (valid)
                     {
@@ -1997,6 +2092,10 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     if (valid && walk.cleanup_tags != 0)
                     {
                         memset(walk.cleanup_tags, 0, (uint64_t)input->cleanup_count * sizeof(uint32_t));
+                        for (uint32_t record = 0; record < input->cleanup_count; record += 1)
+                        {
+                            walk.cleanup_links[record] = record;
+                        }
                     }
                     if (valid && emission.regions != 0)
                     {
@@ -2011,6 +2110,8 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     // The walk is code generation's emission (CheckTargetFeatureEmission): its extra edges and its labels' roots
                     // first, then the run.
                     const uint64_t calls_mark = scratch->length;
+                    CheckTargetFeatureEmitted emitted = input->cleanup_count != 0 ? check_target_feature_emitted_reserve(scratch, body->count) :
+                                                                                    (CheckTargetFeatureEmitted){ 0 };
                     walk.body = body;
                     walk.tag = 0;
                     check_x86_diagnostic_push(&walk, 0, true);
@@ -2041,6 +2142,11 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     // variable's first, with that control's statement, or in a statement expression the one that reached it.
                     const uint32_t call_count = walk.call_count;
                     uint32_t item_count = call_count;
+                    valid = valid && (walk.cleanup_count == 0 || emitted.ready);
+                    if (valid && walk.cleanup_count != 0)
+                    {
+                        check_target_feature_emitted_fill(&walk, &emission, &emitted);
+                    }
                     for (uint32_t i = 0; valid && walk.cleanup_count != 0 && i < body->count; i += 1)
                     {
                         const CheckControl* control = program->controls + body->first + i;
@@ -2050,7 +2156,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                         {
                             // The call runs only where the variable's declaration emitted (clang's registered
                             // cleanups, check_target_feature_cleanup_emitted): a reached exit alone doesn't make one.
-                            if (check_target_feature_cleanup_emitted(&walk, &emission, record))
+                            if (check_target_feature_cleanup_emitted(&walk, &emission, &emitted, record))
                             {
                                 uint64_t* item = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1);
                                 valid = item != 0;
@@ -2062,6 +2168,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                                 }
                             }
                             walk.cleanup_tags[record] = 0;
+                            walk.cleanup_links[record] = record;
                             walk.cleanup_count -= 1;
                         }
                     }

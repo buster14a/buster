@@ -984,8 +984,8 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
 // "argument type is not a real floating point type", INVALID_TYPE), then the two converted types (its "arguments are of
 // different types", INCOMPATIBLE), which check_semantic_expression words as clang's. It folds where both arguments are
 // floating constants of a type whose complex constants the folds, the lowering and the data keep (float, double, long
-// double and the half formats; not __float128's), as clang's evaluator folds it: what glibc's CMPLX of a static
-// initializer reads.
+// double, the half formats, and __float128's by their bits, #1250), as clang's evaluator folds it: what glibc's CMPLX of
+// a static initializer reads.
 static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, const CheckValue* values)
 {
     const TypeId real = type_unqualified(type_strip_aligned(table, values[0].type));
@@ -1005,13 +1005,19 @@ static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscA
     else
     {
         const TypeId complex = type_complex(table, real);
+        const bool quad = real == BUSTER_TYPE_FLOAT128;
         const bool folds = values[0].constant_kind == CHECK_CONSTANT_FLOATING && values[1].constant_kind == CHECK_CONSTANT_FLOATING &&
-                           (check_action_float_supported(table, real) || check_action_half_format(real) != CHECK_HALF_NONE);
+                           (check_action_float_supported(table, real) || check_action_half_format(real) != CHECK_HALF_NONE || quad);
         output->action.value.type = complex;
         output->action.value.category = CHECK_RVALUE;
         output->action.value.constant_kind = folds ? CHECK_CONSTANT_COMPLEX : CHECK_CONSTANT_NONE;
         output->action.value.floating = folds ? values[0].floating : 0.0L;
         output->action.value.imaginary = folds ? values[1].floating : 0.0L;
+        if (folds && quad)
+        {
+            // A _Complex __float128's parts are its bits (#1250, check_quad_complex_set).
+            check_quad_complex_set(&output->action.value, values[0].integer, values[1].integer);
+        }
         output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED |
                                         BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_LITERAL_ZERO);
         if (complex == 0)
@@ -1456,15 +1462,18 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
         // CheckObjCString: "CFString literal is not a string constant" otherwise), NSString's of any const char * in C,
         // which clang checks in Objective-C alone. Of a literal, clang's evaluator takes either call as an address
         // constant (IsOpaqueConstantCall), whose code is its object's address and which no operand's evaluation runs:
-        // here its call's object (CheckBuiltinMiscAction.cfstring_object), a static one. NSString's of what is no
-        // literal stays a value, whose code clang makes from the literal its argument isn't (check_lower_unsupported).
+        // here its call's object (CheckBuiltinMiscAction.cfstring_object), a static one; NSString's of what is no literal
+        // too, whose object clang's code makes from the literal its argument isn't, which the static data refuses.
         // Its argument converts to const char * as a prototype's, and past its parentheses and casts is an ordinary
         // literal, never a UTF-8 one (u8"x", a char array before C23).
         check_builtin_misc_convert(table, input, output, values + 0, 0, type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)));
         const TypeId record = input->ns_constant_string != 0 ? type_qualify(table, input->ns_constant_string, BUSTER_TYPE_CONST) : 0;
         const TypeId result = record != 0 ? type_pointer(table, record) : 0;
         const bool ordinary = id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING || (input->string_known && !input->string_utf8);
-        const bool literal = input->string_known && input->cfstring_object != 0;
+        // NSString's of what is no literal is an address constant too, as clang's evaluator takes any call of either
+        // (IsOpaqueConstantCall), whatever its argument: its object the static data refuses by name (#1785,
+        // check_data_cfstring_keys), clang's code making it from the literal its argument isn't.
+        const bool literal = (input->string_known || id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) && input->cfstring_object != 0;
         if (output->action.diagnostic == CHECK_DIAG_NONE && (!ordinary || result == 0))
         {
             check_action_diagnose(&output->action, result == 0 && ordinary ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE, 0);
@@ -1678,7 +1687,9 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE && (input->argument_count < minimum || input->argument_count > maximum))
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        // prefetch's prototype is variadic: its too few is clang's call's "expected at least".
+        const bool variadic = input->id == CBUILTIN_PREFETCH && input->argument_count < minimum;
+        check_action_diagnose_count(&output->action, input->argument_count, minimum, variadic ? UINT32_MAX : maximum);
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE && input->argument_count != 0 && input->arguments == NULL)
     {

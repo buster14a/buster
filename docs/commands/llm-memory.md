@@ -17,13 +17,42 @@ environment already sets `BUSTER_TAILNET_DISPOSABLE=1` to join the tailnet
   `add_repo` made beside the checkout (`/home/user/llm-memory`) is linked to
   `~/llm-memory`; otherwise the hook clones the repository itself, which works
   only where the session already has it attached (Claude Code) or the
-  container's credentials reach it (Codex).
+  container's credentials reach it (Codex). `add_repo` checks its clone out on
+  the session's branch, and sync pushes the branch it is on, so the hook moves
+  the clone onto `main` when the branch holds nothing `main` lacks, and says so
+  when it can't.
 - **Stop (`stop`):** runs `llm-memory sync` in the background after every turn,
   logging to `~/.local/state/llm-memory/cloud-sync.log`. Sync commits, rebases
   onto GitHub and pushes; its lock makes overlapping runs no-ops, and a failed
   push waits for the next turn's. A Claude Code commit names the session.
   Neither cloud copies `~/.codex/memories` into `codex/`: a container's host
   name is new every time, so each session would add a folder of its own.
+
+## Sessions that start beside the checkout
+
+A Claude Code cloud session with several repositories (the owner's `buster`
+environment attaches this one, `davidgmbb/llm-memory` and
+`buster14a/buster-performance`) starts in the folder holding the checkouts,
+`/home/user`, not in `/home/user/buster`. Claude Code reads
+`.claude/settings.json` only from the folder it starts in, so there none of
+this checkout's hooks run: the tailnet, sign-off and memory are all left
+unset, and Claude Code's memory folder is the one keyed by `/home/user`.
+
+The environment's setup script therefore writes user settings,
+`~/.claude/settings.json`, whose SessionStart and Stop hooks run
+`.claude/hooks/parent-folder.sh start` and `stop`. That script acts only when
+`$CLAUDE_PROJECT_DIR` is the checkout's parent, so a session that starts in
+the checkout doesn't run the hooks twice. It runs the hooks that
+`.claude/settings.json` lists, and `llm-memory.sh start` links the parent's
+memory folder as well as the checkout's. In an environment without that setup,
+or a container built before it, run it by hand from the parent:
+
+```bash
+CLAUDE_PROJECT_DIR=$PWD buster/.claude/hooks/parent-folder.sh start
+```
+
+The Stop hook doesn't run there either, so sync after saving a memory, as
+AGENTS.md asks of other agents: `~/llm-memory/bin/llm-memory sync`.
 
 ## When the repository isn't attached
 

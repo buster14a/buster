@@ -379,6 +379,77 @@ static uint32_t check_input_external_source_parse(CheckInputReader* reader, Chec
     return result;
 }
 
+// Whether the colon at `token` is half of a `::`, which clang's lexer reads as one token (the parser splits it, both halves
+// with its index in the preprocessor's output).
+static bool check_input_double_colon(const Parser* parser, uint32_t token)
+{
+    const bool before = token > 0 && parser->tokens.kinds[token - 1] == PARSE_KIND_COLON && parser->tokens.sources[token - 1] == parser->tokens.sources[token];
+    const bool after = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON &&
+                       parser->tokens.sources[token + 1] == parser->tokens.sources[token];
+    return parser->tokens.kinds[token] == PARSE_KIND_COLON && (before || after);
+}
+
+// objc_bridge_related's arguments in parentheses as clang's ParseObjCBridgeRelatedAttribute reads them (#1447): a related
+// class's identifier, a `,`, an optional class method's selector (an identifier and a `:`), a `,`, an optional instance
+// method's identifier, then its `)`. Its errors are clang's parser's, each of which drops the attribute: "expected a
+// related Objective-C class name, e.g., 'NSColor'" at the token, "expected ','" past the class's end, "expected a class
+// method selector with single argument, e.g., 'colorWithCGColor:'" at a selector's token that is no `:` (or at a `:`
+// where the second `,` is), "expected ','" at the token, "expected ')'" at a token that is no instance method (without a
+// note), and the `)`'s "expected ')'" with its note.
+static uint32_t check_input_objc_bridge_related_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t end = attribute->argument_end;
+    const uint32_t open = attribute->argument_first - 1;
+    uint32_t t = attribute->argument_first;
+    uint32_t result = BUSTER_CHECK_CUSTOM_KEPT;
+    if (t >= end || kinds[t] != PARSE_KIND_IDENTIFIER)
+    {
+        check_input_custom_error(reader, attributes, attribute, t, CHECK_ARGUMENT_OBJC_RELATED_CLASS, 0, BUSTER_CHECK_NONE);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    else if (t + 1 >= end || kinds[t + 1] != PARSE_KIND_COMMA)
+    {
+        // (Past the class's end, as clang's ExpectAndConsume expects it.)
+        check_input_custom_error(reader, attributes, attribute, t, CHECK_ARGUMENT_AVAILABILITY_COMMA, 0, BUSTER_CHECK_NONE);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    t += 2;
+    if (result == BUSTER_CHECK_CUSTOM_KEPT && t < end && kinds[t] == PARSE_KIND_IDENTIFIER)
+    {
+        const bool colon = t + 1 < end && kinds[t + 1] == PARSE_KIND_COLON && !check_input_double_colon(parser, t + 1);
+        if (!colon)
+        {
+            check_input_custom_error(reader, attributes, attribute, t + 1, CHECK_ARGUMENT_OBJC_RELATED_SELECTOR, 0, BUSTER_CHECK_NONE);
+            result = BUSTER_CHECK_CUSTOM_ERROR;
+        }
+        t += 2;
+    }
+    if (result == BUSTER_CHECK_CUSTOM_KEPT && (t >= end || kinds[t] != PARSE_KIND_COMMA))
+    {
+        const bool colon = t < end && kinds[t] == PARSE_KIND_COLON && !check_input_double_colon(parser, t);
+        check_input_custom_error(reader, attributes, attribute, t, colon ? CHECK_ARGUMENT_OBJC_RELATED_SELECTOR : CHECK_ARGUMENT_EXPECTED_COMMA, 0, BUSTER_CHECK_NONE);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    t += 1;
+    if (result == BUSTER_CHECK_CUSTOM_KEPT && t < end && kinds[t] == PARSE_KIND_IDENTIFIER)
+    {
+        t += 1;
+    }
+    else if (result == BUSTER_CHECK_CUSTOM_KEPT && t < end)
+    {
+        check_input_custom_error(reader, attributes, attribute, t, CHECK_ARGUMENT_EXPECTED_PAREN, 0, BUSTER_CHECK_NONE);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    if (result == BUSTER_CHECK_CUSTOM_KEPT && t != end)
+    {
+        check_input_custom_close(reader, attributes, attribute, t, open);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    return result;
+}
+
 // An availability attribute's entry where its declarations meet (#1447, the AvailabilityAttr clang's Sema makes): its
 // platform (its index, or BUSTER_CHECK_AVAILABILITY_NAMED with an unknown one's name) and its token, its stages' versions as
 // Sema takes them (canonical: check_availability_canonical), unavailable, its first token, where its messages are, and

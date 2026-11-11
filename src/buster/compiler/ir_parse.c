@@ -959,10 +959,16 @@ static void ir_parse_instruction(IrParseState* state)
                     row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
                     // A width change's part (#1840), its flags.
                     if (row.c == BUSTER_IR_INTRINSIC_EXTRACT || row.c == BUSTER_IR_INTRINSIC_INSERT || row.c == BUSTER_IR_INTRINSIC_PERMUTE ||
-                        row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+                        row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
+                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE)
                     {
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }
+                }
+                // A frame address's save (#1847).
+                if (row.op == IR_STACK_SAVE && ir_parse_word(state, "frame"))
+                {
+                    row.flags = BUSTER_IR_STACK_SAVE_FRAME;
                 }
                 if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)
                 {

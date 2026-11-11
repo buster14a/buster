@@ -604,11 +604,14 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = IROPT_OVERDEFINED;
         }
     }
-    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_TRUNCATE)
     {
-        // A width change or a permute (#1840): bits moved whole, exact, folded by the model once every operand is constant.
-        static const uint8_t operations[] = { IR_SIMD_EXTRACT, IR_SIMD_WIDEN, IR_SIMD_INSERT, IR_SIMD_PERMUTE, IR_SIMD_SHUFFLE, IR_SIMD_ALIGN, IR_SIMD_SHUFFLE_LANES };
-        const bool binary = f->c[i] != BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] != BUSTER_IR_INTRINSIC_WIDEN;
+        // A width change, a permute or a conversion (#1840): exact integer and bit moves, folded by the model once every
+        // operand is constant.
+        static const uint8_t operations[] = { IR_SIMD_EXTRACT, IR_SIMD_WIDEN,         IR_SIMD_INSERT, IR_SIMD_PERMUTE,  IR_SIMD_SHUFFLE,
+                                              IR_SIMD_ALIGN,   IR_SIMD_SHUFFLE_LANES, IR_SIMD_EXTEND, IR_SIMD_TRUNCATE };
+        const bool binary = f->c[i] != BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] != BUSTER_IR_INTRINSIC_WIDEN && f->c[i] != BUSTER_IR_INTRINSIC_EXTEND &&
+                            f->c[i] != BUSTER_IR_INTRINSIC_TRUNCATE;
         const uint8_t left = work->states[a];
         const uint8_t right = binary ? work->states[b] : IROPT_CONSTANT;
         result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
