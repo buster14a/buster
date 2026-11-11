@@ -316,6 +316,15 @@ typedef enum Tier1SelectRule
 // An AES round (#1840): `immediate` the round, values[0] the state and values[1] the round key: vaesenc or vaesenclast
 // (ir_simd_aes_forms; the VEX form where the target has no VL), the state in vvvv and the key in rm.
 #define BUSTER_TIER1_VECTOR_AES 20
+// One lane of a vector and its lanes' sign bits (#1840, tier1_select_lane): `immediate` the IR's flags; a lane's
+// extraction of values[0] into the general destination, by vmovd or vmovq for lane 0 of 4 or 8 bytes and vpextrb to
+// vpextrq otherwise, after vextracti32x4 into the vector class's scratch register for a lane past the low 16 bytes; a
+// lane's insertion of the general values[1] into values[0]'s copy, by vpinsrb to vpinsrq in place in a 16-byte vector's
+// low lane and through the scratch register and vinserti32x4 otherwise; and vpmovmskb, vmovmskps or vmovmskpd of
+// values[0] into the general destination.
+#define BUSTER_TIER1_VECTOR_LANE_EXTRACT 21
+#define BUSTER_TIER1_VECTOR_LANE_INSERT 22
+#define BUSTER_TIER1_VECTOR_MOVEMASK 23
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1498,6 +1507,83 @@ static void tier1_select_compress(Tier1SelectRecords* result, const Tier1SelectH
     tier1_select_append(result, record);
 }
 
+// A masked load or store (#1840, TIER1_RULE_FLOAT_LOAD's or _STORE's of `condition` nonzero): vmovdqu8 to vmovdqu64 by
+// the lanes, under the mask's k register. A load merges into the destination, which takes the passthrough first unless
+// it holds it; a store writes the vector in `third` to the address alone.
+static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    const bool store = holes->rule == TIER1_RULE_FLOAT_STORE;
+    const uint8_t x = destination & 15;
+    const uint8_t passthrough = holes->third & 15;
+    if (!store && x != passthrough)
+    {
+        tier1_select_append(result, tier1_select_class_move(x, passthrough, width, false));
+    }
+    X86Instruction record = holes->memory;
+    record.form = ir_simd_masked_moves[(holes->condition - 1u) & 3][store][at];
+    record.reg = store ? passthrough : x;
+    record.decorations = (uint8_t)(holes->right & BUSTER_X86_DECORATION_MASK);
+    tier1_select_append(result, record);
+}
+
+// One lane of a vector or its lanes' sign bits (#1840, BUSTER_TIER1_VECTOR_LANE_EXTRACT, _LANE_INSERT and _MOVEMASK).
+static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t width = holes->width;
+    const uint32_t flags = (uint32_t)holes->immediate;
+    const uint32_t size = flags & 3;
+    const uint32_t index = flags >> 2;
+    const uint32_t per = 16u >> size;
+    const uint32_t part = index / per;
+    const uint32_t sub = index % per;
+    const uint8_t x = destination & 15;
+    const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    const uint32_t kind = holes->scale;
+    if (kind == BUSTER_TIER1_VECTOR_MOVEMASK)
+    {
+        tier1_select_append(result, tier1_select_register_record(ir_simd_movemask_forms[size][width == 32], x, holes->left & 15));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT)
+    {
+        uint8_t source = holes->left & 15;
+        if (part != 0)
+        {
+            const X86Instruction extract = { .form = ir_simd_part_extract_forms[width == 64], .reg = source, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            tier1_select_append(result, extract);
+            source = scratch;
+        }
+        const bool whole = sub == 0 && size >= 2;
+        const uint16_t form = whole ? (size == 2 ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_VMOVQ_RM64_X_EVEX) : ir_simd_lane_extract_forms[size];
+        const bool word = !whole && size == 1;
+        const X86Instruction record = { .form = form, .reg = word ? x : source, .rm = word ? source : x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = whole ? 0 : sub };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const uint8_t general = holes->right & 15;
+        if (x != (holes->left & 15))
+        {
+            tier1_select_append(result, tier1_select_class_move(x, holes->left & 15, width, false));
+        }
+        const bool low = width == 16 && part == 0;
+        const uint8_t target = low ? x : scratch;
+        if (!low)
+        {
+            const X86Instruction extract = { .form = ir_simd_part_extract_forms[width == 64], .reg = x, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            tier1_select_append(result, extract);
+        }
+        const X86Instruction insert = { .form = ir_simd_lane_insert_forms[size], .reg = target, .vvvv = target, .rm = general, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = sub };
+        tier1_select_append(result, insert);
+        if (!low)
+        {
+            const X86Instruction back = { .form = ir_simd_part_insert_forms[width == 64], .reg = x, .vvvv = x, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            tier1_select_append(result, back);
+        }
+    }
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -2143,6 +2229,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_compress(&result, holes, destination);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
+        {
+            tier1_select_lane(&result, holes, destination);
+        }
         else if (kind == BUSTER_TIER1_VECTOR_AES)
         {
             const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
@@ -2344,8 +2434,24 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, BUSTER_TIER1_SELECT_FLOAT_SCRATCH));
         break;
     }
-    // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites.
+    // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites; a masked
+    // load's or store's (#1840, `condition` nonzero) its own.
     case TIER1_RULE_FLOAT_LOAD:
+    case TIER1_RULE_FLOAT_STORE:
+        if (holes->condition != 0)
+        {
+            tier1_select_masked_move(&result, holes, destination);
+            break;
+        }
+        if (holes->rule == TIER1_RULE_FLOAT_STORE)
+        {
+            X86Instruction record = holes->memory;
+            record.reg = holes->right & 15;
+            record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->store;
+            tier1_select_append(&result, record);
+            break;
+        }
+        __attribute__((fallthrough));
     case TIER1_RULE_FLOAT_LOAD_ADDRESS:
     {
         X86Instruction record = holes->memory;
@@ -2354,7 +2460,6 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, record);
         break;
     }
-    case TIER1_RULE_FLOAT_STORE:
     case TIER1_RULE_FLOAT_STORE_ADDRESS:
     {
         X86Instruction record = holes->memory;
@@ -2824,9 +2929,10 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
     // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
-    // an atomic read/modify/write. These are the nodes with an effect, which the plan materializes whatever their uses.
+    // an atomic read/modify/write, and a masked store (#1840). These are the nodes with an effect, which the plan
+    // materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
-           (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+           op == IR_MASKED_STORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
 // Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
@@ -2835,7 +2941,7 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 // the last of these before the consumer the load itself), but past no other load.
 static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
 {
-    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD;
+    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD;
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -2867,7 +2973,8 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD))) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_STORE))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -4544,7 +4651,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
-                                                                           c == BUSTER_IR_INTRINSIC_AES)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4643,6 +4750,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_INSERT)
+        {
+            // A lane's insertion (#1840): the vector values[0], the general values[1], the lane in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_LANE_INSERT;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
@@ -4982,6 +5101,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE))
+    {
+        // A masked load or store (#1840): TIER1_RULE_FLOAT_LOAD's or _STORE's with `condition` its lanes' bytes' log2 plus
+        // one, the address in values[0], unfolded, the mask in values[1] and the passthrough or the stored vector in
+        // values[2] (tier1_select_masked_move).
+        static const uint8_t sizes[4] = { 2, 0, 1, 3 };
+        const bool store = op == IR_MASKED_STORE;
+        base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
+        base.width = (uint8_t)tier1_select_vector_width(store && b < function->instruction_count ? function->type[b] : type);
+        base.condition = (uint8_t)(1 + sizes[function->flags[node] & 3]);
+        base.values[0] = a;
+        base.values[1] = store ? c : b;
+        base.values[2] = store ? b : c;
+        base.intrinsic_cost = 1;
+        if (base.width != 0 && function->flags[node] < 4)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
     }
     else if (class_width != 0 && (op == IR_LOAD || op == IR_STORE))
     {
@@ -5883,7 +6021,22 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c < BUSTER_IR_INTRINSIC_COUNT && integer))
+    else if (forest->vectors && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK) && a < function->instruction_count)
+    {
+        // A vector's lane, or its lanes' sign bits, into a general register (#1840): TIER1_RULE_VECTOR's of the vector's
+        // width, its destination the general one.
+        base.rule = TIER1_RULE_VECTOR;
+        base.width = (uint8_t)tier1_select_vector_width(function->type[a]);
+        base.scale = c == BUSTER_IR_INTRINSIC_MOVEMASK ? BUSTER_TIER1_VECTOR_MOVEMASK : BUSTER_TIER1_VECTOR_LANE_EXTRACT;
+        base.immediate = function->flags[node];
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        if (base.width != 0)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c <= BUSTER_IR_INTRINSIC_SMULO && integer))
     {
         // One test in the chain for both rules, as mulhu's alone was: its mul, or the others' VEX instruction (or a signed
         // overflow's sequence, tier1_select_overflow).
@@ -6564,10 +6717,17 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_FLOAT_STORE:
     case TIER1_RULE_FLOAT_STORE_ADDRESS:
         holes.memory = tier1_select_memory_holes(pattern, registers, 0);
-        if (pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS || pattern->rule == TIER1_RULE_MASK_STORE || pattern->rule == TIER1_RULE_MASK_STORE_ADDRESS ||
-            pattern->rule == TIER1_RULE_FLOAT_STORE || pattern->rule == TIER1_RULE_FLOAT_STORE_ADDRESS)
+        if ((pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS || pattern->rule == TIER1_RULE_MASK_STORE || pattern->rule == TIER1_RULE_MASK_STORE_ADDRESS ||
+             pattern->rule == TIER1_RULE_FLOAT_STORE || pattern->rule == TIER1_RULE_FLOAT_STORE_ADDRESS) && pattern->condition == 0)
         {
             holes.right = holes.third;
+        }
+        if ((pattern->rule == TIER1_RULE_FLOAT_LOAD || pattern->rule == TIER1_RULE_FLOAT_STORE) && pattern->condition != 0)
+        {
+            // A masked load's or store's (#1840) address is its base alone: values[1] is its mask, not an index.
+            Tier1SelectPattern unindexed = *pattern;
+            unindexed.values[1] = BUSTER_IR_NONE;
+            holes.memory = tier1_select_memory_holes(&unindexed, registers, 0);
         }
         break;
     case TIER1_RULE_LOAD_OPERAND:

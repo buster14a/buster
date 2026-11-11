@@ -2788,6 +2788,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_x86_rest_test.c"
 #include "c_check_program_amx_test.c"
 #include "c_check_program_transparent_test.c"
+#include "c_check_program_union_cast_test.c"
 #include "c_check_program_alias_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
@@ -3803,6 +3804,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_x86_rest(test, clang);
         check_test_program_amx(test, clang);
         check_test_program_transparent(test, clang);
+        check_test_program_union_casts(test, clang);
         check_test_program_aliases(test, clang);
         check_test_program_vector_builtins(test, clang);
         check_test_program_fp16(test, clang);
@@ -5706,14 +5708,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "auto-type-static-structures", clang);
         // A variably modified deduction (#1844): a pointer to a variable-length array, whose sizes the array's declaration
         // evaluated once; and redeclarations of variables with linkage,
-        // which take the earlier declarations' types (a long, a pointer's, a typedef's) rather than deduce theirs.
+        // which take the earlier declarations' types (a long, a pointer's, a typedef's, a restrict pointer's) rather than
+        // deduce theirs.
         check_test_program_source(test,
             "typedef unsigned short U;extern long merged_l;__auto_type merged_l=1;extern int*merged_p;__auto_type*merged_p=0;"
-            "extern U merged_u;__auto_type merged_u=700;"
+            "extern U merged_u;__auto_type merged_u=700;extern int*restrict merged_r;__auto_type restrict merged_r=0;"
             "int tested(int n){int k=(n&3)+2;int vla[k];for(int i=0;i<k;i++)vla[i]=i*n;__auto_type p=&vla;int m=k;"
             "__auto_type q=p+0;m++;extern long merged_l;"
             "return (int)sizeof(*p)*3+(*p)[1]+(int)sizeof(*q)*5+m*7+(int)sizeof(merged_l)*11+(int)merged_l+(merged_p==0)*13+"
-            "(int)sizeof(merged_u)*17+merged_u;}",
+            "(int)sizeof(merged_u)*17+merged_u+(merged_r==0)*19;}",
             "auto-type-variably-modified-merged", clang);
         {
             char source[4096];

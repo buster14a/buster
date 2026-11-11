@@ -56,6 +56,9 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_COMPRESS: operation = IR_SIMD_COMPRESS; break;
         case BUSTER_IR_INTRINSIC_EXPAND: operation = IR_SIMD_EXPAND; break;
         case BUSTER_IR_INTRINSIC_AES: operation = IR_SIMD_AES; break;
+        case BUSTER_IR_INTRINSIC_LANE_EXTRACT: operation = IR_SIMD_LANE_EXTRACT; break;
+        case BUSTER_IR_INTRINSIC_LANE_INSERT: operation = IR_SIMD_LANE_INSERT; break;
+        case BUSTER_IR_INTRINSIC_MOVEMASK: operation = IR_SIMD_MOVEMASK; break;
         default: break;
     }
     return operation;
@@ -86,7 +89,7 @@ static bool ir_interpreter_simd_supported(const IrFunction* function)
         {
             const uint8_t op = function->op[i];
             supported = op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_BITCAST || op == IR_SELECT ||
-                        op == IR_PHI || op == IR_LOAD || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
+                        op == IR_PHI || op == IR_LOAD || op == IR_MASKED_LOAD || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
                         (op == IR_INTRINSIC && ir_interpreter_simd_intrinsic(ir_intrinsic_kind(function->c[i])) != IR_SIMD_OPERATION_COUNT) ||
                         ir_interpreter_simd_opcode(op) != IR_SIMD_OPERATION_COUNT;
         }

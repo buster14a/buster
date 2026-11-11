@@ -1078,6 +1078,158 @@ static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
     }
 }
 
+// One lane's moves and the lanes' sign bits (#1840): both verifiers admit lane_extract, lane_insert and movemask exactly
+// where the flags' lane is below the vector's lanes, the scalar an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of
+// 8 (movemask an I32 of a vector of 16 or 32 bytes, of bytes, doublewords or quadwords); and the model gives C's lane,
+// C's replaced lane and C's sign bits on random vectors.
+static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x3c6ef372fe94f82b);
+    uint32_t admitted_count = 0;
+    uint32_t expected_count = 0;
+    for (uint32_t kind = 0; kind < 3; kind += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t flags = 0; flags < 256; flags += 1)
+            {
+                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                {
+                    const IrType vector = (IrType)(IR_V4I32 + width);
+                    const uint32_t size = flags & 3;
+                    const uint32_t lanes = (16u << width) >> size;
+                    const IrType right = size == 3 ? IR_I64 : IR_I32;
+                    const IrType given = scalar == 0 ? right : right == IR_I64 ? IR_I32 : IR_I64;
+                    const bool admitted = kind == 2 ? scalar == 0 && flags <= 3 && flags != 1 && width < 2 : scalar == 0 && (flags >> 2) < lanes;
+                    expected_count += admitted;
+                    IrFunction function = {0};
+                    const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                    if (ir_create(output, &sizes, &function) != IR_OK)
+                    {
+                        ir_test_expect(test, false, "lane move verifier fixture allocation");
+                        continue;
+                    }
+                    function.result_type = IR_VOID;
+                    function.block_offsets[1] = 4;
+                    ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 1, IR_UNDEF, kind == 1 ? given : IR_I32, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    if (kind == 1)
+                    {
+                        ir_test_instruction(&function, 2, IR_INTRINSIC, vector, 0, 1, BUSTER_IR_INTRINSIC_LANE_INSERT);
+                    }
+                    else
+                    {
+                        const IrType result = kind == 2 ? (scalar == 0 ? IR_I32 : IR_I64) : given;
+                        ir_test_instruction(&function, 2, IR_INTRINSIC, result, 0, BUSTER_IR_NONE, kind == 0 ? BUSTER_IR_INTRINSIC_LANE_EXTRACT : BUSTER_IR_INTRINSIC_MOVEMASK);
+                    }
+                    ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    function.flags[2] = (uint8_t)flags;
+                    ir_test_pair(test, &function, scratch, NULL, admitted, "a lane move or movemask is admitted exactly where its lane and scalar are its vector's");
+                    admitted_count += admitted;
+                    arena_pop_to(output, mark);
+                }
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == expected_count && expected_count != 0, "lane moves and movemasks are admitted at every width and lane");
+    // The model against C's lanes.
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 64; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t size = (trial / 3) % 4;
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const uint32_t bytes = 16u << width;
+        const uint32_t lanes = bytes >> size;
+        IrSimdValue a = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+        }
+        const uint64_t scalar = ir_test_random(&state);
+        const uint32_t lane = (uint32_t)(ir_test_random(&state) % lanes);
+        const uint32_t element = 1u << size;
+        const uint8_t* source = (const uint8_t*)a.words;
+        uint64_t wanted_lane = 0;
+        memcpy(&wanted_lane, source + lane * element, element);
+        IrSimdValue wanted_insert = a;
+        memcpy((uint8_t*)wanted_insert.words + lane * element, &scalar, element);
+        uint64_t wanted_mask = 0;
+        for (uint32_t l = 0; l < lanes; l += 1)
+        {
+            wanted_mask |= (uint64_t)(source[l * element + element - 1] >> 7) << l;
+        }
+        const IrSimdValue scalar_value = { .words = { scalar } };
+        const IrSimdValue* operands[3] = { &a, &scalar_value, 0 };
+        const uint8_t index = (uint8_t)(size | (lane << 2));
+        const IrSimdAction extract = { .operation = IR_SIMD_LANE_EXTRACT, .result = IR_SIMD_NONE, .operands = { shape, IR_SIMD_NONE, IR_SIMD_NONE }, .index = index };
+        const IrSimdAction insert = { .operation = IR_SIMD_LANE_INSERT, .result = shape, .operands = { shape, IR_SIMD_NONE, IR_SIMD_NONE }, .index = index };
+        const IrSimdAction movemask = { .operation = IR_SIMD_MOVEMASK, .result = IR_SIMD_NONE, .operands = { shape, IR_SIMD_NONE, IR_SIMD_NONE }, .index = (uint8_t)size };
+        IrSimdValue got = {0};
+        exact = exact && ir_simd_evaluate(&extract, operands, 0, 0, 0, &got) && got.words[0] == wanted_lane;
+        exact = exact && ir_simd_evaluate(&insert, operands, 0, 0, 0, &got) && memcmp(&got, &wanted_insert, sizeof(got)) == 0;
+        const bool masked = width < 2 && size != 1;
+        const bool evaluated = ir_simd_evaluate(&movemask, operands, 0, 0, 0, &got);
+        exact = exact && (masked ? evaluated && got.words[0] == wanted_mask : !evaluated);
+    }
+    ir_test_expect(test, exact, "the model's lane moves and movemasks are C's");
+}
+
+// The masked loads and stores (#1840): both verifiers admit them exactly where their flags are integer lanes (0 to 3),
+// whose mask is the load's b or the store's c, the address a ptr, the passthrough or the stored vector a vector (a load's
+// of its type) and the alignment's log2 at most 31; the float lanes, an invalid lane, another mask, a vector address and
+// an alignment of 2^32 are refused.
+static void ir_test_masked_memory(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrSimdLane lane_kinds[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    const uint64_t mark = output->length;
+    uint32_t admitted_count = 0;
+    for (uint32_t store = 0; store < 2; store += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t flags = 0; flags < 7; flags += 1)
+            {
+                for (uint32_t variant = 0; variant < 4; variant += 1)
+                {
+                    const IrType type = (IrType)(IR_V4I32 + width);
+                    const uint32_t right_mask = ir_lane_mask(type, lane_kinds[flags & 3]);
+                    const uint32_t other_mask = ir_lane_mask(type, lane_kinds[(flags + 1) & 3]) != right_mask ? ir_lane_mask(type, lane_kinds[(flags + 1) & 3]) : (uint32_t)type;
+                    const bool admitted = flags <= 3 && variant == 0;
+                    admitted_count += admitted;
+                    IrFunction function = {0};
+                    const IrSizes sizes = { .instruction_count = 5, .block_count = 1 };
+                    if (ir_create(output, &sizes, &function) != IR_OK)
+                    {
+                        ir_test_expect(test, false, "masked access verifier fixture allocation");
+                        continue;
+                    }
+                    function.result_type = IR_VOID;
+                    function.block_offsets[1] = 5;
+                    ir_test_instruction(&function, 0, IR_UNDEF, variant == 2 ? type : IR_PTR, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 1, IR_UNDEF, variant == 1 ? other_mask : right_mask, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 2, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    if (store != 0)
+                    {
+                        ir_test_instruction(&function, 3, IR_MASKED_STORE, IR_VOID, 0, 2, 1);
+                    }
+                    else
+                    {
+                        ir_test_instruction(&function, 3, IR_MASKED_LOAD, type, 0, 1, 2);
+                    }
+                    ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    function.flags[3] = (uint8_t)(flags <= 3 ? lane_kinds[flags] : flags);
+                    function.alignment_log2[3] = (uint8_t)(variant == 3 ? 32 : width + 4);
+                    ir_test_pair(test, &function, scratch, NULL, admitted, "a masked load or store is admitted exactly where its lanes name its mask");
+                    arena_pop_to(output, mark);
+                }
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 2 * 3 * 4, "masked loads and stores are admitted at every width and integer lanes");
+}
+
 // The compresses and expands (#1840): both verifiers admit them exactly where their lanes (flags 0 to 3) name b's mask
 // type and a and the third operand are of the result's type; the model is checked against C's packing of the selected
 // lanes and spreading of the next ones, the rest the third operand's, on random vectors and masks.
@@ -1335,6 +1487,8 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_permute2s(test, output, scratch);
     ir_test_ternlogs(test, output, scratch);
     ir_test_compresses(test, output, scratch);
+    ir_test_masked_memory(test, output, scratch);
+    ir_test_lane_moves(test, output, scratch);
     ir_test_aes(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);

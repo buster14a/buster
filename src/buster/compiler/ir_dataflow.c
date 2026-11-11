@@ -126,8 +126,11 @@ static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, u
     (void)vector;
     if (BUSTER_VECTOR_PATH(vector))
     {
-        const __m512i required_table = _mm512_loadu_si512(ir_operand_table);
-        const __m512i optional_table = _mm512_loadu_si512(ir_optional_table);
+        // The opcode tables' two halves each (BUSTER_IR_OP_TABLE), one vpermi2b per lookup.
+        const __m512i required_low = _mm512_loadu_si512(ir_operand_table);
+        const __m512i required_high = _mm512_loadu_si512(ir_operand_table + 64);
+        const __m512i optional_low = _mm512_loadu_si512(ir_optional_table);
+        const __m512i optional_high = _mm512_loadu_si512(ir_optional_table + 64);
         const uint32_t* const columns[3] = { function->a, function->b, function->c };
         for (uint32_t block = 0; block < function->block_count; block += 1)
         {
@@ -139,8 +142,8 @@ static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, u
                 const __m128i bytes = _mm_maskz_loadu_epi8(tail, function->op + first);
                 const __m512i keys = _mm512_zextsi128_si512(bytes);
                 const __m512i ops = _mm512_cvtepu8_epi32(bytes);
-                const __m512i required = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, required_table)));
-                const __m512i optional = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, optional_table)));
+                const __m512i required = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(required_low, keys, required_high)));
+                const __m512i optional = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(optional_low, keys, optional_high)));
                 for (uint32_t field = 0; field < 3; field += 1)
                 {
                     const __m512i bit = _mm512_set1_epi32(1u << field);

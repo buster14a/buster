@@ -270,6 +270,7 @@ static CheckOverloadResult check_constant_address(CheckConstantInput* input, con
     CheckInputReader* reader = input->reader;
     const CheckOverloadContext context = {
         .semantic = check_input_context(reader, input->end, BUSTER_CHECK_NONE, false),
+        .conditions = &reader->output->graph.conditions,
     };
     const CheckGraph* graph = &reader->output->graph;
     const CheckOverloadResult selected = check_overload_argument(reader->types, source, target, graph->overload_candidates,
@@ -2774,8 +2775,9 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         const bool storage = !pending_arguments || arguments != NULL;
         if (storage)
         {
-            const CheckOverloadResult selected = check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
-                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, arguments, NULL);
+            const CheckOverloadResult selected = check_overload_call_with(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
+                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, arguments, NULL,
+                            &graph->conditions, NULL);
             if (checked->diagnostic == CHECK_DIAG_NONE)
             {
                 check_constant_selected_uses(input, head, &selected, check_constant_action_source(input, callee, ranges, 0), action->context.source_position);
