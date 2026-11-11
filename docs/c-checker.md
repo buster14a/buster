@@ -1631,7 +1631,10 @@ once from the top 128 bits and a sticky bit; a `__float128` or a
 half-precision value isn't folded), an operator whose operands are wide or a
 narrow value shifted by a wide count (`check_wide_fold`), and an integer
 constant expression read as an `int64_t` (`check_wide_i64`: array bounds,
-enumerators). Faults are the narrow ones: signed overflow, division by zero,
+enumerators). A const object's read takes its initializer's wide constant, or
+a zero's limbs, as clang's folding does (`check_const_load`,
+`check_const_zero`); the bit and alignment builtins fold them too (the
+[builtins' guide](c-builtins-integration.md)). Faults are the narrow ones: signed overflow, division by zero,
 shift counts and shifted values, with GNU's folding where the context takes
 it (a count past the width shifts by width - 1, as clang's evaluator clamps
 it).

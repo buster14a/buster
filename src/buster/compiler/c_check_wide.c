@@ -1315,6 +1315,83 @@ static __attribute__((noinline, cold, unused)) const char* check_wide_text(const
     return text;
 }
 
+// --- The alignment builtins (#1447). ---
+
+// An integer constant's shape as an alignment: negative, zero, its magnitude's significant bits and whether it is a power
+// of 2, for a value of up to 128 bits or a wide one. False when it holds no limbs.
+static __attribute__((noinline, cold, unused)) bool check_wide_alignment_shape(const TypeTable* table, const CheckValue* value, bool* negative, bool* zero,
+                                                                                uint32_t* bits, bool* power)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool wide = check_wide_type(table, value->type, &width, &is_signed);
+    const uint32_t count = check_wide_count(width);
+    uint64_t* limbs = wide && value->constant_kind == CHECK_CONSTANT_INTEGER ? check_wide_allocate(count) : NULL;
+    const bool valid = limbs != NULL && check_wide_operand(table, value, limbs, count);
+    if (valid)
+    {
+        limbs[count - 1] &= check_wide_top_mask(width);
+        *negative = check_wide_negative(limbs, width, is_signed);
+        *zero = check_wide_is_zero(limbs, count);
+        *bits = check_wide_bits(limbs, count);
+        uint32_t ones = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            ones += (uint32_t)__builtin_popcountll(limbs[i]);
+        }
+        *power = ones == 1;
+    }
+    return valid;
+}
+
+// An alignment builtin's fold of a wide constant `source` (CheckValue of its _BitInt type) by 2^`exponent`: align_down's
+// x & ~(a - 1), align_up's (x + (a - 1)) & ~(a - 1), wrapping in the source's width, as the narrow fold's, or is_aligned's
+// (x & (a - 1)) == 0 into `value`'s integer. `kind` is 0, 1 or 2 in that order. False when it holds no limbs.
+static __attribute__((noinline, cold, unused)) bool check_wide_align_fold(const TypeTable* table, const CheckValue* source, uint32_t exponent, uint32_t kind,
+                                                                          CheckValue* value)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool wide = check_wide_type(table, source->type, &width, &is_signed);
+    const uint32_t count = check_wide_count(width);
+    uint64_t* x = wide ? check_wide_allocate(count) : NULL;
+    uint64_t* mask = x != NULL ? check_wide_allocate(count) : NULL;
+    uint64_t* answer = mask != NULL ? check_wide_allocate(count) : NULL;
+    const bool valid = answer != NULL && exponent < width && check_wide_operand(table, source, x, count);
+    if (valid)
+    {
+        const CheckWideKernels kernels = { .scalar = false };
+        x[count - 1] &= check_wide_top_mask(width);
+        // a - 1: the low `exponent` bits.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t low = i * BUSTER_CHECK_WIDE_LIMB_BITS;
+            mask[i] = exponent >= low + 64 ? UINT64_MAX : exponent > low ? (UINT64_C(1) << (exponent - low)) - 1 : 0;
+        }
+        if (kind == 2)
+        {
+            check_wide_bitwise(kernels, CHECK_WIDE_AND, answer, x, mask, count);
+            value->constant_kind = CHECK_CONSTANT_INTEGER;
+            value->integer = check_wide_is_zero(answer, count);
+            value->floating_storage[0] = 0;
+        }
+        else
+        {
+            if (kind == 1)
+            {
+                check_wide_add(kernels, x, x, mask, count, false, 0);
+            }
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                answer[i] = x[i] & ~mask[i];
+            }
+            answer[count - 1] &= check_wide_top_mask(width);
+            check_wide_publish(value, answer);
+        }
+    }
+    return valid;
+}
+
 // --- Printing and bytes. ---
 
 // A wide constant's decimal digits, signed as its type says, into `out` (room for `capacity` bytes, the digits without
