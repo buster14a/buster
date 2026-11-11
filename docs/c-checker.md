@@ -9409,7 +9409,19 @@ enables, which this checker doesn't all give.
   `x.n < i` is `'ul' (aka 'unsigned long')`. An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
-  qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
+  the specifiers write again beside a qualified typedef prints over its name
+  (`const CI twice[1]`'s `'const CI[1]' (aka 'const int[1]')`): the operand's
+  spelling is then the typedef's use, not its declaration
+  (`check_input_typedef_sugar`, resolved by `check_input_sugar_declaration`).
+  A typedef with fewer qualifiers than its level names it under the others
+  (`volatile CI`'s `'volatile CI[2]' (aka 'const volatile int[2]')`).
+  A `-Wformat` argument prints its type as the lvalue conversion leaves it
+  (`check_common_format_value`): without its top-level qualifiers (`const I x`
+  is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared
+  where its typedef holds them itself, as clang's `getUnqualifiedType` does
+  (`CI`'s `'int'`). An array decays to a pointer to its qualified element
+  (`'const int *'`).
   A target address space that one macro writes throughout the unit prints by
   that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
   `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.
@@ -9418,9 +9430,6 @@ enables, which this checker doesn't all give.
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - A qualifier written again over a qualified typedef's array
-    (`const CI twice[1]`) is dropped: clang prints
-    `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
   - A cast inside a variable array's bound prints its type name as written
     (`int[(unsigned)n]`), where clang prints the type's own spelling
     (`'int[(unsigned int)n]'`), and `sizeof` of a parenthesized expression

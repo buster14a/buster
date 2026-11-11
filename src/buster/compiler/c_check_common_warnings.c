@@ -162,6 +162,13 @@ static void check_common_report_published(const Parser* parser, Preprocessor* pp
                                         note_count, scratch);
 }
 
+// Whether two operands' spellings are one typedef's sugar (#1447): its uses (check_input_typedef_sugar) are its declaration.
+static bool check_common_same_spelling(const CheckInput* input, const Parser* parser, uint32_t left, uint32_t right)
+{
+    uint32_t written = 0;
+    return left == right || check_input_sugar_declaration(input, parser, left, &written) == check_input_sugar_declaration(input, parser, right, &written);
+}
+
 // Find an operand's typedef specifier without recursive calls. A bounded explicit stack follows the graph through
 // casts, dereferences, subscripts, conversions and arithmetic; a bounded work budget leaves unusually large expressions
 // in their canonical spelling. `sizeof` and `alignof` use the renderer's __size_t sentinel.
@@ -214,17 +221,20 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                 const uint32_t right = result;
                 const uint32_t left_node = graph->operand0[current];
                 const uint32_t right_node = graph->operand1[current];
+                // (An operand's value is its lvalue's unqualified, #1447: `a + b` of two `const U` objects is a `U`.)
                 const TypeId type = check_stream_type(stream, current);
-                const TypeId left_type = left_node < graph->count ? check_stream_type(stream, left_node) : 0;
-                const TypeId right_type = right_node < graph->count ? check_stream_type(stream, right_node) : 0;
+                const TypeId left_type = left_node < graph->count ? type_unqualified(check_stream_type(stream, left_node)) : 0;
+                const TypeId right_type = right_node < graph->count ? type_unqualified(check_stream_type(stream, right_node)) : 0;
                 const CheckOp op = graph->ops[current];
                 if (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT)
                 {
                     result = left_type == type ? left : 0;
                 }
-                else if (left == right && left != 0 && left_type == type && right_type == type)
+                else if (left != 0 && check_common_same_spelling(input, parser, left, right) && left_type == type && right_type == type)
                 {
-                    result = left;
+                    // (Two uses of one typedef are the same sugar, #1447: arithmetic's value has no qualifiers to write.)
+                    uint32_t written = 0;
+                    result = check_input_sugar_declaration(input, parser, left, &written);
                 }
                 else if (left != 0 && left_type == type && right_type != type)
                 {
@@ -296,7 +306,7 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                 // A member's own declarator's typedef (#1447), found in its record's body.
                 const uint32_t member = check_semantic_member_of(parser, input, stream, types, current);
                 const uint32_t declarator = member != 0 ? check_semantic_member_token(parser, input, types, member) : BUSTER_CHECK_NONE;
-                result = declarator < input->token_count ? check_input_typedef_spelling(input, parser, declarator) : 0;
+                result = declarator < input->token_count ? check_input_typedef_sugar(input, parser, declarator) : 0;
                 count -= 1;
             }
             else
@@ -306,7 +316,7 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                 {
                     const uint32_t declaration = input->declarations[token];
                     result = declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
-                             check_input_typedef_spelling(input, parser, declaration) : 0;
+                             check_input_typedef_sugar(input, parser, declaration) : 0;
                 }
                 count -= 1;
             }
@@ -323,8 +333,9 @@ static String8 check_common_type_text(const Parser* parser, Preprocessor* pp, co
     const TypeId stripped = type != 0 ? type_strip_aligned(types, type) : 0;
     if (stripped != 0 && type_kind_is_array(type_kind(types, type_unqualified(stripped))) && result.length != 0)
     {
-        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch,
-                                                          type_element(types, type_unqualified(stripped)), 0);
+        // The pointer's target keeps the array's qualifiers, as its element (`const int[2]`'s `'const int *'`, #1447).
+        const TypeId element_type = type_qualify(types, type_element(types, type_unqualified(stripped)), type_qualifiers(stripped));
+        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch, element_type, spelling);
         if (element.length != 0)
         {
             const char* text = element.pointer;
@@ -6306,14 +6317,32 @@ static void check_common_format_invalid_position(const Parser* parser, Preproces
     check_common_format_report_offset(parser, pp, input, format_token, offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
 }
 
+// A format argument's type as clang's lvalue conversion leaves it (#1447): without its top-level qualifiers (an array's
+// stay with its element), and without the sugar of a typedef that holds them itself (clang's getUnqualifiedType
+// desugars `CI` of `typedef const int CI` to `int`); `spelling` is updated to match.
+static TypeId check_common_format_value(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId type, uint32_t* spelling)
+{
+    const TypeId stripped = type != 0 ? type_strip_aligned(types, type) : 0;
+    const bool array = stripped != 0 && type_kind_is_array(type_kind(types, type_unqualified(stripped)));
+    const bool qualified = type != 0 && !array && type_qualifiers(type) != 0;
+    uint32_t written = 0;
+    const uint32_t declaration = *spelling != 0 && *spelling != BUSTER_CHECK_NONE ? check_input_sugar_declaration(input, parser, *spelling, &written) : 0;
+    const bool typedef_name = declaration != 0 && declaration < input->token_count && input->declared_types != NULL &&
+                              parser->tokens.kinds[declaration] != PARSE_KIND_TYPEOF;
+    const TypeId declared = typedef_name ? input->declared_types[declaration] : 0;
+    *spelling = qualified && declared != 0 && type_qualifiers(declared) != 0 ? 0 : *spelling;
+    return qualified ? type_unqualified(type) : type;
+}
+
 static void check_common_format_report_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, const CheckGraph* graph, uint32_t offset, uint32_t argument,
                                             uint32_t format_token, const char* expected, bool width, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
-    const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId argument_type = check_common_format_argument_type(graph, stream, types, offset, argument);
+    uint32_t spelling = argument_node < graph->count && argument_type == check_stream_type(stream, argument_node) ?
+                        check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId type = check_common_format_value(parser, input, types, argument_type, &spelling);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
@@ -6339,9 +6368,10 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
                                              uint32_t format_token, uint64_t literal_offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
-    const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId argument_type = check_common_format_argument_type(graph, stream, types, offset, argument);
+    uint32_t spelling = argument_node < graph->count && argument_type == check_stream_type(stream, argument_node) ?
+                        check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId type = check_common_format_value(parser, input, types, argument_type, &spelling);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     if (actual.length != 0)
