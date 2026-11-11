@@ -1392,8 +1392,8 @@ qualifiers"). clang's x86 target maps 256, 257 and 258 (`__seg_gs`, `__seg_fs`)
 to the `%gs`, `%fs` and `%ss` segments: its -O0 code loads and stores there with
 a segment override (`mov %gs:(%rax),%eax`).
 
-`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs` or `%gs`
-the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
+`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs`, `%gs` or
+`%ss` the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
 typed stream), from the accessed lvalue's type: a read's own, an assignment's
 target's (the assignment's value has lost the space), an update's stored type
 for its load and its store (the postfix one's too). It marks the function
@@ -1425,12 +1425,49 @@ its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),
 pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
 `__atomic_test_and_set`'s, doesn't carry it).
 
+An object whose value is an address (a struct's, a union's, a complex value's, a
+`__float128`'s, a wide `_BitInt`'s limbs, a transport vector's) is read by a
+copy of its bytes through the override to a frame object of its own
+(`check_lower_segment_read`), whose address its consumers then take as any
+flat one: a copy, a call's argument, a register return, a complex operation, a
+comma's or a conditional's forwarding. A struct's or union's assignment into a
+segment copies through the override (`CheckLowerTask.segments`, the
+destination's in bits 2 and 3, `check_lower_copy_segmented`), and its value is
+the stored bytes at the source's address. Each copy is pieces of 8, 4, 2 and 1
+bytes, a `LOAD` and a `SET` each with its side's override. Clang lowers such a
+copy (an `llvm.memcpy` in a segment's address space, which no library
+function takes) inline as at most 8 stores of its widest vector (4 at `-Os`)
+and stops with "cannot lower memory intrinsic in address space" past them: 128
+bytes for SSE, 256 for AVX and 512 for znver5's AVX-512. The lowering takes up to 8
+of the function's target's widest vector registers' bytes, never fewer than
+clang, and refuses a larger copy by name ("an aggregate copy of more than 8
+vector registers in a segment's address space ..., which clang can't lower
+either").
+
+A complex value's, a `__float128`'s and a wide `_BitInt`'s update (a compound
+assignment, an increment or a decrement), and a real object's update by a
+complex value, go through a frame object (`check_lower_segment_update`): the
+update task's emitters read and write the destination through its address, so
+the object is copied there through the override, updated as any flat object,
+and copied back, its value kept in a temporary across the copy. A complex
+lvalue's part (`__real__ *p`, `__imag__ *p`) has lost its object's space, as a
+vector's element has, and takes the complex object's override on its read, store
+and update (`check_lower_element_segment`), as clang's code does. A narrow
+`_BitInt`'s read, store and update take it as an integer's do.
+
+An `_Atomic` lvalue's read, store and update go through its plan
+(`check_lower_atomic_prepare`), whose direct accesses take the object's override
+(`CheckLowerAtomic.segment`): a load's `mov`, a store's `xchg`, an addition's
+`lock xadd` and another update's loop of a load and `lock cmpxchg`, the
+instructions clang's code has. A library call (`__atomic_load`, `__atomic_store`
+of an object no instruction moves atomically) takes the object's address as it
+is, as clang's does: the segment's offset, which is the object's own only in
+`%ss`.
+
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an aggregate's copy, a complex or `_BitInt` value
-and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
+an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
-`__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
-form of the encoder's has its `36` prefix); a bit of a vector of bool in one,
+`__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
 which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches
 (`check_lower_segment_access`). An asm statement's register output in one is
 refused too (`check_lower_asm_segment`), since its value is stored through the

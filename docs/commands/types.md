@@ -64,6 +64,11 @@ the one `--clang` names:
 - conversions: every pair of codes through both vector kernels and the scalar
   twin, at every length to 200 and ending at a `PROT_NONE` page; the TypeId
   batch against `type_usual_arithmetic`; and clang's results as fixtures;
+- type sugar (#1447, `type_test_sugar`): hash-consed nodes found again after the
+  table grows, each keeping its canonical type, and `type_sugar_print`'s
+  strings for clang's attributed, parenthesized and macro-qualified function
+  pointers, arrays of them, dereferences and addresses, with macros resolved and
+  not, and no print for a type the nodes don't describe;
 - extended qualifiers (#1447, `type_test_extended`): `type_extend`'s
   normalizations, the readers through `QUALIFIED`, a `__weak` member's layout
   and a space's member refused, compatibility, composite types, clang's

@@ -4001,12 +4001,13 @@ static void tier0_test_operands(Tier0TestTally* tally)
 // TPOFF32 immediate an add takes), with an FS override exactly for a thread-local, and for a direct symbol the code
 // without the column. A constant stored into a symbol is an immediate (its CONST absorbed) only for a direct symbol,
 // which a store of an integer's constant's record count shows.
-// Segment overrides (#1447, Tier0Function.segments): LOAD, STORE and SET in FS and GS. Each function compiles to the same
-// code on both paths, and to its stripped twin's but for its marked accesses' memory operands, which take the override
-// (one record for an integer's or a floating value's access); the frame's own operands and the unmarked accesses keep
-// none. Validation refuses an override on another kind and the segment 3. Then they run in a child, %fs's base the
-// thread's and %gs's set by arch_prctl, on addresses that hold the data only through the segment (the data's address
-// less the base), so that an access without its override faults.
+// Segment overrides (#1447, Tier0Function.segments): LOAD, STORE and SET in FS, GS and SS. Each function compiles to the
+// same code on both paths, and to its stripped twin's but for its marked accesses' memory operands, which take the
+// override (one record for an integer's or a floating value's access); the frame's own operands and the unmarked accesses
+// keep none. Validation takes no override on another kind (a constant's top bits are its own). Then they run in a child,
+// %fs's base the thread's and %gs's set by arch_prctl, on addresses that hold the data only through the segment (the
+// data's address less the base), so that an access without its override faults; SS's base is 0 in 64-bit mode, so its
+// cases run on the data's own address, and their records show the override.
 #define BUSTER_TIER0_TEST_SEGMENT_SHAPES 10
 #define BUSTER_TIER0_TEST_SEGMENT_CASES 128
 
@@ -4106,7 +4107,7 @@ static uint32_t tier0_test_segment_stream(const Tier0TestSegmentCase* c, bool ma
     return n;
 }
 
-// The cases: every integer and floating class in every shape that takes it, in FS and GS alternately, and the memory
+// The cases: every integer and floating class in every shape that takes it, in FS, GS and SS in turn, and the memory
 // classes' and vectors' copies.
 static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
 {
@@ -4118,7 +4119,7 @@ static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
             const bool floating = class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64;
             if (!((shape == 5 || shape >= 8) && floating))
             {
-                cases[n] = (Tier0TestSegmentCase){ .class = class, .shape = shape, .segment = (uint8_t)(1 + n % 2), .bytes = tier0_class_bytes(class) };
+                cases[n] = (Tier0TestSegmentCase){ .class = class, .shape = shape, .segment = (uint8_t)(1 + n % 3), .bytes = tier0_class_bytes(class) };
                 n += 1;
             }
         }
@@ -4133,7 +4134,7 @@ static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
         for (uint8_t shape = 6; shape <= 7; shape += 1)
         {
             const uint8_t class = memory[m][0];
-            cases[n] = (Tier0TestSegmentCase){ .class = class, .shape = shape, .segment = (uint8_t)(1 + n % 2), .width = memory[m][1], .transport = memory[m][2],
+            cases[n] = (Tier0TestSegmentCase){ .class = class, .shape = shape, .segment = (uint8_t)(1 + n % 3), .width = memory[m][1], .transport = memory[m][2],
                                                .bytes = class == BUSTER_TYPED_CLASS_F80 ? 10u : class == BUSTER_TYPED_CLASS_VECTOR ? memory[m][1] : 16u };
             n += 1;
         }
@@ -4181,7 +4182,7 @@ static __attribute__((no_sanitize("function"))) uint64_t tier0_test_segment_call
 static void tier0_test_segments(Tier0TestTally* tally)
 {
     Arena arena = arena_reserve(1ull << 26);
-    // Validation: a CONST's top bits are its own, not an override (a negative constant's); the segment 3 on a LOAD is none.
+    // Validation: a CONST's top bits are its own, not an override (a negative constant's); SS's 3 on a LOAD is an override.
     {
         static const uint8_t kinds[3] = { BUSTER_TYPED_CONST, BUSTER_TYPED_LOAD, BUSTER_TYPED_RETURN };
         static const uint8_t classes[3] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32 };
@@ -4201,9 +4202,9 @@ static void tier0_test_segments(Tier0TestTally* tally)
         const Tier0Check three_scalar = tier0_validate_scalar(&function);
         values[1] = (uint64_t)BUSTER_TYPED_SEGMENT_GS << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
         const Tier0Check gs = tier0_validate(&function);
-        tier0_test_expect(tally, constant.error == TIER0_OK && constant_scalar.error == TIER0_OK && three.error == TIER0_ERROR_INVALID &&
-                                     three_scalar.error == TIER0_ERROR_INVALID && gs.error == TIER0_OK,
-                          "segments", "tier0_validate: a CONST's top bits %d, the segment 3 %d, GS on a LOAD %d", constant.error, three.error, gs.error);
+        tier0_test_expect(tally, constant.error == TIER0_OK && constant_scalar.error == TIER0_OK && three.error == TIER0_OK && three_scalar.error == TIER0_OK &&
+                                     gs.error == TIER0_OK,
+                          "segments", "tier0_validate: a CONST's top bits %d, SS on a LOAD %d, GS on a LOAD %d", constant.error, three.error, gs.error);
     }
     Tier0TestSegmentCase cases[BUSTER_TIER0_TEST_SEGMENT_CASES];
     const uint32_t count = tier0_test_segment_cases(cases);
@@ -4307,7 +4308,7 @@ static void tier0_test_segments(Tier0TestTally* tally)
                 data[b] = (uint8_t)(b * 37 + 11);
                 other[b] = (uint8_t)(b * 53 + 5);
             }
-            const uint64_t base = c->segment == BUSTER_TYPED_SEGMENT_FS ? fs : (uint64_t)(uintptr_t)gs_area;
+            const uint64_t base = c->segment == BUSTER_TYPED_SEGMENT_FS ? fs : c->segment == BUSTER_TYPED_SEGMENT_GS ? (uint64_t)(uintptr_t)gs_area : 0;
             const uint64_t p = (uint64_t)(uintptr_t)data - base;
             const uint64_t q = (uint64_t)(uintptr_t)other;
             const uint64_t i = 2;

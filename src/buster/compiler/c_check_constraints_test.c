@@ -40,6 +40,8 @@ struct CheckConstraintFixture
     const char* valid;
     // Clang's warning line on the violation, 0 when it gives none.
     uint32_t warning;
+    // Whether the preprocessor rejects the violation, as clang's lexer does (a directive's rule, 6.10, always is).
+    bool preprocess;
 };
 
 static const CheckConstraintFixture check_constraint_fixtures[] =
@@ -64,6 +66,9 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int \\u0041b;\n",
         "int a;\n"
         "int \\u00e9b;\n",
+        0,
+        // clang's lexer's error (#1447, BUSTER_PP_UCN_ERROR).
+        true,
     },
     {
         "6.4.3p2", "a universal character name below 00A0 in a string", CHECK_CONSTRAINT_ERROR, 0,
@@ -3198,6 +3203,67 @@ static const CheckSemanticFixture check_semantic_fixtures[] =
         36,
         "static assertion failed due to requirement 'VALUE == 2': value",
     },
+    // A character constant by its value, as clang's CharacterLiteral::print gives it (#1999).
+    {
+        "_Static_assert('ab' == 0, \"c\");\n",
+        "_Static_assert('ab' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\u6162' == 0': c",
+    },
+    {
+        "_Static_assert('\\n' == 0, \"c\");\n",
+        "_Static_assert('\\n' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\n' == 0': c",
+    },
+    {
+        "_Static_assert('\\x80' == 0, \"c\");\n",
+        "_Static_assert('\\x80' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\x80' == 0': c",
+    },
+    {
+        "_Static_assert('\\0' == 1, \"c\");\n",
+        "_Static_assert('\\0' == 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\x00' == 1': c",
+    },
+    {
+        "_Static_assert('\\'' + '\\\\' == 0, \"c\");\n",
+        "_Static_assert('\\'' + '\\\\' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\'' + '\\\\' == 0': c",
+    },
+    {
+        "_Static_assert('\\x1b' == 0, \"c\");\n",
+        "_Static_assert('\\x1b' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\x1b' == 0': c",
+    },
+    {
+        "_Static_assert(L'\\xe9' == 0, \"c\");\n",
+        "_Static_assert(L'\\xe9' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement 'L'\\xe9' == 0': c",
+    },
+    {
+        "_Static_assert(u'\\xffff' == 0, \"c\");\n",
+        "_Static_assert(u'\\xffff' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement 'u'\\uffff' == 0': c",
+    },
+    {
+        "_Static_assert(U'\\U0001F600' == 0, \"c\");\n",
+        "_Static_assert(U'\\U0001F600' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement 'U'\\U0001f600' == 0': c",
+    },
+    {
+        "_Static_assert('abcd' == 0, \"c\");\n",
+        "_Static_assert('abcd' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\U61626364' == 0': c",
+    },
 };
 
 static void check_test_semantic_diagnostics(CheckTest* test, const char* clang)
@@ -3353,7 +3419,7 @@ static void check_test_constraints(CheckTest* test, const char* clang)
                 checked.line = fixture->difference;
                 snprintf(checked.file, sizeof(checked.file), "%s", path);
             }
-            if (strncmp(fixture->clause, "6.10", 4) == 0)
+            if (strncmp(fixture->clause, "6.10", 4) == 0 || fixture->preprocess)
             {
                 check_test_constraint_preprocess(test, name, source, path, &checked);
             }

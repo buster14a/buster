@@ -156,9 +156,16 @@ enum
     // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
     // of no option.
     CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
+    // A C-style cast from a pointer to a narrower integer type (#1943, clang's CheckCStyleCast), on by default:
+    // -Wpointer-to-int-cast's, with -Wvoid-pointer-to-int-cast's from a pointer to void under it, and to an enumeration
+    // -Wpointer-to-enum-cast's, with -Wvoid-pointer-to-enum-cast's under it.
+    CHECK_WARNING_ID_POINTER_TO_INT_CAST = 125,
+    CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
+    CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
+    CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
     // swift_name's and swift_async_name's Swift name that doesn't fit its declaration (#1447, clang's SemaSwift::DiagnoseName):
     // -Wswift-name-attribute, on by default. (Its ID past the ones other pull requests take.)
-    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 128,
+    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 129,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -445,6 +452,15 @@ typedef enum CheckWarningEventKind
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
     CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
+    // A cast from a pointer to a narrower integer type (#1943, check_warning_graph_pointer_cast), at the cast's `(`: "cast
+    // to smaller integer type T from P", payload.first_type the operand's type after decay and payload.name its typedef's
+    // spelling, payload.second_type the cast's type and payload.data its.
+    CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
+    // A comma operator's left operand in an attribute's expression argument whose value clang's isUnusedResultAWarning
+    // says is unused (#1447, check_input_attribute_unused): payload.data a BUSTER_CHECK_UNUSED_* message,
+    // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
+    // -Wunused-comparison's, with a CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT at an equality's.
+    CHECK_WARNING_EVENT_UNUSED_RESULT,
     // swift_name's and swift_async_name's warnings (#1447, check_input_attribute_swift_name), at the name's string literal:
     // payload.data's low five bits the message (BUSTER_CHECK_SWIFT_NAME_*), then the expected and the given parameter
     // counts in 13 bits each. Its K&R function's is -Wignored-attributes', the others -Wswift-name-attribute's.
@@ -476,6 +492,13 @@ typedef enum CheckWarningEventKind
 // ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with
 // BUSTER_CHECK_TARGET_CLONES_CPU where an unsupported one is a CPU's.
 #define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 31)
+
+// CHECK_WARNING_EVENT_UNUSED_RESULT's message (payload.data).
+#define BUSTER_CHECK_UNUSED_COMMA 0u
+#define BUSTER_CHECK_UNUSED_VOID_POINTER 1u
+#define BUSTER_CHECK_UNUSED_EQUALITY 2u
+#define BUSTER_CHECK_UNUSED_INEQUALITY 3u
+#define BUSTER_CHECK_UNUSED_RELATIONAL 4u
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
@@ -509,6 +532,9 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
     // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
     CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
+    // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
+    // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
+    CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
