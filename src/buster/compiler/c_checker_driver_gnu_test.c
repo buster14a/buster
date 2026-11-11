@@ -122,6 +122,11 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "a list's two names, one undefined", "void f(void) {\n    {\n        __label__ a, b;\n    b:;\n    }\n}\n" },
         { "a name two lists declare twice, defined and used", "void f(void) {\n    {\n        __label__ c;\n        __label__ d, c;\n    c: goto c;\n    d:;\n    }\n}\n" },
         { "an undeclared label's error after the block's", "void f(void) {\n    {\n        __label__ a, a;\n    a:;\n        int y = z;\n    }\n    int w = v;\n}\n" },
+        // __auto_type's _Atomic and restrict are its deduced type's (#1844): their types as clang's errors print them.
+        { "_Atomic __auto_type's deduced types", "struct T { int a; };\nvoid f(struct T t, int a[3]) {\n    const _Atomic __auto_type q = 1.5;\n    struct S { int x; } s = q;\n"
+          "    _Atomic __auto_type r = t;\n    struct S u = r;\n    volatile _Atomic __auto_type v = a, w = a;\n    struct S x = w;\n}\n" },
+        { "__auto_type restrict's deduced types", "void f(int *p) {\n    __auto_type restrict q = p;\n    struct S { int x; } s = q;\n"
+          "    const __auto_type restrict r = p, t = p;\n    struct S u = t;\n    __auto_type * const restrict v = p;\n    struct S w = v;\n}\n" },
         { "a function's missing labels, once each, as it ends", "void f(void) {\n    goto x;\n    goto y;\n    int u = z;\n    goto x;\n    void *p = &&y;\n}\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
