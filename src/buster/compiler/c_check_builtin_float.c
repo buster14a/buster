@@ -600,7 +600,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
     }
     else if (input->argument_count != count)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, count, count);
     }
     else if (count != 0 && input->arguments == NULL)
     {

@@ -664,6 +664,86 @@ The tests:
 - `test-checker-driver`'s machine-rows unit: its `permutexvar` and
   `shuffle_epi8` are now the IR's, leaving 61 rows and 32 moves.
 
+## Conversions (#1840)
+
+Two more unary kinds of `intrinsic` widen or narrow integer lanes. Their
+`flags` hold the source's lanes' bytes' log2 (bits 0 and 1), the result's (bits
+2 and 3) and the mode (bits 4 and 5):
+
+```text
+%4 = intrinsic.v16i32 %1 extend 8
+%8 = intrinsic.v8i32 %3 truncate 22
+```
+
+- `extend` (`BUSTER_IR_INTRINSIC_EXTEND`): lane i is a's lane i,
+  zero-extended (mode 0) or sign-extended (1) to a wider lane. It has as many
+  lanes as the result holds, read from a's low bytes, which must have them
+  (`vpmovzx`, `vpmovsx`).
+- `truncate` (`BUSTER_IR_INTRINSIC_TRUNCATE`): lane i is a's lane i, for every
+  lane of a, narrowed by wrapping (mode 0), by saturating a signed lane to the
+  signed range (1, `vpmovs`), or by saturating an unsigned lane to the unsigned
+  range (2, `vpmovus`, whose source Intel's manual has unsigned). The lanes go in
+  the result's low bytes with zeros past them; the result is 16 bytes, or the
+  lanes' bytes if more (`vpmov`).
+
+`ir_convert_flags_valid` is the verifier's rule. The model's `IR_SIMD_EXTEND`
+and `IR_SIMD_TRUNCATE` convert lane by lane, and the interpreter, SCCP, GVN
+and LICM take them as they take the permutes.
+
+`ir_simd_typed_convert` decodes two kinds of row:
+
+- `__builtin_convertvector`'s rows between integer vectors of other element
+  sizes: one record of an extension's form at the result's width (destination
+  in reg) or a truncation's at the source's (destination in rm). These are
+  `ir_simd_convert_forms.c`'s tables, which Tier 1's selection shares.
+- TRUNCATE's rows, the `vpmov*` builtins under a mask: the truncation into
+  VECTOR(1) under MASK(2), then its move into VECTOR(0). They become the
+  truncate merged into w by a `vselect` at the result's lanes, or alone where
+  the typed stream's writemask has every lane.
+
+A truncation under a mask whose lanes leave the result's upper bytes zero
+(`vpmovdb` of 16 or 32 bytes, `vpmovqb`, `vpmovqw` but of 64) stays a machine
+row: its merge isn't a `vselect` of the result's lanes. The target needs the
+form's features (BW for words' lanes) and AVX512F's and VL's.
+
+Tier 1 selects each as its form (`BUSTER_TIER1_VECTOR_CONVERT`,
+`tier1_select_convert_form`): an extension with its destination in reg, a
+truncation with its destination in rm, which zeroes the register past its
+lanes. Its 88 register forms that had no Zen 5 row were measured on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09),
+buster-performance#354).
+
+Measured by `--tier1 --tier1-report -march=znver5` on main `cb608c1`'s sources,
+with the width changes and the permutes:
+
+| Unit | Rows | Records | Row moves |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 938 | 575,882 | 676 |
+| `main_unit_backend.c` | 1,406 | 1,490,439 | 902 |
+
+That is 52 and 104 rows fewer than with the permutes (990 and 1,510).
+
+The tests:
+
+- `test-ir`: both verifiers admit each kind between every pair of vector widths
+  at every flags byte below 64 exactly where the lanes, mode and widths agree
+  (156 forms). The model is checked against C's conversions of each lane on
+  random vectors with saturating edges.
+- `test-ir-parse` and `test-ir-optimize`: the text and SCCP's folds, as the
+  permutes'.
+- `test-ir-simd`: decodes, by the real producer, every convertvector row
+  between integers of other sizes (102 extensions, 16 truncations at every
+  width and operand width the producer takes) and every TRUNCATE rule's row
+  (22 fill their result and decode; 30 stay machine rows). Each is checked
+  against kinds, flags and features written out, and refused without each
+  feature it needs and under changes.
+- `test-tier1-masks`: runs 74 programs, convertvector's and the masked
+  truncations, the latter under an input word or unmasked. They go through
+  both lowering paths, the interpreter at every stage and Tier 1's native code,
+  against a lane-by-lane C model. Its runs caught the unsigned saturation's
+  source, which an earlier version took as signed.
+- `test-checker-driver`'s machine-rows unit: 59 rows and 32 moves.
+
 ## Lanes: the vectors' element types (#141)
 
 The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
