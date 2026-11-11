@@ -121,8 +121,11 @@ compares deterministic probe objects and executables, once for each host path:
 scalar path, #1193). It is not part of the required correctness or benchmark
 path; see [the self-host guide](self-hosting-ci.md).
 
-The hosted tests fetch the frozen corpus from the
+The frozen corpus comes from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).
+A run's preparation job fetches it once, with the apt packages, the baseline
+runtime and the c-testsuite and SQLite mirrors, and the hosted tests read them
+all with no network ([Offline inputs](hosted-toolchain.md#offline-inputs-2275)).
 `tools/ci/fetch-corpus.sh` checks the archive digest, original manifest digests,
 every input byte, file counts and file kinds. The archive retains source/header
 notices, package provenance and component license texts. Historical paths and
@@ -421,8 +424,11 @@ uploading its name. The race fixture (below) disproved it on 2026-11-11 (run
 uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
 name. So no candidate claims anything. Each draw's **collector**
 (`collect-1` to `collect-3`, and the verdict's reading after the last) starts
-with its draw and polls the run every 5 s, through the artifacts and jobs APIs
-(`actions: read`). It waits until as many candidates qualified as items are
+with its draw and polls the run every 15 s, through the artifacts and jobs APIs
+(`actions: read`). Those calls share the repository's hourly REST limit with
+every other run, so a failed listing doubles the pause, up to 60 s, and the
+jobs fetch `tools/ci/vector-draw.sh` by a one-file checkout rather than the
+contents API (#2309). It waits until as many candidates qualified as items are
 missing, or every candidate has published its verdict or ended, at most 25
 minutes. Then it assigns: the qualifying candidates, by their numbers, get the
 missing items, the costliest first (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1

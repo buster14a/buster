@@ -398,11 +398,13 @@ static void pp_diagnostic_format(PPDiagnostic* diagnostic, const char* format, v
 }
 
 // A fatal error's flag as clang's printer gives it (#1447): "-Werror," names a warning made an error, so a fatal one (a
-// warning -Werror promoted and -Wfatal-errors made fatal, or a pragma's fatal) has its group alone, `[-Wgroup]`. Removes
-// "-Werror," from the trailing flag of the message written from byte `start`.
+// warning -Werror promoted and -Wfatal-errors made fatal, or a pragma's fatal) has its group alone, `[-Wgroup]`, and one of
+// no group no flag. Removes "-Werror," from the trailing flag of the message written from byte `start`, or a trailing
+// " [-Werror]" whole.
 static void pp_diagnostic_fatal_flag(PPDiagnostic* diagnostic, uint64_t start)
 {
     static const char tag[] = " [-Werror,";
+    static const char bare[] = " [-Werror]";
     const uint64_t size = sizeof(tag) - 1;
     const bool closed = !diagnostic->direct && diagnostic->count > start && diagnostic->bytes[diagnostic->count - 1] == ']';
     uint64_t open = closed ? diagnostic->count - 1 : start;
@@ -410,12 +412,18 @@ static void pp_diagnostic_fatal_flag(PPDiagnostic* diagnostic, uint64_t start)
     {
         open -= 1;
     }
-    const bool tagged = closed && open > start && diagnostic->count - (open - 1) > size && memcmp(diagnostic->bytes + open - 1, tag, size) == 0;
+    const bool flagged = closed && open > start && diagnostic->count - (open - 1) >= size;
+    const bool tagged = flagged && memcmp(diagnostic->bytes + open - 1, tag, size) == 0;
+    const bool alone = flagged && diagnostic->count - (open - 1) == size && memcmp(diagnostic->bytes + open - 1, bare, size) == 0;
     if (tagged)
     {
         const uint64_t removed = size - 2;
         memmove(diagnostic->bytes + open + 1, diagnostic->bytes + open + 1 + removed, diagnostic->count - (open + 1 + removed));
         diagnostic->count -= removed;
+    }
+    else if (alone)
+    {
+        diagnostic->count = open - 1;
     }
 }
 
@@ -591,6 +599,9 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     }
     if (note != 0)
     {
+        // An attached note's place is the include context the next primary compares with, as a separately rendered note's
+        // (#1970): one in another header makes that primary repeat its include stack.
+        pp->diagnostic_include_range = pp_presumed_include(pp, note->location);
         pp_diagnostic_place(pp, &diagnostic, note->location);
         if (note->macro != 0)
         {

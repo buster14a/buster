@@ -412,13 +412,54 @@ static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint
     return result;
 }
 
+// A character constant's spelling in a failed assertion's requirement, as clang's CharacterLiteral::print gives it (#1999):
+// its prefix, then its value quoted: a C escape for a quote, a backslash or a control character that has one; else, an
+// ordinary constant's sign extension of a byte taken off, a printable byte as itself, `\xNN` below 256, `\uNNNN` up to
+// 0xFFFF and `\UNNNNNNNN` past it, in lower case. The spelling as written where it doesn't decode.
+static String8 check_semantic_character(Preprocessor* pp, String8 written, Arena* scratch)
+{
+    String8 result = written;
+    const uint8_t* bytes = (const uint8_t*)written.pointer;
+    const CheckLiteral literal = check_literal_character_by(bytes, (uint32_t)written.length, pp->options.language.standard >= 2023,
+                                                            pp->options.predefines.char_unsigned, true);
+    uint32_t prefix = 0;
+    while (prefix < written.length && bytes[prefix] != '\'')
+    {
+        prefix += 1;
+    }
+    char* text = literal.valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, prefix + 16) : NULL;
+    if (text != NULL)
+    {
+        uint32_t value = (uint32_t)literal.integer;
+        const bool ordinary = prefix == 0;
+        value = ordinary && (value & ~UINT32_C(0xFF)) == ~UINT32_C(0xFF) ? value & 0xFF : value;
+        static const char escapes[][3] = { ['\a'] = "\\a", ['\b'] = "\\b", ['\t'] = "\\t", ['\n'] = "\\n", ['\v'] = "\\v", ['\f'] = "\\f", ['\r'] = "\\r" };
+        const bool quoted = value == '\'' || value == '\\';
+        const bool control = value < BUSTER_ARRAY_LENGTH(escapes) && escapes[value][0] != 0;
+        memcpy(text, written.pointer, prefix);
+        int length = 0;
+        if (quoted || control)
+        {
+            length = snprintf(text + prefix, 16, "'%s'", quoted ? (value == '\'' ? "\\'" : "\\\\") : escapes[value]);
+        }
+        else if (value >= 0x20 && value < 0x7F)
+        {
+            length = snprintf(text + prefix, 16, "'%c'", (char)value);
+        }
+        else
+        {
+            length = snprintf(text + prefix, 16, value < 256 ? "'\\x%02x'" : value <= 0xFFFF ? "'\\u%04x'" : "'\\U%08x'", (unsigned)value);
+        }
+        result = length > 0 ? (String8){ .pointer = text, .length = prefix + (uint32_t)length } : written;
+    }
+    return result;
+}
+
 static bool check_semantic_binary(uint8_t role)
 {
     return (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY;
 }
 
-// Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace. This
-// is a bounded token pass, including macro expansions; it never walks the expression recursively.
 // A run of builtin type keywords as clang's TypePrinter spells their type (#1447): `unsigned` is "unsigned int",
 // `long unsigned int` "unsigned long", `signed` "int". NULL where the run isn't one it reorders (a typedef's, a
 // complex's, a _BitInt's, or any keyword it doesn't know), which keeps the keywords as written.
@@ -496,8 +537,10 @@ static String8 check_semantic_number_literal(const Parser* parser, const CheckIn
     return text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
 }
 
-// A requirement's text as clang's StmtPrinter prints it, from `first` to `end`; with `input` and `stream`, its number
-// literals by value (check_semantic_number_literal), as a static assertion's are.
+// Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace, and its character
+// constants by their values (check_semantic_character); with `input` and `stream`, its number literals by value
+// (check_semantic_number_literal), as a static assertion's are. This is a bounded token pass, including macro expansions;
+// it never walks the expression recursively.
 static const char* check_semantic_requirement_printed(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, uint32_t first,
                                                       uint32_t end, Arena* scratch)
 {
@@ -509,6 +552,8 @@ static const char* check_semantic_requirement_printed(const Parser* parser, Prep
     {
         const String8 literal = check_semantic_number_literal(parser, input, stream, first + i, scratch);
         parts[i] = literal.length != 0 ? literal : check_semantic_token(parser, pp, first + i, scratch);
+        // A character constant by its value, as clang prints it (#1999).
+        parts[i] = parts[i].length != 0 && parser->tokens.kinds[first + i] == PARSE_KIND_CHARACTER ? check_semantic_character(pp, parts[i], scratch) : parts[i];
         valid = parts[i].length != 0 && parts[i].length < UINT64_MAX - length - 1;
         length += valid ? parts[i].length + 1 : 0;
     }
