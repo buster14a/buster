@@ -2191,8 +2191,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
                               "initializer native code stays bounded independently of payload size");
-            // (A unit's __builtin_dump_struct strings are pools too, which no memcpy reads.)
-            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0)
+            // (A unit's __builtin_dump_struct strings and __builtin_clear_padding tables are pools too, which no memcpy reads.)
+            bool tables = false;
+            for (uint32_t k = 0; k < code.lowered.initializers.padding_count; k += 1)
+            {
+                tables |= code.lowered.initializers.paddings[k].pool != BUSTER_CHECK_NONE;
+            }
+            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0 && !tables)
             {
                 const uint64_t access_mark = scratch.length;
                 uint8_t* defined = NULL;
@@ -5636,6 +5641,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){static __auto_type bp=(P){3,4L};__auto_type lp=(P){n,7L};bp.x+=n;"
             "return auto_sp.x+(int)auto_sp.y*3+auto_gp.x*5+(int)auto_gp.y*7+bp.x*11+(int)bp.y*13+lp.x*17+(int)lp.y*19;}",
             "auto-type-static-structures", clang);
+        // A variably modified deduction (#1844): a pointer to a variable-length array, whose sizes the array's declaration
+        // evaluated once; and redeclarations of variables with linkage,
+        // which take the earlier declarations' types (a long, a pointer's, a typedef's) rather than deduce theirs.
+        check_test_program_source(test,
+            "typedef unsigned short U;extern long merged_l;__auto_type merged_l=1;extern int*merged_p;__auto_type*merged_p=0;"
+            "extern U merged_u;__auto_type merged_u=700;"
+            "int tested(int n){int k=(n&3)+2;int vla[k];for(int i=0;i<k;i++)vla[i]=i*n;__auto_type p=&vla;int m=k;"
+            "__auto_type q=p+0;m++;extern long merged_l;"
+            "return (int)sizeof(*p)*3+(*p)[1]+(int)sizeof(*q)*5+m*7+(int)sizeof(merged_l)*11+(int)merged_l+(merged_p==0)*13+"
+            "(int)sizeof(merged_u)*17+merged_u;}",
+            "auto-type-variably-modified-merged", clang);
         {
             char source[4096];
             uint32_t length = 0;

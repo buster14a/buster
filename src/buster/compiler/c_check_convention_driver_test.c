@@ -530,6 +530,10 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "long ocl(long a, long b);\n"
         "long ocl_calls(long a, long b);\n"
         "double ocl_double(double a, double b);\n"
+        "long most_every(long a, long b);\n"
+        "long all_every(long a, long b);\n"
+        "long ocl_every(long a, long b);\n"
+        "double ocl_every_double(double a, double b);\n"
         "extern int depth_seen;\n"
         "int main(void)\n"
         "{\n"
@@ -573,6 +577,11 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    bad |= check(\"ocl\", (void*)ocl, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 40, 2, &r) || r != 42;\n"
         "    bad |= check(\"ocl_calls\", (void*)ocl_calls, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 40, 2, &r) || r != 126;\n"
         "    bad |= check(\"ocl_double\", (void*)ocl_double, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 1, 2, &r) || ocl_double(2.0, 3.0) != 7.0;\n"
+        "    // no_caller_saved_registers beside another convention (#1447): every register, the convention's arguments.\n"
+        "    bad |= check(\"most_every\", (void*)most_every, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 126;\n"
+        "    bad |= check(\"all_every\", (void*)all_every, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 42;\n"
+        "    bad |= check(\"ocl_every\", (void*)ocl_every, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 126;\n"
+        "    bad |= ocl_every_double(2.0, 3.0) != 7.0 || most_every(1, 2) != 9;\n"
         "    Pair p = most_pair(5, 3);\n"
         "    bad |= p.a != 8 || p.b != 2 || all_double(2.0, 3.0) != 7.0;\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
@@ -610,7 +619,12 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "__attribute__((cdecl, no_caller_saved_registers)) long every_cdecl(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return a + b; }\n"
         "__attribute__((intel_ocl_bicc)) long ocl(long a, long b) { double x = (double)a * 0.5; return (long)(x * 2) + b; }\n"
         "__attribute__((intel_ocl_bicc)) long ocl_calls(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f %ld\", 1.5, a); return helper(a, b); }\n"
-        "__attribute__((intel_ocl_bicc)) double ocl_double(double a, double b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", a); return a * b + 1.0; }\n";
+        "__attribute__((intel_ocl_bicc)) double ocl_double(double a, double b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", a); return a * b + 1.0; }\n"
+        "__attribute__((preserve_most, no_caller_saved_registers)) long most_every(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return helper(a, b); }\n"
+        "__attribute__((no_caller_saved_registers)) long all_every(long a, long b) __attribute__((preserve_all));\n"
+        "long all_every(long a, long b) { double x = (double)a * 0.5; return (long)(x * 2) + b; }\n"
+        "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long ocl_every(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f %ld\", 1.5, a); return helper(a, b); }\n"
+        "__attribute__((no_caller_saved_registers, intel_ocl_bicc)) double ocl_every_double(double a, double b) { return a * b + 1.0; }\n";
     static const struct
     {
         const char* name;
@@ -777,6 +791,8 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "void handler_overflow_error(void*, unsigned long, ...);\n"
         "void handler_overflow_aligned(void*, ...);\n"
         "void handler_overflow_aligned_error(void*, unsigned long, ...);\n"
+        "void handler_most(void*);\n"
+        "void handler_all(void*);\n"
         "static int raise_one(const char* what, void* fn, int error, int expected)\n"
         "{\n"
         "    State s;\n"
@@ -820,6 +836,8 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "    bad |= raise_one(\"handler_overflow_error\", (void*)handler_overflow_error, 1, 127);\n"
         "    bad |= raise_one(\"handler_overflow_aligned\", (void*)handler_overflow_aligned, 0, 127);\n"
         "    bad |= raise_one(\"handler_overflow_aligned_error\", (void*)handler_overflow_aligned_error, 1, 127);\n"
+        "    bad |= raise_one(\"handler_most\", (void*)handler_most, 0, 5);\n"
+        "    bad |= raise_one(\"handler_all\", (void*)handler_all, 0, 5);\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
         "    return bad;\n"
         "}\n";
@@ -833,6 +851,10 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "__attribute__((interrupt)) void handler(Frame* f) { record(f, 0); }\n"
         "__attribute__((interrupt)) void handler_error(Frame* f, unsigned long e) { record(f, e); }\n"
         "__attribute__((interrupt)) void handler_calls(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
+        // preserve_most and preserve_all beside interrupt (#2014's review): clang's interrupt takes x86_intrcc whatever the
+        // convention, which keeps every register, r11 too, through the calls that clobber it.
+        "__attribute__((interrupt, preserve_most)) void handler_most(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
+        "__attribute__((interrupt, preserve_all)) void handler_all(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
         "__attribute__((interrupt)) void handler_aligned(Frame* f) { record(f, 0); _Alignas(64) char x[64]; __builtin_memset(x, 3, 64); seen.rip = (uint64_t)x[63]; }\n"
         "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n"
         // A variadic handler's list starts at the interrupted code's rdi, rsi and xmm0 (#1447), as LLVM's x86_intrcc has it.

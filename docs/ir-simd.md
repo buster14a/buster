@@ -574,6 +574,96 @@ The tests:
   now the IR's. It has 65 rows and 32 moves (main: 75 and 39), 51 and 26 with
   the selects, and its native hashes are clang -O0's by both paths.
 
+## Permutes (#1840)
+
+Four more kinds of `intrinsic` move lanes of two vectors of the result's type,
+their immediate in `flags`:
+
+```text
+%4 = intrinsic.v16i32 %3, %2 permute 0
+%7 = intrinsic.v4i32 %1, %2 shuffle
+%8 = intrinsic.v16i32 %3, %6 align 47
+%11 = intrinsic.v16i32 %8, %6 shuffle_lanes 228
+```
+
+- `permute`: lane i is a's lane that b's lane i's low bits name, modulo the
+  lanes; its lanes are `1 << flags` bytes (0 to 3). These are `vpermb` to
+  `vpermq`, the variable permutes.
+- `shuffle`: byte i is 0 where b's byte i has its top bit set, and else a's byte,
+  within the same 16 bytes, that the low 4 bits of b's byte i name (`vpshufb`;
+  flags 0).
+- `align`: lane i is lane i + count of b's lanes followed by a's. Its lanes are
+  `1 << (flags >> 4)` bytes (4 or 8), and its count is flags' low 4 bits, below
+  the lanes (`valignd`, `valignq`).
+- `shuffle_lanes`: each 16-byte lane j comes from a for the result's low half
+  and from b for its high half: the lane that flags' bits from j times log2(the
+  lanes) name. A 32-byte vector takes 2 bits of flags and a 64-byte one any
+  byte (`vshufi64x2`, and `vshufi32x4`'s same lanes); a 16-byte one has none.
+
+`ir_permute_flags_valid` is the verifier's rule. The model's
+`IR_SIMD_PERMUTE` to `IR_SIMD_SHUFFLE_LANES` moves each byte, and the
+interpreter, SCCP, GVN and LICM take them as they take the width changes.
+
+`ir_simd_typed_permute` decodes the rows of one record of these forms at the
+result's width, of two vectors of that width:
+
+- the variable permutes, their indices in VECTOR(1) (vvvv) and their lanes in
+  VECTOR(0) (rm), as the front end swaps the builtins' arguments;
+- `vpshufb` of VECTOR(0) by VECTOR(1);
+- `valign*` and `vshufi*` of VECTOR(0) and VECTOR(1) by the immediate. An
+  align's count is the immediate's bits below the lanes, and a 32-byte shuffle
+  of lanes uses its low 2 bits: the bits the instruction reads, though the front
+  end passes the builtin's whole byte.
+
+The destination is VECTOR(0). The target needs the form's features (BW for
+words and `vpshufb`, VBMI for `vpermb`) and the vectors' moves.
+
+Tier 1 selects each as its form at the same width (`BUSTER_TIER1_VECTOR_PERMUTE`,
+`tier1_select_permute_form`), `vshufi64x2` for both shuffles of lanes. Its 19
+register forms, every one but `vpermb`'s 64-byte form, have new Zen 5 rows
+measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09),
+buster-performance#354): 2 per cycle, and a latency of 2 cycles at 16 bytes,
+3 to 4 at 32 and 5 at 64 (2 at every width for `vpshufb`). A permute of a width with no form (a doubleword's or a
+quadword's of 16 bytes, a quadword's of 32) gets no candidate, though no row
+makes one.
+
+Measured by `--tier1 --tier1-report -march=znver5` on main `cb608c1`'s sources,
+with the width changes too:
+
+| Unit | Rows | Records | Row moves |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 990 | 575,941 | 693 |
+| `main_unit_backend.c` | 1,510 | 1,490,520 | 926 |
+
+That is 121 and 133 rows fewer than the width changes alone (1,111 and 1,643),
+with the same records and moves around the rows: each of these rows was one
+record that took no move.
+
+The three-operand permutes (`vpermt2*`, which `__builtin_shufflevector`'s rows
+use too) wait on the owner's decision on #1840.
+
+The tests:
+
+- `test-ir`: both verifiers take each kind at each width and every flags byte
+  exactly where the rule, written out again, admits it (317 forms). They refuse
+  operands of another type and a missing b. The model's bytes are checked
+  against a byte formula on random vectors.
+- `test-ir-parse`: round-trips the forms.
+- `test-ir-optimize`: SCCP folds each kind, by both paths alike, to the
+  interpreter's value.
+- `test-ir-simd`: decodes every rule of these forms (vpermb, vpermw at 3 widths,
+  vpermd at 2 and vpermq at 1; vpshufb at 3; the aligns at 3 and the shuffles of
+  lanes at 2, at 8 immediates: 92 rows) to its kind and flags, written out, at
+  exactly its features. Each row stays a machine row without each feature it
+  needs and under 8 changes.
+- `test-tier1-masks`: runs 89 programs, every row but vpermb's (the
+  pipeline's x86-64-v4 has no VBMI), each as a program's only row, through both
+  lowering paths, the interpreter at every stage and Tier 1's native code. They
+  are checked against a C model written from Intel's manual.
+- `test-checker-driver`'s machine-rows unit: its `permutexvar` and
+  `shuffle_epi8` are now the IR's, leaving 61 rows and 32 moves.
+
 ## Lanes: the vectors' element types (#141)
 
 The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`

@@ -807,6 +807,16 @@ static void check_common_report_discarded(const Parser* parser, Preprocessor* pp
     check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, id, false, message, notes, note_count, scratch);
 }
 
+// check_common_report_discarded for a diagnostic whose highlighted range spans more than one token, a call's, which shows a
+// macro's argument's own "expanded from macro" note (Preprocessor.diagnostic_spans).
+static void check_common_report_spanning(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
+                                         const char* message, Arena* scratch)
+{
+    pp->diagnostic_spans = true;
+    check_common_report_discarded(parser, pp, input, token, id, message, NULL, 0, scratch);
+    pp->diagnostic_spans = false;
+}
+
 // A closer's opener is the token whose parent it is; the closer's own parent is the enclosing construct.
 static uint32_t check_common_cast_opener(const Parser* parser, uint32_t closer)
 {
@@ -3723,11 +3733,16 @@ static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStre
         const CheckInputEnumDefinition* nearest = low != 0 ? input->enum_definitions + low - 1 : NULL;
         const bool held = nearest != NULL && declaration < nearest->close;
         result = held && token > nearest->close ? nearest->type : result;
+        // An inner definition can have closed before the enumerator of an outer definition.
+        // Reduce initialized indices, not TypeId payloads from inactive vector lanes (Clang 23 MSan).
+        uint32_t selected = 0;
         for (uint32_t i = 0; !held && i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
-            result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
+            const uint32_t candidate = definition->open < declaration && declaration < definition->close && token > definition->close ? i + 1 : 0;
+            selected = candidate > selected ? candidate : selected;
         }
+        result = selected != 0 ? input->enum_definitions[selected - 1].type : result;
     }
     return result;
 }
@@ -4542,7 +4557,13 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const bool out_of_range = (changed.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0;
             const __int128 target_integer = check_common_integer_value(&changed, width, is_signed);
             const long double target_float = is_signed ? (long double)target_integer : (long double)changed.integer;
-            if (out_of_range || value->floating != target_float)
+            // A __float128's value is its bits' (c_check_quad.c), which its mirror may round. A -0 changes too, as
+            // clang takes its sign (its mirror's is the bits').
+            const bool quad = type_unqualified(type_strip_aligned(types, value->type)) == BUSTER_TYPE_FLOAT128;
+            const bool negative_zero = value->floating == 0 && signbit(value->floating) != 0;
+            const bool different = negative_zero || (quad ? check_common_quad_changed(value->integer, target_integer, changed.integer, is_signed) :
+                                                            value->floating != target_float);
+            if (out_of_range || different)
             {
                 const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
                 const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(target), 0);
@@ -4559,7 +4580,14 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                           source_type == BUSTER_TYPE_FLOAT ? 24 : source_type == BUSTER_TYPE_DOUBLE ? 53 : source_type == BUSTER_TYPE_FLOAT128 ? 113 : 64;
                     char original[96];
                     char result[48];
-                    check_common_float_number(original, sizeof(original), value->floating, (bits * 59 + 195) / 196);
+                    if (source_type == BUSTER_TYPE_FLOAT128)
+                    {
+                        check_common_quad_number(original, sizeof(original), value->integer, (bits * 59 + 195) / 196);
+                    }
+                    else
+                    {
+                        check_common_float_number(original, sizeof(original), value->floating, (bits * 59 + 195) / 196);
+                    }
                     check_common_number(result, sizeof(result), target_integer);
                     const bool boolean = type_unqualified(type_strip_aligned(types, target)) == BUSTER_TYPE_BOOL;
                     const char* converted_text = boolean ? (changed.integer != 0 ? "true" : "false") : result;
@@ -8467,6 +8495,33 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
     }
 }
 
+// A GNU statement expression's statements are graph roots of their own, evaluated as roots are; clang's CFG holds them
+// where it holds the statement expression (#1447). So for -Wuninitialized, where its value, the node at its `)`, is not
+// evaluated (a sizeof's or an alignof's operand, a condition's arm left out), neither is any of its nodes, the run of
+// nodes just before its own whose tokens its parentheses hold, nested statement expressions' and array bounds' with
+// them (the warnings that read a context keep a bound's, constant-evaluated to clang). The reader's list of statement
+// expressions finds them, and each one left out clears its own nodes once. Scalar: it runs only in a unit with statement
+// expressions, with the uninitialized analysis enabled, and clears only the nodes of those in an unevaluated operand,
+// rare and few, one store a node, which a vector store would save little of; its loop over the statement expressions
+// costs a load and a test each. It isn't measured on the 9700X: no unit of the timed corpus reaches the clearing.
+static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated)
+{
+    const CheckGraph* graph = &input->graph;
+    for (uint32_t region = evaluated != NULL && input->token_nodes != NULL ? input->region_count : 0; region-- > 0;)
+    {
+        const uint32_t open = input->regions[region].opening;
+        const uint32_t close = input->regions[region].closing;
+        const uint32_t value = close < input->token_count && close < parser->tokens.count ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+        if (value < graph->count && graph->ops[value] == CHECK_OP_STATEMENT_VALUE && evaluated[value] == 0)
+        {
+            for (uint32_t node = value; node-- > 0 && graph->tokens[node] > open && graph->tokens[node] < close;)
+            {
+                evaluated[node] = 0;
+            }
+        }
+    }
+}
+
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
 // reads it) and its reach, then which nodes are evaluated. The scalar path makes them in one pass over the nodes in graph
 // order, so that its operands' and arguments' already hold; an operand that doesn't precede its node, which the graph's
@@ -8475,10 +8530,11 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
 // first ancestor that has it, whose ancestors all do; and takes the evaluated nodes by check_common_evaluated_tree. False
 // where scratch can't hold them. (Whether a discarded value warns is check_common_unused_of's, asked only of a discarded
 // one.)
-static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+static bool check_common_facts(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, const uint8_t* flushed, Arena* scratch,
                                CheckCommonFacts* facts)
 {
+    const CheckGraph* graph = &input->graph;
     const uint32_t count = graph->count;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
@@ -8807,7 +8863,15 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     const uint8_t* used_value = facts->used;
     uint8_t* parameters = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* statement_write = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    const uint8_t* evaluated = facts->evaluated;
+    // (In a unit with statement expressions, the analysis's own copy of the facts, without an unevaluated one's nodes:
+    // clang's CFG holds none of them, where the warnings that read a context keep a bound's.)
+    uint8_t* regional = input->region_count != 0 && facts->evaluated != NULL && graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (regional != NULL)
+    {
+        memcpy(regional, facts->evaluated, graph->count);
+        check_common_region_evaluation(input, parser, regional);
+    }
+    const uint8_t* evaluated = regional != NULL ? regional : input->region_count != 0 ? NULL : facts->evaluated;
     bool valid = count == 0 || (first_write != NULL && addressed != NULL && written != NULL && first_read != NULL && first_use_read != NULL &&
                                 parameters != NULL && statement_write != NULL &&
                                 (graph->count == 0 || (nonread != NULL && self_read != NULL && target != NULL && used_value != NULL && evaluated != NULL)));
@@ -9631,6 +9695,418 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// -Wtype-safety (#1447): clang's CheckArgumentWithTypeTag at each call of a function or a function pointer whose
+// declaration has argument_with_type_tag or pointer_with_type_tag rules (c_check_type_safety_input.c), in the order its
+// checkCall makes them, after the call's format warnings. clang is the external oracle of the behavior; no clang code is
+// incorporated.
+
+// clang's isLayoutCompatible of two types in C (SemaChecking's): the same type without qualifiers; two complete enumerations
+// of one underlying type; two structures whose members pair off in order, or two unions whose members each match another's
+// (the first unmatched one that does), members matching when their types are layout-compatible, they are both bit-fields of
+// one width or neither, and, a structure's, their largest alignment attributes are equal. The recursion of its members'
+// types is a stack of frames here: a frame waits on its pair of members' types (`child`) and goes on with the answer.
+#define BUSTER_CHECK_LAYOUT_DEPTH 64u
+
+typedef struct CheckCommonLayoutFrame CheckCommonLayoutFrame;
+struct CheckCommonLayoutFrame
+{
+    TypeId a;
+    TypeId b;
+    // The member of `a` the frame is at, and the member of `b` a union's tries.
+    uint32_t i;
+    uint32_t j;
+    // A union's members of `b` no member of `a` has matched yet, a bit each.
+    uint64_t unmatched;
+    bool started;
+};
+
+static TypeId check_common_layout_canonical(const TypeTable* types, TypeId type)
+{
+    return type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+}
+
+// Whether a frame's types are layout-compatible without their members' (*decided, and the answer), or how its members go
+// on: its members' first pair's alignment and bit-field widths checked, the frame set up.
+static bool check_common_layout_start(const TypeTable* types, CheckCommonLayoutFrame* frame, bool* decided)
+{
+    const TypeId a = check_common_layout_canonical(types, frame->a);
+    const TypeId b = check_common_layout_canonical(types, frame->b);
+    const uint8_t kind = a != 0 && b != 0 ? type_kind(types, a) : BUSTER_TYPE_KIND_NONE;
+    bool result = a != 0 && a == b;
+    *decided = true;
+    if (!result && kind != BUSTER_TYPE_KIND_NONE && kind == type_kind(types, b) && kind == BUSTER_TYPE_KIND_ENUM)
+    {
+        result = type_is_complete(types, a) && type_is_complete(types, b) && types->types.base[type_index(a)] == types->types.base[type_index(b)];
+    }
+    else if (!result && kind != BUSTER_TYPE_KIND_NONE && kind == type_kind(types, b) && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
+    {
+        const uint32_t a_tag = types->types.index[type_index(a)];
+        const uint32_t b_tag = types->types.index[type_index(b)];
+        const uint32_t a_count = types->tags.member_count[a_tag];
+        const uint32_t b_count = types->tags.member_count[b_tag];
+        // (An incomplete record has no members: clang compares their empty lists, as here.)
+        if (kind == BUSTER_TYPE_KIND_STRUCT)
+        {
+            result = a_count == b_count;
+            *decided = !result || a_count == 0;
+        }
+        else
+        {
+            // (Past 64 members of `b`, taken as compatible, so that no warning comes of it.)
+            const bool wide = b_count > 64;
+            *decided = wide || a_count == 0;
+            result = wide || b_count == 0;
+            frame->unmatched = wide ? 0 : b_count == 64 ? UINT64_MAX : ((uint64_t)1 << b_count) - 1;
+        }
+        frame->a = a;
+        frame->b = b;
+        frame->i = 0;
+        frame->j = 0;
+    }
+    frame->started = true;
+    return result;
+}
+
+static bool check_common_layout_compatible(const TypeTable* types, TypeId first, TypeId second)
+{
+    CheckCommonLayoutFrame stack[BUSTER_CHECK_LAYOUT_DEPTH];
+    uint32_t depth = 1;
+    stack[0] = (CheckCommonLayoutFrame){ .a = first, .b = second };
+    bool answer = false;
+    // Whether `answer` is a child's, which the top frame waits on.
+    bool returned = false;
+    while (depth != 0)
+    {
+        CheckCommonLayoutFrame* frame = &stack[depth - 1];
+        bool decided = false;
+        bool pushed = false;
+        if (!frame->started)
+        {
+            answer = check_common_layout_start(types, frame, &decided);
+        }
+        else
+        {
+            const bool is_struct = type_kind(types, frame->a) == BUSTER_TYPE_KIND_STRUCT;
+            const uint32_t a_tag = types->types.index[type_index(frame->a)];
+            const uint32_t b_tag = types->types.index[type_index(frame->b)];
+            const uint32_t a_begin = types->tags.member_begin[a_tag];
+            const uint32_t b_begin = types->tags.member_begin[b_tag];
+            const uint32_t a_count = types->tags.member_count[a_tag];
+            const uint32_t b_count = types->tags.member_count[b_tag];
+            if (returned && is_struct)
+            {
+                // A structure's pair answered: the next pair, or the answer.
+                decided = !answer;
+                frame->i += 1;
+            }
+            else if (returned)
+            {
+                // A union's member of `a` against `b`'s member j: matched, or the next of `b`'s.
+                frame->unmatched &= answer ? ~((uint64_t)1 << frame->j) : UINT64_MAX;
+                frame->i += answer ? 1u : 0u;
+                frame->j = answer ? 0u : frame->j + 1;
+            }
+            while (!decided && !pushed)
+            {
+                while (!is_struct && frame->j < b_count && ((frame->unmatched >> frame->j) & 1u) == 0)
+                {
+                    frame->j += 1;
+                }
+                const uint32_t candidate = is_struct ? frame->i : frame->j;
+                const uint32_t x = a_begin + frame->i;
+                const uint32_t y = b_begin + candidate;
+                const bool ended = frame->i == a_count;
+                const bool exhausted = !ended && candidate >= b_count;
+                const bool a_bits = !ended && !exhausted && (types->members.flags[x] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+                const bool b_bits = !ended && !exhausted && (types->members.flags[y] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+                const bool fits = !ended && !exhausted && a_bits == b_bits && (!a_bits || types->members.bit_width[x] == types->members.bit_width[y]) &&
+                                  (!is_struct || types->members.alignment_log2[x] == types->members.alignment_log2[y]);
+                if (ended || exhausted)
+                {
+                    // A structure's members all paired, a union's all matched (and none of `b`'s left over), or not.
+                    answer = ended && (is_struct || frame->unmatched == 0);
+                    decided = true;
+                }
+                else if (fits && depth < BUSTER_CHECK_LAYOUT_DEPTH)
+                {
+                    stack[depth] = (CheckCommonLayoutFrame){ .a = types->members.type[x], .b = types->members.type[y] };
+                    pushed = true;
+                }
+                else if (fits)
+                {
+                    // Past the stack's depth: taken as compatible, so that no warning comes of it.
+                    answer = true;
+                    decided = true;
+                }
+                else if (is_struct)
+                {
+                    answer = false;
+                    decided = true;
+                }
+                else
+                {
+                    frame->j += 1;
+                }
+            }
+        }
+        returned = false;
+        if (pushed)
+        {
+            depth += 1;
+        }
+        else if (decided)
+        {
+            depth -= 1;
+            returned = depth != 0;
+        }
+    }
+    return answer;
+}
+
+// clang's getExprLoc of an argument's expression `node` (#1447), the argument's tokens from `first` to `last`: a
+// parenthesized argument's `(`; else, through implicit conversions, a binary operator's operator, a member access's
+// member; else its first token (a conditional's too).
+static uint32_t check_common_type_safety_location(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t first, uint32_t last)
+{
+    uint32_t at = node;
+    while (at < graph->count && graph->ops[at] == CHECK_OP_CONVERT)
+    {
+        at = graph->operand0[at];
+    }
+    const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
+    const bool parenthesized = first < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == last;
+    const bool binary = (op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR) || op == CHECK_OP_ASSIGN || op == CHECK_OP_COMMA || op == CHECK_OP_MEMBER ||
+                        op == CHECK_OP_ARROW || (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    const uint32_t token = at < graph->count ? graph->tokens[at] : BUSTER_CHECK_NONE;
+    return !parenthesized && binary && token >= first && token <= last ? token : first;
+}
+
+// The first token of argument `index` (from 0) of the call whose `)` is `closing`: after the `(` or the index-th comma at
+// the arguments' level; or `closing` where there is none.
+static uint32_t check_common_type_safety_first(const Parser* parser, uint32_t closing, uint32_t index)
+{
+    uint32_t open = closing;
+    uint32_t depth = 0;
+    bool found = closing >= parser->tokens.count || parser->tokens.kinds[closing] != PARSE_KIND_R_PAREN;
+    while (!found && open > 0)
+    {
+        open -= 1;
+        const uint8_t kind = parser->tokens.kinds[open];
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        found = opener && depth == 0;
+        depth = closer ? depth + 1 : opener && depth != 0 ? depth - 1 : depth;
+    }
+    uint32_t result = found && open < closing ? open + 1 : closing;
+    uint32_t commas = 0;
+    depth = 0;
+    for (uint32_t t = result; found && commas < index && t < closing; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const bool comma = kind == PARSE_KIND_COMMA && depth == 0;
+        commas += comma ? 1u : 0u;
+        result = comma ? t + 1 : result;
+        depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+    }
+    return commas == index ? result : closing;
+}
+
+// The last token of the argument that starts at `first`: before the next comma at its level, or the call's `)`.
+static uint32_t check_common_type_safety_last(const Parser* parser, uint32_t first)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t t = first;
+    bool ended = false;
+    while (!ended && t < count)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const uint32_t next = opener && parser->tree.parents[t] > t && parser->tree.parents[t] < count ? parser->tree.parents[t] + 1 : t + 1;
+        const uint8_t after = next < count ? parser->tokens.kinds[next] : PARSE_KIND_R_PAREN;
+        ended = after == PARSE_KIND_COMMA || after == PARSE_KIND_R_PAREN || after == PARSE_KIND_R_SQUARE || after == PARSE_KIND_R_BRACE;
+        t = ended ? next - 1 : next;
+    }
+    return t < count ? t : count - 1;
+}
+
+// An argument's type as a call reads it, an array's or a function's decayed.
+static TypeId check_common_type_safety_decay(TypeTable* types, TypeId type)
+{
+    const TypeId bare = type != 0 ? type_strip_aligned(types, type) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, type_unqualified(bare)) : BUSTER_TYPE_KIND_NONE;
+    return type_kind_is_array(kind) ? type_pointer(types, type_element(types, type_unqualified(bare))) :
+           kind == BUSTER_TYPE_KIND_FUNCTION ? type_pointer(types, type_unqualified(bare)) : bare != 0 ? type_unqualified(bare) : 0;
+}
+
+static bool check_common_type_safety_void_pointer(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    return bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_unqualified(type_strip_aligned(types, type_element(types, bare)))) == BUSTER_TYPE_KIND_VOID;
+}
+
+// clang's IsSameCharType: plain char and the signed or unsigned char it is.
+static bool check_common_type_safety_same_char(const TypeTable* types, TypeId a, TypeId b)
+{
+    const TypeId x = a != 0 ? type_strip_aligned(types, a) : 0;
+    const TypeId y = b != 0 ? type_strip_aligned(types, b) : 0;
+    const TypeId same = types->char_unsigned ? BUSTER_TYPE_UCHAR : BUSTER_TYPE_SCHAR;
+    return (x == BUSTER_TYPE_CHAR && y == same) || (x == same && y == BUSTER_TYPE_CHAR);
+}
+
+// The tag a call's type tag argument `node` names (clang's FindTypeTagExpr and GetMatchingCType): through casts, & and *, a
+// comma's right operand and a conditional's arm its constant condition takes, a variable's first tag (its own or inherited)
+// or an integer literal's registered value before the call; *wrong where the variable's tag is of another kind than `kind`.
+static const CheckTypeTagDatatype* check_common_type_safety_tag(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                                uint32_t node, uint32_t kind, uint32_t call, bool* wrong)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckTypeTags* tags = input->type_tags;
+    uint32_t at = node;
+    bool searching = true;
+    for (uint32_t steps = 0; searching && at < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = graph->ops[at];
+        CheckValue condition = op == CHECK_OP_CONDITIONAL && graph->operand0[at] < graph->count ? check_stream_value(stream, graph->operand0[at]) : (CheckValue){ 0 };
+        bool truth = false;
+        const bool constant = op == CHECK_OP_CONDITIONAL && condition.constant_kind != CHECK_CONSTANT_NONE && check_action_truth(types, &condition, &truth);
+        searching = op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_COMMA || constant;
+        at = !searching ? at : op == CHECK_OP_COMMA ? graph->operand1[at] : !constant ? graph->operand0[at] : truth ? graph->operand1[at] : graph->operand2[at];
+    }
+    const uint32_t token = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? graph->tokens[at] : BUSTER_CHECK_NONE;
+    const uint8_t token_kind = token < parser->tokens.count ? parser->tokens.kinds[token] : PARSE_KIND_SEMI;
+    const uint32_t declaration = token_kind == PARSE_KIND_IDENTIFIER && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const CheckTypeTagDeclaration* entry = declaration != BUSTER_CHECK_NONE ? check_type_tags_declaration(tags, declaration) : NULL;
+    const CheckTypeTagDatatype* named = entry != NULL && entry->datatype_count != 0 ? tags->datatypes + entry->datatype_first : NULL;
+    const bool literal = token_kind == PARSE_KIND_NUMBER && check_common_integer_constant(stream, at);
+    const CheckValue value = literal ? check_stream_value(stream, at) : (CheckValue){ 0 };
+    *wrong = named != NULL && named->kind != kind;
+    return named != NULL ? (*wrong ? NULL : named) : literal && (value.integer >> 64) == 0 ? check_type_tags_magic(tags, kind, (uint64_t)value.integer, call) : NULL;
+}
+
+static void check_common_type_safety(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+                                     CheckWarningSpelling* spell, Arena* scratch)
+{
+    const CheckTypeTags* tags = input->type_tags;
+    const CheckGraph* graph = &input->graph;
+    if (tags == NULL || tags->declaration_count == 0 || !check_common_enabled(pp, input, CHECK_WARNING_ID_TYPE_SAFETY, false))
+    {
+        return;
+    }
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const CheckOp calls[] = { CHECK_OP_CALL };
+    const CheckCommonOps set = check_common_ops(calls, BUSTER_ARRAY_LENGTH(calls));
+    CheckCommonScan scan = { 0 };
+    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        if (graph->ops[node] != CHECK_OP_CALL || stream->diagnostics[node] != CHECK_DIAG_NONE)
+        {
+            continue;
+        }
+        // A function's or a function pointer's name, through its conversions (clang's NamedDecl of the callee).
+        uint32_t callee = graph->operand0[node];
+        while (callee < graph->count && graph->ops[callee] == CHECK_OP_CONVERT)
+        {
+            callee = graph->operand0[callee];
+        }
+        const uint32_t token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = token < parser->tokens.count && token < input->token_count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
+                                     input->declarations[token] : BUSTER_CHECK_NONE;
+        const CheckTypeTagDeclaration* entry = declaration != BUSTER_CHECK_NONE ? check_type_tags_declaration(tags, declaration) : NULL;
+        const uint32_t offset = graph->argument_offsets[node];
+        const uint32_t count = graph->argument_counts[node];
+        const uint32_t closing = graph->tokens[node];
+        for (uint32_t r = 0; entry != NULL && r < entry->rule_count && offset <= graph->argument_count && count <= graph->argument_count - offset; r += 1)
+        {
+            const CheckTypeTagRule rule = tags->rules[entry->rule_first + r];
+            const uint32_t tag_node = rule.tag - 1 < count ? graph->argument_nodes[offset + rule.tag - 1] : BUSTER_CHECK_NONE;
+            const uint32_t argument_node = rule.argument - 1 < count ? graph->argument_nodes[offset + rule.argument - 1] : BUSTER_CHECK_NONE;
+            if (tag_node >= graph->count || argument_node >= graph->count)
+            {
+                continue;
+            }
+            bool wrong = false;
+            const CheckTypeTagDatatype* datatype = check_common_type_safety_tag(parser, input, stream, types, tag_node, rule.kind, closing, &wrong);
+            const uint32_t tag_first = check_common_type_safety_first(parser, closing, rule.tag - 1);
+            if (wrong)
+            {
+                const uint32_t at = check_common_type_safety_location(parser, graph, tag_node, tag_first, check_common_type_safety_last(parser, tag_first));
+                check_common_report_at(parser, pp, input, at, closing, CHECK_WARNING_ID_TYPE_SAFETY, false, "this type tag was not designed to be used with this function",
+                                       NULL, 0, scratch);
+                continue;
+            }
+            if (datatype == NULL)
+            {
+                continue;
+            }
+            // The argument as clang reads it: its conversion's type, but a pointer's conversion to void * (a bit cast), whose
+            // pointer a pointer_with_type_tag reads.
+            const TypeId source = check_stream_type(stream, argument_node);
+            const TypeId decayed = check_common_type_safety_decay(types, source);
+            const CheckConversion conversion = stream->argument_conversions != NULL ? stream->argument_conversions[offset + rule.argument - 1] : (CheckConversion){ 0 };
+            const TypeId converted = conversion.type != 0 ? type_unqualified(type_strip_aligned(types, conversion.type)) : decayed;
+            const CheckValue value = check_stream_value(stream, argument_node);
+            const bool null = check_action_null(types, &value, 0);
+            const bool stripped = rule.pointer && check_common_type_safety_void_pointer(types, converted) && decayed != 0 &&
+                                  type_kind(types, decayed) == BUSTER_TYPE_KIND_POINTER && decayed != converted && !null;
+            const TypeId argument = stripped ? decayed : converted;
+            if (argument == 0 || (rule.pointer && check_common_type_safety_void_pointer(types, argument)))
+            {
+                continue;
+            }
+            const uint32_t argument_first = check_common_type_safety_first(parser, closing, rule.argument - 1);
+            const uint32_t at = check_common_type_safety_location(parser, graph, argument_node, argument_first, check_common_type_safety_last(parser, argument_first));
+            const String8 kind = { .pointer = (char*)intern_bytes(pp->table, rule.kind), .length = intern_length(pp->table, rule.kind) };
+            if ((datatype->flags & BUSTER_CHECK_TYPE_TAG_NULL) != 0)
+            {
+                if (stripped || !null)
+                {
+                    const char* message = check_warning_text(scratch, "specified %.*s type tag requires a null pointer", (int)kind.length, kind.pointer);
+                    if (message != NULL)
+                    {
+                        check_common_report_at(parser, pp, input, at, closing, CHECK_WARNING_ID_TYPE_SAFETY, false, message, NULL, 0, scratch);
+                    }
+                }
+                continue;
+            }
+            const TypeId required = rule.pointer ? type_pointer(types, datatype->type) : datatype->type;
+            const bool layout = (datatype->flags & BUSTER_CHECK_TYPE_TAG_LAYOUT) != 0;
+            bool mismatch = false;
+            if (!layout)
+            {
+                mismatch = required == 0 || type_strip_aligned(types, argument) != type_strip_aligned(types, required);
+                const TypeId argument_char = rule.pointer ? type_element(types, type_strip_aligned(types, argument)) : argument;
+                const TypeId required_char = rule.pointer && required != 0 ? type_element(types, type_strip_aligned(types, required)) : required;
+                mismatch &= !check_common_type_safety_same_char(types, argument_char, required_char);
+            }
+            else
+            {
+                mismatch = !check_common_layout_compatible(types, rule.pointer ? type_element(types, type_strip_aligned(types, argument)) : argument,
+                                                           rule.pointer ? type_element(types, type_strip_aligned(types, required)) : required);
+            }
+            if (mismatch)
+            {
+                // The argument's type as written where it is the argument's own (its spelling's typedef), its conversion's
+                // canonical one otherwise; the tag's as its attribute names it.
+                const TypeId shown = stripped || conversion.type == 0 ? source : argument;
+                const uint32_t spelling = shown == source ? check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+                const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, shown, spelling);
+                const String8 wanted = layout ? (String8){ "", 0 } : check_common_type_text(parser, pp, input, types, spell, scratch, required, datatype->spelling);
+                const char* message = layout ? check_warning_text(scratch, "argument type %.*s doesn't match specified '%.*s' type tag ", (int)actual.length, actual.pointer,
+                                                                  (int)kind.length, kind.pointer) :
+                                               check_warning_text(scratch, "argument type %.*s doesn't match specified '%.*s' type tag that requires %.*s", (int)actual.length,
+                                                                  actual.pointer, (int)kind.length, kind.pointer, (int)wanted.length, wanted.pointer);
+                if (message != NULL && actual.length != 0 && (layout || wanted.length != 0))
+                {
+                    check_common_report_at(parser, pp, input, at, closing, CHECK_WARNING_ID_TYPE_SAFETY, false, message, NULL, 0, scratch);
+                }
+            }
+        }
+    }
+}
+
 // `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
 // without one.
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -9662,7 +10138,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, flushed, scratch, &facts))
+    if (!check_common_facts(input, stream, types, parser, program, &enabled, flushed, scratch, &facts))
     {
         check_common_exhausted(pp);
     }
@@ -9678,6 +10154,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
     }
     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
+    check_common_type_safety(parser, pp, input, stream, types, &spell, scratch);
     arena_pop_to(scratch, mark);
     check_common_contexts = (CheckCommonContexts){ 0 };
 }

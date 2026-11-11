@@ -311,20 +311,12 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
             const uint32_t object = input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) ? input->objects[token] : 0;
             const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
-            const bool defines = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || (!function && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE));
             for (uint32_t i = object != 0 ? check_program_alias_lower(by_target, group_count, object) : group_count;
                  i < group_count && (uint32_t)(by_target[i] >> 32) == object; i += 1)
             {
                 const uint32_t group = (uint32_t)by_target[i];
                 definitions[group] = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) && definitions[group] == BUSTER_CHECK_NONE ? token : definitions[group];
                 tentatives[group] = !function && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) && tentatives[group] == BUSTER_CHECK_NONE ? token : tentatives[group];
-            }
-            // An alias's or ifunc's own object that the unit also defines: a variable's tentative definition after the
-            // alias, which clang takes as the alias's (Sema refuses the others).
-            const uint32_t entry = defines && object != 0 ? check_program_alias_of(aliases, count, object) : 0;
-            if (entry != 0 && aliases[entry - 1].kind != CHECK_PROGRAM_WEAKREF)
-            {
-                aliases[entry - 1].error = CHECK_PROGRAM_ALIAS_DEFINED;
             }
         }
     }
@@ -415,7 +407,8 @@ static bool check_program_alias_chains(CheckProgram* program, CheckProgramAlias*
                 // An aliased ifunc's base is its resolver, with its error: its errors are its own, which a valid alias of
                 // it doesn't repeat (clang's aliasee is the ifunc, which is defined).
                 const CheckProgramAlias* aliased = ifunc ? aliases + entry - 1 : NULL;
-                const bool based = alias->error == CHECK_PROGRAM_ALIAS_OK && (aliased == NULL || aliased->error == CHECK_PROGRAM_ALIAS_OK);
+                const bool based = (alias->error == CHECK_PROGRAM_ALIAS_OK || alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL) &&
+                                   (aliased == NULL || aliased->error == CHECK_PROGRAM_ALIAS_OK);
                 alias->base = !based ? 0 : aliased != NULL ? aliased->base : aliasee;
                 alias->type = kind == CHECK_PROGRAM_IFUNC || ifunc ? BUSTER_LINK_SYMBOL_IFUNC :
                               function ? BUSTER_LINK_SYMBOL_FUNCTION :

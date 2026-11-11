@@ -123,6 +123,14 @@ static const char asm_test_segmented_movq[] =
     "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
     "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
 
+// MMX's registers in both syntaxes and either case (#1846): movq's and movd's forms, the load's and the store's, and the
+// MMX instructions the target table already had (emms, pxor, paddd).
+static const char asm_test_mmx[] =
+    "mmx:\n"
+    "movq %mm0,%rax\nmovq %rax,%mm1\nmovq (%rdi),%mm2\nmovq %mm3,(%rdi)\nmovq %mm4,%mm5\nmovd %mm0,%eax\nmovd (%rsi),%mm6\n"
+    "movd %mm7,4(%rsp)\nmovd %r9d,%mm3\nmovq %r10,%mm7\nmovq %MM2,%rcx\nemms\npxor %mm1,%mm1\npaddd (%rax),%mm2\n"
+    ".intel_syntax noprefix\nmovq mm1, rax\nmovq qword ptr [rdi+8], mm3\nmovq mm5, mm4\n.att_syntax prefix\n";
+
 static const char asm_test_rep_scans[] =
     ".text\nscans:\n"
     "rep bsfw %cx,%ax\nrepz bsfl %ecx,%eax\nrep; bsfq %r9,%r8\n"
@@ -966,18 +974,27 @@ static void asm_test_code(AsmTest* test)
                              "movsl\nlodsq\npushfq\npopfq\ncld",
                        20, "inline code: naked functions' instructions");
     asm_test_code_pair(test, asm_test_segmented_movq, 8, "inline code: segmented movq encoding choice");
+    // MMX's registers (#1846): movq and movd to and from general registers, memory and each other, by both paths.
+    const AsmCode mmx = asm_test_code_pair(test, asm_test_mmx, 17, "inline code: MMX's moves");
+    asm_test_check(test, mmx.count == 17 && (mmx.records[2].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_MM_M64 &&
+                         (mmx.records[3].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_M64_MM && (mmx.records[4].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_MM_MM &&
+                         mmx.records[4].reg == 5 && mmx.records[4].rm == 4,
+                   "inline code: MMX's movq takes GNU as's forms", 0);
     // musl's templates (#147): its atomics' lock prefixes, as statements of their own (past a semicolon and a line) and
     // on the instruction's line, the exchanges, the bit scans, hlt and the thread pointer's load; its math's SSE
     // instructions, FMA3's and the x87's, fnstsw into %ax and fistpll among them. Each locked instruction is a record of
-    // its prefixed form.
+    // its prefixed form, `lock xchg`'s too (#1846), whose prefix GNU as and clang keep though XCHG to memory is locked.
     const AsmCode atomics = asm_test_code_pair(test, "lock ; cmpxchg %ecx, (%rdx)\nlock cmpxchgq %rcx, 8(%rdx)\nxchg %eax, (%rdx)\nlock ; xadd %eax, (%rdx)\n"
                                                       "lock ; and %eax, (%rdx)\nlock ; or %rax, (%rdx)\nlock\n\n\tincl (%rdx)\nlock ; decl (%rdx)\n"
-                                                      "movl %eax, (%rdx) ; lock ; orl $0,(%rsp)\nbsf %rax,%rcx\nbsr %rax,%rcx ; xor $63,%rcx\nhlt\nmov %fs:0,%rax",
-                                               15, "inline code: musl's atomics");
-    asm_test_check(test, atomics.count == 15 && (atomics.records[0].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_CMPXCHG_M32_R32 &&
+                                                      "movl %eax, (%rdx) ; lock ; orl $0,(%rsp)\nbsf %rax,%rcx\nbsr %rax,%rcx ; xor $63,%rcx\nhlt\nmov %fs:0,%rax\n"
+                                                      "lock xchg %eax, (%rdx)\nlock ; xchgq %rcx, 8(%rdx)",
+                                               17, "inline code: musl's atomics");
+    asm_test_check(test, atomics.count == 17 && (atomics.records[0].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_CMPXCHG_M32_R32 &&
                          (atomics.records[1].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_CMPXCHG_M64_R64 &&
                          (atomics.records[6].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_INC_M32 &&
-                         (atomics.records[9].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_OR_M32_IMM8,
+                         (atomics.records[9].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_OR_M32_IMM8 &&
+                         (atomics.records[15].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_XCHG_M32_R32 &&
+                         (atomics.records[16].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_XCHG_M64_R64,
                    "inline code: lock prefixes make the locked forms", 0);
     asm_test_code_pair(test, "sqrtsd %xmm1, %xmm0\nsqrtss %xmm1, %xmm0\ncvtsd2si %xmm0, %rax\ncvtss2si %xmm0, %eax\nvfmadd132sd %xmm1, %xmm2, %xmm0\n"
                              "vfmadd132ss %xmm1, %xmm2, %xmm0\npcmpeqd %xmm0, %xmm0\npsrlq $1, %xmm0\npsrld $1, %xmm0\nandps %xmm1, %xmm0\n"
@@ -1787,6 +1804,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "vmovdqa64 zmm1,zmmword ptr [rax]\nvmovdqa64 zmmword ptr [rsp],zmm2\nvmovdqu64 zmm3,zmm4\npush qword ptr [rdi+128]\n"
                                        "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, asm_test_segmented_movq, directory, 0);
+                asm_test_oracle(&test, asm_test_mmx, directory, 0);
                 asm_test_oracle(&test, asm_test_kmov, directory, X86_ARCH_V4);
                 // And musl's (#147): the lock prefix on the instruction's line and as a statement of its own, past a
                 // semicolon and a line (but before a 16-bit instruction, whose 66 GNU as then writes after the lock it
@@ -1799,6 +1817,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "lock ; addl $1,(%rdx)\nlock ; subq $-128,(%rdx)\nlock adcw $300,(%rdx)\nlock ; sbbb $1,(%rdx)\nlock ; xorl %esi,(%rdi)\n"
                                        "lock\nincl (%rdx)\nlock ; decq (%rdx)\nlock notw (%rdx)\nlock ; negb (%rdx)\nlock ; andq $0xfffffffffffffff0,(%r9)\n"
                                        "movl %eax,(%rdx) ; lock ; orl $0,(%rsp)\ncmpxchg %ecx,%edx\nxadd %rax,(%rdi)\nxchg %eax,(%rdx)\n"
+                                       "lock xchg %eax,(%rdx)\nlock ; xchgq %rcx,8(%rdx)\nlock xchgw %cx,(%rdx)\nlock\nxchgb %al,(%r9)\n"
                                        "bsf %rax,%rcx\nbsr %rax,%rcx ; xor $63,%rcx\nbsfl (%rdi),%eax\nbsrw %dx,%si\nhlt\nmov %fs:0,%rax\n"
                                        "sqrtsd %xmm1,%xmm0\nsqrtss (%rax),%xmm9\ncvtsd2si %xmm0,%rax\ncvtsd2si %xmm2,%eax\ncvtss2si %xmm0,%rcx\ncvtss2si 4(%rsp),%r8d\n"
                                        "cvttsd2si %xmm3,%rdx\ncvttss2si %xmm4,%esi\nandps %xmm1,%xmm0\nandpd 16(%rax),%xmm2\nandnps %xmm3,%xmm4\nandnpd %xmm5,%xmm6\n"
@@ -1814,7 +1833,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "rep; bsrq %rcx,%rax\nrep; bsrl %ecx,%eax\nrep bsfq (%rdi),%rdx\nrep\nbsf %r8,%r9\nrepz bsr %rax,%rbx\nrepe bsfl %esi,%edi\n"
                                        "rep bsrw %cx,%ax\nlzcnt %rax,%rcx\ntzcntl %eax,%ecx\n"
                                        ".intel_syntax noprefix\nlock cmpxchg dword ptr [rdx],ecx\nlock\nxadd qword ptr [rdx],rax\nlock add dword ptr [rsp],0\n"
-                                       "lock inc word ptr [rdx]\nbsf rcx,rax\nbsr ecx,dword ptr [rdi]\nhlt\nsqrtsd xmm0,xmm1\ncvtsd2si rax,xmm0\nandps xmm0,xmm1\n"
+                                       "lock inc word ptr [rdx]\nlock xchg dword ptr [rdx],ecx\nbsf rcx,rax\nbsr ecx,dword ptr [rdi]\nhlt\nsqrtsd xmm0,xmm1\ncvtsd2si rax,xmm0\nandps xmm0,xmm1\n"
                                        "psrlq xmm0,1\nvfmadd132sd xmm0,xmm2,xmm1\nfnstsw ax\nfistp qword ptr [rax]\nfild word ptr [rax]\nfisttp dword ptr [rax]\nfsqrt\n"
                                        "rep; bsr rax,rcx\nrep bsf ecx,dword ptr [rdi]\nlzcnt rcx,rax\n",
                                 directory, X86_ARCH_V3);

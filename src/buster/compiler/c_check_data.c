@@ -153,9 +153,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(base) != CHECK_HALF_NONE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
-        // A __float128 object's bytes are zeros without an initializer (#137). The checker folds none of its arithmetic or
-        // conversions, so that one with such an initializer is refused below as not constant; the constant builtins'
-        // values are its constants (__builtin_inff128, __builtin_nanf128 and the others, #148).
+        // A __float128 object's bytes are zeros without an initializer (#137), or its constant's bits (#1250).
         quad = base == BUSTER_TYPE_FLOAT128;
         const uint64_t size = type_size(types, object->type);
         const uint32_t natural = type_alignment_log2(types, object->type);
@@ -272,7 +270,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                 }
                 else
                 {
-                    check_data_float_bytes(plan->bytes, base, value->floating);
+                    check_data_scalar_float_bytes(plan->bytes, base, value);
                 }
             }
             else if (complex && value->constant_kind == CHECK_CONSTANT_COMPLEX)

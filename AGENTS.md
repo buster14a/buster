@@ -29,7 +29,7 @@ license; do not select or change this repository's license on the owner's behalf
 ## Licensing and contributions
 
 Read [LICENSING.md](LICENSING.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-and [CONTRIBUTING.md](CONTRIBUTING.md) before importing or submitting material.
+and [CONTRIBUTING.md](CONTRIBUTING.md) before importing, submitting or merging material.
 Original contributions use `Apache-2.0 WITH LLVM-exception`; identified
 components and local changes to their portions follow their retained terms.
 Do not add the LLVM exception over Apache-only upstream material or label a
@@ -424,7 +424,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-checker-asm` — `c_check_program_asm.c` — [guide](docs/commands/checker-asm.md).
 - `test-checker-corpus` — `c_check_corpus.c` — [guide](docs/commands/checker-corpus.md).
 - `test-check-debug, benchmark-check-debug` — `c_check_debug.c` — [guide](docs/commands/check-debug.md).
-- `correctness.tests / CI selection` — `tools/ci/correctness.tests` — [guide](docs/commands/ci.md).
+- `correctness.tests, costs / CI selection` — `tools/ci/correctness.tests`, `tools/ci/costs.c` — [guide](docs/commands/ci.md).
 - `measure-compile, --time-stages` — `c_check_clock.c` — [guide](docs/commands/compile-time.md).
 - `test-c-testsuite, test-sqlite` — `c_testsuite.c`, `sqlite_test.c` — [guide](docs/commands/c-testsuite.md).
 - `dco status, audit, compose` — `tools/dco/dco.c` — [guide](docs/commands/dco.md).

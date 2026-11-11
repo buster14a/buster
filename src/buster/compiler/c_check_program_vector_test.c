@@ -645,21 +645,14 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-vector-element-update", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_gs*p){(*p)[2]++;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-load", "int tested(int __seg_fs*p){return __atomic_load_n(p,5);}",
+        // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
+        // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
+        // which take another plan, are refused.
+        { "segment-atomic-generic-load", "int tested(int __seg_fs*p,int*r){__atomic_load(p,r,5);return *r;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-store", "void tested(int __seg_gs*p){__atomic_store_n(p,3,5);}",
+        { "segment-atomic-generic-exchange", "int tested(int __seg_gs*p,int*v,int*o){__atomic_exchange(p,v,o,5);return *o;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-exchange", "int tested(int __seg_gs*p){return __atomic_exchange_n(p,3,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-compare-exchange", "_Bool tested(int __seg_gs*p,int*e){return __atomic_compare_exchange_n(p,e,1,0,5,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-fetch-add", "int tested(int __seg_fs*p){return __atomic_fetch_add(p,1,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-sync-fetch-add", "int tested(int __seg_gs*p){return __sync_fetch_and_add(p,1);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-c11-atomic-load", "int tested(_Atomic int __seg_fs*p){return __c11_atomic_load(p,5);}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-test-and-set", "_Bool tested(char __seg_fs*p){return __atomic_test_and_set(p,5);}",
+        { "segment-sync-lock-release", "void tested(int __seg_gs*p){__sync_lock_release(p);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-atomic-clear", "void tested(char __seg_gs*p){__atomic_clear(p,5);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -674,18 +667,10 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // bit-field, a complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field", "struct S{int a:3,b:5;};int tested(struct S __seg_gs*p){return p->b;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-store", "struct S{int a:3,b:5;};void tested(struct S __seg_gs*p){p->b=3;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-update", "struct S{int a:3,b:5;};void tested(struct S __seg_fs*p){p->b+=3;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-increment", "struct S{int a:3,b:5;};int tested(struct S __seg_fs*p){return p->b++;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -743,6 +728,36 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "if(syscall(158,0x1001,0UL)!=0)return -3;"
         "return (int)r+window[a-lo]+window[b-lo+8];}",
         "segment-gs-globals", clang);
+    // The atomic builtins a direct plan takes (#1059): loads and stores (a seq_cst store's xchg), lock xadd, xchg,
+    // lock cmpxchg, a bitwise or a minimum's loop of a LOAD and lock cmpxchg, __sync's, C11's, test-and-set's xchg.
+    check_test_program_source(test,
+        "static _Thread_local int ta=5;static _Thread_local long tb=100;static _Thread_local short tc=3;static _Thread_local char td;"
+        "static _Thread_local _Atomic int te=11;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();int __seg_fs*a=(int __seg_fs*)((char*)&ta-tp);"
+        "long __seg_fs*b=(long __seg_fs*)((char*)&tb-tp);short __seg_fs*c=(short __seg_fs*)((char*)&tc-tp);"
+        "char __seg_fs*d=(char __seg_fs*)((char*)&td-tp);_Atomic int __seg_fs*e=(_Atomic int __seg_fs*)((char*)&te-tp);"
+        "int r=__atomic_load_n(a,5);__atomic_store_n(a,r+n,5);__atomic_store_n(a,__atomic_load_n(a,0)+1,3);"
+        "r+=__atomic_fetch_add(a,3,5)+__atomic_sub_fetch(a,1,2)+__atomic_exchange_n(a,7,4);int x=7;"
+        "r+=__atomic_compare_exchange_n(a,&x,n,0,5,5)+x;x=-1;r+=__atomic_compare_exchange_n(a,&x,2,1,2,0)+x;"
+        "r+=(int)__atomic_fetch_or(b,n,5)+(int)__atomic_and_fetch(b,~1L,0)+(int)__atomic_fetch_xor(b,6,5)+(int)__atomic_fetch_nand(b,3,5);"
+        "r+=(int)__sync_fetch_and_sub(b,1)+(int)__sync_val_compare_and_swap(b,tb,9)+__sync_bool_compare_and_swap(b,9,n)+(int)__sync_lock_test_and_set(b,4);"
+        "r+=__atomic_fetch_max(c,(short)n,5)+__atomic_fetch_min(c,(short)-n,5)+__atomic_exchange_n(c,(short)(n*3),5);"
+        "r+=__atomic_test_and_set(d,5)+__atomic_test_and_set(d,5);"
+        "r+=__c11_atomic_load(e,5)+__c11_atomic_fetch_add(e,n,5);__c11_atomic_store(e,4,5);"
+        "return r+ta+(int)tb+tc+td+te;}",
+        "segment-atomics", clang);
+    // Bit-fields: their unit's pieces read and written through %fs (check_lower_bit_unit, check_lower_bit_store), a unit of
+    // 1, 2, 4 and 8 bytes and one of 3 bytes' pieces, signed and unsigned, by assignments, updates and increments.
+    check_test_program_source(test,
+        "struct B{unsigned a:3;int b:5;unsigned c:12;long d:33;unsigned char e:2;};"
+        "struct __attribute__((packed)) P{char x;unsigned y:20;};"
+        "static _Thread_local struct B tb={5,-3,100,-7,1};static _Thread_local struct P tp_={1,0x12345};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();struct B __seg_fs*b=(struct B __seg_fs*)((char*)&tb-tp);"
+        "struct P __seg_fs*p=(struct P __seg_fs*)((char*)&tp_-tp);"
+        "int r=b->a+b->b+b->c+(int)b->d+b->e+p->y;b->a=n;b->b+=n;b->c++;--b->d;b->e=b->a;r+=b->b++;"
+        "p->y^=n*977;r+=p->y+(p->y=n);"
+        "return r+tb.a+tb.b+tb.c+(int)tb.d+tb.e+(int)tp_.y+tp_.x;}",
+        "segment-bit-fields", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1010,6 +1025,44 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "S(SW,16);S(SD,32);S(UQ,64);S(SQ,64);long long kk=k%64;v2di z;fill(&z,16,n);v2di zz=z>>kk;FOLD(zz);}\n"
           "return (int)h;}\n"
         },
+        // #1834: the generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without
+        // AVX-512) on pieces of the registers' width through memory, as a transport vector's: shuffles of each element
+        // size, a 16-byte vector's two into one of 32 and 32-byte ones' into 16, conversions widening and between integers
+        // and floats, and elementwise minima, maxima, saturating arithmetic and square roots.
+        { "baseline-wide-builtins",
+          "typedef int I8 __attribute__((vector_size(32),aligned(16)));typedef unsigned U8 __attribute__((vector_size(32),aligned(16)));typedef float F8 __attribute__((vector_size(32),aligned(16)));\n"
+          "typedef short S16 __attribute__((vector_size(32),aligned(16)));typedef unsigned char B32 __attribute__((vector_size(32),aligned(16)));typedef double D4 __attribute__((vector_size(32),aligned(16)));\n"
+          "typedef long long L4 __attribute__((vector_size(32),aligned(16)));typedef short S8 __attribute__((vector_size(16)));typedef int I4 __attribute__((vector_size(16)));\n"
+          "typedef unsigned char B64 __attribute__((vector_size(64),aligned(16)));typedef int I16 __attribute__((vector_size(64),aligned(16)));typedef float F16 __attribute__((vector_size(64),aligned(16)));\n"
+          "typedef double D8 __attribute__((vector_size(64),aligned(16)));typedef unsigned short W32 __attribute__((vector_size(64),aligned(16)));\n"
+          "int tested(int n){unsigned h=2166136261u;I8 a,b;U8 u,v;S16 s,t;B32 c,d;L4 l,m;I16 w,x;B64 e,g;W32 y,z;F8 f,k;D4 q,r;F16 fa;D8 da;\n"
+          "fill(&a,32,n);fill(&b,32,n+1);fill(&u,32,n+2);fill(&v,32,n+3);fill(&s,32,n+4);fill(&t,32,n+5);fill(&c,32,n+6);fill(&d,32,n+7);fill(&l,32,n+8);fill(&m,32,n+9);\n"
+          "fill(&w,64,n+10);fill(&x,64,n+11);fill(&e,64,n+12);fill(&g,64,n+13);fill(&y,64,n+14);fill(&z,64,n+15);\n"
+          "for(int i=0;i<8;i++){f[i]=(float)((n*13+i*7)%50-25)*0.75f;k[i]=(float)((n*5+i*3)%40-20)*0.5f;}for(int i=0;i<4;i++){q[i]=f[i]*1.5;r[i]=k[i+4];}\n"
+          "for(int i=0;i<16;i++)fa[i]=(float)((i*7+n)%30-15)*0.25f;for(int i=0;i<8;i++)da[i]=fa[i*2];\n"
+          "I8 s1[]={__builtin_shufflevector(a,b,7,6,5,4,3,2,1,0),__builtin_shufflevector(a,b,0,8,1,9,2,10,3,11),__builtin_shufflevector(a,b,15,0,14,1,13,2,12,3)};FOLD(s1);\n"
+          "#if defined(__SSSE3__)&&!defined(__AVX2__)\n"
+          "B32 s2r=__builtin_shufflevector(c,d,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);FOLD(s2r);\n"
+          "#endif\n"
+          "#ifndef __AVX2__\n"
+          "B32 s2[]={__builtin_shufflevector(c,d,0,32,1,33,2,34,3,35,4,36,5,37,6,38,7,39,8,40,9,41,10,42,11,43,12,44,13,45,14,46,15,47)};FOLD(s2);\n"
+          "#endif\n"
+          "L4 s3=__builtin_shufflevector(l,m,3,4,1,6);FOLD(s3);I4 s4=__builtin_shufflevector(a,b,1,9,7,15);FOLD(s4);I8 s5=__builtin_shufflevector((I4){n,2,3,4},(I4){5,6,7,n},7,6,5,4,3,2,1,0);FOLD(s5);\n"
+          "I16 s6=__builtin_shufflevector(w,x,31,30,29,28,27,26,25,24,0,1,2,3,4,5,6,7);FOLD(s6);\n"
+          "F8 c3=__builtin_convertvector(a,F8);FOLD(c3);I8 c4=__builtin_convertvector(f,I8);FOLD(c4);\n"
+          "D4 c5=__builtin_convertvector(s4,D4);FOLD(c5);L4 c6=__builtin_convertvector(s4,L4);FOLD(c6);typedef unsigned char B16 __attribute__((vector_size(16)));B16 cc;fill(&cc,16,n);I16 c7=__builtin_convertvector(cc,I16);FOLD(c7);F16 c8=__builtin_convertvector(w,F16);FOLD(c8);\n"
+          "#ifdef __SSE4_1__\n"
+          "U8 e2[]={__builtin_elementwise_min(u,v),__builtin_elementwise_max(u,v)};FOLD(e2);\n"
+          "#endif\n"
+          "I8 e1[]={a+b};FOLD(e1);\n"
+          "S16 e3[]={__builtin_elementwise_min(s,t),__builtin_elementwise_add_sat(s,t),__builtin_elementwise_sub_sat(s,t)};FOLD(e3);\n"
+          "B32 e4[]={__builtin_elementwise_min(c,d),__builtin_elementwise_max(c,d),__builtin_elementwise_add_sat(c,d),__builtin_elementwise_sub_sat(c,d)};FOLD(e4);\n"
+          "B64 e5[]={__builtin_elementwise_min(e,g),__builtin_elementwise_add_sat(e,g)};FOLD(e5);W32 e6[]={__builtin_elementwise_sub_sat(y,z)};FOLD(e6);\n"
+          "F8 e7[]={__builtin_elementwise_sqrt(f*f)};FOLD(e7);\n"
+          "D4 e8[]={__builtin_elementwise_sqrt(q*q)};FOLD(e8);\n"
+          "F16 e9[]={__builtin_elementwise_sqrt(fa*fa)};FOLD(e9);D8 e10[]={__builtin_elementwise_sqrt(da*da)};FOLD(e10);\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
@@ -1153,8 +1206,6 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                   "vector shuffles of 16-bit elements without SSSE3" },
                 { 1, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
                   "vector minimum and maximum of 64-bit elements without SSE4.2" },
-                { 3, "typedef int V __attribute__((vector_size(32)));typedef short N __attribute__((vector_size(16)));N tested(V a){return __builtin_convertvector(a,N);}",
-                  "vector conversions wider than the target's registers" },
                 { 4, "typedef char V __attribute__((vector_size(32)));V tested(V a,V b){return __builtin_shufflevector(a,b,31,30,29,28,27,26,25,24,23,22,21,20,19,"
                      "18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
                   "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512" },

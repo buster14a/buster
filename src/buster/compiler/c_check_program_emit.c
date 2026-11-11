@@ -2822,9 +2822,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t active = most < bodies ? most : bodies;
     active = paid < active ? (uint32_t)paid : active;
     // In a command's flow (#905), no more than its session asks for: by default one lane per core, which a lazy session's
-    // lane 1 has been counting meanwhile (lane_session_asked).
+    // lane 1 has been counting meanwhile (lane_session_asked). An on-demand session's lanes start here if they haven't
+    // (lane_session_start, #1444): the C driver starts them once a unit large enough to pay for them is preprocessed.
     if (active > 1 && lanes->flow != NULL)
     {
+        lane_session_start();
         const uint32_t asked = lane_session_asked();
         active = asked < active ? asked : active;
     }
@@ -3186,6 +3188,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // through weakrefs alone (BUSTER_CHECK_PROGRAM_ALIAS_WEAK). An alias or ifunc clang's code generation refuses (the
         // driver reports its error before the emission: check_driver_aliases), or one the emission doesn't take, is
         // refused at its attribute, in source order.
+        // A late weak declaration (#1849) leaves the symbol of an object global where the selection found that clang's
+        // code generation binds it before the declaration applies (check_program_weak_bindings), or can't tell.
+        for (uint32_t i = 0; valid && program->weak_decided && i < program->weak_global_count; i += 1)
+        {
+            const uint32_t object = program->weak_globals[i];
+            const SymbolId taken = object < program->object_count ? program->object_symbols[object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+            weak[symbol] = symbol != 0 ? 0 : weak[symbol];
+        }
+        if (valid && program->weak_decided && program->weak_refused != 0)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a weak declaration after a use that only code clang emits at the unit's end makes, through declarations before and after it";
+            result->token = program->weak_refused - 1;
+            valid = false;
+        }
         // cpu_specific's and cpu_dispatch's names (#1447): f.ifunc for the references, f.X for each version's own.
         valid = valid && check_program_cpu_names(program, symbol_names, output);
         if (symbol_aliases != 0)
@@ -3199,8 +3217,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const SymbolId taken = program->object_symbols[alias->object];
             const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == alias->object ? taken : 0;
             const uint8_t state = program->alias_states[k];
-            const bool failed = alias->error != CHECK_PROGRAM_ALIAS_OK || (state & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0 ||
-                                (alias->kind != CHECK_PROGRAM_WEAKREF && alias->base == 0);
+            const bool mismatched = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL;
+            const bool failed = (mismatched ? (state & BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED) != 0 : alias->error != CHECK_PROGRAM_ALIAS_OK) ||
+                                (state & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0 || (alias->kind != CHECK_PROGRAM_WEAKREF && alias->base == 0);
             refused = failed && alias->attribute < refused ? alias->attribute : refused;
             if (symbol != 0)
             {
@@ -3219,8 +3238,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             if (alias->attribute == refused)
             {
                 result->status = CHECK_PROGRAM_UNSUPPORTED;
-                result->reason = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL ? "an alias whose thread-local storage isn't its definition's" :
-                                 alias->error == CHECK_PROGRAM_ALIAS_DEFINED ? "an alias variable that the unit also defines tentatively" :
+                result->reason = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL ? "a reference to an alias whose thread-local storage isn't its definition's" :
                                  alias->kind == CHECK_PROGRAM_WEAKREF ? "a weakref without a target" :
                                                                          "an alias or ifunc that clang's code generation refuses";
                 result->token = refused;

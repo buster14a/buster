@@ -3,14 +3,13 @@
 //
 // #147: GNU C's local labels and __auto_type against clang, through the driver: each fixture's first error at clang's
 // line and column, and with clang's text where the driver's message is clang's; and where a unit has several label
-// errors, every place's, whatever their order. The driver gives a place one error (`firsts`), its first: clang's second
-// at a use of an ambiguous name, its undeclared label, is left out.
+// errors, every one, in clang's order: an ambiguous name's where it is met, a list's undeclared labels as its block ends
+// and the function's (an ambiguous name's use's among them) as the function does.
 #ifndef BUSTER_C_CHECKER_DRIVER_GNU_TEST_INCLUDED
 #define BUSTER_C_CHECKER_DRIVER_GNU_TEST_INCLUDED
 
-// The error lines of `text` (`file:line:column: error: message`), each place's first, sorted, into `errors` with a
-// newline after each: the places' errors whatever their order. Returns false for more lines than it keeps or than
-// `errors` has room for.
+// The error lines of `text` (`file:line:column: error: message`), in their order, into `errors` with a newline after
+// each. Returns false for more lines than it keeps or than `errors` has room for.
 static bool check_test_driver_gnu_errors(char* text, char* errors, size_t capacity)
 {
     char* lines[32];
@@ -23,30 +22,13 @@ static bool check_test_driver_gnu_errors(char* text, char* errors, size_t capaci
         {
             *end = 0;
         }
-        const char* error = strstr(at, ": error: ");
-        bool repeated = false;
-        for (uint32_t i = 0; error != NULL && i < count && !repeated; i += 1)
-        {
-            repeated = strncmp(lines[i], at, (size_t)(error - at) + 9) == 0;
-        }
-        if (error != NULL && !repeated)
+        if (strstr(at, ": error: ") != NULL)
         {
             valid = count < BUSTER_ARRAY_LENGTH(lines);
             lines[valid ? count : 0] = at;
             count += valid;
         }
         at = end != NULL ? end + 1 : NULL;
-    }
-    for (uint32_t i = 1; valid && i < count; i += 1)
-    {
-        char* line = lines[i];
-        uint32_t j = i;
-        while (j != 0 && strcmp(lines[j - 1], line) > 0)
-        {
-            lines[j] = lines[j - 1];
-            j -= 1;
-        }
-        lines[j] = line;
     }
     size_t length = 0;
     errors[0] = 0;
@@ -124,7 +106,8 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         unlink(source);
     }
     // A name a block's lists declare twice: clang's ambiguity where it is defined or used (and its undeclared label at a
-    // use), and an undeclared label at each declaration; with a name they declare once and its block doesn't define.
+    // use, as the function ends), and an undeclared label at each declaration, as the block ends; with a name they declare
+    // once and its block doesn't define; and a function's missing labels, once a name, as the function ends.
     static const struct
     {
         const char* name;
@@ -137,6 +120,9 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "a name declared twice, used and defined", "void f(void) {\n    {\n        __label__ a, a;\n        goto a;\n    a:;\n    }\n}\n" },
         { "a name declared twice, never used", "void f(void) {\n    {\n        __label__ a, a;\n    }\n}\n" },
         { "a list's two names, one undefined", "void f(void) {\n    {\n        __label__ a, b;\n    b:;\n    }\n}\n" },
+        { "a name two lists declare twice, defined and used", "void f(void) {\n    {\n        __label__ c;\n        __label__ d, c;\n    c: goto c;\n    d:;\n    }\n}\n" },
+        { "an undeclared label's error after the block's", "void f(void) {\n    {\n        __label__ a, a;\n    a:;\n        int y = z;\n    }\n    int w = v;\n}\n" },
+        { "a function's missing labels, once each, as it ends", "void f(void) {\n    goto x;\n    goto y;\n    int u = z;\n    goto x;\n    void *p = &&y;\n}\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {

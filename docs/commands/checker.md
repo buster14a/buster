@@ -96,10 +96,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `main_source_command_reusable` (main.c's routing by the commands that
   release what they map), with the captured stream in a `memfd`;
   `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
-  `tools/clang-server` (built by `tools/clang-server/build.sh` against that
-  clang's `libclang-cpp` where the toolchain lets it hold one copy of LLVM: a
-  shared-LLVM toolchain's, not the official release's, whose hosted rows then
-  run the oracle clang as children), which runs each command line through clang's own
+  `tools/clang-server` (`oracle_cache.c`'s client, `OracleServer`; built by
+  `tools/clang-server/build.sh` against that clang's libraries with one copy
+  of LLVM: a shared-LLVM toolchain's `libclang-cpp`, or the official release's
+  static clang and LLVM archives, which the hosted rows install; the build
+  checks one request against a spawned clang), which runs each command line through clang's own
   driver and cc1 in its process, in the run's directory and environment;
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
@@ -121,8 +122,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447; `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
-  through typedef chains, members and qualified arrays, `docs/c-checker.md`'s
-  "Type sugar", #1447). Its library-builtin comparisons are pinned to Clang
+  through typedef chains, members and qualified arrays, and const assignment's
+  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
@@ -176,7 +177,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
   (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
   floating-action fixtures cover that distinction, ties, subnormals and negative zero.
-  `float`, `double` and `long double` folds give APFloat's NaNs, not the host's (#1473): an invalid operation
+  `float`, `double`, `long double` and `__float128` folds give APFloat's NaNs, not the host's (#1473, #1250): an invalid operation
   (`inf - inf`, `0 * inf`, `0 / 0`) folds to the positive quiet NaN, and an operation on a NaN keeps its first NaN
   operand's sign and payload, quieted. The floating-action fixtures, the constant-source fixture "real invalid
   constant arithmetic has Clang NaN signs" and `--program-float-constants`' "float-constants-invalid-arithmetic"
@@ -191,7 +192,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
-  `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `--requests` selects #1057's request tests (`c_check_request_test.c`), with #1444's option IDs and option forms
+  (`c_option_table_test.c`, the driver guide's "Option matching"), and the source benchmarks' preparation tests.
   `c_check_self_assign_driver_test.c` checks #1391's macro self-assignment boundary. The warning is suppressed
   when the assignment operator or either variable-name use comes from a macro body or substituted argument;
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
@@ -238,13 +240,31 @@ unused-warning fixtures also check exact scope-completion tokens.
   statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
   The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
   original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
-  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
-  in such a statement expression, which need the evaluation facts themselves; the input reader's
-  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
-  `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
-  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
-  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
-  expression as `_Generic`'s controlling expression.
+  controls and a value that decays from a variable array. For `-Wuninitialized`, a statement
+  expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
+  on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
+  and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
+  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
+  reads outside a deferred typeof region. And a statement expression in a chosen `_Generic` arm
+  (`_Generic(1, int: ({ u; }))`), whose statements the selection's token range marks unselected, so that
+  `-Wuninitialized` reads none of them (#2023).
+  `-Wunevaluated-expression` (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr,
+  `check_warning_graph_operand`) is on by default, under `-Wunused-value`: the expression operand of a sizeof or an
+  alignof of no variable array type, and a `_Generic`'s controlling expression, that has a side effect as
+  Expr::HasSideEffects finds one without the possible ones (an assignment, an increment, `__builtin_va_arg`, an atomic
+  builtin clang makes an AtomicExpr of; not a call, a volatile read or a declaration), warns at the operand's location,
+  a sizeof's own `(` where it has one, once the operation is read. The search climbs the parse tree from each side
+  effect in the operand and stops at an expression whose location a macro wrote (an argument's too), a nested sizeof,
+  a type, a specifier's operand, a static selection's other operands, and, in a statement expression, an
+  unevaluated-argument builtin's call that is a statement's own expression. The scan is part of the warning graph's
+  16-node pass, and an operand's tokens are classified 64 at a time. Left: the operands the constant reader alone
+  reads (file-scope initializers, array bounds, enumerators, `_Static_assert`), and a bound of a pointer to a
+  variable array in a statement expression's declaration, which clang leaves out and the scan reads.
+  `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
+  or three lanes.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
@@ -328,8 +348,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   initializer's is warned once. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
   that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
   an enumeration.
-  `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
-  with `-c`.
+  `check_common_enum_coerced` first finds the nearest enclosing definition by its ordered opening token. Nested
+  enum definitions inside enumerator values can close before a later outer enumerator, so the fallback scans all
+  definitions. It takes the maximum one-based matching index (zero for nonmatching SIMD lanes), then loads that type
+  once, avoiding Clang 23 MSan checking inactive poison TypeId lanes before `llvm.experimental.vector.extract.last.active`
+  (#1829). `c_check_enum_arithmetic_driver_test.c` compares complete pinned-Clang output at each policy, both paths
+  and with `-c`, including 9/17-definition vector-chunk cases and nested-definition fallback coverage.
   `-Wfor-loop-analysis` (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration,
   `check_common_for_loops`) is off by default, under `-Wloop-analysis` and `-Wmost` and so `-Wall`; a unit where nothing
   enables it skips the scan. The condition is its truth test's operand. Its variables, where it is simple (operators,

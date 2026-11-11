@@ -401,7 +401,10 @@ selects as `vpblendm` and `vpxor`.
 The x86 builtins' casts between vector widths, lane inserts and masked lane
 extracts are the IR's `extract`, `widen` and `insert` intrinsics (#1840, [the
 SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
-selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`.
+selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`; their variable permutes, byte
+shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
+`shuffle_lanes` (#1840, its "Permutes"), each one EVEX instruction of
+`BUSTER_TIER1_VECTOR_PERMUTE`.
 
 ### Inlining (#1282)
 
@@ -465,7 +468,13 @@ A vector passed by value is an object already; one returned in registers comes
 back split across xmm0 and xmm1, xmm0 to xmm3 or ymm0 and ymm1 (#1193), which
 selection, both consumers and the code's certificate now take as up to four
 result parts (`tier1_select_result_parts`, staged in the red zone one after
-another on the way out).
+another on the way out). At an AVX-512 target a 128-byte vector comes back in
+zmm0 and zmm1, two 64-byte parts (#1847). The parts must fit the red zone's 16
+eightbyte slots (`tier1_select_result_staged`, which the consumer and the
+certificate check too): four 32-byte parts or two 64-byte ones take all of
+them, so a 256-byte vector's four zmm parts are still refused, and Tier 0
+compiles its function. `test-checker-driver`'s wide results' unit returns a
+128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0.
 
 Measured by `--tier1 --tier1-refusals --verify` of the compiler's own units,
 whose scalar host's emulations of AVX2's and AVX-512's intrinsics
