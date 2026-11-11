@@ -96,7 +96,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `main_source_command_reusable` (main.c's routing by the commands that
   release what they map), with the captured stream in a `memfd`;
   `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
-  `tools/clang-server` (built by `tools/clang-server/build.sh` against that
+  `tools/clang-server` (`oracle_cache.c`'s client, `OracleServer`; built by `tools/clang-server/build.sh` against that
   clang's `libclang-cpp` where the toolchain lets it hold one copy of LLVM: a
   shared-LLVM toolchain's, not the official release's, whose hosted rows then
   run the oracle clang as children), which runs each command line through clang's own
