@@ -84,6 +84,49 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // Clang's DiagRuntimeBehavior drops a runtime warning in an array bound (ConstantEvaluated), a variable array's
+        // too, and in an unevaluated operand's statement expression: shift counts, divisions, sign comparisons, constant
+        // conversions and array indexes; a comma's unused value stays (#1447, check_common_bound).
+        .name = "runtime warnings in array bounds and unevaluated statement expressions",
+        .source = "int g(void) __attribute__((warn_unused_result));\n"
+                  "void f(int n, unsigned u) {\n"
+                  "    int b[n + (1 << 40)];\n"
+                  "    int c[n + 1 / 0];\n"
+                  "    int d[n + (u < -1)];\n"
+                  "    char cc = 0;\n"
+                  "    int e[n + (cc = 300)];\n"
+                  "    int h[n + (n, 1)];\n"
+                  "    int a2[3]; int k[n + a2[5]];\n"
+                  "    int s[n + sizeof(1 << 41)];\n"
+                  "    int t = sizeof(int[n + (1 << 45)]);\n"
+                  "    int v = (int)sizeof(({ int w = 1 << 46; w; })) + (int)sizeof(({ 1 << 47; }));\n"
+                  "    int x = (1 << 48) + 1 / 0;\n"
+                  "    (void)b; (void)c; (void)d; (void)e; (void)h; (void)k; (void)s; (void)t; (void)v; (void)x;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 3,
+    },
+    {
+        .name = "runtime warnings in array bounds and unevaluated statement expressions in C23",
+        .source = "int g(void) __attribute__((warn_unused_result));\n"
+                  "void f(int n, unsigned u) {\n"
+                  "    int b[n + (1 << 40)];\n"
+                  "    int c[n + 1 / 0];\n"
+                  "    int d[n + (u < -1)];\n"
+                  "    char cc = 0;\n"
+                  "    int e[n + (cc = 300)];\n"
+                  "    int h[n + (n, 1)];\n"
+                  "    int a2[3]; int k[n + a2[5]];\n"
+                  "    int s[n + sizeof(1 << 41)];\n"
+                  "    int t = sizeof(int[n + (1 << 45)]);\n"
+                  "    int v = (int)sizeof(({ int w = 1 << 46; w; })) + (int)sizeof(({ 1 << 47; }));\n"
+                  "    int x = (1 << 48) + 1 / 0;\n"
+                  "    (void)b; (void)c; (void)d; (void)e; (void)h; (void)k; (void)s; (void)t; (void)v; (void)x;\n"
+                  "}\n",
+        .warnings = 3,
+        .c23 = true,
+    },
+    {
         .name = "return flow conservative no-fallthrough and reachable fallthrough",
         .source = "int a(int c){if(c)return 1;return 2;}int b(int c){if(c)return 1;}int d(void){while(1){}}_Noreturn void r(void){while(1){}}\n",
         .warnings = 1,

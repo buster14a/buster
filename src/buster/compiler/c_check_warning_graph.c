@@ -837,6 +837,9 @@ typedef enum CheckVoidContext
     CHECK_VOID_CONTEXT_UNEVALUATED = 2,
     CHECK_VOID_CONTEXT_TRANSFORMED = 4,
     CHECK_VOID_CONTEXT_SELECTION = 8,
+    // An array declarator's bound (clang's ConstantEvaluated context), where DiagRuntimeBehavior drops the runtime
+    // warnings (#1447, check_common_bound).
+    CHECK_VOID_CONTEXT_BOUND = 16,
 } CheckVoidContext;
 
 // Whether a token of `role` is a declaration's specifiers' (a type name's root, as a declarator's tokens hang from it).
@@ -961,7 +964,7 @@ static uint8_t check_warning_graph_void_step(const CheckInput* input, const Pars
     }
     else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT && check_warning_graph_void_declarator(parser, parent))
     {
-        result = CHECK_VOID_CONTEXT_KNOWN | transformed;
+        result = CHECK_VOID_CONTEXT_KNOWN | CHECK_VOID_CONTEXT_BOUND | transformed;
     }
     return result;
 }

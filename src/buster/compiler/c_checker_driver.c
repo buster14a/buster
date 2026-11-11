@@ -3333,6 +3333,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const bool scalar = parser->options.scalar;
     const uint32_t count = parser->tokens.count;
     CheckWarningSpelling spell = { 0 };
+    // (The parser contexts a folded shift's warning asks, check_common_context's memo, are this function's own.)
+    check_common_contexts = (CheckCommonContexts){ 0 };
     // Every token key is at most count, so all of its possible radix digits are known without gather-loop state.
     const uint32_t varying = count != 0 ? UINT32_MAX >> __builtin_clz(count) : 0;
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
@@ -3701,6 +3703,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                              (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
                                                               CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) != 0 &&
                                              node < input->graph.count && check_common_shift_op(input->graph.ops[node]);
+                        // A folded shift's runtime warning in an unevaluated operand's statement expression or an array bound,
+                        // which clang's DiagRuntimeBehavior drops (#1447).
+                        const bool dropped = !stashed &&
+                                             (warning_flag & (CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
+                                                              CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) != 0 && node < input->graph.count &&
+                                             (check_common_unevaluated(parser, pp, input, token, scratch) || check_common_bound(parser, pp, input, token, scratch));
                         if (stashed)
                         {
                             // The common walk reports it (CheckCommonShiftWarnings), or drops it where unevaluated.
@@ -3724,7 +3732,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 shifts_ready = false;
                             }
                         }
-                        else
+                        else if (!dropped)
                         {
                             const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
@@ -5033,6 +5041,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const bool pragma_ready = ready && (from != 0 || check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
         &directives->pragma_warnings, NULL, publication_end, scratch));
     arena_pop_to(scratch, mark);
+    check_common_contexts = (CheckCommonContexts){ 0 };
     return pragma_ready && shifts_ready;
 }
 
