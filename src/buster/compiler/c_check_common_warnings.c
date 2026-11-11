@@ -1010,6 +1010,8 @@ struct CheckCommonEnabled
     // Whether the unit names a tagged enumeration's enumerator or variable (CheckInput.enum_names), which an implicit
     // conversion between enumerations needs (check_common_enum_cast).
     bool enum_cast;
+    // The const objects' initializer receipts a divisor's read may give zero from (check_common_zero_divisor), or null.
+    const CheckConstValues* const_values;
 };
 
 // A folded shift's runtime warnings the legacy driver words (#1394): its counts and its negative left operand, clang's
@@ -1901,6 +1903,49 @@ static bool check_common_comma_bound_operands(const CheckCommonEmission* emissio
     return (reach & BUSTER_CHECK_REACH_BOUND) != 0;
 }
 
+// Whether a division's divisor is zero as clang's EvaluateAsInt finds it (DiagnoseBadDivideOrRemainderValues): an integer
+// constant, or, through integer casts, a read of a const non-volatile object whose completed initializer gives it zero
+// (its receipt, CheckInput.const_values: `const int k = 0; 1 / k`, an element's or a member's too, #1447).
+static bool check_common_zero_divisor(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckConstValues* const_values,
+                                      uint32_t division, uint32_t divisor)
+{
+    uint32_t at = divisor;
+    bool result = false;
+    bool going = true;
+    for (uint32_t steps = 0; going && at < graph->count && steps < graph->count; steps += 1)
+    {
+        if (check_common_integer_constant(stream, at))
+        {
+            result = check_stream_value(stream, at).integer == 0;
+            going = false;
+        }
+        else if (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT)
+        {
+            uint32_t width = 0;
+            bool sign = false;
+            going = check_common_integer(types, check_stream_type(stream, at), &width, &sign);
+            at = going ? graph->operand0[at] : at;
+        }
+        else
+        {
+            const CheckValue value = check_stream_value(stream, at);
+            const uint32_t qualifiers = type_qualifiers(value.type);
+            CheckValue loaded = { 0 };
+            uint32_t width = 0;
+            bool sign = false;
+            result = value.category == CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.fault == CHECK_FAULT_NONE &&
+                     (qualifiers & BUSTER_TYPE_CONST) != 0 && (qualifiers & BUSTER_TYPE_VOLATILE) == 0 &&
+                     (value.flags & (BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                     check_common_integer(types, value.type, &width, &sign) &&
+                     const_values != NULL && check_const_load(types, const_values, value.object, value.offset, value.object_bit_offset, value.bit_width,
+                                      value.type, graph->source_positions[division], &loaded) &&
+                     loaded.constant_kind == CHECK_CONSTANT_INTEGER && loaded.integer == 0;
+            going = false;
+        }
+    }
+    return result;
+}
+
 // The arithmetic-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
 // too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
 // evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
@@ -1928,7 +1973,7 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
         const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
-        if (!ice && check_common_integer_constant(emission->stream, divisor) && check_stream_value(emission->stream, divisor).integer == 0)
+        if (!ice && check_common_zero_divisor(graph, emission->stream, emission->types, &emission->input->const_values, node, divisor))
         {
             uint32_t width = 0;
             bool sign = false;
@@ -2239,6 +2284,27 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
            place->object != 0 ? check_semantic_subobject_spelling(parser, input, types, place->object, place->declaration, place->offset, target) : 0;
 }
 
+// The innermost macro argument occurrence that substituted `token` (clang's immediate macro argument expansion), as its
+// expansion's and its parameter's indices plus one: the last argument substitution its origin passes through, which
+// runs from the outermost expansion in; 0 for a token no argument substituted (a source token, a macro body's, a
+// generated one).
+static uint64_t check_common_argument_occurrence(const Parser* parser, Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
+    uint32_t origin = macro && pp_history_ensure(pp) ? pp_history_at(pp, source) : 0;
+    uint64_t result = 0;
+    for (uint32_t steps = 0; origin != 0 && steps < 256; steps += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        const PPSubstitution* substitution = kind == BUSTER_PP_ORIGIN_ARGUMENT ? &pp->substitutions[index] : NULL;
+        result = substitution != NULL ? ((uint64_t)substitution->expansion << 32 | substitution->parameter) + 1 : result;
+        origin = kind == 0 ? pp->history[index].parent : substitution != NULL ? substitution->source : 0;
+    }
+    return result;
+}
+
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
 // conversion to `target`, carried to a conditional's arms (its true arm's first, the unselected one's too: no runtime
 // pruning) and to a root comma's result, warns at each leaf whose type, an enumerator's taken as its enumeration
@@ -2298,8 +2364,18 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
                 const char* message = check_warning_text(scratch, "implicit conversion from enumeration type %.*s to different enumeration type %.*s",
                                                           (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer);
                 const uint32_t publication = at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, leaf);
-                check_common_report_evaluated(parser, pp, input, check_common_enum_cast_location(parser, graph, leaf), publication, PP_DIAGNOSTIC_DEFERRED,
+                const uint32_t location = check_common_enum_cast_location(parser, graph, leaf);
+                // Its ranges are the leaf's and its context's (DiagnoseImpCast's CContext: the assignment's operator, the
+                // declarator, the return, the call, a brace initializer's declaration), so a leaf a macro's argument writes
+                // shows that argument's macro unless the context is written in the same argument too
+                // (rangesInsideSameMacroArgExpansion).
+                const uint32_t context = place->conversion < graph->count ? graph->tokens[place->conversion] :
+                                         place->call < graph->count ? graph->tokens[place->call] : place->declaration;
+                const uint64_t occurrence = check_common_argument_occurrence(parser, pp, location);
+                pp->diagnostic_spans = occurrence != 0 && (context >= parser->tokens.count || check_common_argument_occurrence(parser, pp, context) != occurrence);
+                check_common_report_evaluated(parser, pp, input, location, publication, PP_DIAGNOSTIC_DEFERRED,
                                               CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST, false, message, NULL, 0, scratch);
+                pp->diagnostic_spans = false;
             }
         }
     }
@@ -5373,6 +5449,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     // A null dereference shares the arithmetic scan with division and shifts.
     const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
                            check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
+                          ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !check_common_integer_constant(stream, divisor) &&
+                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor)) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
@@ -10484,6 +10562,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
         .enum_cast = input->enum_names,
+        .const_values = &input->const_values,
     };
     check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);

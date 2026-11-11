@@ -502,7 +502,8 @@ static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* functi
 // restored no more than remembered, and offsets that don't decrease and are less than the size.
 static UnwindError unwind_rows_check(const UnwindFunction* function)
 {
-    UnwindError result = function->size == 0 || function->saved != 0 || function->frame_size != 0 || function->event_count != 0 || function->pointer != 0 ||
+    // A program of no rows may cover no bytes: an empty naked function's (#1845), whose FDE has no range, as clang's.
+    UnwindError result = (function->size == 0 && function->row_count != 0) || function->saved != 0 || function->frame_size != 0 || function->event_count != 0 || function->pointer != 0 ||
                                  function->tail_count != 0 || function->tails != 0 || (function->row_count != 0 && function->rows == 0) ? UNWIND_ERROR_INVALID : UNWIND_OK;
     result = result == UNWIND_OK && function->size > INT32_MAX ? UNWIND_ERROR_LIMIT : result;
     uint32_t previous = 0;

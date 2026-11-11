@@ -733,6 +733,94 @@ static const CheckDriverDefaultWarningFixture check_driver_convention_sugar_fixt
                   "}\n",
         .errors = 8,
     },
+    {
+        // A declaration's convention as its type sugar keeps it (c_check_type_sugar_input.c): clang's AttributedType where
+        // the attribute is written, inside the ParenType of a pointer's group (`'__attribute__((preserve_most))  void
+        // ((*))(void)'`), its macro's MacroQualifiedType, the attribute a macro in a group before `*` writes dropped with
+        // its function's modified type (`void (MS *r)(void)`'s `'MS void (*)(void)'`), a pointer's own, and the ones
+        // reached through `*` and `&`.
+        .name = "declarator convention sugar",
+        .source = "#define MS __attribute__((ms_abi))\n"
+                  "void f(void) __attribute__((preserve_most));\n"
+                  "void (*p)(void) __attribute__((preserve_most));\n"
+                  "void (**pp)(void) __attribute__((preserve_all));\n"
+                  "void (*a[2])(void) __attribute__((preserve_none));\n"
+                  "typedef void F(void) __attribute__((preserve_most));\n"
+                  "F *fp;\n"
+                  "void (*q)(void) __attribute__((ms_abi));\n"
+                  "void (MS *r)(void);\n"
+                  "void (* MS s)(void);\n"
+                  "void (MS **t)(void);\n"
+                  "MS void (*u)(void);\n"
+                  "void (*v)(void) MS;\n"
+                  "void g(void) __attribute__((sysv_abi));\n"
+                  "void (*w)(void) __attribute__((sysv_abi));\n"
+                  "void h(void)\n"
+                  "{\n"
+                  "    int x1 = f, x2 = p, x3 = pp, x4 = a, x5 = fp, x6 = q, x7 = r, x8 = s;\n"
+                  "    int x9 = t, x10 = u, x11 = v, x12 = &f, x13 = g, x14 = w, x15 = &g, x16 = *pp;\n"
+                  "}\n",
+        .warnings = 1,
+        .errors = 16,
+    },
+    {
+        // Every placement: a const pointer's group and its own `* const`, a pointer to pointer's inner `*`, arrays, a
+        // function returning a pointer, a function-like macro, a group's sysv_abi, specifiers', C23 lists before the
+        // specifiers (the whole type's) and after the declarator, a local's, and assignments' targets.
+        .name = "convention sugar placements",
+        .source = "#define MS __attribute__((ms_abi))\n"
+                  "#define PM __attribute__((preserve_most))\n"
+                  "#define AS2(x) __attribute__((x))\n"
+                  "void (*const c1)(void) MS = 0;\n"
+                  "void (* const MS c2)(void) = 0;\n"
+                  "void (* MS *pq)(void);\n"
+                  "void (*arr[3])(void) PM;\n"
+                  "void (*(*fpf)(int))(void) MS;\n"
+                  "void (AS2(ms_abi) *m2)(void);\n"
+                  "void (__attribute__((sysv_abi)) *sg)(void);\n"
+                  "__attribute__((vectorcall)) void (*vc)(void);\n"
+                  "[[gnu::ms_abi]] void (*c23)(void);\n"
+                  "void (*c23b)(void) [[gnu::ms_abi]];\n"
+                  "void h(void)\n"
+                  "{\n"
+                  "    void (*local)(void) MS;\n"
+                  "    int a = local, c = pq, d = *pq, e = arr, f = arr[1], g = &arr, i = fpf, k = m2, l = sg;\n"
+                  "    int m = vc, n = c23, o = c23b, r = c1, s = c2;\n"
+                  "    local = 1;\n"
+                  "    pq = 2;\n"
+                  "    *pq = 3;\n"
+                  "}\n",
+        .warnings = 1,
+        .errors = 17,
+    },
+    {
+        // Each convention's AttributedType spelling, explicit sysv_abi and cdecl too, which the canonical type doesn't
+        // keep; and no_caller_saved_registers beside one, with which clang rebuilds the type without its sugar.
+        .name = "convention attribute spellings",
+        .source = "void a1(void) __attribute__((sysv_abi));\n"
+                  "void a2(void) __attribute__((ms_abi));\n"
+                  "void a3(void) __attribute__((vectorcall));\n"
+                  "void a4(void) __attribute__((regcall));\n"
+                  "void a5(void) __attribute__((preserve_all));\n"
+                  "void a8(void) __attribute__((no_caller_saved_registers));\n"
+                  "void a9(void) __attribute__((intel_ocl_bicc));\n"
+                  "void a10(void) __attribute__((swiftcall));\n"
+                  "void a11(void) __attribute__((swiftasynccall));\n"
+                  "void __regcall a12(void);\n"
+                  "void __vectorcall a13(void);\n"
+                  "void a15(void) __attribute__((__ms_abi__));\n"
+                  "void a16(void) __attribute__((ms_abi, no_caller_saved_registers));\n"
+                  "void a17(void) __attribute__((cdecl));\n"
+                  "void (*b9)(void) __attribute__((intel_ocl_bicc));\n"
+                  "void (__regcall *b12)(void);\n"
+                  "void (* __attribute__((vectorcall)) b3)(void);\n"
+                  "void h(void)\n"
+                  "{\n"
+                  "    int x1 = a1, x2 = a2, x3 = a3, x4 = a4, x5 = a5, x8 = a8, x9 = a9, x10 = a10, x11 = a11;\n"
+                  "    int x12 = a12, x13 = a13, x15 = a15, x16 = a16, x17 = a17, y9 = b9, y12 = b12, y3 = b3;\n"
+                  "}\n",
+        .errors = 17,
+    },
 };
 
 // clang's const assignment diagnostics (#1447, check_semantic_const_assignment and check_semantic_const_fields): the
@@ -881,6 +969,147 @@ static const CheckDriverDefaultWarningFixture check_driver_const_assignment_fixt
     },
 };
 
+// A failed static assertion's details (#2171, check_semantic_assert): clang's "expression evaluates to" note, the failing
+// conjunct of an `&&`, and its requirement's number literals as clang's StmtPrinter prints them.
+static const CheckDriverDefaultWarningFixture check_driver_static_assert_fixtures[] =
+{
+    {
+        // A failed assertion of a binary operator but `||` notes its sides' values at the operator (clang's
+        // DiagnoseStaticAssertDetails), where a side isn't a literal: casts, sizeof, arithmetic, enumeration constants.
+        .name = "comparisons' sides evaluated",
+        .source = "_Static_assert(1 == 2, \"a\");\n"
+                  "_Static_assert((unsigned)1 == 2, \"x\");\n"
+                  "_Static_assert((long unsigned)sizeof(int) == 3, \"y\");\n"
+                  "_Static_assert(sizeof(int) == 3, \"z\");\n"
+                  "_Static_assert(1 + 1 == 3, \"w\");\n"
+                  "_Static_assert((char)1 < 0, \"v\");\n"
+                  "enum { K = 2 };\n"
+                  "_Static_assert(K == 3, \"u\");\n"
+                  "_Static_assert((int)K == 3, \"t\");\n",
+        .errors = 8,
+        .notes = 7,
+    },
+    {
+        // An `&&`'s first failing conjunct is the requirement, at it (findFailedBooleanCondition); integer literals print
+        // by value and suffix (StmtPrinter's `1U`, `9223372036854775807LL`); a negative side, a char, a bool.
+        .name = "failing conjuncts and literal spellings",
+        .source = "enum { K = 2, Z = 0 };\n"
+                  "_Static_assert(K - 2, \"a\");\n"
+                  "_Static_assert(K && Z, \"b\");\n"
+                  "_Static_assert(Z || Z, \"c\");\n"
+                  "_Static_assert(K == -3, \"d\");\n"
+                  "_Static_assert(-K == 3, \"e\");\n"
+                  "_Static_assert(1.5 == K, \"f\");\n"
+                  "_Static_assert((_Bool)K == 0, \"g\");\n"
+                  "_Static_assert((K) == (3), \"h\");\n"
+                  "_Static_assert(K & 1, \"i\");\n"
+                  "_Static_assert('a' == K, \"j\");\n"
+                  "_Static_assert((signed char)-1 == K, \"k\");\n"
+                  "_Static_assert(K == 3 && 1, \"l\");\n"
+                  "_Static_assert(!K, \"m\");\n"
+                  "_Static_assert(K < 1u, \"n\");\n"
+                  "_Static_assert(0x7fffffffffffffffLL == K, \"o\");\n"
+                  "_Static_assert((unsigned char)200 == K, \"p\");\n"
+                  "_Static_assert((char)'\\n' == K, \"q\");\n",
+        .errors = 17,
+        .notes = 14,
+    },
+    {
+        // A plain char's value as a character literal with its code unit and value (escapes, `<U+0000>`, `<0xFF>`), a
+        // bool's `false`, an unsigned long long's and an __int128's values.
+        .name = "character and integer values",
+        .source = "enum { K = 2 };\n"
+                  "_Static_assert((char)-1 == K, \"\");\n"
+                  "_Static_assert((char)'a' == K, \"\");\n"
+                  "_Static_assert((char)' ' == K, \"\");\n"
+                  "_Static_assert((char)'\\'' == K, \"\");\n"
+                  "_Static_assert((char)'\\\\' == K, \"\");\n"
+                  "_Static_assert((char)127 == K, \"\");\n"
+                  "_Static_assert((char)'\\t' == K, \"\");\n"
+                  "_Static_assert((char)'\"' == K, \"\");\n"
+                  "_Static_assert((char)0 == K, \"\");\n"
+                  "_Static_assert((_Bool)0 == K, \"\");\n"
+                  "_Static_assert((unsigned long long)-1 == K, \"\");\n"
+                  "_Static_assert(K == (__int128)3, \"\");\n"
+                  "_Static_assert((char)200 == K, \"\");\n",
+        .errors = 13,
+        .notes = 13,
+    },
+    {
+        // The same with -funsigned-char: a char past 0x7F is positive.
+        .name = "character values of unsigned char",
+        .source = "enum { K = 2 };\n"
+                  "_Static_assert((char)-1 == K, \"\");\n"
+                  "_Static_assert((char)'a' == K, \"\");\n"
+                  "_Static_assert((char)' ' == K, \"\");\n"
+                  "_Static_assert((char)'\\'' == K, \"\");\n"
+                  "_Static_assert((char)'\\\\' == K, \"\");\n"
+                  "_Static_assert((char)127 == K, \"\");\n"
+                  "_Static_assert((char)'\\t' == K, \"\");\n"
+                  "_Static_assert((char)'\"' == K, \"\");\n"
+                  "_Static_assert((char)0 == K, \"\");\n"
+                  "_Static_assert((_Bool)0 == K, \"\");\n"
+                  "_Static_assert((unsigned long long)-1 == K, \"\");\n"
+                  "_Static_assert(K == (__int128)3, \"\");\n"
+                  "_Static_assert((char)200 == K, \"\");\n",
+        .options = { "-funsigned-char" },
+        .errors = 13,
+        .notes = 13,
+    },
+    {
+        // Floating sides and literals as llvm's APFloat::toString spells them: `100`, `0.5`, `0.10000000000000001`,
+        // `1.0E+10`; a literal's trailing `.` and its `F` (`2.`, `1.5F`).
+        .name = "floating values and literals",
+        .source = "enum{K=2};\n"
+                  "_Static_assert(2.0 == K+1, \"\");\n"
+                  "_Static_assert(0.5 == K, \"\");\n"
+                  "_Static_assert(100.0 == K, \"\");\n"
+                  "_Static_assert(1e10 == K, \"\");\n"
+                  "_Static_assert(0.1 == K, \"\");\n"
+                  "_Static_assert(1.0/3 == K, \"\");\n"
+                  "_Static_assert(1.5f == K, \"\");\n"
+                  "_Static_assert(1234567.0 == K, \"\");\n"
+                  "_Static_assert(-0.25 == K, \"\");\n"
+                  "_Static_assert(1e-5 == K, \"\");\n"
+                  "_Static_assert(1000.0 == K, \"\");\n"
+                  "_Static_assert(10000.0 == K, \"\");\n",
+        .errors = 12,
+        .notes = 12,
+    },
+    {
+        // C23's static_assert without a message, `nullptr`, and no note for a boolean value compared with `true` or
+        // `false` (isKnownToHaveBooleanValue); `(bool)` casts.
+        .name = "C23 assertions and boolean literals",
+        .source = "enum { K = 2 };\n"
+                  "static_assert(K == 3);\n"
+                  "static_assert(true == (K == 3));\n"
+                  "static_assert((K == 3) == true);\n"
+                  "static_assert((K == 2) && (K == 3) && 1, \"x\");\n"
+                  "static_assert(((K == 2) && (1 && K > 5)), \"y\");\n"
+                  "static_assert(nullptr != nullptr, \"z\");\n"
+                  "static_assert(K + 0u == 3, \"w\");\n"
+                  "static_assert((K == 2) && !K, \"v\");\n"
+                  "static_assert(sizeof(long double) == 4);\n"
+                  "static_assert(1 ? K == 3 : 0);\n",
+        .errors = 10,
+        .notes = 5,
+        .c23 = true,
+    },
+    {
+        // A boolean literal beside a value that isn't known to be boolean is noted.
+        .name = "C23 boolean literal sides",
+        .source = "enum { K = 2 };\n"
+                  "static_assert(true == K);\n"
+                  "static_assert(K == false + 3);\n"
+                  "static_assert(false == (K + 1));\n"
+                  "static_assert((_Bool)K == false);\n"
+                  "static_assert(false != 0);\n",
+        .errors = 5,
+        .notes = 3,
+        .c23 = true,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
@@ -889,4 +1118,6 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_convention_sugar_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_convention_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vla_bound_fixtures, BUSTER_ARRAY_LENGTH(check_driver_vla_bound_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
 }

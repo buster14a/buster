@@ -299,8 +299,68 @@ static void ir_inline_test_rows(IrInlineTest* test, Arena* input, Arena* output,
     arena_pop_to(input, 0);
 }
 
+// The permutes of two tables (#1840), whose third operand the extra array holds: a caller with its own calls a callee
+// with two, one of whose third operand is the callee's parameter. Inlined, every permute2's third operand is in a slot of
+// the result's own, remapped: the callee's to the caller's value, and the parameter's to the caller's permute2.
+static void ir_inline_test_permute2(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    static const char caller_text[] =
+        "function (ptr) -> void {\n"
+        "b0:\n"
+        "  %0 = param.ptr 0\n"
+        "  %1 = load.v16i32 %0 align=1\n"
+        "  %2 = address.ptr %0 offset=64\n"
+        "  %3 = load.v16i32 %2 align=1\n"
+        "  %4 = intrinsic.v16i32 %1, %3, %3 permute2 2\n"
+        "  %5 = call.v16i32 @2(%4, %3) fixed=(v16i32, v16i32) variadic=0\n"
+        "  %6 = address.ptr %0 offset=128\n"
+        "  %7 = store.void %6, %5 align=1\n"
+        "  %8 = ret.void\n"
+        "}\n";
+    static const char callee_text[] =
+        "function (v16i32, v16i32) -> v16i32 {\n"
+        "b0:\n"
+        "  %0 = param.v16i32 0\n"
+        "  %1 = param.v16i32 1\n"
+        "  %2 = intrinsic.v16i32 %0, %1, %1 permute2 2\n"
+        "  %3 = intrinsic.v16i32 %1, %2, %0 permute2 3\n"
+        "  %4 = ret.void %3\n"
+        "}\n";
+    IrFunction functions[2];
+    if (ir_inline_simd_parse(test, caller_text, input, scratch, &functions[0]) && ir_inline_simd_parse(test, callee_text, input, scratch, &functions[1]))
+    {
+        const uint32_t symbols[] = { 1, 2 };
+        const uint8_t flags[] = { 0, BUSTER_IR_INLINE_INTERNAL };
+        const IrInlineUnit unit = { functions, symbols, flags, 2, 128 };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            const IrFunction* out = &result.functions[0];
+            uint32_t permutes = 0;
+            uint32_t chained = 0;
+            uint32_t slots_valid = 0;
+            for (uint32_t i = 0; i < out->instruction_count; i += 1)
+            {
+                if (ir_ternary_instruction(out, i))
+                {
+                    permutes += 1;
+                    const uint32_t third = ir_intrinsic_third(out, i);
+                    slots_valid += ir_intrinsic_extra(out->c[i]) < out->extra_count && third < i && out->type[third] == IR_V16I32;
+                    chained += out->op[third] == IR_INTRINSIC && ir_intrinsic_ternary(out->c[third]);
+                }
+            }
+            ir_inline_test_expect(test, result.inlined_calls == 1 && ir_inline_simd_count(out, IR_CALL) == 0 && permutes == 3 && slots_valid == 3 && chained == 1,
+                                  "an inlined permute2's third operand is remapped into a slot of the caller's");
+        }
+        arena_pop_to(output, 0);
+        arena_pop_to(twin, 0);
+    }
+    arena_pop_to(input, 0);
+}
+
 static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     ir_inline_test_by_value(test, input, output, twin, scratch);
     ir_inline_test_rows(test, input, output, twin, scratch);
+    ir_inline_test_permute2(test, input, output, twin, scratch);
 }

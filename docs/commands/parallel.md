@@ -114,7 +114,10 @@ the costliest first, but gives each to the shard that would end the earliest
 with it, run on N CPUs as the runner runs it (in the list's order, each command
 holding its CPUs, at most N, for its cost over them). A deal by costs alone
 can't see that a long command starts only after the 8-CPU commands before it on
-its shard, which hold every CPU. Either way the deal depends on the list and the
+its shard, which hold every CPU. A line `#: first-shard SECONDS` (once) gives the
+time of the steps that a row's shard 1 alone runs besides its commands; the
+scheduled deal counts shard 1 as ending that much later, so it gets less.
+Either way the deal depends on the list and the
 file alone, never on the machine or `--jobs`, so the N shards run every command
 once. The hosted rows' tables, `tools/ci/costs/ROW.costs`, are
 `tools/ci/costs.c`'s output from the rows' own job logs, and name their runner

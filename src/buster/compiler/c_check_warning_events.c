@@ -163,6 +163,9 @@ enum
     CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
     CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
     CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
+    // An object whose tentative definitions leave it an array of unknown bound at the unit's end (#2238, clang's
+    // ActOnEndOfTranslationUnit): -Wtentative-definition-array, on by default.
+    CHECK_WARNING_ID_TENTATIVE_ARRAY = 129,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -445,6 +448,9 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
+    // definition assumed to have one element", at its name.
+    CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
     // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
@@ -453,6 +459,15 @@ typedef enum CheckWarningEventKind
     // to smaller integer type T from P", payload.first_type the operand's type after decay and payload.name its typedef's
     // spelling, payload.second_type the cast's type and payload.data its.
     CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
+    // A comma operator's left operand in an attribute's expression argument whose value clang's isUnusedResultAWarning
+    // says is unused (#1447, check_input_attribute_unused): payload.data a BUSTER_CHECK_UNUSED_* message,
+    // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
+    // -Wunused-comparison's, with a CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT at an equality's.
+    CHECK_WARNING_EVENT_UNUSED_RESULT,
+    // GNU's escape sequence (\e, \E, \(, \{, \[ or \%) in an evaluated literal (#1447, -pedantic's -Wpedantic): "use of
+    // non-standard escape character '\c'" at its backslash, payload.name the character and payload.data the backslash's
+    // offset in the token.
+    CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -460,6 +475,13 @@ typedef enum CheckWarningEventKind
 // ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with
 // BUSTER_CHECK_TARGET_CLONES_CPU where an unsupported one is a CPU's.
 #define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 31)
+
+// CHECK_WARNING_EVENT_UNUSED_RESULT's message (payload.data).
+#define BUSTER_CHECK_UNUSED_COMMA 0u
+#define BUSTER_CHECK_UNUSED_VOID_POINTER 1u
+#define BUSTER_CHECK_UNUSED_EQUALITY 2u
+#define BUSTER_CHECK_UNUSED_INEQUALITY 3u
+#define BUSTER_CHECK_UNUSED_RELATIONAL 4u
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
@@ -493,6 +515,9 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
     // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
     CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
+    // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
+    // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
+    CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

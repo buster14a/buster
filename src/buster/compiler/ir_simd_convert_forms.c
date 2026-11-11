@@ -83,6 +83,60 @@ static const uint16_t ir_simd_shift_forms[3][3][3] = {
         { X86_FORM_VPSRAQ_X_X_XM128, X86_FORM_VPSRAQ_Y_Y_XM128, X86_FORM_VPSRAQ_Z_Z_XM128 },
     },
 };
+// The lane operations (#1840, BUSTER_IR_INTRINSIC_LANE_OP), by the operation (the unsigned and signed minimum and
+// maximum, the unsigned and signed saturating sum and difference), the lanes (bytes to quadwords) and the width, the
+// first operand in vvvv and the second in rm, X86_FORM_NONE where AVX-512 has none (saturation of doublewords and
+// quadwords): which the decoder admits (ir_simd_typed_lane_op) and Tier 1 emits (tier1_select.c).
+static const uint16_t ir_simd_lane_op_forms[8][4][3] = {
+    {
+        { X86_FORM_VPMINUB_X_X_XM128_EVEX, X86_FORM_VPMINUB_Y_Y_YM256_EVEX, X86_FORM_VPMINUB_Z_Z_ZM512 },
+        { X86_FORM_VPMINUW_X_X_XM128_EVEX, X86_FORM_VPMINUW_Y_Y_YM256_EVEX, X86_FORM_VPMINUW_Z_Z_ZM512 },
+        { X86_FORM_VPMINUD_X_X_XM128_EVEX, X86_FORM_VPMINUD_Y_Y_YM256_EVEX, X86_FORM_VPMINUD_Z_Z_ZM512 },
+        { X86_FORM_VPMINUQ_X_X_XM128, X86_FORM_VPMINUQ_Y_Y_YM256, X86_FORM_VPMINUQ_Z_Z_ZM512 },
+    },
+    {
+        { X86_FORM_VPMINSB_X_X_XM128_EVEX, X86_FORM_VPMINSB_Y_Y_YM256_EVEX, X86_FORM_VPMINSB_Z_Z_ZM512 },
+        { X86_FORM_VPMINSW_X_X_XM128_EVEX, X86_FORM_VPMINSW_Y_Y_YM256_EVEX, X86_FORM_VPMINSW_Z_Z_ZM512 },
+        { X86_FORM_VPMINSD_X_X_XM128_EVEX, X86_FORM_VPMINSD_Y_Y_YM256_EVEX, X86_FORM_VPMINSD_Z_Z_ZM512 },
+        { X86_FORM_VPMINSQ_X_X_XM128, X86_FORM_VPMINSQ_Y_Y_YM256, X86_FORM_VPMINSQ_Z_Z_ZM512 },
+    },
+    {
+        { X86_FORM_VPMAXUB_X_X_XM128_EVEX, X86_FORM_VPMAXUB_Y_Y_YM256_EVEX, X86_FORM_VPMAXUB_Z_Z_ZM512 },
+        { X86_FORM_VPMAXUW_X_X_XM128_EVEX, X86_FORM_VPMAXUW_Y_Y_YM256_EVEX, X86_FORM_VPMAXUW_Z_Z_ZM512 },
+        { X86_FORM_VPMAXUD_X_X_XM128_EVEX, X86_FORM_VPMAXUD_Y_Y_YM256_EVEX, X86_FORM_VPMAXUD_Z_Z_ZM512 },
+        { X86_FORM_VPMAXUQ_X_X_XM128, X86_FORM_VPMAXUQ_Y_Y_YM256, X86_FORM_VPMAXUQ_Z_Z_ZM512 },
+    },
+    {
+        { X86_FORM_VPMAXSB_X_X_XM128_EVEX, X86_FORM_VPMAXSB_Y_Y_YM256_EVEX, X86_FORM_VPMAXSB_Z_Z_ZM512 },
+        { X86_FORM_VPMAXSW_X_X_XM128_EVEX, X86_FORM_VPMAXSW_Y_Y_YM256_EVEX, X86_FORM_VPMAXSW_Z_Z_ZM512 },
+        { X86_FORM_VPMAXSD_X_X_XM128_EVEX, X86_FORM_VPMAXSD_Y_Y_YM256_EVEX, X86_FORM_VPMAXSD_Z_Z_ZM512 },
+        { X86_FORM_VPMAXSQ_X_X_XM128, X86_FORM_VPMAXSQ_Y_Y_YM256, X86_FORM_VPMAXSQ_Z_Z_ZM512 },
+    },
+    {
+        { X86_FORM_VPADDUSB_X_X_XM128_EVEX, X86_FORM_VPADDUSB_Y_Y_YM256_EVEX, X86_FORM_VPADDUSB_Z_Z_ZM512 },
+        { X86_FORM_VPADDUSW_X_X_XM128_EVEX, X86_FORM_VPADDUSW_Y_Y_YM256_EVEX, X86_FORM_VPADDUSW_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+    },
+    {
+        { X86_FORM_VPADDSB_X_X_XM128_EVEX, X86_FORM_VPADDSB_Y_Y_YM256_EVEX, X86_FORM_VPADDSB_Z_Z_ZM512 },
+        { X86_FORM_VPADDSW_X_X_XM128_EVEX, X86_FORM_VPADDSW_Y_Y_YM256_EVEX, X86_FORM_VPADDSW_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+    },
+    {
+        { X86_FORM_VPSUBUSB_X_X_XM128_EVEX, X86_FORM_VPSUBUSB_Y_Y_YM256_EVEX, X86_FORM_VPSUBUSB_Z_Z_ZM512 },
+        { X86_FORM_VPSUBUSW_X_X_XM128_EVEX, X86_FORM_VPSUBUSW_Y_Y_YM256_EVEX, X86_FORM_VPSUBUSW_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+    },
+    {
+        { X86_FORM_VPSUBSB_X_X_XM128_EVEX, X86_FORM_VPSUBSB_Y_Y_YM256_EVEX, X86_FORM_VPSUBSB_Z_Z_ZM512 },
+        { X86_FORM_VPSUBSW_X_X_XM128_EVEX, X86_FORM_VPSUBSW_Y_Y_YM256_EVEX, X86_FORM_VPSUBSW_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+    },
+};
 static const uint16_t ir_simd_shift_immediate_forms[3][3][3] = {
     {
         { X86_FORM_VPSLLW_X_XM128_IMM8, X86_FORM_VPSLLW_Y_YM256_IMM8, X86_FORM_VPSLLW_Z_ZM512_IMM8 },
@@ -99,6 +153,47 @@ static const uint16_t ir_simd_shift_immediate_forms[3][3][3] = {
         { X86_FORM_VPSRAD_X_XM128_IMM8, X86_FORM_VPSRAD_Y_YM256_IMM8, X86_FORM_VPSRAD_Z_ZM512_IMM8 },
         { X86_FORM_VPSRAQ_X_XM128_IMM8, X86_FORM_VPSRAQ_Y_YM256_IMM8, X86_FORM_VPSRAQ_Z_ZM512_IMM8 },
     },
+};
+// The permutes of two tables (#1840, BUSTER_IR_INTRINSIC_PERMUTE2), by their lanes' bytes' log2 and width (16, 32 or 64
+// bytes): vpermt2b to vpermt2q, whose destination is the first table and which read the indices from vvvv and the second
+// table from rm.
+static const uint16_t ir_simd_permute2_forms[4][3] = {
+    { X86_FORM_VPERMT2B_X_X_XM128, X86_FORM_VPERMT2B_Y_Y_YM256, X86_FORM_VPERMT2B_Z_Z_ZM512 },
+    { X86_FORM_VPERMT2W_X_X_XM128, X86_FORM_VPERMT2W_Y_Y_YM256, X86_FORM_VPERMT2W_Z_Z_ZM512 },
+    { X86_FORM_VPERMT2D_X_X_XM128, X86_FORM_VPERMT2D_Y_Y_YM256, X86_FORM_VPERMT2D_Z_Z_ZM512 },
+    { X86_FORM_VPERMT2Q_X_X_XM128, X86_FORM_VPERMT2Q_Y_Y_YM256, X86_FORM_VPERMT2Q_Z_Z_ZM512 },
+};
+// The bitwise functions of three vectors (#1840, BUSTER_IR_INTRINSIC_TERNLOG), by their writemask's lanes (doublewords,
+// quadwords) and width: vpternlogd and vpternlogq, the destination the first operand, the second in vvvv and the third in
+// rm. Without a writemask they compute the same bits.
+static const uint16_t ir_simd_ternlog_forms[2][3] = {
+    { X86_FORM_VPTERNLOGD_X_X_XM128_IMM8, X86_FORM_VPTERNLOGD_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8 },
+    { X86_FORM_VPTERNLOGQ_X_X_XM128_IMM8, X86_FORM_VPTERNLOGQ_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8 },
+};
+// The compresses and expands of a vector's lanes into a register (#1840, BUSTER_IR_INTRINSIC_COMPRESS and _EXPAND), by
+// their lanes' bytes' log2 and width: vpcompressb to vpcompressq, the source in reg and the destination in rm, and
+// vpexpandb to vpexpandq, the destination in reg and the source in rm, each merged under a writemask; and the move of a
+// whole vector at each width that the front end's rows end with.
+static const uint16_t ir_simd_compress_forms[4][3] = {
+    { X86_FORM_VPCOMPRESSB_XM128_X, X86_FORM_VPCOMPRESSB_YM256_Y, X86_FORM_VPCOMPRESSB_ZM512_Z },
+    { X86_FORM_VPCOMPRESSW_XM128_X, X86_FORM_VPCOMPRESSW_YM256_Y, X86_FORM_VPCOMPRESSW_ZM512_Z },
+    { X86_FORM_VPCOMPRESSD_XM128_X, X86_FORM_VPCOMPRESSD_YM256_Y, X86_FORM_VPCOMPRESSD_ZM512_Z },
+    { X86_FORM_VPCOMPRESSQ_XM128_X, X86_FORM_VPCOMPRESSQ_YM256_Y, X86_FORM_VPCOMPRESSQ_ZM512_Z },
+};
+static const uint16_t ir_simd_expand_forms[4][3] = {
+    { X86_FORM_VPEXPANDB_X_XM128, X86_FORM_VPEXPANDB_Y_YM256, X86_FORM_VPEXPANDB_Z_ZM512 },
+    { X86_FORM_VPEXPANDW_X_XM128, X86_FORM_VPEXPANDW_Y_YM256, X86_FORM_VPEXPANDW_Z_ZM512 },
+    { X86_FORM_VPEXPANDD_X_XM128, X86_FORM_VPEXPANDD_Y_YM256, X86_FORM_VPEXPANDD_Z_ZM512 },
+    { X86_FORM_VPEXPANDQ_X_XM128, X86_FORM_VPEXPANDQ_Y_YM256, X86_FORM_VPEXPANDQ_Z_ZM512 },
+};
+static const uint16_t ir_simd_whole_moves[3] = { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 };
+// vpermi2b to vpermi2q, the same permutes whose destination is the indices, the first table in vvvv and the second in rm
+// (Tier 1's where the destination's register holds the indices).
+static const uint16_t ir_simd_permute2_index_forms[4][3] = {
+    { X86_FORM_VPERMI2B_X_X_XM128, X86_FORM_VPERMI2B_Y_Y_YM256, X86_FORM_VPERMI2B_Z_Z_ZM512 },
+    { X86_FORM_VPERMI2W_X_X_XM128, X86_FORM_VPERMI2W_Y_Y_YM256, X86_FORM_VPERMI2W_Z_Z_ZM512 },
+    { X86_FORM_VPERMI2D_X_X_XM128, X86_FORM_VPERMI2D_Y_Y_YM256, X86_FORM_VPERMI2D_Z_Z_ZM512 },
+    { X86_FORM_VPERMI2Q_X_X_XM128, X86_FORM_VPERMI2Q_Y_Y_YM256, X86_FORM_VPERMI2Q_Z_Z_ZM512 },
 };
 
 #endif

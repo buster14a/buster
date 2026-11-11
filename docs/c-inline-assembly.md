@@ -651,12 +651,23 @@ instructions, labels and the syntax directives. It refuses:
 
 - every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to any of its labels: the planner assembles
-  these whole too (#1845), as their failure asks (`AsmCode.directive`), so
-  that `leaq 1f(%rip)`, `.`'s address and `loop 1b` are the assembler's own
-  fixups and branches, as clang's;
+  addend, and `loop` and `jrcxz` to its labels with an addend or across a `jmp`
+  or `jcc` that branch sizing sizes: the planner assembles these whole too
+  (#1845), as their failure asks (`AsmCode.directive`), so that `leaq
+  1f(%rip)`, `.`'s address and such a `loop 1b` are the assembler's own fixups
+  and branches, as clang's;
 - undefined numeric labels;
 - what the matcher doesn't take.
+
+A `loop` or a `jrcxz` to a label of the template's own, without an addend and
+with no `jmp` or `jcc` that branch sizing sizes between it and its label, is a
+record whose rel8 displacement the assembler fixes once the records are, by
+their lengths (#1839's item 4: these have no rel32 form, which branch sizing
+would need to grow them, and nothing between them can grow). A body or a
+helper takes it as any record; `check_asm_implicit` gives `loop` its rcx and
+`jrcxz` nothing, and `check_asm_inline_touched` takes it as the template's
+own branch. So `1: addq %rcx, %0; loop 1b` is an asm body in its caller, as
+clang places it.
 
 ### Templates that take directives
 
@@ -1049,8 +1060,12 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   snippet's label does, stays admitted. The assembler takes these instructions
   in `.s` files and file-scope assembly;
 - in a naked function, statements other than `asm` statements, which clang
-  rejects, operands other than integer constants, and a body of no
-  instructions.
+  rejects, and operands other than integer constants and static objects'
+  symbols (#1845: `"m"(g)` prints `g(%rip)`, `"i"(&g)` prints `$g`, bare
+  with `c`, `p` or `P`, and `g(%rip)` with `a`; a block-scope static's or a
+  literal's, whose names the emission makes, stays refused). A naked function
+  of no instructions is clang's function of no bytes, with an FDE of no
+  range.
 
 ## Why it is scalar
 
@@ -1283,7 +1298,7 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` (assembled whole, as templates that take directives are),
+templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
@@ -1299,8 +1314,8 @@ What the lowering still refuses of what GCC and clang take:
 - a template that returns and has a named label, or keeps its helper for
   another of the reasons above (a reference, a directive), which the helper
   design refuses by name;
-- naked functions of no instructions, and naked functions' operands other than
-  integer constants (clang's `"m"(global)`, printed RIP-relative);
+- naked functions' operands other than integer constants and static objects'
+  symbols (a register's, a block-scope static's);
 - the matcher's gaps: the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);

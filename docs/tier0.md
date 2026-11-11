@@ -629,6 +629,12 @@ the operations, of another class than its row's result or of an operand of anoth
 vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
 conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
 
+**Integer vector division (#2216).** No x86 instruction divides vectors of integers: at every target, `/` and `%` of
+them (and `/=` and `%=`) are element by element, as clang's code divides each (`check_lower_vector_divide`, and a
+transport vector's in `check_lower_transport_rows`): the operands set into frame temporaries, each lane's elements loaded,
+promoted to int or unsigned int where narrower, divided by the scalar `DIV` or `MOD`, truncated and set into the result's
+temporary; an extended vector's padding lanes are not divided.
+
 **Targets without AVX-512 (#775).** At `x86-64`, `x86-64-v2` and `x86-64-v3` a function's vector transport is 16 bytes
 of SSE2 or 32 of AVX (`vector_bytes`, #955), through the first free floating register, and its rows are the front end's
 at the target's forms, by both of the checker's paths:
@@ -714,14 +720,14 @@ at the target's forms, by both of the checker's paths:
 - A `__builtin_convertvector` between integers and floats or doubles that no row of SSE's or AVX's takes (of unsigned
   integers, and of 64-bit ones without AVX-512DQ) converts element by element, as C converts each scalar
   (`check_lower_transport_convertvector`, #1834): clang's sequences compute the same values.
-- What has no form at the target is refused by name: the scalars' IEEE maxima and minima (`maximum`
-  and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
+- A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
   without SSE4.1 its `ceilf` ... `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of
   the value plus the largest value below 0.5 of its sign). copysign and canonicalize are SSE's sequences, maxnum,
   minnum and their `_num` forms #967's (`check_vector_extreme_scalar_rows`), and with AVX the IEEE maxima and minima
   `vmaxss` or `vminss`, their sign bit fixed by x's and the NaNs' operands blended in (`vblendvps`,
-  `check_vector_baseline_scalar_row`). The sign masks and the conversions
+  `check_vector_baseline_scalar_row`); without AVX clang's SSE2 sequence in two rows, the sign-fixed `maxss` or `minss`
+  and then x where x is a NaN (`check_vector_floating_scalar_row`'s tail, #1834). The sign masks and the conversions
   to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in several registers
   and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's

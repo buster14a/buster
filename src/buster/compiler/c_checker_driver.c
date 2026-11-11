@@ -7,6 +7,69 @@
 #include "linker_options.c"
 #include "c_driver_inputs.c"
 
+// The closing brace of the function body around `token`, up its tree's parents, or BUSTER_CHECK_NONE.
+static uint32_t check_driver_body_close(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t parent = token, steps = 0; result == BUSTER_CHECK_NONE && parent < count && steps < count; steps += 1)
+    {
+        result = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY ? parent : BUSTER_CHECK_NONE;
+        parent = parser->tree.parents[parent];
+    }
+    return result;
+}
+
+// The candidates clang's notes name for an ambiguous label's reference, report `index` (#1844, its reader's
+// check_input_report_label_ambiguous), in its lookup's order, into `candidates` (`capacity` of them), their count: the
+// innermost list's entries of the name in the candidates' scope, the latest first (its note token's, then back through
+// its block's lists, which begin the block), then where the function's own labels are among them (`detail` 1), in the
+// order clang made them: the one a reference that was no ambiguity made (`attribute`), then the one each earlier
+// ambiguous reference of the function made, at its name.
+static uint32_t check_driver_label_candidates(const Parser* parser, const CheckInput* input, uint32_t index, uint32_t* candidates, uint32_t capacity)
+{
+    const uint32_t count = parser->tokens.count;
+    const CheckInputReport* report = input->reports + index;
+    const uint32_t name = parser->tokens.names[report->token];
+    uint32_t found = 0;
+    bool listed = report->note_token < count;
+    for (uint32_t token = report->note_token; listed && found < capacity; token -= 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] == name)
+        {
+            candidates[found++] = token;
+        }
+        listed = token != 0 && (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_LABEL);
+    }
+    if (report->detail == 1)
+    {
+        if (report->attribute < count && found < capacity)
+        {
+            candidates[found++] = report->attribute;
+        }
+        // The earlier ambiguous references of the name in the same body, in their tokens' order.
+        const uint32_t close = check_driver_body_close(parser, report->token);
+        const uint32_t start = found;
+        for (uint32_t r = 0; r < input->report_count && found < capacity; r += 1)
+        {
+            const CheckInputReport* other = input->reports + r;
+            if (other->message == CHECK_INPUT_LABEL_AMBIGUOUS && other->token < report->token && parser->tokens.names[other->token] == name &&
+                check_driver_body_close(parser, other->token) == close)
+            {
+                uint32_t at = found++;
+                while (at > start && candidates[at - 1] > other->token)
+                {
+                    candidates[at] = candidates[at - 1];
+                    at -= 1;
+                }
+                candidates[at] = other->token;
+            }
+        }
+    }
+    return found;
+}
+
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
     const char* result = "invalid expression";
@@ -65,6 +128,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NEGATIVE: result = "array size is negative"; break;
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
+        case CHECK_INPUT_FUNCTION_INITIALIZER: result = "illegal initializer (only variables can be initialized)"; break;
         case CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT: result = "size of array element isn't a multiple of its alignment"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
@@ -1633,7 +1697,7 @@ static uint32_t check_driver_character_count(const uint8_t* bytes, uint32_t leng
     {
         if (bytes[at] == '\\')
         {
-            at = check_literal_evaluated_escape(bytes, at, end, c23, UINT32_MAX, NULL, &ignored, &had_error);
+            at = check_literal_evaluated_escape(bytes, at, end, c23, false, UINT32_MAX, NULL, &ignored, &had_error);
             count += 1;
         }
         else
@@ -1688,10 +1752,12 @@ static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp,
             const String8 spelling = check_warning_string_spelling(parser, pp, t, scratch);
             const uint32_t length = (uint32_t)spelling.length;
             CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
-            const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes((const uint8_t*)spelling.pointer, length, c23, diagnostics, &had_error) : 0;
+            const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes((const uint8_t*)spelling.pointer, length, c23, true, diagnostics, &had_error) : 0;
             for (uint32_t i = 0; i < count; i += 1)
             {
-                errors |= diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN;
+                // (-Wunknown-escape-sequence's and -pedantic's are warnings.)
+                errors |= diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN && diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD &&
+                          diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_DELIMITED && diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_NAMED;
                 if (pass == 1)
                 {
                     check_driver_escape(parser, pp, input, t, spelling, diagnostics + i, publication);
@@ -2600,38 +2666,49 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
-// `events` split for clang's end of the translation unit (#2141): `unit_end` gets its unused file-scope declarations,
-// which Sema::ActOnEndOfTranslationUnit diagnoses only where no error has occurred (a warning -Werror promoted
-// included), and `rest` every other event, in order. A view without such an event is `rest` itself, with no copy.
-// Whether there was room.
-static bool check_driver_unit_end_split(const CheckWarningEvents* events, Arena* scratch, CheckWarningEvents* rest, CheckWarningEvents* unit_end)
+// The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative array's
+// (#2238), 2 an unused file-scope declaration's.
+static uint32_t check_driver_unit_end_class(const CheckWarningEvent* event)
 {
-    *rest = *events;
-    *unit_end = (CheckWarningEvents){ .notes = events->notes, .note_count = events->note_count };
-    uint32_t ending = 0;
-    for (uint32_t i = 0; i < events->count; i += 1)
+    const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+                        event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+    return event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY ? 1u : unused ? 2u : 0u;
+}
+
+// Splits a reader's warning events (`events`) into those published where they stand (`kept`) and the unit-end ones
+// (`late`), which clang's ActOnEndOfTranslationUnit gives after every other diagnostic (#2238): late[0] the tentative
+// arrays' warnings, late[1] the unused file-scope declarations', which it leaves out once any error has occurred, a
+// warning -Werror promotes included. Each keeps its order. `kept` may be `events`; a unit with unit-end events copies
+// them into `arena`. Whether there was room.
+static bool check_driver_unit_end_split(const CheckWarningEvents* events, Arena* arena, CheckWarningEvents* kept, CheckWarningEvents late[2])
+{
+    const CheckWarningEvents source = *events;
+    uint32_t counts[3] = { 0 };
+    for (uint32_t i = 0; i < source.count; i += 1)
     {
-        const CheckWarningEvent* event = events->events + i;
-        ending += (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
-                  event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+        counts[check_driver_unit_end_class(source.events + i)] += 1;
     }
-    CheckWarningEvent* split = ending != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningEvent, events->count) : NULL;
-    const bool valid = ending == 0 || split != NULL;
-    if (ending != 0 && valid)
+    late[0] = (CheckWarningEvents){ .notes = source.notes, .note_count = source.note_count };
+    late[1] = late[0];
+    CheckWarningEvent* copy = counts[1] + counts[2] != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, source.count) : NULL;
+    const bool valid = counts[1] + counts[2] == 0 || copy != NULL;
+    if (copy != NULL)
     {
-        uint32_t front = 0;
-        uint32_t back = events->count - ending;
-        for (uint32_t i = 0; i < events->count; i += 1)
+        uint32_t cursors[3] = { 0, counts[0], counts[0] + counts[1] };
+        for (uint32_t i = 0; i < source.count; i += 1)
         {
-            const CheckWarningEvent* event = events->events + i;
-            const bool late = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
-                              event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
-            split[late ? back++ : front++] = *event;
+            const uint32_t class = check_driver_unit_end_class(source.events + i);
+            copy[cursors[class]++] = source.events[i];
         }
-        rest->events = split;
-        rest->count = events->count - ending;
-        unit_end->events = split + rest->count;
-        unit_end->count = ending;
+        *kept = (CheckWarningEvents){ .events = copy, .count = counts[0], .notes = source.notes, .note_count = source.note_count };
+        late[0].events = copy + counts[0];
+        late[0].count = counts[1];
+        late[1].events = copy + counts[0] + counts[1];
+        late[1].count = counts[2];
+    }
+    else
+    {
+        *kept = source;
     }
     return valid;
 }
@@ -3153,20 +3230,24 @@ static uint32_t check_driver_parameter_place(const Parser* parser, const CheckIn
     return result;
 }
 
-// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef) as clang words it (#147,
+// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef, or `target_sugar`'s
+// sugar) as clang words it (#147,
 // Sema::DiagnoseAssignmentResult): its kind's words (check_driver_conversion_kind), its `action`'s (0 initializing, 1
 // assigning, 2 returning, 3 passing, each putting the target or the source first as clang's does), the fix-it's
 // (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint8_t action, Arena* scratch)
+                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
+                                                 uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if (source < stream->count && target != 0)
     {
         const TypeId value = check_stream_type(stream, source);
         const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
-        const String8 to = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
-        const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, source_spelling);
+        // Each as its declaration's sugar writes it, where it has some (#1447).
+        const String8 to = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
+        const String8 from = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
@@ -3240,7 +3321,8 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool narrow = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
-                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling, 0, scratch) :
+                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, 0, scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
@@ -3272,6 +3354,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t source = BUSTER_CHECK_NONE;
     TypeId target = 0;
     uint32_t target_spelling = 0;
+    uint32_t target_sugar = 0;
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
@@ -3283,6 +3366,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
             at = check_sparse_get(input->initializer_nodes, declaration) == node ? declaration : at;
         }
         target = check_input_object_spelling(types, input, parser, at, graph->types[node], graph->types[node], &target_spelling);
+        target_sugar = at < input->token_count ? check_input_declared_sugar(input, at) : 0;
     }
     else if (applies && op == CHECK_OP_ASSIGN)
     {
@@ -3296,6 +3380,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
         target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
         target = member ? lvalue : target;
+        target_sugar = member ? 0 : check_driver_operand_sugar(input, stream, left);
     }
     else if (applies && returning)
     {
@@ -3338,7 +3423,8 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         }
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
-    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, action, scratch) : NULL;
+    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar, action,
+                                                                 scratch) : NULL;
     *located = result != NULL ? at : *located;
     return result;
 }
@@ -4916,6 +5002,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
                                                         "alias definition of '%.*s' after tentative definition", (int)intern_length(pp->table, name),
                                                         intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_LABEL_AMBIGUOUS && located < count &&
+                                 parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // An ambiguous label's reference (#1844), with clang's note at each candidate its lookup found.
+                            const uint32_t name = parser->tokens.names[located];
+                            uint32_t candidates[16];
+                            const uint32_t candidate_count = check_driver_label_candidates(parser, input, index, candidates, BUSTER_ARRAY_LENGTH(candidates));
+                            char candidate[512];
+                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            PPOutputDiagnosticNote notes[16];
+                            for (uint32_t c = 0; c < candidate_count; c += 1)
+                            {
+                                notes[c] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[candidates[c]], .message = candidate };
+                            }
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, candidate_count, "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
@@ -9597,12 +9700,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     const bool unit_errors = pp->errors != 0 || parse_failed || input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
                     const bool located = input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
                     const uint32_t* error_counts = located ? check_driver_error_counts(checking, &input, &stream, &types, additional, additional_count, scratch) : NULL;
-                    CheckWarningEvents kept_warnings;
                     CheckWarningEvents input_warnings;
-                    CheckWarningEvents unit_end_warnings;
+                    // The unit-end warnings publish after every other diagnostic (check_driver_unit_end_split).
+                    CheckWarningEvents unit_end_warnings[2] = { 0 };
                     const bool unit_end_ready = (!located || error_counts != NULL) &&
-                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &kept_warnings) &&
-                        check_driver_unit_end_split(&kept_warnings, scratch, &input_warnings, &unit_end_warnings);
+                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings) &&
+                        check_driver_unit_end_split(&input_warnings, output_arena, &input_warnings, unit_end_warnings);
                     if (!unit_end_ready ||
                         !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
@@ -9628,35 +9731,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
                     }
-                    // A warning the publication promoted to an error rejects the unit, before its final warnings.
+                    // A warning the publication promoted to an error rejects the unit.
                     result = pp->errors != 0 ? 1 : result;
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
-                    const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
-                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
-                    if (final_warnings)
-                    {
-                        CheckInput undefined_input;
-                        CheckWarningBuffer undefined_warnings = { .arena = output_arena };
-                        const bool completed = check_initializers_warning_uses(&undefined_input, &input, &initializer_warning_view, output_arena) &&
-                                               check_warning_undefined_internal(&undefined_warnings, &undefined_input, checking, &types, &stream, scratch);
-                        const CheckWarningEvents undefined_view = check_warning_view(&undefined_warnings);
-                        if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
-                        {
-                            fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
-                            driver_fatal = true;
-                            result = 1;
-                        }
-                        result = pp->errors != 0 ? 1 : result;
-                    }
-                    // The unused file-scope declarations, last at the unit's end and only where no error occurred before them,
-                    // the internal functions used but not defined included (#2141).
-                    if (unit_end_ready && pp->errors == 0 && unit_end_warnings.count != 0 &&
-                        !check_driver_warning_events_at(checking, pp, &input, &types, &unit_end_warnings, repairing ? &repair : NULL, publication_end, scratch))
-                    {
-                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
-                        driver_fatal = true;
-                    }
-                    result = pp->errors != 0 || driver_fatal ? 1 : result;
                     if (program_checked)
                     {
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
@@ -9764,6 +9841,39 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs
                     // none).
                     check_common_shift_finish(pp, &shift_warnings);
+                    // The unit's end, in clang's ActOnEndOfTranslationUnit's order, after every other diagnostic (#2238):
+                    // the internal functions used but never defined, unless an error has occurred (clang's
+                    // hasErrorOccurred, which counts a warning -Werror promotes); the tentative arrays' warnings; then, again
+                    // unless an error has occurred, a promoted one among those included, the unused file-scope declarations'.
+                    const bool final_warnings = pp->errors == 0 && !pp->fatal && program_checked && !prefix_only && !repairing && !parse_failed &&
+                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
+                    if (final_warnings)
+                    {
+                        CheckInput undefined_input;
+                        CheckWarningBuffer undefined_warnings = { .arena = output_arena };
+                        const bool completed = check_initializers_warning_uses(&undefined_input, &input, &initializer_warning_view, output_arena) &&
+                                               check_warning_undefined_internal(&undefined_warnings, &undefined_input, checking, &types, &stream, scratch);
+                        const CheckWarningEvents undefined_view = check_warning_view(&undefined_warnings);
+                        if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
+                        {
+                            fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
+                            driver_fatal = true;
+                            result = 1;
+                        }
+                        result = pp->errors != 0 ? 1 : result;
+                    }
+                    if (!pp->fatal && unit_end_warnings[0].count != 0 &&
+                        !check_driver_warning_events_at(checking, pp, &input, &types, unit_end_warnings, repairing ? &repair : NULL, publication_end, scratch))
+                    {
+                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
+                    }
+                    if (!pp->fatal && pp->errors == 0 && unit_end_warnings[1].count != 0 &&
+                        !check_driver_warning_events_at(checking, pp, &input, &types, unit_end_warnings + 1, repairing ? &repair : NULL, publication_end, scratch))
+                    {
+                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
+                    }
                     result = pp->errors != 0 ? 1 : result;
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                     // The backend reads the program, not the preprocessor's output: only its diagnostics do, which ask for it

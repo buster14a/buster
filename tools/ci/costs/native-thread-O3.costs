@@ -8,8 +8,11 @@
 # failure, a lower bound (`lower-bound`); where it has none, the row's median per CPU times its CPUs (`unmeasured`),
 # which `costs refresh` also gives a command the inventory adds. The costs only deal the commands to the shards: a
 # stale cost makes a shard longer, never a test go missing.
+# `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference
+# with each job scaled as its samples are: the steps the row runs once, which the deal adds to shard 1's schedule.
 #: row native thread O3
 #: runner-cpus 4
+#: first-shard 182.7
 #: samples 3 3
 #: revision 2eff3c58125390bf06c13a681d221cc50b3643f8 4
 #: revision 92da7275dfad08e445cf82f86e8d019e9da8db78 4

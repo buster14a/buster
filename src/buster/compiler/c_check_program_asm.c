@@ -101,6 +101,11 @@
 // clang's code places an __int128 there; its slots take 16 bytes. A narrower A operand is a general register's, rax
 // (CheckAsmPlace.wide).
 #define BUSTER_CHECK_ASM_PAIR 10
+// A naked function's operand that names a static object (#1845), whose name and offset (CheckAsmPlace.symbol and
+// .constant) the template prints, as clang's: an "i" operand's address constant (`$g+8`, bare `g+8` with c, p or P,
+// and `g+8(%rip)` with a), and an "m" operand of the object itself (`g+8(%rip)`, `g+16(%rip)` with H).
+#define BUSTER_CHECK_ASM_SYMBOL 11
+#define BUSTER_CHECK_ASM_SYMBOL_MEMORY 12
 
 // check_asm_variable_register's number for an explicit register variable in rsp, esp or sp (#1846), and the first of
 // ymm0 to ymm31's and of zmm0 to zmm31's.
@@ -175,6 +180,8 @@ struct CheckAsmPlace
     // A global register variable's operand (#1846): its register, rsp or rbp, which the template names and nothing loads,
     // stores or gives a slot.
     bool global;
+    // A symbol operand's name (BUSTER_CHECK_ASM_SYMBOL and _SYMBOL_MEMORY, #1845).
+    String8 symbol;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -666,6 +673,18 @@ static void check_asm_emit_number(Arena* scratch, int64_t value, bool* valid)
     check_asm_emit_bytes(scratch, digits, (uint64_t)length, valid);
 }
 
+// A symbol operand's name and offset (#1845): `g`, `g+8` or `g-8`, as clang prints them.
+static void check_asm_emit_symbol(Arena* scratch, const CheckAsmPlace* place, int64_t extra, bool* valid)
+{
+    const int64_t offset = place->constant + extra;
+    check_asm_emit_bytes(scratch, place->symbol.pointer, place->symbol.length, valid);
+    check_asm_emit_text(scratch, offset > 0 ? "+" : "", valid);
+    if (offset != 0)
+    {
+        check_asm_emit_number(scratch, offset, valid);
+    }
+}
+
 // Operand `place`, as GCC and clang print it in AT&T syntax with `modifier` (0 for none): NULL, or the feature a
 // modifier the lowering doesn't print names.
 static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, uint8_t modifier, bool* valid)
@@ -744,6 +763,21 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
                 check_asm_emit_number(scratch, place->reg, valid);
                 check_asm_emit_text(scratch, ")", valid);
             }
+        }
+        else
+        {
+            refused = "this inline assembly operand modifier";
+        }
+    }
+    else if (place->kind == BUSTER_CHECK_ASM_SYMBOL || place->kind == BUSTER_CHECK_ASM_SYMBOL_MEMORY)
+    {
+        const bool memory = place->kind == BUSTER_CHECK_ASM_SYMBOL_MEMORY;
+        const bool printed = memory ? modifier == 0 || modifier == 'H' : modifier == 0 || modifier == 'c' || modifier == 'p' || modifier == 'P' || modifier == 'a';
+        if (printed)
+        {
+            check_asm_emit_text(scratch, !memory && modifier == 0 ? "$" : "", valid);
+            check_asm_emit_symbol(scratch, place, modifier == 'H' ? 8 : 0, valid);
+            check_asm_emit_text(scratch, memory || modifier == 'a' ? "(%rip)" : "", valid);
         }
         else
         {
@@ -1677,6 +1711,10 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_RDPMC, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RDX) },
     { X86_FORM_XGETBV, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RDX) },
     { X86_FORM_SYSCALL, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RCX) | BUSTER_CHECK_ASM_GPR(R11) },
+    // loop decrements rcx (ecx with an address-size prefix) and jrcxz writes nothing: each a branch to the template's own
+    // record, whose rel8 displacement the assembler fixed (asm_assemble_code's fixed branches, #1839's item 4).
+    { X86_FORM_LOOP_REL8, BUSTER_CHECK_ASM_GPR(RCX) },
+    { X86_FORM_JRCXZ_REL8, 0 },
     { X86_FORM_FNSTSW_AX, BUSTER_CHECK_ASM_GPR(RAX) },
     { X86_FORM_FSTSW_AX, BUSTER_CHECK_ASM_GPR(RAX) },
     { X86_FORM_LDMXCSR_M32, 0 },
@@ -1736,6 +1774,18 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         written |= places[k].kind == BUSTER_CHECK_ASM_PAIR ? 1ull << X86_REGISTER_RAX | 1ull << X86_REGISTER_RDX : 0;
         opmask_writes |= places[k].kind == BUSTER_CHECK_ASM_MASK ? 1u << (places[k].reg & 7) : 0;
     }
+    // A loop's or a jrcxz's (#1839's item 4): a rel8 record the assembler gave its displacement to a record of the template's
+    // own (asm_assemble_code's fixed branches). A template of one takes no straight path to a return below.
+    bool fixed = false;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        bool sized = false;
+        for (uint32_t b = 0; b < code->branch_count; b += 1)
+        {
+            sized |= code->branches[b] == r;
+        }
+        fixed |= !sized && x86_form_description(code->records[r].form & BUSTER_X86_FORM_NUMBER)->relative_bytes == 1 && (code->records[r].form & BUSTER_X86_FORM_FIXUP) == 0;
+    }
     for (uint32_t r = 0; placed && r < code->count; r += 1)
     {
         const X86Instruction* record = code->records + r;
@@ -1758,7 +1808,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 branch |= gotos[j].record == k;
             }
-            out = !target && check_asm_return(code->records[k].form);
+            out = !target && !fixed && check_asm_return(code->records[k].form);
             if (branch || target)
             {
                 break;
@@ -1816,6 +1866,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 local |= gotos[j].record == r;
             }
+            // A fixed branch's rel8 form, to the template's own record.
+            local |= x86_form_description(record->form & BUSTER_X86_FORM_NUMBER)->relative_bytes == 1 && (record->form & BUSTER_X86_FORM_FIXUP) == 0;
             const uint32_t control = x86_effects_control(effects);
             placed = (control == BUSTER_X86_CONTROL_NONE || (local && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))) &&
                      (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_STACK_WRITE)) == 0 &&
@@ -3436,6 +3488,22 @@ static bool check_program_asm_naked(const CheckProgram* program, uint32_t b)
     return program->object_naked != 0 && body.object < program->object_count && program->object_naked[body.object] <= body.declaration;
 }
 
+// The symbol a naked function's operand names (#1845): a static object's or a function's of the unit, by its asm label
+// or else its identifier, as clang prints it; an empty name for one whose name the emission makes (a block-scope
+// static's, a literal's or a compound literal's), which stays refused.
+static String8 check_asm_naked_symbol(const CheckProgram* program, uint32_t object)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = object != 0 && object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const bool named = declaration < input->token_count && check_input_linkage(input->declaration_bits, declaration) != 0 &&
+                       !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
+                       !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) && program->parser->tokens.names[declaration] != 0;
+    const String8 label = named ? check_program_alias_label(input, declaration) : (String8){ 0 };
+    const uint32_t identifier = named ? program->parser->tokens.names[declaration] : 0;
+    return !named ? (String8){ 0 } : label.length != 0 ? label :
+           (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
+}
+
 // Plans naked body `b` (CheckProgramNaked): its statements, each an asm statement whose operands are integer constants
 // (anything else is refused by name, as clang refuses statements other than asm statements), are its whole code: their
 // templates, substituted, assembled together in order, the syntax AT&T's again at each statement's start, as clang's
@@ -3493,9 +3561,21 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
                 uint32_t bits = 64;
                 const bool immediate = !output && constraint.refused == NULL && constraint.immediate &&
                                        check_asm_integer_constant(program->types, operands + firsts[s] + k, &constant, &bits);
-                places[k] = (CheckAsmPlace){ .constant = constant, .slot = BUSTER_CHECK_NONE, .value = BUSTER_CHECK_NONE, .tied = BUSTER_CHECK_NONE,
-                                             .kind = BUSTER_CHECK_ASM_CONSTANT };
-                reason = !immediate ? "naked functions' inline assembly operands other than integer constants" :
+                // An address constant of a symbol ("i"(&g), "i"(f)) and a static object ("m"(g)), which clang prints by
+                // its symbol's name (#1845).
+                const CheckValue* value = &operands[firsts[s] + k].value;
+                const bool clean = !output && constraint.refused == NULL && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                const bool address = clean && !immediate && constraint.immediate && constraint.low == INT64_MIN && constraint.high == INT64_MAX &&
+                                     value->constant_kind == CHECK_CONSTANT_ADDRESS;
+                const bool object = clean && !immediate && !address && constraint.memory && value->category == CHECK_LVALUE &&
+                                    (value->flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && value->bit_width == 0;
+                const String8 symbol = address || object ? check_asm_naked_symbol(program, value->object) : (String8){ 0 };
+                const bool named = symbol.length != 0;
+                places[k] = (CheckAsmPlace){ .constant = named ? value->offset : constant, .slot = BUSTER_CHECK_NONE, .value = BUSTER_CHECK_NONE, .tied = BUSTER_CHECK_NONE,
+                                             .kind = !named ? BUSTER_CHECK_ASM_CONSTANT : address ? BUSTER_CHECK_ASM_SYMBOL : BUSTER_CHECK_ASM_SYMBOL_MEMORY,
+                                             .symbol = symbol };
+                reason = named ? NULL :
+                         !immediate ? "naked functions' inline assembly operands other than integer constants or static objects' symbols" :
                          !check_asm_constant_fits(&constraint, constant, bits) ? "inline assembly constants outside their constraint's range" : NULL;
             }
             if (valid && reason == NULL)
@@ -3539,15 +3619,11 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             {
                 reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
             }
-            // clang makes an empty function of none, which would have an unwind entry of no bytes.
-            reason = reason == NULL && valid && !unit.entry_code ? "naked functions of no instructions" : reason;
         }
         else
         {
             reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
             valid = code.error == NULL || reason != NULL;
-            // clang makes an empty function of none, which would have an unwind entry of no bytes.
-            reason = reason == NULL && valid && code.count == 0 ? "naked functions of no instructions" : reason;
         }
     }
     if (valid && reason == NULL && unit_assembled)

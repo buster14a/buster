@@ -1191,10 +1191,37 @@ struct CheckLocalLabels
     uint32_t* shadowed;
     uint32_t* tokens;
     uint32_t* ends;
-    // Per token: 1 + a label definition's or use's scope, or 0 for its body.
+    // Per token: 1 + a label definition's or use's scope, or 0 for its body; BUSTER_CHECK_NONE for an ambiguous use.
     uint32_t* scopes;
+    // Per name, the labels of the function's own scope that clang's lookup made (check_input_label_lookup): their count,
+    // 1 + the name token of the first where a reference that was no ambiguity made it (or 0), and 1 + the function body
+    // they are of, whose change empties them.
+    uint32_t* function_counts;
+    uint32_t* function_firsts;
+    uint32_t* function_bodies;
+    // Per name, 1 + the reference (its label's or its goto's or address's token) that made the first of them.
+    uint32_t* function_ones;
     uint32_t count;
 };
+
+// What a label's reference finds (check_input_label_lookup): whether it is ambiguous, and its candidates for clang's
+// notes: the name token of the innermost list's entry in scope of its name (or BUSTER_CHECK_NONE); whether the function's
+// own labels of its name are among them; and the first of those, where a reference that was no ambiguity made it.
+typedef struct CheckLabelLookup CheckLabelLookup;
+struct CheckLabelLookup
+{
+    uint32_t local;
+    uint32_t first;
+    // The reference that made the function's own label it finds, where it finds that one alone, or BUSTER_CHECK_NONE.
+    uint32_t one;
+    bool function;
+    bool ambiguous;
+};
+
+// A goto's or an address's CheckLocalLabels.scopes where its reference was ambiguous, and where a later definition
+// found the label it made, which is then defined (check_input_label_lookup).
+#define BUSTER_CHECK_LABEL_AMBIGUOUS BUSTER_CHECK_NONE
+#define BUSTER_CHECK_LABEL_AMBIGUOUS_DEFINED (BUSTER_CHECK_NONE - 1)
 
 // A label definition's or use's scope (CheckLocalLabels).
 static uint32_t check_input_label_scope(const CheckInputReader* reader, const CheckLocalLabels* locals, uint32_t token)
@@ -1230,10 +1257,9 @@ static uint32_t check_input_find_label(const CheckInputReader* reader, const Che
     return result;
 }
 
-// Pushes a `__label__` list's names (check_input_local_labels marked it), whose block ends at its statement's parent's
-// parent: the block's closing brace, after the list's `;`. Makes the columns on a unit's first list: the heads per name,
+// Makes the local labels' columns (CheckLocalLabels) on a unit's first list: the heads and the function's labels per name,
 // the entries and scopes per token, each of which takes at most one.
-static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t keyword)
+static void check_input_local_labels_make(CheckInputReader* reader, CheckLocalLabels* locals)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
@@ -1246,13 +1272,19 @@ static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLab
         locals->tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
         locals->ends = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
         locals->scopes = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        locals->function_counts = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->function_firsts = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->function_bodies = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->function_ones = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
         const bool made = locals->heads != NULL && locals->names != NULL && locals->shadowed != NULL && locals->tokens != NULL && locals->ends != NULL &&
-                          locals->scopes != NULL;
+                          locals->scopes != NULL && locals->function_counts != NULL && locals->function_firsts != NULL && locals->function_bodies != NULL &&
+                          locals->function_ones != NULL;
         reader->output->resource |= !made;
         if (made)
         {
             memset(locals->heads, 0, ((uint64_t)names + 1) * sizeof(uint32_t));
             memset(locals->scopes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memset(locals->function_bodies, 0, ((uint64_t)names + 1) * sizeof(uint32_t));
         }
         else
         {
@@ -1260,6 +1292,17 @@ static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLab
             locals->scopes = NULL;
         }
     }
+}
+
+// Pushes a `__label__` list's names (check_input_local_labels marked it), whose block ends at its statement's parent's
+// parent: the block's closing brace, after the list's `;`, making the columns on a unit's first list
+// (check_input_local_labels_make).
+static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t names = reader->pp->table->count;
+    check_input_local_labels_make(reader, locals);
     const uint32_t statement = parser->tree.parents[keyword];
     const uint32_t end = statement < count ? parser->tree.parents[statement] : count;
     for (uint32_t token = keyword + 1; locals->heads != NULL && end < count && token < statement; token += 1)
@@ -1291,18 +1334,97 @@ static bool check_input_local_label_ambiguous(const CheckLocalLabels* locals, ui
     return shadowed != 0 && locals->ends[shadowed - 1] == locals->ends[entry];
 }
 
+// clang's lookup of a label's name at reference `name_token` (a definition's, a goto's or an address's) in function body
+// `body`, whose closing brace is `close` (#1844): LookupSingleName's declarations of the first one's scope, then
+// LookupOrCreateLabel's. The innermost list in scope with the name decides where its block isn't the body: ambiguous
+// where it names it twice. Otherwise its candidates are the body's list's entries (none, one, or two and more) and the
+// labels of the function's own scope, which is the body's: each reference that found no label made one, and so does each
+// ambiguous reference, wherever it is (a later reference that finds that one alone takes it). Two and more are ambiguous.
+// Makes the label the reference makes. Without lists in the unit, a name is never ambiguous.
+static CheckLabelLookup check_input_label_lookup(const CheckInputReader* reader, CheckLocalLabels* locals, uint32_t reference, uint32_t name_token, uint32_t body,
+                                                 uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t name = parser->tokens.names[name_token];
+    CheckLabelLookup result = { .local = BUSTER_CHECK_NONE, .first = BUSTER_CHECK_NONE, .one = BUSTER_CHECK_NONE };
+    if (locals->heads != NULL && name < reader->pp->table->count && body != BUSTER_CHECK_NONE)
+    {
+        if (locals->function_bodies[name] != body + 1)
+        {
+            locals->function_bodies[name] = body + 1;
+            locals->function_counts[name] = 0;
+            locals->function_firsts[name] = 0;
+            locals->function_ones[name] = 0;
+        }
+        const uint32_t local = check_input_local_label(reader, locals, name);
+        const bool top = local == BUSTER_CHECK_NONE || locals->ends[local] == close;
+        const uint32_t made = locals->function_counts[name];
+        const uint32_t entries = local == BUSTER_CHECK_NONE ? 0 : check_input_local_label_ambiguous(locals, local) ? 2 : 1;
+        result.local = local != BUSTER_CHECK_NONE ? locals->tokens[local] : BUSTER_CHECK_NONE;
+        result.function = top && made != 0;
+        result.first = top && locals->function_firsts[name] != 0 ? locals->function_firsts[name] - 1 : BUSTER_CHECK_NONE;
+        result.ambiguous = top ? entries + made >= 2 : entries >= 2;
+        const bool makes = result.ambiguous || (local == BUSTER_CHECK_NONE && made == 0);
+        result.one = !result.ambiguous && local == BUSTER_CHECK_NONE && made == 1 ? locals->function_ones[name] - 1 : BUSTER_CHECK_NONE;
+        locals->function_firsts[name] = !result.ambiguous && makes ? name_token + 1 : locals->function_firsts[name];
+        locals->function_ones[name] = made == 0 && makes ? reference + 1 : locals->function_ones[name];
+        locals->function_counts[name] = made + (makes ? 1 : 0);
+    }
+    return result;
+}
+
+// The lookups of the references in function body `body` (whose closing brace is `close`) before the unit's first list,
+// at `keyword`, which made no columns for them when they met them (#1844): each name's first, a label's definition, a
+// goto's or an address's, made the function's label a later ambiguity counts. No reference before a list is ambiguous.
+static void check_input_label_lookups_before(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t body, uint32_t close, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t token = body + 1; token < keyword; token += 1)
+    {
+        const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0;
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool definition = parser->tree.roles[token] == PARSE_ROLE_LABEL;
+        const bool jump = kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0 && !check_input_indirect_goto(parser, token);
+        const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
+        const uint32_t name = deferred ? count : definition ? check_input_label_name(reader, token) : jump || address ? reader->first_child[token] : count;
+        if (name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER)
+        {
+            (void)check_input_label_lookup(reader, locals, token, name, body, close);
+        }
+    }
+}
+
+// Reports clang's "reference to 'X' is ambiguous" at a label's name, with what its notes name (the driver's): the
+// innermost list's entry of the name in the candidates' scope (`note_token`, whose list's earlier entries of the name the
+// driver adds), and where the function's own labels are among them, `detail` 1 and the first of them that a reference
+// that was no ambiguity made (`attribute`), before the earlier ambiguous references' (each of which made one).
+static void check_input_report_label_ambiguous(CheckInputReader* reader, uint32_t name_token, const CheckLabelLookup* lookup)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_report(reader, name_token, CHECK_INPUT_LABEL_AMBIGUOUS);
+    if (reader->output->report_count > before)
+    {
+        CheckInputReport* report = reader->output->reports + before;
+        report->note_token = lookup->local;
+        report->detail = lookup->function ? 1 : 0;
+        report->attribute = lookup->first;
+    }
+}
+
 // clang's "use of undeclared label" at `token`, a label's name, given where clang gives it: as the scope that declares the
 // label pops, at `close` (a block's closing brace for a local label's list, the function body's for a label of the
 // function's own), after the errors before it. A function's label (`function`) is reported once: clang's function scope
 // creates a name's label at its first reference, which the later ones find (CheckInputReport.detail marks it, and a later
-// one of the same name at the same close is none). An error's path alone.
-static void check_input_report_label_undeclared(CheckInputReader* reader, uint32_t token, uint32_t close, bool function)
+// one of the same name at the same close is none), but an ambiguous reference's (`own`) is a label of its own, which
+// clang's lookup made (check_input_label_lookup). An error's path alone.
+static void check_input_report_label_undeclared(CheckInputReader* reader, uint32_t token, uint32_t close, bool function, bool own)
 {
     const CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t name = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[token] : BUSTER_CHECK_NONE;
     bool reported = false;
-    for (uint32_t r = input->report_count; !reported && name != BUSTER_CHECK_NONE && close != 0 && r-- > 0;)
+    for (uint32_t r = input->report_count; !own && !reported && name != BUSTER_CHECK_NONE && close != 0 && r-- > 0;)
     {
         const CheckInputReport* report = input->reports + r;
         reported = function && report->message == CHECK_INPUT_LABEL_UNDECLARED && report->detail == 1 && report->sort == close && report->token < parser->tokens.count &&
@@ -1340,7 +1462,7 @@ static void check_input_local_label_pop(CheckInputReader* reader, CheckLocalLabe
             const uint32_t name_token = locals->tokens[entry];
             if (check_input_find_label(reader, locals, labels, capacity, name_token, locals->names[entry]) == BUSTER_CHECK_NONE)
             {
-                check_input_report_label_undeclared(reader, name_token, end, false);
+                check_input_report_label_undeclared(reader, name_token, end, false, false);
             }
         }
         for (uint32_t entry = locals->count; entry-- > first;)
@@ -3433,6 +3555,15 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
             }
             if (kind == PARSE_KIND_LABEL && reader->ignored[token])
             {
+                // The unit's first list: the lookups before it, which no columns took, before its names are pushed.
+                if (locals.heads == NULL)
+                {
+                    check_input_local_labels_make(reader, &locals);
+                    if (locals.heads != NULL && body != BUSTER_CHECK_NONE)
+                    {
+                        check_input_label_lookups_before(reader, &locals, body, close, token);
+                    }
+                }
                 check_input_local_label_push(reader, &locals, token);
             }
             else if (role == PARSE_ROLE_LABEL)
@@ -3451,8 +3582,14 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     const uint32_t name = parser->tokens.names[name_token];
                     // A local label's definition is its scope's (CheckLocalLabels); one of an ambiguous name defines none.
                     const uint32_t local = check_input_local_label(reader, &locals, name);
-                    const bool ambiguous = local != BUSTER_CHECK_NONE && check_input_local_label_ambiguous(&locals, local);
-                    const uint32_t scope = local != BUSTER_CHECK_NONE ? locals.tokens[local] : body;
+                    const CheckLabelLookup lookup = check_input_label_lookup(reader, &locals, token, name_token, body, close);
+                    const bool ambiguous = lookup.ambiguous;
+                    const uint32_t scope = local != BUSTER_CHECK_NONE && !ambiguous ? locals.tokens[local] : body;
+                    // The label an ambiguous goto or address made, which this one alone of the function's finds, is defined.
+                    if (lookup.one < count && parser->tree.roles[lookup.one] != PARSE_ROLE_LABEL && locals.scopes[lookup.one] == BUSTER_CHECK_LABEL_AMBIGUOUS)
+                    {
+                        locals.scopes[lookup.one] = BUSTER_CHECK_LABEL_AMBIGUOUS_DEFINED;
+                    }
                     if (local != BUSTER_CHECK_NONE)
                     {
                         locals.scopes[token] = ambiguous ? 0 : scope + 1;
@@ -3460,11 +3597,13 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
                     // Whether a redefinition keeps the earlier label as the name's, for its gotos.
                     bool kept_earlier = false;
-                    while (!ambiguous && labels[slot] != 0)
+                    // An ambiguous definition defines the label of the function's own scope it made, which a later
+                    // reference may find alone: it goes into the table, but never as a redefinition.
+                    while (labels[slot] != 0)
                     {
                         const uint32_t old = labels[slot] - 1;
                         const uint32_t old_name = check_input_label_name(reader, old);
-                        if (check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
+                        if (!ambiguous && check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
                         {
                             // Clang defines a label as its statement completes (ActOnLabelStmt), so a label within the other's
                             // statement (`L: L: ;`, `L: { L: ; }`) is the one defined first, and the other is the redefinition,
@@ -3496,9 +3635,9 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     }
                     if (ambiguous && (!prefix || token < limit))
                     {
-                        check_input_report(reader, name_token, CHECK_INPUT_LABEL_AMBIGUOUS);
+                        check_input_report_label_ambiguous(reader, name_token, &lookup);
                     }
-                    else if (!ambiguous && !kept_earlier)
+                    if (!kept_earlier)
                     {
                         labels[slot] = token + 1;
                     }
@@ -3509,15 +3648,15 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, token, body);
                 // A use of a local label takes its scope here, where its lists are in scope: an ambiguous name's, at its name.
                 const uint32_t operand = reader->first_child[token];
-                const uint32_t local = operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER && !check_input_indirect_goto(parser, token) ?
-                                       check_input_local_label(reader, &locals, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
-                if (local != BUSTER_CHECK_NONE)
+                const bool named = operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER && !check_input_indirect_goto(parser, token);
+                const uint32_t local = named ? check_input_local_label(reader, &locals, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
+                const CheckLabelLookup lookup = named ? check_input_label_lookup(reader, &locals, token, operand, body, close) : (CheckLabelLookup){ .local = BUSTER_CHECK_NONE };
+                if (local != BUSTER_CHECK_NONE || lookup.ambiguous)
                 {
-                    const bool ambiguous = check_input_local_label_ambiguous(&locals, local);
-                    locals.scopes[token] = ambiguous ? BUSTER_CHECK_NONE : locals.tokens[local] + 1;
-                    if (ambiguous && (!prefix || token < limit))
+                    locals.scopes[token] = lookup.ambiguous ? BUSTER_CHECK_LABEL_AMBIGUOUS : locals.tokens[local] + 1;
+                    if (lookup.ambiguous && (!prefix || token < limit))
                     {
-                        check_input_report(reader, operand, CHECK_INPUT_LABEL_AMBIGUOUS);
+                        check_input_report_label_ambiguous(reader, operand, &lookup);
                     }
                 }
             }
@@ -3582,7 +3721,8 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 const uint32_t body = check_sparse_get(reader->output->declaration_bodies, token);
                 const uint32_t operand = reader->first_child[token];
                 const bool local = locals.scopes != NULL && locals.scopes[token] != 0;
-                const bool ambiguous = locals.scopes != NULL && locals.scopes[token] == BUSTER_CHECK_NONE;
+                const bool defined = locals.scopes != NULL && locals.scopes[token] == BUSTER_CHECK_LABEL_AMBIGUOUS_DEFINED;
+                const bool ambiguous = locals.scopes != NULL && (locals.scopes[token] == BUSTER_CHECK_LABEL_AMBIGUOUS || defined);
                 const uint32_t scope = check_input_label_scope(reader, &locals, token);
                 uint32_t target = body != BUSTER_CHECK_NONE && !ambiguous && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
                                         check_input_find_label(reader, &locals, labels, capacity, scope, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
@@ -3612,11 +3752,11 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 }
                 // A missing label of the function's, and an ambiguous local one's use, for which clang's lookup creates a
                 // label of the function's that nothing defines, as the function ends (check_input_report_label_undeclared).
-                if (target == BUSTER_CHECK_NONE && !unfinished && (!local || ambiguous))
+                if (target == BUSTER_CHECK_NONE && !unfinished && (!local || ambiguous) && !defined)
                 {
                     const uint32_t close = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[body] : 0;
                     check_input_report_label_undeclared(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token,
-                                                        close < count ? close : 0, true);
+                                                        close < count ? close : 0, true, ambiguous);
                 }
             }
             else if (kind == PARSE_KIND_SEMI && check_input_attributes_at(reader->output, token) != 0)

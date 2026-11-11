@@ -952,15 +952,38 @@ static void ir_parse_instruction(IrParseState* state)
                 // An intrinsic's operation (#141), after its operands as a comparison's predicate is.
                 if (row.op == IR_INTRINSIC)
                 {
+                    uint32_t third = BUSTER_IR_NONE;
                     if (ir_parse_take(state, ','))
                     {
                         row.b = ir_parse_id(state, '%');
+                        // A ternary kind's third operand (#1840), which goes to the extra array.
+                        if (ir_parse_take(state, ','))
+                        {
+                            third = ir_parse_id(state, '%');
+                        }
                     }
                     row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
+                    if (state->result.error == IR_PARSE_OK && ir_intrinsic_ternary(row.c) != (third != BUSTER_IR_NONE))
+                    {
+                        ir_parse_fail(state, IR_PARSE_SYNTAX);
+                    }
+                    if (state->result.error == IR_PARSE_OK && third != BUSTER_IR_NONE)
+                    {
+                        if (state->extra.count > BUSTER_IR_INTRINSIC_EXTRA_LIMIT)
+                        {
+                            ir_parse_fail(state, IR_PARSE_SYNTAX);
+                        }
+                        else
+                        {
+                            row.c = ir_intrinsic_ternary_c(row.c, state->extra.count);
+                            ir_parse_append(state, &state->extra, &third);
+                        }
+                    }
                     // A width change's part (#1840), its flags.
                     if (row.c == BUSTER_IR_INTRINSIC_EXTRACT || row.c == BUSTER_IR_INTRINSIC_INSERT || row.c == BUSTER_IR_INTRINSIC_PERMUTE ||
                         row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
-                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT)
+                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT ||
+                        row.c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(row.c))
                     {
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }
