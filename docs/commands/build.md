@@ -142,13 +142,14 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time |
 | `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link lld, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path; lld links at `-O0` |
 | `BUSTER_BUILD_DEFINES` | none | whitespace-separated arguments every unit's compile adds |
-| `BUSTER_SANITIZER` | `none` | `address` (with UBSan and bounds), `undefined`, `thread`, `memory`: a PIE |
+| `BUSTER_SANITIZER` | `none` | `address` (with UBSan and bounds), `undefined`, `thread`, `memory`; `thread`, `memory` and fuzzing builds link a PIE, the others at a fixed address and baked |
 | `BUSTER_SANITIZER_OPTIMIZATION` | `3` | a sanitizer build's Release optimization, `1` to `3` |
 | `BUSTER_FUZZ_AVAILABLE` | `0` | `1` adds libFuzzer and `--fuzz`, with AddressSanitizer unless a sanitizer is given |
 | `BUSTER_FUZZ_ENTRY` | `fuzz.c` | the fuzzing entry's C file, with `BUSTER_FUZZ_AVAILABLE=1` alone |
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
+| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -170,7 +171,15 @@ build publishes nothing, and an unchanged one nothing again. CI runs the configu
 as `BUSTER_COMPILER`) and checks that `build/compiler` is that file. Ninja
 Multi-Config's `compile_commands.json` has every unit once per configuration;
 `build/compile_commands.json` has the published configuration's alone, which
-editors and static analyzers read (Release after a plain `./build.sh`).
+editors and static analyzers read (Release after a plain `./build.sh`). Ninja
+keeps that filtered database in `CONFIG/compile_commands.json`, rebuilding it
+when CMake regenerates the multi-config database, its filter changes, or the
+cached file is missing. Unchanged builds and source edits reuse it. Publication
+compares it with the published database under the publication lock and stages a
+copy only when the contents differ or the published file is missing. Unchanged
+builds and source edits therefore write no temporary database. A needed copy is
+completed before replacing the published compiler, so a failed build or staging
+copy leaves both published files intact even when a new cached database exists.
 
 ## Targets and outputs
 
@@ -188,6 +197,10 @@ In `build/cmake/VARIANT/` (a preset's tree is the same):
   (`cmake/BusterPostLink.cmake`), which bakes the tables and checks the canary.
   The step writes a new file and renames it into place, removing the old one
   first, so that a failed step leaves no executable there.
+- `compiler_compile_commands`, when `CMAKE_EXPORT_COMPILE_COMMANDS` is enabled:
+  `CONFIG/compile_commands.json`, the configuration's filtered database. The
+  `compiler` target depends on it; direct CMake builds with export disabled
+  need no compilation database.
 - `call-graph-ir` and `check-call-graph`: `call-graph/NAME.ll`, the units' IR,
   one capture for both configurations, and the check by `CONFIG/compiler`.
 - `shifts`, with `BUSTER_SHIFTS`: `CONFIG/shifts/compiler-SHIFT`.
@@ -252,6 +265,306 @@ the default driver, `test-checker`, and its other commands each reach the whole
 compiler, and before the homes a unit for any one of them took 84 to 88% of its
 time (clang 18, locally).
 
+### Unity test dependencies
+
+The eleven `main.c` units share the compiler interfaces and the fixtures
+used across test families. Production bodies are limited to their consumers,
+as described below. Independent test files are included only by the unit
+that runs them, with the same guard around their command branches. This avoids
+parsing those tests in the other ten units during a clean build, and Ninja's
+depfiles keep their edits local: for example, `c_check_builtin_bits_test.c`
+rebuilds only `main_unit_check_builtins.c`, `profile_test.c` only `main.c`,
+`c_files_test.c` only `main_unit_frontend.c`, and `tier1_wide_test.c` only
+`main_unit_backend.c`, followed by the link and post-link checks.
+
+The checker keeps `c_checker_test.c` shared for its value and stream comparison
+helpers, while its private fixtures, test routines and nested test files are
+compiled only by `main_unit_checker.c`. Editing `c_check_program_test.c`,
+`c_check_generic_test.c`, `c_check_attribute_test.c`, or the program tests'
+nested `c_check_program_amx_test.c` therefore rebuilds that unit alone. Editing
+the checker driver suite `c_checker_driver_test.c` or the debug test
+`c_check_debug_tier1_parameters_test.c` also rebuilds only that unit. Editing
+the shared `c_checker_test.c` root rebuilds the checker semantic consumers
+pinned in the ownership table. Unrelated units no longer include that root;
+a configured fuzz DRIVER retains its helpers.
+
+The backend similarly owns the private IR, interpreter, optimizer and Tier 1
+fixtures. Edits to nested files such as `ir_simd_model_test.c`,
+`interpreter_wide_test.c`, `ir_optimize_simd_test.c`, `tier1_call_probe_test.c`
+and `tier1_address_coalesce_test.c` rebuild only `main_unit_backend.c`.
+The optimizer roots `ir_optimize_test.c` and `ir_optimize_text_test.c`, including
+their nested if-conversion and verified-pass fixtures, also belong to BACKEND.
+Production pass includes retain their positions within the units that consume
+them, so narrowing the test roots does not reorder emitted code. Source
+preparation and the BURS/selection helpers serve BACKEND and CHECKER. The
+production IR and code-generation families are also guarded for their actual
+consumers; their exact owner sets are pinned in the build regression. Narrow
+semantic references retain production unused-function checking without emitting
+code in units that omit the associated fixture callers.
+
+The backend also owns the private Tier 0 fixtures, their nested tests and vector
+baseline, the mask tests and the streaming tests and benchmark. Editing those
+files rebuilds only `main_unit_backend.c`. `tier0_test_same_code` and its unwind
+consumer belong to that same unit, so the entire `tier0_test.c` root is private.
+Production `tier0_generate.c` and `streaming.c` follow the code-generation
+consumer guards rather than making unrelated units parse their bodies.
+
+Nonstandard support names follow the same rule. The differential command's
+`differential.c` belongs to BACKEND. `test_tool.c` keeps probing helpers for
+DRIVER, TYPES, X86, FRONTEND, LINK and BACKEND, while `test_tool_test.c` belongs
+to DRIVER. `test_process.c` keeps the CPU-limit and capture-file helpers shared;
+its process-worker functions and `test_process_test.c` belong to FRONTEND.
+Standalone inclusion of either support root retains its complete self-tests.
+
+The frontend owns the private preprocessor, parser, GNU, bindings and lowering
+fixtures and their fixture-consuming commands. Edits to
+`preprocessor_fuzz_generate.c`, `c_preprocessor_directives_test.c`,
+`c_predefines_test.c`, `c_gnu_test.c`, `c_parser_bindings_test.c` or the nested
+`x86_target_policy_test.c` rebuild only `main_unit_frontend.c`.
+`c_preprocessor_history_test.c` is included by the frontend and checker units:
+the checker shares its diagnostic scratch-location normalization, while the
+frontend alone includes its private tests. The shared helper spans in
+`c_preprocessor_test.c`, `c_preprocessor_oracle.c` and `c_parser_test.c` stay at
+their original positions, so editing those roots still rebuilds all eleven
+units, as does editing the production `c_parser_bindings.c` or
+`c_builtin_intrinsic_catalog.c`. The intrinsic catalog keeps its first inclusion
+position in every unit, including those that omit the feature tests. On vector
+hosts, editing it also rebuilds the standalone `c_checker_benchmark.c`, which
+includes the catalog itself.
+
+The executable unit owns the private foreign input fixtures and the benchmark
+commands that use them. Editing `foreign_unwind_runtime_test.c`,
+the nested `foreign_driver_symbols_test.c`, `foreign_strings_output_test.c`
+or the directly included `foreign_gc_benchmark.c` rebuilds only
+`main_unit_executable.c`. The checker shares helpers that read and write ELF files
+and link test programs in `foreign_test.c`; their definitions stay at their original positions,
+and editing that root rebuilds exactly the checker and executable units. The
+production `foreign_link.c` and `foreign_unwind.c` remain shared by all eleven
+main units.
+
+The frontend roots with internal guards, `foreign_test.c`, `tier0_test.c` and
+`tier1_select_source_benchmark.c` also preserve standalone preprocessing. Without
+`main.c`'s unity-unit definitions, their guards keep the complete source. The
+correctness inventory preprocesses `main.c` (with `-DBUSTER_COMPLETE_DRIVER=1`)
+and every `*_benchmark.c` as independent inputs and compares them with Clang. The build regression also preprocesses the
+guarded roots directly, checking that their private entry points remain in the
+output.
+
+The remaining independent diagnostic, dataflow, SSA, allocation, builtin-lowering,
+frame, unwind, intrinsic, measurement and source-benchmark fixtures follow the
+same rule. In particular, the allocator's nested `tier1_allocate_test_cases.c`
+and the scheduler's `tier1_schedule_fixture.c` belong to BACKEND; the lowering
+inventory belongs to CHECKER; and the driver owns the process measurements and
+SQLite harness. The row-source header is shared by DRIVER and CHECKER alone.
+The benchmark counter utilities have exactly BACKEND and CHECKER as consumers;
+the debug benchmark keeps only its clock available to BACKEND beside its LINK
+owner. Intrinsic object-reading helpers remain available to the checker's AMX
+fixtures and X86. Standalone benchmark translation units retain their own
+includes and dependency sets.
+
+The type fixtures keep table allocation available to TYPES, FRONTEND, BACKEND
+and CHECKER, with the generated-world helpers restricted to TYPES and CHECKER.
+Their private type tests, including the deferred and lookup suites, belong to
+TYPES. The ABI root similarly shares only its generated-world builder with
+CHECKER; `calling_convention_test_limits.h` supplies its three contract bounds
+to the backend without including that fixture root. Integer builtin oracles
+serve TYPES and CHECK_BUILTINS; environment jobs serve FRONTEND and CHECKER.
+Lane topology helpers serve DRIVER, CHECKER and EXECUTABLE, while the VM helpers
+serve DRIVER and CHECKER alone. Private bodies retain complete standalone
+preprocessing.
+
+X86 owns the encoder and intrinsic fixtures, with their printing, generation
+and object-reading helpers retained for other families. The branch-sizing
+root shares its process runner with DRIVER. The semantics root deliberately
+keeps six `used` globals in every unity object at their original positions;
+its form names also serve BACKEND, and only DRIVER reads the fixture bodies.
+The lexer and Tier 0 roots now belong wholly to DRIVER and BACKEND respectively.
+The BURS and source-corpus helper roots have exactly BACKEND and CHECKER as
+consumers. The c-testsuite command's fixtures belong to DRIVER; BACKEND shares
+only its process/file helpers for the SSA source tests.
+
+ELF fixtures use the same boundaries. LINK owns private object/DWARF/import
+and binding checks; EXECUTABLE owns executable, symbol and snapshot checks;
+DYNAMIC owns its PIE, library, bounds and static-link suites. Their small
+constructors, readers, runners and shared inputs remain at their original
+positions, with individual helper guards matching their actual consumers.
+The linker, import and binding roots have LINK, DYNAMIC and EXECUTABLE as
+consumers; the debug native helpers have LINK and BACKEND; snapshot's patching
+helpers also serve CHECKER. The shared object-view declarations and helpers in
+`object_writer_test.c` remain available to the production symbol reader.
+All owning commands and their emitted code stay in the same units, and the
+importer's five assertion coordinates are preserved.
+
+The test commands, their owning units and compiler optimization flags stay the
+same. The checker's common helpers retain their callers; the driver's
+`oracle_cache_test.c` is private. Narrow semantic references keep production
+helpers checked in units that omit their fixture callers and emit no code.
+Check every unit with scalar and vector flags
+after changing these guards; the build regression harness checks representative
+private-test edits against their exact owning units and keeps shared helper and
+production dependencies explicit.
+
+### Production parsing and implementation dependencies
+
+`c_parser.c` holds the parser's shared types, declarations and small helpers;
+`c_parser_impl.c` holds its private data and function bodies. Only FRONTEND
+includes those bodies in the unity build. Other units call the same frontend
+entry points through ordinary external declarations. Standalone inclusion of
+`c_parser.c` keeps the complete implementation, including the vector parser
+benchmark. An implementation edit therefore rebuilds FRONTEND alone on a scalar
+host, and FRONTEND plus `c_parser_benchmark.c` on a vector host. Shared interface
+edits still rebuild their consumers.
+
+The preprocessor follows the same interface/body boundary. Shared state,
+declarations, feature tables and reader helpers remain in `c_preprocessor.c`;
+`c_preprocessor_impl.c` holds the private bodies, private tables and generated
+predefines. `c_preprocessor_history.c` keeps the shared history reader and
+diagnostic declarations; `c_preprocessor_history_impl.c` holds history writers
+and diagnostic rendering. The literal evaluator in `c_preprocessor_literal.c`
+is included through the private implementation. Ordinary unity builds read
+these private files only in FRONTEND and keep the same externally emitted entry
+points there. Standalone preprocessor, parser and files benchmarks keep the
+complete source through the shared interface.
+
+`executable.c` retains the writer's public types and declaration, section names,
+hash helpers and unwind/debug readers. `executable_impl.c` contains layout,
+patching, file output and the original `executable_write` body. DYNAMIC remains
+the externally emitted writer's home; EXECUTABLE also reads the private bodies
+for its direct tests, retaining the existing entry-point linkage. Other unity
+units read the shared interface. The standalone executable, snapshot and link
+benchmarks retain the complete implementation.
+
+Source checking and code-generation dependencies are guarded separately.
+CHECKER owns the source reader, graph checking, whole-program checking and
+source lowering. BACKEND calls its existing `ir_source_prepare` entry through
+a declaration, retaining the shared status, vector/x86 rows and frame verifier
+needed by its own commands. CHECKER and BACKEND both read the code-generation
+families; DRIVER retains only its existing shared IR counter and baked BURS
+table definitions. CHECK_BUILTINS keeps semantic actions, constant helpers and
+comparisons without the source reader or code-generation families. These
+boundaries keep command homes, section placement and optimization settings
+unchanged.
+`BUSTER_COMPLETE_DRIVER`, which `main.c` defines, is DRIVER with the rest of
+the compiler as well: the source, checker and code-generation families and the
+private preprocessor and executable bodies, the closure `main.c` read before
+these boundaries. A `BUSTER_FUZZ_AVAILABLE=1` build selects it, so both the
+default callback and a `BUSTER_FUZZ_ENTRY` override keep their existing module
+access; ordinary builds do not acquire that additional owner. The self-tests and
+9700X benchmarks whose input is `main.c` (`tools/ci/correctness.tests` and
+`9700x.yml`) pass `-DBUSTER_COMPLETE_DRIVER=1`, so that they still check, compile
+and measure the whole compiler without changing any production object: with
+`-march=native`, `main.c` preprocesses to 25.76 MB with it and 12.02 MB without
+(25.75 MB before the boundaries). Pass it when running those commands by hand
+too. The build regression checks that it keeps a definition from each block
+that the ordinary driver leaves out, on both hosts.
+
+The x86 target-form row enums, initializers and per-row policy assertions are
+also parsed only by their data owner or a standalone consumer. Other units use
+complete array declarations with two explicit bounds. The owner recomputes
+those bounds from the canonical rows and asserts equality, so adding or removing
+a row requires updating the interface deliberately. Editing row contents rebuilds
+FRONTEND and `tier1_model_measure.c`, plus `tier1_select_benchmark.c` on a vector
+host; changing a shared bound correctly rebuilds the readers too.
+
+The ownership-only check pins production paths to their exact named unity
+consumers, including configured fuzz access. The full build regression also
+checks incremental fanout, including standalone consumers, and rejects both
+kinds of target row-count drift. A new dependency cannot silently undo these
+boundaries.
+
+The [2026-11-10 validation packet](https://github.com/buster14a/buster-performance/tree/5223db00aaf609229db2d7911d70d1404bb1e774/docs/measurements/build-owner-boundaries-2026-11-10)
+compares this ownership pass with merged revision `39506e86`. It reduces the
+eleven unity units' preprocessed input by 43.7% for scalar and 44.0% for vector
+builds. Actual Ninja plans for private preprocessor edits shrink from eleven
+compilations to one on scalar, or fourteen to four on vector; private writer
+edits shrink from eleven to two or fourteen to five. Shared-interface positive
+controls retain their original consumers. All 86 Release objects and both
+complete baked compiler executables are byte-identical to the baseline.
+The packet includes the exact input manifest, candidate patch, dependency
+captures and validation receipts. These are structural-work measurements;
+approved Ryzen 7 9700X elapsed-time qualification remains pending.
+
+The earlier parser/target-row [validation packet](https://github.com/buster14a/buster-performance/tree/f29dc2c6616fb0530a2b21b1555507da79f7ba25/docs/measurements/build-production-codegen-2026-11-09)
+records the before/after dependencies, the parser definition and object
+preservation checks, and the optional parallel-codegen contract and runtime
+results below. That packet reduced ordinary unity expansion by about 35 MB
+(10.6%) in each host configuration. Its elapsed-time observations are
+development diagnostics; approved-host build and runtime measurements are still
+required before changing the experimental mode's default.
+
+### Preventing dependency growth
+
+Give new test, inline benchmark and measurement C files the `*_test.c`,
+`*_benchmark.c` and `*_measure.c` suffixes; name test headers/fragments
+`*_test.h`/`*_test.inc`. Keep their includes and command
+branches inside their owning unit's guard. If another family needs a helper,
+share the narrow helper span and keep private fixtures and nested includes
+guarded. A root that is also preprocessed as a standalone input must keep its
+complete source when `BUSTER_UNIT` is undefined.
+
+The build regression's `--ownership-only [COMPILER]` mode reads all active
+repository paths in the selected compiler's Ninja graph. Test/benchmark/measure
+names, fixture names and explicit nonstandard roots seed a literal quoted-include
+closure. Every active descendant is checked regardless of suffix, extension or
+directory, including headers, `.inc` files and generated fixture data. The
+default is exactly one unity owner. A shared root never exempts a new child or
+prefix. Important nonstandard paths also assert the command's exact owner.
+Production implementation boundaries have separate exact path/owner rows even
+when their filenames do not identify fixtures. A boundary may name several
+consumers; missing, added or substituted owners all fail. Configuration-specific
+access must come from the selected build's settings, not from the dependency
+record being checked.
+
+Shared exceptions name exact paths, explicit owner sets and a reason; even the
+current eleven-unit set is explicit, so adding a unit cannot silently widen it.
+Remove obsolete exceptions. Production implementations/data reached through
+fixtures have their own exact rows, rather than an allowance for descendants.
+The two scalar host headers have separate, exact configuration-scoped rows.
+Do not add private fixtures to the exception table merely to pass the check.
+
+Shared fixture/support roots also pin a small lexical fingerprint of their
+shared declaration headers, aggregate members, include directives and macro
+names with their owner masks. Unit-private islands do not contribute. Unknown
+host predicates conservatively include both branches, so scalar CI protects
+vector-only shared growth too. New unguarded functions, data declarations,
+headers or widened helper guards therefore require review even inside an
+already-approved root. Guard private additions for their owner; update the
+reported fingerprint only after reviewing a justified shared change. This is
+not a C semantic analysis: function bodies, data initializers and macro
+replacement bodies still need review for private fixture growth. Macro-computed
+include paths need an explicit assertion if literal closure cannot discover
+them. Keep includes literal where practical.
+
+When splitting a production implementation, preserve its original definitions,
+entry-point linkage and standalone access. Register the private file and its
+private descendants in the ownership assertions, check the complete edit plan,
+and update `tools/ci/changes.c` so runtime consumers keep their benchmark
+selection. Its standalone benchmark traversal follows literal
+`#include "buster/..."` paths; use that spelling for new implementation
+includes, including nested implementation files. Compile the ordinary scalar
+and vector consumers and any configured fuzz DRIVER after changing the guards.
+
+After building the selected configuration, run the check directly with:
+
+```sh
+cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/buster-build-regression tools/ci/build_regression.c
+/tmp/buster-build-regression --ownership-only "$(./build.sh print-output --config Release)"
+```
+
+Pass the Debug output path to check Debug instead. The check refuses an
+incomplete graph or pending build work, rather than accepting old dependency
+data after an unbuilt edit. Each unity record must be VALID, have its declared
+number of dependencies and contain its own source; missing, duplicate, stale
+or wrong-configuration records fail. It also preprocesses internally guarded
+roots without a unity selector. It reads one dependency snapshot and does not
+rebuild the compiler. The ordinary correctness inventory runs it against its
+own compiler, including on source-only PRs that do not trigger the separate
+build-regression workflow. Representative edit-plan checks remain in the full
+build regression to verify Ninja's actual invalidation behavior.
+
+The [cleanup inventory](../build-dependency-cleanup.md) records completed packets,
+necessary sharing, remaining production boundaries and validation limits.
+
 ## Presets and CTest
 
 `CMakePresets.json` has the configure presets `native`, `x86-64` and `znver5`,
@@ -280,6 +593,106 @@ that executable's parallel runner, which gives each command the executable as
 calls. The inventory needs CI's tools and frozen inputs ([CI](../ci.md)) and
 every core, so it runs alone. `./build.sh test --config Debug -- -L build`
 runs the first label in Debug.
+
+## Parallel native generation
+
+A clean build waits for its longest unit: on the 9700X, `main_unit_checker.c`
+took 99.6 s of a 100.3 s build at `fa6254e0`, with the other units done long
+before. More than half of a unit's compile is native code generation after the
+O3 IR pipeline: 57.3 of 112.5 s for the checker and 37.9 of 75.5 s for the
+backend (`-ftime-trace`, locally), single-threaded in one Clang process. So the
+Release configuration generates those two units' native code in parallel parts:
+
+1. The unit compiles C through the ordinary O3 pipeline to LLVM bitcode
+   (`-emit-llvm` in Release alone), keeping its depfile and its compilation
+   database record. Clang's bitcode keeps the module's use-list order.
+2. `tools/codegen/split.c` (`Partitioning UNIT's optimized IR`) writes eight
+   parts of contiguous function ranges in module order, the costliest (by
+   instruction count) as cheap as the alignment rule below allows, and a ninth
+   with the unit's global variables: one per job of `build.sh`'s default, a
+   physical core (fourteen, one per hardware thread of the 9700X, ran in two
+   waves there: 74.0 s for a clean build against 73.1 s). It parses the module
+   once and forks a child per part, as many at once as the CPUs it may use and
+   the available memory allow: each child copies most of the module's pages
+   (fifteen children of the checker came to about 14.8 GB, four to 4.7 GB).
+3. A Clang backend job per part (`Generating UNIT's native part N`) compiles
+   it with the unit's `-march`, debug information and O3 code generation, the
+   IR optimizer disabled.
+4. `cmake/BusterCodegenMerge.cmake` (`Combining UNIT's native parts`) joins
+   them in order with a relocatable link and makes local again everything the
+   unit didn't export, before the ordinary final link. It fails when any of the
+   unit's local names (the split's `locals.txt`) is still undefined.
+
+Each unit's parts start once its own split is done: with CMake 3.27 and later
+these commands take `DEPENDS_EXPLICIT_ONLY`, without which CMake makes a
+command the link uses wait for every unit's object (the backend's parts waited
+for the checker's bitcode, 14.5 s, then competed with its parts).
+
+The executable's code is the single object's: every function at the same
+address with the same instructions. The split keeps what the code generator
+saw. A function another part refers to stays local where it is defined, so its
+jumps relax as before (a near tail call's two-byte `jmp`); a hidden alias,
+`NAME.buster_split`, names it for the other parts. A code part reads strong
+constants' initializers `available_externally`, so a string's bytes still fold
+into immediate stores; every local global such an initializer names is a
+hidden external one, since folding a pointer out of a table can name it too. A
+local definition another part owns and this one doesn't use is an ordinary
+external declaration, which emits no symbol: as a hidden one it would be an
+undefined hidden symbol, which lld ignores and GNU ld refuses. The module's inline assembly, which places
+`.text.buster_checker`, stays in the first part. A part starts, in each text
+section (`.text`, a named section, a cold function's `.text.unlikely.`), at a
+function of the greatest alignment it holds there, so that the relocatable
+link adds no padding. The bitcode the parts are written as keeps its use-list
+order: `split_bitcode.cpp` is the one call to LLVM's C++ API, which LLVM's C
+API lacks. The merge clears the parts' allocated `SHF_MERGE` flags first: a
+relocatable link merges those sections, which the final link at `-O0` copies
+whole from the single object (the checker's parts lost 27,904 bytes of
+duplicate constants that way). Read-only data keeps its order and each item's
+alignment, but a part's `.rodata` takes its greatest item's alignment (64), so
+items after a part boundary can move by less than that: 256 bytes in all for
+the two units (768 with fourteen parts), with `.eh_frame` 16 bytes longer. Between a part's last function
+and the next part's first, the linker's padding is `int3` where the assembler's
+was `nop`; neither is executed.
+
+On the 9700X, against the same tree compiled whole (#2056's merged head
+`cd920bf1`), a clean build took 72.8 s against 100.3 s, and editing `main.c`,
+`c_check_input.c` or `tier0.c` rebuilt in 69.0, 62.7 and 66.0 s against 96.2,
+90.5 and 93.0 s (medians of 3). CPU time rose about 11%: every part reads the
+module's declarations again. The produced compilers ran a `-c` of `sqlite3.c`
+and a `-fsyntax-only` of the checker's unit within ±0.33% of each other, as
+noise. The [record](https://github.com/buster14a/buster-performance/tree/dc6be30185f2c22b8944f24a02c092760b96cf7a/docs/measurements/build-parallel-native-2026-11-10)
+has the runs, scripts and the comparison of the two executables' code.
+
+`BUSTER_PARALLEL_CODEGEN` is `auto` by default: the build uses the parts
+wherever its flags allow and the tools are there, and otherwise says why in the
+configure step's `parallel native generation` line and compiles the units
+whole. `1` requires the parts, failing the configuration without them; `0`
+never uses them. Sanitizers, fuzzing, PGO, an explicit host runtime,
+`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile. The tools,
+beside the configured Clang or on `PATH`, at its version: `llvm-config` with
+LLVM's C API headers and library (the splitter is built in the tree, at
+`codegen-tools/split`, with the flags it gives), `clang++`, `llvm-nm`,
+`llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
+where `llvm-config` finds them, else static, as in CI's hosted release. The Debug configuration compiles
+the units as before; the final link still uses any supported `BUSTER_LINKER`.
+
+An unrelated edit reuses both units' native objects. A change to a split unit
+compiles its bitcode and splits it again, but parts whose bytes didn't change
+keep their timestamps, so Ninja repeats only the changed parts' code generation
+(a mutable global's initializer changes the data part alone); a comment-only
+edit that leaves the optimized IR unchanged generates nothing. Failed
+splitting, native compilation or symbol restoration stops the graph before a
+replacement executable can be published. Diagnostics produced only when
+compiling inline assembly remain fatal under `-Werror`, but report the inline
+assembly without the original C file and line.
+
+`build-regression --parallel-codegen-only` exercises the production helpers on two
+translation units with identically named private functions, data and TLS, distinct
+hidden public entries, and shared strong and weak external references. It checks
+runtime isolation across threads, the source compilation database, unchanged and
+source-only edits, one-part private data edits, missing pieces, deterministic
+regeneration, late assembly warnings and failed-stage recovery. The full build
+regression also builds the real opt-in compiler once and runs its baking checks.
 
 ## A profile-guided build
 
@@ -352,3 +765,18 @@ environment variables. The focused mode cleans the selected `build.sh` tree.
 The build's clean, unchanged and edited timings come from the
 9700X under its lock, with their raw records in
 [buster-performance](https://github.com/buster14a/buster-performance).
+
+`build-regression --compile-commands-only` checks the database dependencies
+with a small CMake project: both configurations, an ordinary source edit,
+changed compile arguments, a missing cached database, an edited filter and
+export disabled. It builds only the fixture. The full harness also checks
+that missing cached or published databases are restored without recompiling
+or relinking Buster, and that configuration switches publish the right one.
+
+`build-regression --driver-only` checks the build driver's actual version,
+description and publication helpers in a disposable directory, without building the compiler.
+It checks version thresholds, publication without a database copy when the
+contents match, changed and missing databases, copy fallback, and staging
+failures that must preserve both published files. The full harness runs these
+checks too. Keep these behavioral checks when changing the wrapper's fixed
+overhead; no-op timing thresholds would be sensitive to runner load.

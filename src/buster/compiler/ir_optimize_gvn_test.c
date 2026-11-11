@@ -850,6 +850,73 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// The width changes (#1840) on values SCCP can't fold, a parameter's splat: GVN merges an insert, an extract and a widen
+// equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart, by both paths, and the
+// interpreter's mask is unchanged.
+static void ir_gvn_test_widths(IrOptimizeTest* test)
+{
+    static const char text[] = "function (i32) -> m16 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = intrinsic.v4i32 %0 splat\n"
+                               "  %2 = add.v4i32 %1, %1\n"
+                               "  %3 = intrinsic.v8i32 %1 widen\n"
+                               "  %4 = intrinsic.v8i32 %3, %2 insert 1\n"
+                               "  %5 = intrinsic.v8i32 %3, %2 insert 1\n"
+                               "  %6 = intrinsic.v8i32 %3, %2 insert 0\n"
+                               "  %7 = intrinsic.v4i32 %4 extract 0\n"
+                               "  %8 = intrinsic.v4i32 %5 extract 0\n"
+                               "  %9 = intrinsic.v4i32 %4 extract 1\n"
+                               "  %10 = intrinsic.v8i32 %1 widen\n"
+                               "  %11 = intrinsic.v4i32 %6 extract 0\n"
+                               "  %12 = intrinsic.v4i32 %10 extract 1\n"
+                               "  %13 = add.v4i32 %7, %8\n"
+                               "  %14 = add.v4i32 %13, %9\n"
+                               "  %15 = add.v4i32 %14, %11\n"
+                               "  %16 = add.v4i32 %15, %12\n"
+                               "  %17 = vcmp.m16 %16, %2 ult lanes=i8\n"
+                               "  %18 = ret.void %17\n"
+                               "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena output = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL;
+    const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+    ir_optimize_test_expect(test, parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK, "GVN's width change fixture parses");
+    for (uint32_t path = 0; parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK && path < 2; path += 1)
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.scalar = path != 0;
+        IrGvnResult result = { 0 };
+        const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, options, &result);
+        ir_optimize_test_expect(test, check.error == IR_OK, "GVN takes the width changes");
+        if (check.error == IR_OK)
+        {
+            // Per kind and flags: inserts of part 0 and 1, extracts of part 0 and 1, widens.
+            uint32_t counts[5] = { 0 };
+            for (uint32_t i = 0; i < result.function.instruction_count; i += 1)
+            {
+                const bool intrinsic = result.function.op[i] == IR_INTRINSIC;
+                const uint32_t kind = intrinsic ? result.function.c[i] : 0;
+                const uint32_t part = result.function.flags[i];
+                counts[0] += intrinsic && kind == BUSTER_IR_INTRINSIC_INSERT && part == 0;
+                counts[1] += intrinsic && kind == BUSTER_IR_INTRINSIC_INSERT && part == 1;
+                counts[2] += intrinsic && kind == BUSTER_IR_INTRINSIC_EXTRACT && part == 0;
+                counts[3] += intrinsic && kind == BUSTER_IR_INTRINSIC_EXTRACT && part == 1;
+                counts[4] += intrinsic && kind == BUSTER_IR_INTRINSIC_WIDEN;
+            }
+            ir_optimize_test_expect(test, result.removed == 3 && counts[0] == 1 && counts[1] == 1 && counts[2] == 2 && counts[3] == 2 && counts[4] == 1,
+                                    "GVN merges equal width changes and keeps those of another part apart");
+            ir_optimize_test_simd_semantics(test, &f, &result.function, &scratch);
+        }
+        arena_pop_to(&output, 0);
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -875,6 +942,7 @@ static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
         ir_gvn_test_partitions(&test);
         ir_gvn_test_ir(&test);
         ir_gvn_test_simd(&test);
+        ir_gvn_test_widths(&test);
         printf("ir-gvn: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

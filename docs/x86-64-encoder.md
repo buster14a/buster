@@ -317,7 +317,7 @@ and their marked copies and clearing 3.2 MB of pages.
   one that a fresh build gives the file's bytes and build ID; a missing section
   fails it. `test-x86-encoder` compares every entry of the table it starts with
   against `build_mode_template`'s.
-- **Where it isn't.** A PIE (the sanitizers' builds) isn't baked, since a
+- **Where it isn't.** A PIE (TSan, MSan and fuzzing builds) isn't baked, since a
   table's pointer would hold its load address, and neither is an executable
   linked without build.sh, or with `BUSTER_BAKE=0`: their initializers build
   the tables when they run, as before. So do the benchmarks' units and the

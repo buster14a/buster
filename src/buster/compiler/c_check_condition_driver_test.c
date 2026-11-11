@@ -387,6 +387,322 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .warnings = 2,
         .notes = 2,
     },
+    {
+        .name = "one address error for each operation that converts",
+        .source = "void q(int x) __attribute__((enable_if(x > 0, \"p1\")));\n"
+                  "void r(int x) __attribute__((enable_if(x > 0, \"p2\")));\n"
+                  "void s(int x);\n"
+                  "void g(void (*)(int), void (*)(int));\n"
+                  "void f1(int c) { void (*p)(int) = c ? q : r; (void)p; }\n"
+                  "void f2(int c) { (void)(c ? r : q); (void)(c ? (q) : (r)); (void)(q ? q : 0); }\n"
+                  "void f3(int c) { (void)(q == r); (void)(q, r); (void)(q && r); (void)(q ?: r); }\n"
+                  "void f4(int c) { (void)(c ? (c ? q : r) : r); (void)(q == (c ? r : s)); }\n"
+                  "void f5(int c) { (void)(&q == &r); (void)(c ? &q : &r); }\n",
+        .errors = 14,
+    },
+    {
+        .name = "one address error for each call and statement",
+        .source = "void q(int x) __attribute__((enable_if(x > 0, \"p1\")));\n"
+                  "void r(int x) __attribute__((enable_if(x > 0, \"p2\")));\n"
+                  "void s(int x);\n"
+                  "void g(void (*)(int), void (*)(int));\n"
+                  "void f6(int c) { g(q, r); g(s, q); }\n"
+                  "void f7(int c) { q; r; }\n"
+                  "void f8(int c) { (void)((q == s) + (r == s)); (void)((s == q) == r); }\n"
+                  "void f9(int c) { (void)(c ? q : r) == (c ? r : q); }\n",
+        .errors = 9,
+    },
+    {
+        .name = "address errors in initializer lists",
+        .source = "void q(int x) __attribute__((enable_if(x > 0, \"p1\")));\n"
+                  "void r(int x) __attribute__((enable_if(x > 0, \"p2\")));\n"
+                  "void s(int x);\n"
+                  "struct P { void (*a)(int); void (*b)(int); };\n"
+                  "void f1(int c) { void (*a[2])(int) = { q, r }; (void)a; }\n"
+                  "void f2(int c) { void (*a[2])(int) = { q, c ? r : s }; (void)a; }\n"
+                  "void f3(int c) { struct P p = { .a = q, .b = c ? r : s }; (void)p; }\n"
+                  "void f4(int c) { struct P p[2] = { { q, s }, { c ? s : r, s } }; (void)p; }\n",
+        .errors = 5,
+    },
+    {
+        .name = "address errors inside unevaluated operands",
+        .source = "void q(int x) __attribute__((enable_if(x > 0, \"p1\")));\n"
+                  "void r(int x) __attribute__((enable_if(x > 0, \"p2\")));\n"
+                  "void f(int c) { (void)sizeof(q == r); (void)sizeof(&q); (void)sizeof((q)); (void)sizeof q; (void)sizeof(q, r); }\n"
+                  "void h(int c) { __typeof__(c ? q : r) *p = 0; (void)p; (void)__alignof__(q); (void)_Generic(q, default: 0); }\n",
+        .errors = 5,
+    },
+    {
+        .name = "warning groups",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .warnings = 5,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-format",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-format" },
+        .warnings = 5,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wall",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-all",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-all" },
+        .warnings = 2,
+    },
+    {
+        .name = "warning groups under -Werror=shadow",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Werror=shadow" },
+        .warnings = 4,
+        .errors = 2,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Werror -Wno-error=shadow",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Werror", "-Wno-error=shadow" },
+        .errors = 6,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-error=shadow -Werror",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-error=shadow", "-Werror" },
+        .errors = 6,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-everything",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-everything" },
+        .warnings = 4,
+        .errors = 1,
+    },
+    {
+        .name = "warning groups under -Wfatal-errors=shadow",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wfatal-errors=shadow" },
+        .errors = 1,
+    },
+    {
+        .name = "warning groups under -Wno-error=format",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-error=format" },
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wformat",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wformat" },
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-shadow -Wshadow",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-shadow", "-Wshadow" },
+        .warnings = 5,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-unused",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-unused" },
+        .warnings = 4,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -W",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-W" },
+        .warnings = 5,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under -Wno-error=format -Werror",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
+                  "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
+                  "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
+                  "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
+        .options = { "-Wno-error=format", "-Werror" },
+        .errors = 6,
+        .notes = 1,
+    },
+    {
+        .name = "warning groups under pragmas",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+                  "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
+                  "#pragma clang diagnostic warning \"-Wformat\"\n"
+                  "int m(void) { f(1); h(2); return 0; }\n"
+                  "#pragma clang diagnostic ignored \"-Wshadow-all\"\n"
+                  "int n(void) { f(1); h(2); return 0; }\n"
+                  "#pragma clang diagnostic error \"-Wshadow\"\n"
+                  "#pragma clang diagnostic ignored \"-Wmost\"\n"
+                  "int k(void) { f(1); h(2); return 0; }\n",
+        .warnings = 3,
+        .errors = 1,
+    },
+    {
+        .name = "calls, assignments and increments a call skips or leaves unknown",
+        .source = "int g(int);\n"
+                  "int h(void);\n"
+                  "int abs(int);\n"
+                  "void f0(int x) __attribute__((diagnose_if(g(x) > 0, \"c0\", \"warning\")));\n"
+                  "void f1(int x) __attribute__((diagnose_if(x > 3 || g(x), \"c1\", \"warning\")));\n"
+                  "void f2(int x) __attribute__((diagnose_if(x > 0 && g(1), \"c2\", \"warning\")));\n"
+                  "void f3(int x) __attribute__((diagnose_if(x ? g(1) : 1, \"c3\", \"warning\")));\n"
+                  "void f4(int x) __attribute__((diagnose_if(g(g(x)), \"c4\", \"warning\")));\n"
+                  "void f5(int x) __attribute__((diagnose_if(abs(x) > 3, \"c5\", \"warning\")));\n"
+                  "void f6(int x) __attribute__((diagnose_if(x > 0 && (x = 3), \"c6\", \"warning\")));\n"
+                  "void f7(int x) __attribute__((diagnose_if(x > 0 || (x = 1), \"c7\", \"warning\")));\n"
+                  "void f8(int x) __attribute__((diagnose_if(x > 0 ? x++ : 0, \"c8\", \"warning\")));\n"
+                  "void f9(int x) __attribute__((diagnose_if(x > 0 && g(x = 1), \"c9\", \"warning\")));\n"
+                  "void k(void) { f0(5); f0(0); f1(5); f1(0); f2(5); f2(0); f3(5); f3(0); f4(5); f4(0); f5(5); f5(0); f6(5); f6(0); f7(5); f7(0); f8(5); f8(0); f9(5); f9(0); }\n",
+        .warnings = 3,
+        .notes = 3,
+    },
+    {
+        .name = "a condition that never produces a constant: x == g(1)",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if(x == g(1), \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: (x += 1) > 2",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if((x += 1) > 2, \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: --x > 2",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if(--x > 2, \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: x++ > 3",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if(x++ > 3, \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: g(x = 1)",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if(g(x = 1), \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: (x++, 1)",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if((x++, 1), \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: h()",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if(h(), \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a condition that never produces a constant: g(1) > 0",
+        .source = "int g(int);\nint h(void);\n"
+                  "void f(int x) __attribute__((diagnose_if(g(1) > 0, \"c\", \"warning\")));\n",
+        .errors = 1,
+        .notes = 1,
+    },
 };
 
 static void check_test_driver_conditions(CheckTest* test, const char* clang, const char* executable, const char* directory)

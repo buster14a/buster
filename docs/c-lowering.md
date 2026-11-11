@@ -1629,8 +1629,9 @@ none of its subset's programs makes a name twice in clang's objects.
   path's, and compares its checking, by both paths, and its `-c` object with
   clang's (`test-checker-corpus --symbols-minimum 1`). The TSan and MSan rows
   run the compiles in a separate step after the suite, and leave out only the
-  checking comparison, whose 6,323,682-token unit exceeds their hosted
-  runner's memory (docs/ci.md).
+  checking comparison, whose unit (4,864,411 tokens on 2026-11-10, with
+  `-DBUSTER_COMPLETE_DRIVER=1`) exceeds their hosted runner's memory
+  (docs/ci.md).
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined. The dropped ones were the other units' commands,
   each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which

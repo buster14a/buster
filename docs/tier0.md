@@ -648,17 +648,32 @@ at the target's forms, by both of the checker's paths:
   (`check_vector_baseline_shift_by`, #1834): `psll`, `psrl` and `psra` of words, dwords and qwords, a qword's arithmetic
   one the logical one xor its sign bit shifted alike less that, and bytes' through words: masked by `0xff` shifted
   alike for a left or logical right shift, unpacked into words' high bytes, shifted and packed for an arithmetic one.
+  The generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without AVX-512) run on
+  pieces of the registers' width through memory, as a transport vector's do (`check_lower_vector_wide`, #1834):
+  shuffles element by element, conversions and elementwise builtins each piece's row.
+  The integers' `__builtin_elementwise_min` and `_max` without SSE4.1's (or AVX-512's qword) instructions are a
+  compare's blend (`check_vector_baseline_extremes`, #1834): the mask `pcmpgt` of a and b (of b and a for a minimum),
+  unsigned elements' biased by their sign bits first (a constant operand, `xorps`), then `pand`, `pandn` and `por`;
+  unsigned words' are `psubusw` with `paddw` or `psubw`. Absolute values without SSSE3 (or AVX-512's of qwords) are
+  bytes' `pminub` and words' `pmaxsw` of each and its negation, and dwords' and qwords' xor with their sign less it
+  (`check_vector_baseline_absolute`).
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
-  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low dword
-  (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts and
-  packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between 8-
-  or 16-bit integers and floats or doubles go through dwords by them.
+  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
+  dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
+  and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
+  8- or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
-  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3,
-  conversions of vectors wider than the target's registers, and scalar fused multiply-adds without FMA. The sign masks
-  and the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
-  several registers and operators on vectors wider than the registers are #1193's.
+  without AVX-512, minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
+  and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
+  `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
+  without SSE4.1 its `ceilf` ... `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of
+  the value plus the largest value below 0.5 of its sign). copysign and canonicalize are SSE's sequences, maxnum,
+  minnum and their `_num` forms #967's (`check_vector_extreme_scalar_rows`), and with AVX the IEEE maxima and minima
+  `vmaxss` or `vminss`, their sign bit fixed by x's and the NaNs' operands blended in (`vblendvps`,
+  `check_vector_baseline_scalar_row`). The sign masks and the conversions
+  to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in several registers
+  and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
   intrinsics, shuffles of every element size, SSE4.1's and AVX2's) at the three levels natively against clang -O0's build
   at the same `-march`, and checks each refusal by name.

@@ -470,6 +470,7 @@ static CheckOSLogFormat check_os_log_format(Arena* arena, const uint8_t* bytes, 
 // the buffer for __builtin_os_log_format (`buffer`), up to the call's `)` `closing`, of `count` arguments. It must be an
 // ordinary or UTF-8 string literal past its parentheses and casts (clang's CheckOSLogFormatStringArg); its layout's
 // items (CheckBuiltinCall.os_log_items) and its checks' facts are the call's.
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 static __attribute__((noinline)) void check_input_os_log_evidence(CheckInputReader* reader, uint32_t first, uint32_t closing, bool buffer, uint32_t count,
                                                                   CheckBuiltinCall* evidence)
 {
@@ -521,3 +522,4 @@ static __attribute__((noinline)) void check_input_os_log_evidence(CheckInputRead
         memcpy(evidence->os_log_taken, format.taken, sizeof(format.taken));
     }
 }
+#endif

@@ -76,9 +76,10 @@
 #define BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS 2000
 #define BUSTER_EXECUTABLE_TEST_PATH_BYTES 512
 #define BUSTER_EXECUTABLE_TEST_MAX_BOUNDARIES 4096
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Workers enough for 38 chunks, several for each of 8 lanes.
 #define BUSTER_EXECUTABLE_TEST_MANY_CHUNKS_FUNCTIONS 50000
-
+#endif
 static const uint32_t executable_test_lane_counts[] = { 1, 2, 3, 8 };
 
 typedef struct ExecutableTestTally ExecutableTestTally;
@@ -88,7 +89,7 @@ struct ExecutableTestTally
     uint64_t checked;
     uint64_t failures;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static void executable_test_expect(ExecutableTestTally* tally, bool condition, const char* what, uint64_t index)
 {
     tally->checked += 1;
@@ -101,13 +102,15 @@ static void executable_test_expect(ExecutableTestTally* tally, bool condition, c
         tally->failures += 1;
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool executable_test_report(const ExecutableTestTally* tally)
 {
     printf("%s: %llu checks, %llu failed\n", tally->check, (unsigned long long)tally->checked, (unsigned long long)tally->failures);
     return tally->failures == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // splitmix64.
 static uint64_t executable_test_random(uint64_t* state)
 {
@@ -117,7 +120,7 @@ static uint64_t executable_test_random(uint64_t* state)
     x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
     return x ^ (x >> 31);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Running and reading files
 
@@ -129,7 +132,7 @@ struct ExecutableTestDirectory
     char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     bool keep;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static String8 executable_test_path(const ExecutableTestDirectory* directory, const char* name, char* buffer)
 {
     const int length = snprintf(buffer, BUSTER_EXECUTABLE_TEST_PATH_BYTES, "%s/%s", directory->path, name);
@@ -139,7 +142,8 @@ static String8 executable_test_path(const ExecutableTestDirectory* directory, co
     };
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Runs the executable `arguments` name first with them (a null-terminated list), in `environment`: what it writes to
 // standard output, and how it ended.
 static bool executable_test_run_arguments(char** arguments, char** environment, uint8_t* output, uint64_t* output_length, int* status)
@@ -175,7 +179,8 @@ static bool executable_test_run_arguments(char** arguments, char** environment, 
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Runs the executable at `path` without arguments, in `environment`: what it writes to standard output, and how it
 // ended.
 static bool executable_test_run_with(const char* path, char** environment, uint8_t* output, uint64_t* output_length, int* status)
@@ -183,7 +188,8 @@ static bool executable_test_run_with(const char* path, char** environment, uint8
     char* arguments[] = { (char*)path, 0 };
     return executable_test_run_arguments(arguments, environment, output, output_length, status);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Runs the executable at `path` without arguments, in an environment of its own: what it writes to standard output, and
 // how it ended.
 static bool executable_test_run(const char* path, uint8_t* output, uint64_t* output_length, int* status)
@@ -191,7 +197,8 @@ static bool executable_test_run(const char* path, uint8_t* output, uint64_t* out
     char* environment[] = { "BUSTER=1", 0 };
     return executable_test_run_with(path, environment, output, output_length, status);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the executable at `path` exits with status 0 having written exactly `expected`.
 static bool executable_test_runs(const char* path, const uint8_t* expected, uint64_t expected_length)
 {
@@ -201,7 +208,8 @@ static bool executable_test_runs(const char* path, const uint8_t* expected, uint
     const bool ran = executable_test_run(path, output, &length, &status);
     return ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == expected_length && memcmp(output, expected, length) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The file at `path`, read whole into `arena`: its bytes, or a null pointer.
 static String8 executable_test_read(Arena* arena, const char* path)
 {
@@ -230,7 +238,7 @@ static String8 executable_test_read(Arena* arena, const char* path)
     }
     return result;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Writing with lanes
 
@@ -246,7 +254,7 @@ struct ExecutableTestWrite
     uint64_t room;
     bool succeeded;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static void executable_test_lane_main(void* argument)
 {
     ExecutableTestWrite* write = argument;
@@ -271,7 +279,8 @@ static void executable_test_lane_main(void* argument)
         write->succeeded = succeeded;
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Writes the link to `path` with a group of `lanes` lanes, lane `starved_lane` having only `room` bytes of scratch
 // memory: whether executable_write succeeded, and its result.
 static bool executable_test_write_starved(Link* link, SymbolId entry, String8 path, uint32_t lanes, uint32_t starved_lane, uint64_t room, ExecutableResult* result)
@@ -291,7 +300,8 @@ static bool executable_test_write_starved(Link* link, SymbolId entry, String8 pa
     *result = write.result;
     return ran && write.succeeded;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Writes the link to `path` with a group of `lanes` lanes: whether executable_write succeeded, and its result.
 static bool executable_test_write(Link* link, SymbolId entry, String8 path, uint32_t lanes, ExecutableResult* result, uint64_t* boundaries, uint64_t boundary_capacity)
 {
@@ -309,7 +319,8 @@ static bool executable_test_write(Link* link, SymbolId entry, String8 path, uint
     *result = write.result;
     return ran && write.succeeded;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Writes the link to `path` with a group of `lanes` lanes by the passes' exact twins (ExecutableOptions.exact): whether
 // executable_write succeeded, and its result.
 static bool executable_test_write_exact(Link* link, SymbolId entry, String8 path, uint32_t lanes, ExecutableResult* result)
@@ -327,7 +338,8 @@ static bool executable_test_write_exact(Link* link, SymbolId entry, String8 path
     *result = write.result;
     return ran && write.succeeded;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Writes the link to `path` with a group of `lanes` lanes, each chunk staged in a lane's buffer (ExecutableOptions.stage):
 // whether executable_write succeeded, and its result.
 static bool executable_test_write_staged(Link* link, SymbolId entry, String8 path, uint32_t lanes, ExecutableResult* result)
@@ -345,7 +357,8 @@ static bool executable_test_write_staged(Link* link, SymbolId entry, String8 pat
     *result = write.result;
     return ran && write.succeeded;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Undoes what a write left, so that the next write has all of it to do again: every fixup's field in the atoms' bytes
 // back to zeros, as the generator leaves them, and the output, if it exists, overwritten with 0x5a over its whole
 // length, so that a write in place over it must write every byte. Returns whether the output could be overwritten.
@@ -377,7 +390,8 @@ static bool executable_test_reset(Link* link, const char* path)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The atoms' bytes as the link's maker left them, all in one copy on `arena`, or null if it has no room. A write
 // patches them in place, and its relaxations rewrite instructions (a TLS access's sequence, a load's or a call's
 // through the GOT), which a TLS access's next write would no longer find, and which an object written from the link
@@ -402,7 +416,8 @@ static uint8_t* executable_test_save(const Link* link, Arena* arena)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static void executable_test_restore(Link* link, const uint8_t* saved)
 {
     uint64_t at = 0;
@@ -416,7 +431,7 @@ static void executable_test_restore(Link* link, const uint8_t* saved)
         at += size;
     }
 }
-
+#endif
 static const char* const executable_test_error_names[] = {
     [EXECUTABLE_ERROR_NONE] = "none",
     [EXECUTABLE_ERROR_MEMORY] = "memory",
@@ -430,13 +445,13 @@ static const char* const executable_test_error_names[] = {
     [EXECUTABLE_ERROR_UNWIND] = "unwind",
 };
 _Static_assert(BUSTER_ARRAY_LENGTH(executable_test_error_names) == EXECUTABLE_ERROR_UNWIND + 1, "every error has a name");
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static void executable_test_print_failure(const char* what, const ExecutableResult* result)
 {
     printf("  %s: %s error, atom %u, symbol %u, fixup %u, %s: %s\n", what, executable_test_error_names[result->error], result->atom, result->symbol, result->fixup,
            result->call != 0 ? result->call : "-", result->system_error != 0 ? strerror(result->system_error) : "-");
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Fields and headers
 //
@@ -452,7 +467,7 @@ struct ExecutableTestImage
     const char* names;
     bool valid;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // The file read as an executable of ELF type `type` (ET_EXEC, or ET_DYN for a PIE): valid if its headers are within it.
 static ExecutableTestImage executable_test_image_of(String8 file, uint16_t type)
 {
@@ -472,12 +487,14 @@ static ExecutableTestImage executable_test_image_of(String8 file, uint16_t type)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static ExecutableTestImage executable_test_image(String8 file)
 {
     return executable_test_image_of(file, ET_EXEC);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // A section by name, or null.
 static const Elf64_Shdr* executable_test_section(const ExecutableTestImage* image, const char* name)
 {
@@ -488,7 +505,8 @@ static const Elf64_Shdr* executable_test_section(const ExecutableTestImage* imag
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A program header by type, or null.
 static const Elf64_Phdr* executable_test_segment(const ExecutableTestImage* image, uint32_t type)
 {
@@ -499,7 +517,7 @@ static const Elf64_Phdr* executable_test_segment(const ExecutableTestImage* imag
     }
     return result;
 }
-
+#endif
 // What fills an executable's GOT, ours or another linker's, read from its sections: its slots, .got's entries and the
 // entries of .got.plt that IRELATIVE relocations fill (lld's IFUNCs' slots: its header and its PLT's slots aren't the
 // GOT's), and of .got's entries, those that relocations fill, RELATIVE ones (.rela.dyn's and .relr.dyn's), IRELATIVE
@@ -515,7 +533,7 @@ struct ExecutableTestGot
     uint64_t plain;
     bool valid;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static ExecutableTestGot executable_test_got(String8 file, uint16_t type)
 {
     const ExecutableTestImage image = executable_test_image_of(file, type);
@@ -568,7 +586,8 @@ static ExecutableTestGot executable_test_got(String8 file, uint16_t type)
     result.plain = entries - relocated;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // How many of a link's symbols have GOT slots that hold their offsets from the thread pointer (initial-exec accesses'),
 // which lld relaxes to local-exec in an executable where the writer doesn't (yet).
 static uint64_t executable_test_tls_slots(const Link* link)
@@ -582,7 +601,8 @@ static uint64_t executable_test_tls_slots(const Link* link)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The file offset of an address, from the PT_LOAD that has it in its file bytes: UINT64_MAX if none does.
 static uint64_t executable_test_file_offset(const ExecutableTestImage* image, uint64_t address)
 {
@@ -597,7 +617,8 @@ static uint64_t executable_test_file_offset(const ExecutableTestImage* image, ui
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Native LOADs share one mapping base, even without intermediate segments. Gaps between their file bytes are zero.
 static bool executable_test_load_gaps(String8 file, uint64_t base)
 {
@@ -620,7 +641,8 @@ static bool executable_test_load_gaps(String8 file, uint64_t base)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The headers: PT_PHDR first and loaded; PT_LOADs in lld's order (R, RX, RW, RW), their offsets nonoverlapping and
 // 4 KB-congruent with their addresses, each from a page after the last's end; PT_TLS within the RELRO segment;
 // PT_GNU_RELRO the RELRO segment to its page's end; PT_GNU_STACK not executable; and the build ID's note.
@@ -682,7 +704,8 @@ typedef enum ExecutableTestField
     // executable_test_fields checks that its start and end are the same instead.
     EXECUTABLE_TEST_FIELD_UNKNOWN,
 } ExecutableTestField;
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A symbol's value as the program sees it, from its atom's address and the file's headers: its address, or a TLS
 // symbol's offset from the thread pointer (in the TLS segment, less align_up(p_memsz + f, p_align) - f, f being
 // p_vaddr modulo p_align, as glibc places the block and GNU ld and lld compute TPOFF), or 0 for a weak symbol defined
@@ -719,7 +742,8 @@ static bool executable_test_symbol_value(const Link* link, const ExecutableTestI
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether a symbol's value is an address in the image, by the test's own rule: one defined in an atom that isn't
 // thread-local, or one of the linker's names. A thread-local symbol's offset, an absolute symbol's value, an import and
 // a weak symbol defined nowhere (0) aren't.
@@ -728,13 +752,15 @@ static bool executable_test_in_image(const Link* link, SymbolId symbol)
     const AtomId atom = link->symbols.atom[symbol];
     return (atom != 0 && !link_class_is_tls(link->atoms.class[atom])) || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether a symbol is an IFUNC with a resolver, the code at it.
 static bool executable_test_is_ifunc(const Link* link, SymbolId symbol)
 {
     return link->symbols.atom[symbol] != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether a fixup reaches its target directly, as GNU ld and lld relax it in an executable of any kind, by the test's
 // own rule: a CALL_GOT or LOAD_GOT with the addend -4 to a symbol of the image's (executable_test_in_image) that isn't
 // an IFUNC.
@@ -749,7 +775,8 @@ static bool executable_test_far_possible(const Link* link)
     }
     return total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE - BUSTER_EXECUTABLE_FAR_SLACK;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool executable_test_relaxes(const Link* link, FixupId fixup)
 {
     const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
@@ -759,7 +786,8 @@ static bool executable_test_relaxes(const Link* link, FixupId fixup)
     const bool far = atom != 0 && link->atoms.address[atom] + link->symbols.value[target] > (uint64_t)INT32_MAX;
     return loads && link_fixup_addend(link, fixup) == -4 && !far && executable_test_in_image(link, target) && !executable_test_is_ifunc(link, target);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The 6 bytes that a relaxed load or call (executable_test_relaxes), fixup `fixup` of `holder`, leaves from 2 bytes
 // before its field, for its target at address `symbol` and its field at `place`: for a mov, lea's 8d and its ModRM;
 // for a call, addr32 call's 67 e8; for a jmp, e9 and its rel32 a byte earlier, measured from its end, and a nop; and the
@@ -784,7 +812,8 @@ static bool executable_test_relaxed(const Link* link, AtomId holder, FixupId fix
     expected[5] = jump ? 0x90 : expected[5];
     return offset >= 2 && distance == field && (load ? opcode == 0x8b || opcode == 0x8d : jump || call);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether a load or call through the GOT that doesn't relax keeps its instruction in `bytes`, its field at `offset`: a
 // CALL_GOT its call or jmp [rip + slot] (ff 15 or ff 25), a LOAD_GOT its mov (8b). Every other kind keeps its own.
 static bool executable_test_unrelaxed(uint8_t kind, const uint8_t* bytes, uint64_t offset)
@@ -793,7 +822,8 @@ static bool executable_test_unrelaxed(uint8_t kind, const uint8_t* bytes, uint64
     const bool load = kind == BUSTER_LINK_FIXUP_LOAD_GOT;
     return (!call && !load) || (offset >= 2 && (call ? bytes[offset - 2] == 0xff && (bytes[offset - 1] == 0x15 || bytes[offset - 1] == 0x25) : bytes[offset - 2] == 0x8b));
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The value a fixup's field must hold, from the reference arithmetic of its kind (link_test_load's), with its target's
 // value from executable_test_symbol_value. `holder` is the atom whose fixup it is, and width gets the field's width. A
 // value that can't fit is a failure: a generated program never has one.
@@ -963,7 +993,7 @@ static uint64_t executable_test_fields(ExecutableTestTally* tally, const Link* l
     }
     return relaxed_count;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Unwind tables, read back
 //
@@ -979,7 +1009,7 @@ struct ExecutableTestFde
     int64_t initial;
     uint64_t range;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Reads the LEB128 at *at, before `end`, past it, as unsigned. False if it runs past `end`.
 static bool executable_test_leb128(const uint8_t* bytes, uint64_t end, uint64_t* at, uint64_t* value)
 {
@@ -996,7 +1026,8 @@ static bool executable_test_leb128(const uint8_t* bytes, uint64_t end, uint64_t*
     *value = result;
     return !more;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The FDE pointers' encoding of the CIE at `cie` among .eh_frame's `size` bytes, from its augmentation's 'R', or 0xff
 // if it isn't a CIE the test reads: version 1 or 3, and an augmentation of 'z' then 'R', 'P', 'L' and 'S'.
 static uint8_t executable_test_cie_encoding(const uint8_t* bytes, uint64_t size, uint64_t cie)
@@ -1066,7 +1097,8 @@ static uint8_t executable_test_cie_encoding(const uint8_t* bytes, uint64_t size,
     }
     return valid && at <= data_end ? result : 0xff;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Walks .eh_frame's records, `size` bytes at `address`, one after another: each FDE into `fdes` (room for `capacity`),
 // which must point back to a CIE met before it with pc-relative sdata4 pointers. A zero length is a terminator, which
 // must be the last record, as it is where an unwinder that walks the records stops. Returns how many FDEs, or
@@ -1129,7 +1161,8 @@ static uint64_t executable_test_walk_frames(const uint8_t* bytes, uint64_t size,
     }
     return valid ? count : UINT64_MAX;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The table's entry for `pc`, as libgcc's unwinder looks it up: a binary search for the last initial location at or
 // before it. Returns its index, or UINT64_MAX if every one is after it.
 static uint64_t executable_test_lookup(const uint8_t* table, uint64_t count, uint64_t header, int64_t pc)
@@ -1147,7 +1180,8 @@ static uint64_t executable_test_lookup(const uint8_t* table, uint64_t count, uin
     }
     return low == 0 ? UINT64_MAX : low - 1;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The walked FDE at `address`, by a binary search of `fdes` (in address order), or UINT64_MAX.
 static uint64_t executable_test_fde_at(const ExecutableTestFde* fdes, uint64_t count, uint64_t address)
 {
@@ -1161,7 +1195,8 @@ static uint64_t executable_test_fde_at(const ExecutableTestFde* fdes, uint64_t c
     }
     return low < count && fdes[low].address == address ? low : UINT64_MAX;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The first rule that `file`'s unwind tables break, or 0 if they keep them all. The file is an executable of `link`
 // whose image starts at `base` (BUSTER_EXECUTABLE_BASE, or 0 for a PIE); the program's own atoms are its units' below
 // `units`; `result` is its write's, or null.
@@ -1353,10 +1388,10 @@ static const char* executable_test_unwind(const Link* link, String8 file, uint64
     scratch_end(scratch);
     return failed;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Build IDs
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether the file's build ID is the hash of its chunks' hashes, each chunk hashed with the note's hash zeroed.
 static bool executable_test_build_id(Arena* arena, String8 file, const uint64_t* boundaries, uint64_t chunks)
 {
@@ -1386,7 +1421,8 @@ static bool executable_test_build_id(Arena* arena, String8 file, const uint64_t*
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The chunk hash of every length from 0 to BUSTER_EXECUTABLE_TEST_HASH_LENGTHS bytes, cut into pieces at random places,
 // against the same bytes whole; and runs of zeros of every length up to a page, whose hashes must all differ from the
 // next length's.
@@ -1656,7 +1692,7 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
 // wait for a signal, or fail.
 
 #define BUSTER_EXECUTABLE_TEST_MAX_CODE 16
-
+#endif
 typedef struct ExecutableTestLink ExecutableTestLink;
 struct ExecutableTestLink
 {
@@ -1665,7 +1701,7 @@ struct ExecutableTestLink
     Arena names;
     Arena bytes;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 static bool executable_test_link_begin_with(ExecutableTestLink* test, uint64_t bytes, LinkCapacity capacity)
 {
     test->tables = arena_reserve(link_capacity_bytes(capacity));
@@ -1673,7 +1709,8 @@ static bool executable_test_link_begin_with(ExecutableTestLink* test, uint64_t b
     test->bytes = arena_reserve(bytes);
     return link_initialize(&test->link, &test->tables, &test->names, capacity) && test->names.base != 0 && test->bytes.base != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 static bool executable_test_link_begin(ExecutableTestLink* test, uint64_t bytes)
 {
     const LinkCapacity capacity = {
@@ -1685,14 +1722,16 @@ static bool executable_test_link_begin(ExecutableTestLink* test, uint64_t bytes)
     };
     return executable_test_link_begin_with(test, bytes, capacity);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 static void executable_test_link_end(ExecutableTestLink* test)
 {
     arena_release(&test->tables);
     arena_release(&test->names);
     arena_release(&test->bytes);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // A symbol of the program named `name`, to be defined later.
 static SymbolId executable_test_symbol(Link* link, const char* name, uint8_t flags)
 {
@@ -2006,13 +2045,15 @@ static bool executable_test_failing(ExecutableTestLink* test, SymbolId* start, u
     result = result && table != 0 && link_add_fixup(link, table, 0, kind, *start, addend) != 0;
     return result && link_check(link) == LINK_ERROR_NONE;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool executable_test_same_file(Arena* arena, const char* path, String8 bytes)
 {
     const String8 file = executable_test_read(arena, path);
     return file.pointer != 0 && bytes.pointer != 0 && file.length == bytes.length && memcmp(file.pointer, bytes.pointer, bytes.length) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Waits up to 5 s until this child runs the file. Opening the file for writing to probe ETXTBSY can itself make the
 // child's execve fail with ETXTBSY. Observe its executable's inode instead, without taking a writable descriptor.
 static bool executable_test_running(const char* path, pid_t child)
@@ -4057,7 +4098,8 @@ static bool executable_test_kernel(uint64_t seed)
 // The command
 
 #include "buster/compiler/executable_symbols_test.c"
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool executable_test_parse_u64(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -4066,7 +4108,8 @@ static bool executable_test_parse_u64(const char* text, uint64_t* value)
     *value = result ? parsed : *value;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The image offsets of the atoms of `section`: the lowest and the highest end, or false for a section without atoms.
 static bool executable_test_section_span(const Link* link, String8 section, uint64_t* start, uint64_t* end)
 {
@@ -4081,7 +4124,8 @@ static bool executable_test_section_span(const Link* link, String8 section, uint
     }
     return *start != UINT64_MAX;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // #1122: a static executable of hand-made atoms, whose atoms refer to __start_ and __stop_ of three sections and to a
 // weak __start_ of a missing one. `bst_sec`'s three atoms and `bst_two`'s two share a bucket with the two plain atoms
 // between them; `bst_wide`'s two have different alignments, which the section takes the largest of. The linker's names
@@ -4177,7 +4221,8 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
     executable_test_link_end(&test);
     return executable_test_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // #1122: a thread-local atom and an ordinary one can't be one section's run in one output section, so a __start_/__stop_
 // bound of their name's is refused EXECUTABLE_ERROR_UNSUPPORTED with the bound symbol, not written wrong and not
 // mistaken for an allocation failure.
@@ -4300,3 +4345,4 @@ static int run_executable_tests(int argc, char** argv)
     }
     return result;
 }
+#endif

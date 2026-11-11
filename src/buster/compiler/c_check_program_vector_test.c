@@ -1021,6 +1021,99 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "S(SW,16);S(SD,32);S(UQ,64);S(SQ,64);long long kk=k%64;v2di z;fill(&z,16,n);v2di zz=z>>kk;FOLD(zz);}\n"
           "return (int)h;}\n"
         },
+        // #1834: the generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without
+        // AVX-512) on pieces of the registers' width through memory, as a transport vector's: shuffles of each element
+        // size, a 16-byte vector's two into one of 32 and 32-byte ones' into 16, conversions widening and between integers
+        // and floats, and elementwise minima, maxima, saturating arithmetic and square roots.
+        { "baseline-wide-builtins",
+          "typedef int I8 __attribute__((vector_size(32),aligned(16)));typedef unsigned U8 __attribute__((vector_size(32),aligned(16)));typedef float F8 __attribute__((vector_size(32),aligned(16)));\n"
+          "typedef short S16 __attribute__((vector_size(32),aligned(16)));typedef unsigned char B32 __attribute__((vector_size(32),aligned(16)));typedef double D4 __attribute__((vector_size(32),aligned(16)));\n"
+          "typedef long long L4 __attribute__((vector_size(32),aligned(16)));typedef short S8 __attribute__((vector_size(16)));typedef int I4 __attribute__((vector_size(16)));\n"
+          "typedef unsigned char B64 __attribute__((vector_size(64),aligned(16)));typedef int I16 __attribute__((vector_size(64),aligned(16)));typedef float F16 __attribute__((vector_size(64),aligned(16)));\n"
+          "typedef double D8 __attribute__((vector_size(64),aligned(16)));typedef unsigned short W32 __attribute__((vector_size(64),aligned(16)));\n"
+          "int tested(int n){unsigned h=2166136261u;I8 a,b;U8 u,v;S16 s,t;B32 c,d;L4 l,m;I16 w,x;B64 e,g;W32 y,z;F8 f,k;D4 q,r;F16 fa;D8 da;\n"
+          "fill(&a,32,n);fill(&b,32,n+1);fill(&u,32,n+2);fill(&v,32,n+3);fill(&s,32,n+4);fill(&t,32,n+5);fill(&c,32,n+6);fill(&d,32,n+7);fill(&l,32,n+8);fill(&m,32,n+9);\n"
+          "fill(&w,64,n+10);fill(&x,64,n+11);fill(&e,64,n+12);fill(&g,64,n+13);fill(&y,64,n+14);fill(&z,64,n+15);\n"
+          "for(int i=0;i<8;i++){f[i]=(float)((n*13+i*7)%50-25)*0.75f;k[i]=(float)((n*5+i*3)%40-20)*0.5f;}for(int i=0;i<4;i++){q[i]=f[i]*1.5;r[i]=k[i+4];}\n"
+          "for(int i=0;i<16;i++)fa[i]=(float)((i*7+n)%30-15)*0.25f;for(int i=0;i<8;i++)da[i]=fa[i*2];\n"
+          "I8 s1[]={__builtin_shufflevector(a,b,7,6,5,4,3,2,1,0),__builtin_shufflevector(a,b,0,8,1,9,2,10,3,11),__builtin_shufflevector(a,b,15,0,14,1,13,2,12,3)};FOLD(s1);\n"
+          "#if defined(__SSSE3__)&&!defined(__AVX2__)\n"
+          "B32 s2r=__builtin_shufflevector(c,d,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);FOLD(s2r);\n"
+          "#endif\n"
+          "#ifndef __AVX2__\n"
+          "B32 s2[]={__builtin_shufflevector(c,d,0,32,1,33,2,34,3,35,4,36,5,37,6,38,7,39,8,40,9,41,10,42,11,43,12,44,13,45,14,46,15,47)};FOLD(s2);\n"
+          "#endif\n"
+          "L4 s3=__builtin_shufflevector(l,m,3,4,1,6);FOLD(s3);I4 s4=__builtin_shufflevector(a,b,1,9,7,15);FOLD(s4);I8 s5=__builtin_shufflevector((I4){n,2,3,4},(I4){5,6,7,n},7,6,5,4,3,2,1,0);FOLD(s5);\n"
+          "I16 s6=__builtin_shufflevector(w,x,31,30,29,28,27,26,25,24,0,1,2,3,4,5,6,7);FOLD(s6);\n"
+          "F8 c3=__builtin_convertvector(a,F8);FOLD(c3);I8 c4=__builtin_convertvector(f,I8);FOLD(c4);\n"
+          "D4 c5=__builtin_convertvector(s4,D4);FOLD(c5);L4 c6=__builtin_convertvector(s4,L4);FOLD(c6);typedef unsigned char B16 __attribute__((vector_size(16)));B16 cc;fill(&cc,16,n);I16 c7=__builtin_convertvector(cc,I16);FOLD(c7);F16 c8=__builtin_convertvector(w,F16);FOLD(c8);\n"
+          "#ifdef __SSE4_1__\n"
+          "U8 e2[]={__builtin_elementwise_min(u,v),__builtin_elementwise_max(u,v)};FOLD(e2);\n"
+          "#endif\n"
+          "I8 e1[]={a+b};FOLD(e1);\n"
+          "S16 e3[]={__builtin_elementwise_min(s,t),__builtin_elementwise_add_sat(s,t),__builtin_elementwise_sub_sat(s,t)};FOLD(e3);\n"
+          "B32 e4[]={__builtin_elementwise_min(c,d),__builtin_elementwise_max(c,d),__builtin_elementwise_add_sat(c,d),__builtin_elementwise_sub_sat(c,d)};FOLD(e4);\n"
+          "B64 e5[]={__builtin_elementwise_min(e,g),__builtin_elementwise_add_sat(e,g)};FOLD(e5);W32 e6[]={__builtin_elementwise_sub_sat(y,z)};FOLD(e6);\n"
+          "F8 e7[]={__builtin_elementwise_sqrt(f*f)};FOLD(e7);\n"
+          "D4 e8[]={__builtin_elementwise_sqrt(q*q)};FOLD(e8);\n"
+          "F16 e9[]={__builtin_elementwise_sqrt(fa*fa)};FOLD(e9);D8 e10[]={__builtin_elementwise_sqrt(da*da)};FOLD(e10);\n"
+          "return (int)h;}\n"
+        },
+        // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
+        // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
+        // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
+        // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, and with AVX the IEEE maxima and minima,
+        // of every pair of NaNs (their payloads), signed zeros, infinities, a denormal and others.
+        { "baseline-scalar-builtins",
+          "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
+          "__builtin_elementwise_rint(v),__builtin_elementwise_nearbyint(v),__builtin_elementwise_roundeven(v),__builtin_elementwise_round(v)};FOLD(r_);}while(0)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "static const float fs[]={0.5f,-0.5f,1.5f,2.5f,-2.5f,0.49999997f,-0.49999997f,8388607.5f,-0.0f,1e30f,-3.75f,0.0f};\n"
+          "static const double ds[]={0.5,-0.5,1.5,2.5,-2.5,0.49999999999999994,-0.49999999999999994,4503599627370495.5,-0.0,1e300,-3.75,0.0};\n"
+          "for(int i=0;i<12;i++){float x=fs[i]*(float)(n+1);double y=ds[i]*(double)(n+1);R(x);R(y);"
+          "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
+          "#define B(x,y) do{__typeof__(x) r_[]={__builtin_elementwise_copysign(x,y),__builtin_elementwise_maxnum(x,y),__builtin_elementwise_minnum(x,y),"
+          "__builtin_elementwise_canonicalize(x)IEEE(x,y)};FOLD(r_);}while(0)\n"
+          "#ifdef __AVX__\n"
+          "#define IEEE(x,y) ,__builtin_elementwise_maximum(x,y),__builtin_elementwise_minimum(x,y),__builtin_elementwise_maximumnum(x,y),__builtin_elementwise_minimumnum(x,y)\n"
+          "#else\n"
+          "#define IEEE(x,y)\n"
+          "#endif\n"
+          "union{unsigned u;float f;}fu[]={{0x7fc01234u},{0xffc05678u},{0x80000000u},{0},{0x3f800000u},{0xbf800000u},{0x7f800000u},{0xff800000u},{1},{0x40490fdbu}};\n"
+          "union{unsigned long long u;double f;}du[]={{0x7ff8000000001234ull},{0xfff8000000005678ull},{0x8000000000000000ull},{0},{0x3ff0000000000000ull},"
+          "{0xbff0000000000000ull},{0x7ff0000000000000ull},{0xfff0000000000000ull},{1},{0x400921fb54442d18ull}};\n"
+          "for(int i=0;i<10;i++)for(int j=0;j<10;j++){float x=fu[i].f,y=fu[(unsigned)(j+n+40)%10].f;double a=du[i].f,b=du[(unsigned)(j+n+40)%10].f;B(x,y);B(a,b);}\n"
+          "float l[]={__builtin_elementwise_ldexp(1.5f,n),__builtin_elementwise_ldexp(3.0f,(long)n-100),__builtin_elementwise_ldexp(1.0f,(short)(n*7)),"
+          "__builtin_elementwise_ldexp(2.0f,(long)n+0x100000000L)};FOLD(l);\n"
+          "double k[]={__builtin_elementwise_ldexp(1.5,n),__builtin_elementwise_ldexp(3.0,(long)n-1000),__builtin_elementwise_ldexp(1.0,(unsigned)n*3)};FOLD(k);\n"
+          "return (int)h;}\n"
+        },
+        // __builtin_elementwise_min, _max and _abs of integers without their instructions (#1834): SSE2's compares and
+        // blends, unsigned elements biased by their sign bits, unsigned words' saturating subtractions, bytes' and words'
+        // absolute values of each and its negation and the others' by their signs; qwords' minima and maxima with SSE4.2's
+        // PCMPGTQ, 32 bytes with AVX2. Each pair has equal elements and the most negative one.
+        { "baseline-min-max-abs",
+          "typedef signed char sb __attribute__((vector_size(16)));typedef short sw __attribute__((vector_size(16)));"
+          "typedef unsigned ud __attribute__((vector_size(16)));typedef unsigned long long uq __attribute__((vector_size(16)));"
+          "typedef signed char sb8 __attribute__((vector_size(8)));typedef unsigned short uw4 __attribute__((vector_size(8)));typedef int sd2 __attribute__((vector_size(8)));"
+          "typedef unsigned char ub32 __attribute__((vector_size(32),aligned(16)));typedef unsigned short uw16 __attribute__((vector_size(32),aligned(16)));"
+          "typedef unsigned ud8 __attribute__((vector_size(32),aligned(16)));typedef unsigned long long uq4 __attribute__((vector_size(32),aligned(16)));"
+          "typedef signed char sb32 __attribute__((vector_size(32),aligned(16)));\n"
+          "#define M(T,a,b) do{T x_=__builtin_elementwise_min(a,b),y_=__builtin_elementwise_max(a,b);FOLD(x_);FOLD(y_);}while(0)\n"
+          "#define A(T,a) do{T x_=__builtin_elementwise_abs(a);FOLD(x_);}while(0)\n"
+          "#define V(T,k) T a##k,b##k;fill(&a##k,sizeof(T),n+k);fill(&b##k,sizeof(T),n+k+50);b##k[1]=a##k[1];a##k[0]=(__typeof__(a##k[0]))(1ull<<(8*sizeof(a##k[0])-1));\n"
+          "int tested(int n){unsigned h=2166136261u;V(sb,1)V(v16qu,2)V(sw,3)V(v8hu,4)V(v4si,5)V(ud,6)V(v2di,7)V(uq,8)V(sb8,9)V(uw4,10)V(sd2,11)\n"
+          "M(sb,a1,b1);M(v16qu,a2,b2);M(sw,a3,b3);M(v8hu,a4,b4);M(v4si,a5,b5);M(ud,a6,b6);M(sb8,a9,b9);M(uw4,a10,b10);M(sd2,a11,b11);\n"
+          "A(sb,a1);A(sw,a3);A(v4si,a5);A(v2di,a7);A(sb8,b9);A(sd2,b11);\n"
+          "#ifdef __SSE4_2__\n"
+          "M(v2di,a7,b7);M(uq,a8,b8);\n"
+          "#endif\n"
+          "#ifdef __AVX2__\n"
+          "V(sb32,12)V(uw16,13)V(ud8,14)V(v4di,15)V(uq4,16)V(ub32,17)\n"
+          "M(sb32,a12,b12);M(uw16,a13,b13);M(ud8,a14,b14);M(v4di,a15,b15);M(uq4,a16,b16);M(ub32,a17,b17);A(sb32,a12);A(v4di,a15);\n"
+          "#endif\n"
+          "return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
@@ -1107,14 +1200,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                   "vector shuffles of 8-bit elements without SSSE3" },
                 { 1, "typedef short V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,7,8,1,15,4,4,9,0);}",
                   "vector shuffles of 16-bit elements without SSSE3" },
-                { 1, "typedef signed char V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_min(a,b);}",
-                  "vector minimum and maximum of these elements without SSE4.1" },
-                { 1, "typedef int V __attribute__((vector_size(16)));V tested(V a){return __builtin_elementwise_abs(a);}", "vector absolute values without SSSE3" },
-                { 1, "float tested(float a,float b,float c){return __builtin_elementwise_fma(a,b,c);}", "fused multiply-adds of scalars without FMA or AVX-512F" },
-                { 7, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
-                  "vector minimum and maximum of 64-bit elements without AVX-512" },
-                { 3, "typedef int V __attribute__((vector_size(32)));typedef short N __attribute__((vector_size(16)));N tested(V a){return __builtin_convertvector(a,N);}",
-                  "vector conversions wider than the target's registers" },
+                { 1, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
+                  "vector minimum and maximum of 64-bit elements without SSE4.2" },
                 { 4, "typedef char V __attribute__((vector_size(32)));V tested(V a,V b){return __builtin_shufflevector(a,b,31,30,29,28,27,26,25,24,23,22,21,20,19,"
                      "18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
                   "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512" },
