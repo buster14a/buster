@@ -5939,7 +5939,15 @@ default: a `<`, `>`, `<=` or `>=` whose left operand is one, unparenthesized,
 "chained comparison 'X < Y < Z' does not behave the same as a mathematical
 expression" at the outer operator; `-Wno-error=parentheses` demotes it and
 `-w` leaves it an error, which the common checks under `-w` still give
-(`check_common_default_error`), with no `-Werror,` in its option. `-Wshift-op-parentheses` (#2264, on
+(`check_common_default_error`), with no `-Werror,` in its option. `-Wsizeof-array-decay` (#2264, on by
+default, `check_common_sizeof_array_decay`) is clang's
+`warnOnSizeofOnArrayDecay`: `sizeof` of a binary operator, through
+parentheses, whose operand is an array decayed to the operator's own type
+(`sizeof(a + 1)`, `sizeof(0, a)`, `sizeof(p = a)`), "sizeof on pointer
+operation will return size of 'int *' instead of 'int[10]'" at the operator,
+once for each such operand, the array's type as written; published past the
+`sizeof`'s `)`, after its operand's `-Wunevaluated-expression`. Not alignof's
+operand. `-Wshift-op-parentheses` (#2264, on
 by default, `-Wparentheses`' and so `-Wall`'s,
 `check_common_shift_op_parentheses`) is clang's `DiagnoseAdditionInShift`:
 each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
