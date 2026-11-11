@@ -509,10 +509,12 @@ round trip and the IR's three forms against clang.
 
 ### Segment overrides (#1447)
 
-A `load` or a `store` in `__seg_fs` or `__seg_gs` carries its segment in
-`BUSTER_IR_SEGMENT` (flags bits 5 and 6: 1 FS, 2 GS, 3 refused), from the typed
-stream's `BUSTER_TYPED_ACCESS_SEGMENT` (`ir_typed_access`), printed last as `fs`
-or `gs` (`load.i32 %0 align=4 fs`; `tests/ir/segments.ir`). Its address is an
+A `load` or a `store` in `__seg_fs`, `__seg_gs` or address space 258 carries its
+segment in `BUSTER_IR_SEGMENT` (flags bits 5 and 6: 1 FS, 2 GS, 3 SS), from the
+typed stream's `BUSTER_TYPED_ACCESS_SEGMENT` (`ir_typed_access`), printed last as
+`fs`, `gs` or `ss` (`load.i32 %0 align=4 fs`; `tests/ir/segments.ir`). SS's base
+is 0 in 64-bit mode, but clang keeps the space apart and emits its `36`, so an
+SS access is kept apart as the others are. Its address is an
 offset from the segment's base, which nothing relates to a flat address, so the
 segment is in `BUSTER_IR_OBSERVABLE`: promotion, private-field replacement and
 Tier 1's folding keep the access as they keep a volatile one, and both
