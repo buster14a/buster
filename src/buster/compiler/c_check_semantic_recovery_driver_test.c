@@ -434,6 +434,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum D : char { M = 200, N, P, P = 400 };\n"
         "_Static_assert(N == -55, \"n\");\n"
         "int use(void) { return A2 + B3 + C2 + undeclared; }\n",
+        // An array of an element whose alignment an attribute raised past its size (#1893): clang's "size of array element
+        // of type 'enum E' (4 bytes) isn't a multiple of its alignment (8 bytes)" at the `[`, recovered, the declaration
+        // invalid and its uses quiet; arrays of pointers to it and an over-aligned record whose size grew are fine.
+        "enum __attribute__((aligned(8))) E { A };\n"
+        "enum E arr[3];\n"
+        "enum E two[2][2];\n"
+        "void f(void) { enum E loc[2]; int u = loc[0] + q; (void)u; static enum E s[4]; }\n"
+        "enum E *ptrs[3];\n"
+        "struct A8 { char c; } __attribute__((aligned(8)));\n"
+        "struct A8 ok[3];\n"
+        "int use = arr[0] + two[0][0] + sizeof(arr) + sizeof(ptrs) + sizeof(ok);\n"
+        "int x = undeclared;\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
