@@ -2241,8 +2241,9 @@ typedef enum PPPragmaMapping
 
 // The preprocessor's warnings that follow clang's options and pragmas (#1934, pp_warning_severity), by their group:
 // -Wc23-extensions' (a bit-precise constant's suffix in #if), -Wunicode's (a \N read as no UCN),
-// -Wdelimited-escape-sequence-extension's (a named UCN that starts a token, #1447), -W#warnings' (#warning's text, #1790)
-// and -W#pragma-messages' (#pragma message's and #pragma GCC warning's).
+// -Wdelimited-escape-sequence-extension's (a named UCN that starts a token, #1447), -W#warnings' (#warning's text, #1790),
+// -W#pragma-messages' (#pragma message's and #pragma GCC warning's), and #warning's own before C23, -Wpedantic's, and in
+// C23, -Wpre-c23-compat's.
 typedef enum PPWarningGroup
 {
     PP_WARNING_C23_EXTENSIONS,
@@ -2250,6 +2251,8 @@ typedef enum PPWarningGroup
     PP_WARNING_DELIMITED_ESCAPE,
     PP_WARNING_WARNINGS,
     PP_WARNING_PRAGMA_MESSAGES,
+    PP_WARNING_PEDANTIC,
+    PP_WARNING_PRE_C23_COMPAT,
     BUSTER_PP_WARNING_GROUPS,
 } PPWarningGroup;
 
@@ -2277,6 +2280,8 @@ static const PPWarningGroupName pp_warning_groups[BUSTER_PP_WARNING_GROUPS] =
     { "delimited-escape-sequence-extension", NULL, "pedantic", true, false, false, false },
     { "#warnings", NULL, NULL, false, true, true, false },
     { "#pragma-messages", NULL, NULL, false, true, false, true },
+    { "pedantic", NULL, NULL, true, false, false, false },
+    { "pre-c23-compat", "pre-c2x-compat", NULL, false, false, false, false },
 };
 
 _Static_assert(BUSTER_PP_WARNING_GROUPS <= sizeof(((Preprocessor*)0)->warning_mappings), "a mapping for each warning group");
@@ -10964,7 +10969,15 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_ERROR:
         case PP_DIRECTIVE_WARNING:
         {
-            pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1), kind == PP_DIRECTIVE_ERROR);
+            const uint32_t location = pp_token_location(pp, context, data, hash + 1);
+            if (kind == PP_DIRECTIVE_WARNING)
+            {
+                // The directive itself, before its text (#1790): C23's, an extension before it.
+                const bool c23 = pp->options.language.standard >= 2023;
+                pp_diagnose_group(pp, c23 ? PP_WARNING_PRE_C23_COMPAT : PP_WARNING_PEDANTIC, location,
+                                  c23 ? "#warning is incompatible with C standards before C23" : "#warning is a C23 extension");
+            }
+            pp_diagnostic_text(pp, data, hash + 1, location, kind == PP_DIRECTIVE_ERROR);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:
