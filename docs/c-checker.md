@@ -5114,7 +5114,33 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   suggests it ("did you mean 'while'?", "did you mean 'myint'?" with
   "'myint' declared here") and the name stays undeclared, the expression
   rejected with no other diagnostic of it, as clang's is (the report's
-  `detail` and `subject`, `check_typo_suggestion`).
+  `detail` and `subject`, `check_typo_suggestion`). Where an operand follows
+  the name (`sizeo a`, `retrn 5` in an initializer), the parse fails there;
+  clang's correction takes the keyword and skips the expression's rest to the
+  `,`, `;` or closer that ends it, without the parser's error. The recovery
+  view leaves that tail out for a name near an expression's or a statement's
+  keyword (`check_driver_typo_tail`, `CheckPrefixTails`), and keeps it, with
+  the parser's error, where the name's search then suggests no keyword.
+- **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
+  next token as within an expression, and a type keyword or a typedef name
+  before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
+  parser reads the statement again with a keyword or a type it takes
+  (`ClassifyName`): `retrn x;` returns x, `whil;` gives "expected '(' after
+  'while'", and `myin x;` declares a `myint`, its error "unknown type name
+  'myin'; did you mean 'myint'?". The reader can't parse again: the name's
+  report says what it took (`CHECK_TYPO_STATEMENT`), and the driver reads the
+  unit again from the original's tokens with each such name replaced, the view
+  recovered and checked as a failed parse's is (`check_driver_typo_edits`,
+  `CheckPrefixEdit`, up to 4 readings), its errors at the names first
+  (`check_driver_typo_errors`) and a parse error naming one spelling the
+  correction (`Parser.respelled`). An expression statement whose `;` is
+  missing after its first name or that name's call (`retrn x`, `whil (a) a--`)
+  is read on past as if the `;` were there (`ParseDiagnostic.probe`), as
+  clang's `ParseExprStatement` does once the name is classified, so that the
+  reader searches it; where the statement's expression keeps an undeclared
+  name, clang's invalid expression, its rest is left out to its `;`, with the
+  parser's error. Before C23 a name's call is an undeclared function's, which
+  no search reads as a keyword (`whil (a)` stays a call).
 - **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
   only where its diagnostic is an error) takes a function. Its error gets
   "did you mean 'compute'?" at the call and "'compute' declared here", but not
@@ -5160,18 +5186,17 @@ Left as they were:
   '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
   `__builtin_c23_va_start` named outside a call before C23).
 
-- At a statement's start clang parses the statement again with the keyword
-  it takes (`retrn x;` is a `return`, `whil;` then gives "expected '(' after
-  'while'", and in C23 `foo();` is a `for`). Where a keyword, or a visible
-  typedef before `(`, `[` or a name, is as near as the best value there,
-  buster suggests nothing. Clang's parser also takes a keyword before an
-  operand buster's parser can't read (`sizeo a`, `retrn 5` in an
-  initializer).
-- A declaration's type name is clang's parser's to correct
-  (`DiagnoseUnknownTypeName`): `myin x;` and a parameter's `myin v` keep
-  buster's parse errors, with no suggestion, and a parse error still ends
-  the checking. Neither does an implicit declaration's diagnostic that
-  `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
+- A statement start's correction whose statement then fails to parse in a way
+  no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
+  & 1`) ends the checking of its body there, as other such parse errors do;
+  so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
+  C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
+  before a `}` without a `;` keeps the parser's error.
+- A declaration's type name outside a statement's start is clang's parser's
+  to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
+  buster's "unknown type name" with no suggestion, and its prefix view
+  recovers it as `int`. Neither does an implicit declaration's diagnostic
+  that `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
   still buster's parse error.
 - A function designator's comparison statement keeps its `-Wunused` and
   `-Wparentheses` notes after a correction.
