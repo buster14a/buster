@@ -4873,7 +4873,9 @@ bodies after the one that brings them past the limit are left out whole, and
 that holds it, or file scope after it, still hides; past them the unit's
 warnings aren't given. Without a limit (`-ferror-limit=0`) the rounds go on
 while each finds an error. Each round is a reading of the unit, so a unit of
-`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The second reading's unused variables in a scope with an error
+`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The rounds
+run under `-w` too, for the errors they find, which clang gives whatever the
+warning options; `-w`'s policy leaves out their warnings (#2162). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
