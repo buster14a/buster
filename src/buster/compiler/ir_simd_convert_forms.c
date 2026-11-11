@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The integer lanes' conversions' x86 forms (#1840), which the typed lowering's decoder (ir_simd_typed_convert) admits
+// The integer lanes' conversions' and scalar shifts' x86 forms (#1840), which the typed lowering's decoder (ir_simd_typed_convert) admits
 // and Tier 1's selection (tier1_select_convert_form) emits: one table for both, so that they agree. Include after
 // x86_64_encoder.c; ir_simd_typed.c and tier1_select.c both include it, the first one alone defining it.
 #ifndef BUSTER_IR_SIMD_CONVERT_FORMS_INCLUDED
@@ -60,5 +60,45 @@ static const uint16_t ir_simd_typed_truncations[3][6][3] = {
 // A conversion's pair of lanes' bytes' log2s, by the tables' pair index: the extensions' (from, to), and the truncations'.
 static const uint8_t ir_simd_typed_extension_pairs[6][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
 static const uint8_t ir_simd_typed_truncation_pairs[6][2] = { { 1, 0 }, { 2, 0 }, { 2, 1 }, { 3, 0 }, { 3, 1 }, { 3, 2 } };
+
+// The shifts by a scalar count (#1840, BUSTER_IR_INTRINSIC_SHIFT), by the shift (left, logical right, arithmetic right),
+// the lanes (words, doublewords, quadwords) and the width (16, 32 and 64 bytes): by a count in an xmm register's low
+// quadword, which the decoder admits (ir_simd_typed_shift) and Tier 1 emits after a vmovd of the count; and by an
+// immediate, which Tier 1 emits for a constant count below the lane's bits (tier1_select_vector_shift). EVEX's forms at every
+// width: VL's below 64 bytes, BW's for words.
+static const uint16_t ir_simd_shift_forms[3][3][3] = {
+    {
+        { X86_FORM_VPSLLW_X_X_XM128_EVEX, X86_FORM_VPSLLW_Y_Y_XM128_EVEX, X86_FORM_VPSLLW_Z_Z_XM128 },
+        { X86_FORM_VPSLLD_X_X_XM128_EVEX, X86_FORM_VPSLLD_Y_Y_XM128_EVEX, X86_FORM_VPSLLD_Z_Z_XM128 },
+        { X86_FORM_VPSLLQ_X_X_XM128_EVEX, X86_FORM_VPSLLQ_Y_Y_XM128_EVEX, X86_FORM_VPSLLQ_Z_Z_XM128 },
+    },
+    {
+        { X86_FORM_VPSRLW_X_X_XM128_EVEX, X86_FORM_VPSRLW_Y_Y_XM128_EVEX, X86_FORM_VPSRLW_Z_Z_XM128 },
+        { X86_FORM_VPSRLD_X_X_XM128_EVEX, X86_FORM_VPSRLD_Y_Y_XM128_EVEX, X86_FORM_VPSRLD_Z_Z_XM128 },
+        { X86_FORM_VPSRLQ_X_X_XM128_EVEX, X86_FORM_VPSRLQ_Y_Y_XM128_EVEX, X86_FORM_VPSRLQ_Z_Z_XM128 },
+    },
+    {
+        { X86_FORM_VPSRAW_X_X_XM128_EVEX, X86_FORM_VPSRAW_Y_Y_XM128_EVEX, X86_FORM_VPSRAW_Z_Z_XM128 },
+        { X86_FORM_VPSRAD_X_X_XM128_EVEX, X86_FORM_VPSRAD_Y_Y_XM128_EVEX, X86_FORM_VPSRAD_Z_Z_XM128 },
+        { X86_FORM_VPSRAQ_X_X_XM128, X86_FORM_VPSRAQ_Y_Y_XM128, X86_FORM_VPSRAQ_Z_Z_XM128 },
+    },
+};
+static const uint16_t ir_simd_shift_immediate_forms[3][3][3] = {
+    {
+        { X86_FORM_VPSLLW_X_XM128_IMM8, X86_FORM_VPSLLW_Y_YM256_IMM8, X86_FORM_VPSLLW_Z_ZM512_IMM8 },
+        { X86_FORM_VPSLLD_X_XM128_IMM8, X86_FORM_VPSLLD_Y_YM256_IMM8, X86_FORM_VPSLLD_Z_ZM512_IMM8 },
+        { X86_FORM_VPSLLQ_X_XM128_IMM8, X86_FORM_VPSLLQ_Y_YM256_IMM8, X86_FORM_VPSLLQ_Z_ZM512_IMM8 },
+    },
+    {
+        { X86_FORM_VPSRLW_X_XM128_IMM8, X86_FORM_VPSRLW_Y_YM256_IMM8, X86_FORM_VPSRLW_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRLD_X_XM128_IMM8, X86_FORM_VPSRLD_Y_YM256_IMM8, X86_FORM_VPSRLD_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRLQ_X_XM128_IMM8, X86_FORM_VPSRLQ_Y_YM256_IMM8, X86_FORM_VPSRLQ_Z_ZM512_IMM8 },
+    },
+    {
+        { X86_FORM_VPSRAW_X_XM128_IMM8, X86_FORM_VPSRAW_Y_YM256_IMM8, X86_FORM_VPSRAW_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRAD_X_XM128_IMM8, X86_FORM_VPSRAD_Y_YM256_IMM8, X86_FORM_VPSRAD_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRAQ_X_XM128_IMM8, X86_FORM_VPSRAQ_Y_YM256_IMM8, X86_FORM_VPSRAQ_Z_ZM512_IMM8 },
+    },
+};
 
 #endif
