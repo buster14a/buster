@@ -9882,9 +9882,20 @@ arguments against the function. The checker now gives these as clang does.
     attributes (a later use of `struct V [[deprecated]];`'s tag isn't
     deprecated); an enum's list's, or a list's after a GNU list, declaration
     attributes (`deprecated`) are clang's "cannot be applied to types" error,
-    not the warning; and a
-    definition's list (`struct S [[...]] { ... };`) is the parser's
-    "expected identifier or '('" at its `{`.
+    not the warning; and a later warning of the unit's file scope
+    (`-Wdivision-by-zero`) is dropped after a constant that reads such a tag
+    (`_Alignof(struct V)`).
+  - A struct's or a union's definition's C23 lists between its name and its
+    body (#2268, `check_input_tag`): the parser reads on past them
+    (`parse_scalar_tag`, whose tree the vector path's rules build too), and
+    the checker gives clang's parser's "an attribute list cannot appear here"
+    at the first, recovered, then reads them on as the tag's own, with the
+    ones before its name (`CheckMisplacedCXX11Attribute`): their Sema's
+    errors, as a bare declaration's, and the layout takes them
+    (`[[gnu::packed]]`, `[[gnu::aligned(16)]]`). An enum's list there, which
+    clang applies to the type with "cannot be applied to types" before the
+    parser's "expected identifier or '('" at its `{`, is still the parser's
+    error alone.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares

@@ -5188,7 +5188,29 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
         uint32_t cursor = token + 1;
         CheckInputAttributes* attributes = 0;
         reader->tag_attributes = true;
-        const bool valid = check_input_read_attributes(reader, &cursor, end, &attributes);
+        bool valid = check_input_read_attributes(reader, &cursor, end, &attributes);
+        // C23 lists between a struct's or a union's name and its body (#2268): clang's parser's "an attribute list cannot
+        // appear here" at the first, after which it reads them on as the tag's own (CheckMisplacedCXX11Attribute), with the
+        // ones before the name.
+        const Parser* parser = reader->parser;
+        const uint32_t list = valid && parser->tokens.kinds[token] == PARSE_KIND_STRUCT && cursor + 1 < end && parser->tokens.kinds[cursor] == PARSE_KIND_IDENTIFIER &&
+                              parser->tokens.kinds[cursor + 1] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, cursor + 1, end) ? cursor + 1 : BUSTER_CHECK_NONE;
+        uint32_t list_end = list;
+        while (list_end < end && parser->tokens.kinds[list_end] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, list_end, end))
+        {
+            list_end = parser->tree.parents[list_end] < end ? parser->tree.parents[list_end] + 1 : end;
+        }
+        if (list_end < end && parser->tokens.kinds[list_end] == PARSE_KIND_L_BRACE)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, list, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
+            valid = !reader->output->resource && check_input_recover_reports(reader, before);
+            uint32_t at = list;
+            reader->tag_name_list = true;
+            valid = valid && check_input_read_attributes(reader, &at, list_end, &attributes);
+            reader->tag_name_list = false;
+            memset(reader->ignored + list, 1, list_end - list);
+        }
         reader->tag_attributes = false;
         // Before the identity, which completes an enum with a fixed underlying type and its alignment attribute.
         check_input_set_attributes_at(reader->output, token, valid ? attributes : 0);
