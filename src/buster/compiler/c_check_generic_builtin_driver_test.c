@@ -3,7 +3,8 @@
 //
 // #148's generic builtins' own errors by the driver against clang, on original fixtures: __builtin_verbose_trap's
 // arguments, each a constant string without a `$` (check_input_verbose_trap_arguments), a literal's under parentheses
-// and casts, __func__'s, a variable's, a null pointer's and an integer's; and a FILE builtin's call in a unit without a
+// and casts, __func__'s, a variable's, a null pointer's and an integer's, and const objects' chars through casts that
+// keep or lose clang's designator (through `void *`, to or from another type) and literals' whatever the casts (#1843); and a FILE builtin's call in a unit without a
 // file-scope FILE (check_input_file_type), clang's "use of unknown builtin"; and memcpy_inline's and memset_inline's size
 // that is no integer constant expression, clang's error at the call; and __builtin_complex's arguments of no real floating
 // type or of two types, clang's errors at the argument (check_semantic_expression). The errors are compared, their places and
@@ -45,6 +46,58 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
         { "verbose_trap of a const array's dollar", "static const char m[] = \"a$c\";\nvoid g(void) {\n__builtin_verbose_trap(\"c\", m);\n}\n" },
         { "verbose_trap past a const array's end", "static const char m[] = \"abc\";\nvoid g(void) {\n__builtin_verbose_trap(m + 4, \"m\");\n}\n" },
         { "verbose_trap of a const array of no NUL", "static const char m[3] = \"abc\";\nvoid g(void) {\n__builtin_verbose_trap(\"c\", m);\n}\n" },
+        { "verbose_trap through casts and other pointers",
+          "struct R { char m[8]; int x; };\n"
+          "static const struct R r = { \"member\", 1 };\n"
+          "static const char arr[] = \"array\";\n"
+          "static const unsigned char uarr[] = \"uarr\";\n"
+          "static const char* const ptr = \"pointer\";\n"
+          "static const char* const ptr2 = arr;\n"
+          "static const char* const ptr3 = \"lit\";\n"
+          "void f1(void) { __builtin_verbose_trap(\"cat\", r.m); }\n"
+          "void f2(void) { __builtin_verbose_trap(\"cat\", ptr); }\n"
+          "void f3(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)arr); }\n"
+          "void f4(void) { __builtin_verbose_trap(\"cat\", (const char*)(void*)\"lit\"); }\n"
+          "void f5(void) { __builtin_verbose_trap(\"cat\", ptr2); }\n"
+          "void f6(void) { __builtin_verbose_trap(\"cat\", (const char*)arr); }\n"
+          "void f7(void) { __builtin_verbose_trap(\"cat\", &r.m[1]); }\n"
+          "void f8(void) { __builtin_verbose_trap((const char*)ptr, \"x\"); }\n"
+          "void g1(void) { __builtin_verbose_trap(\"cat\", (const char*)(char*)arr); }\n"
+          "void g2(void) { __builtin_verbose_trap(\"cat\", (const char*)uarr); }\n"
+          "void g3(void) { __builtin_verbose_trap(\"cat\", (char*)ptr); }\n"
+          "void g4(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)ptr); }\n"
+          "void g5(void) { __builtin_verbose_trap(\"cat\", (const char*)(void*)r.m); }\n"
+          "void g6(void) { __builtin_verbose_trap(\"cat\", (const char*)(const signed char*)arr); }\n"
+          "void g7(void) { __builtin_verbose_trap(\"cat\", (const char*)(long)arr); }\n"
+          "void g8(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)(void*)\"lit\"); }\n"
+          "void g9(void) { __builtin_verbose_trap(\"cat\", (const char*)(const int*)arr); }\n"
+          "void g10(void) { __builtin_verbose_trap(\"cat\", (const char*)(const char*)r.m); }\n"
+          "void h1(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)ptr2); }\n"
+          "void h2(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)&arr[0]); }\n"
+          "void h3(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)(arr + 1)); }\n"
+          "void h5(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)(ptr3 + 1)); }\n"
+          "void h6(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)(\"lit\" + 1)); }\n"
+          "void h7(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)&\"lit\"[0]); }\n"
+          "void h10(void) { __builtin_verbose_trap(\"cat\", (const char*)(const unsigned char*)\"lit\"); }\n"
+          "void h11(void) { __builtin_verbose_trap(\"cat\", (const char*)(const unsigned char*)ptr3); }\n"
+          "void k3(void) { __builtin_verbose_trap(\"cat\", uarr); }\n"
+          "void k4(void) { __builtin_verbose_trap(\"cat\", (const char*)&r); }\n"
+          "void k5(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)__func__); }\n"
+          "void k6(void) { __builtin_verbose_trap(\"cat\", (const char*)&arr); }\n"
+          "void k7(void) { __builtin_verbose_trap(\"cat\", (const char*)(long)\"lit\"); }\n"
+          "void k8(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)\"lit\" + 1); }\n"
+          "void k9(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)arr + 1); }\n"
+          "void k10(void) { __builtin_verbose_trap(\"cat\", arr + (int)1); }\n"
+          "void k11(void) { __builtin_verbose_trap(\"cat\", (const char*)(char*)__func__); }\n"
+          "void k12(void) { __builtin_verbose_trap(\"cat\", (const char*)L\"ab\"); }\n"
+          "void k13(void) { __builtin_verbose_trap(\"cat\", \"lit\" + 3); }\n"
+          "void k14(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)\"a$b\"); }\n"
+          "void k15(void) { __builtin_verbose_trap(\"cat\", (const char*)u8\"ab\"); }\n"
+          "void k16(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)\"lit\" + 3); }\n"
+          "void k17(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)\"lit\" + 4); }\n"
+          "void n1(void) { __builtin_verbose_trap(\"cat\", (const char*)(const void*)ptr3 + 1); }\n"
+          "void n2(void) { __builtin_verbose_trap(\"cat\", (const char*)(char*)arr + 1); }\n"
+          "void n3(void) { __builtin_verbose_trap(\"cat\", (char*)arr + 1); }\n" },
         { "verbose_trap in two functions", "void g(const char* p) {\n__builtin_verbose_trap(p, \"m\");\n}\nvoid h(void) {\n__builtin_verbose_trap(\"$\", \"m\");\n}\n" },
         { "fprintf without FILE", "int g(void* p) {\nreturn 1 + __builtin_fprintf(p, \"x\");\n}\n" },
         { "vfscanf with a FILE of block scope", "void h(void) {\ntypedef int FILE;\n}\nint g(void* p, __builtin_va_list a) {\nreturn __builtin_vfscanf(p, \"x\", a);\n}\n" },
@@ -194,7 +247,8 @@ static void check_test_driver_availability(CheckTest* test, const char* clang, c
 // unit at its first error): the attribute's places and argument forms, valid and not, with clang's errors of its member,
 // its pointee and its count, a count member whose name a typedef has too (its declarator parenthesized, after a tag's
 // name; a function declarator's parameter and a nested named record's member aren't the record's: #1842), the
-// struct-with-flexible-member element warning, and the attribute off a member; the builtin's types (with _Generic), its
+// struct-with-flexible-member element warning, the attribute off a member, and a type name read as its argument's expression
+// (the parser's error and clang's second, #1842); the builtin's types (with _Generic), its
 // arguments' errors, and the uses of its value clang refuses (assigned, passed, returned, subscripted, in a binary
 // expression) beside those it takes.
 static void check_test_driver_counted_by(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -259,6 +313,15 @@ static void check_test_driver_counted_by(CheckTest* test, const char* clang, con
         "typedef int n;\nstruct B26 { int n; struct X { int k; } x; int (*fp)(int k); int fam[] __attribute__((counted_by(n))); };\n",
         "typedef int n;\nstruct B27 { int (n); int fam[] __attribute__((counted_by(n))); };\nint f(struct B27 *s) { return __builtin_dynamic_object_size(s->fam, 0); }\n",
         "typedef int n;\nstruct B28 { int ((n)); int fam[] __attribute__((counted_by(n))); };\nint f(struct B28 *s) { return __builtin_dynamic_object_size(s->fam, 0); }\n",
+        // A type name read as the count's expression (#1842): the parser's error, then clang's second, at the argument's first
+        // token, whatever the depth, for each attribute of the family; past a top-level `,`, clang's "expected ')'" alone.
+        "typedef int T;\nint f(int);\nstruct C1 { int n; int *p __attribute__((counted_by(T))); };\nstruct C2 { int n; int fam[] __attribute__((counted_by(n + T))); };\n"
+        "struct C3 { int n; void *p __attribute__((sized_by(f(T)))); };\nstruct C4 { int n; int *p __attribute__((counted_by_or_null(-T))); };\n"
+        "struct C5 { int n; void *p __attribute__((sized_by_or_null(n ? T : 1))); };\nstruct C6 { int n; int *p __attribute__((__counted_by__(n[T]))); };\n",
+        "typedef int T;\nstruct C7 { int n; int *p __attribute__((counted_by(n, T))); };\n",
+        "typedef int T;\nint f(int);\nstruct C8 { int n; int *p __attribute__((counted_by(n, f(T)))); };\n",
+        "typedef int T;\nstruct C9 { int n; int *p __attribute__((counted_by((T)))); };\nstruct C10 { int n; int *p __attribute__((counted_by(sizeof T))); };\n"
+        "struct C11 { int n; int *p __attribute__((aligned(T))); };\n",
         "typedef int n;\nstruct X { int a; };\nstruct B29 { struct X n; int *p __attribute__((counted_by(n))); };\n",
         "typedef int n;\nenum E { A };\nstruct B30 { enum E n; int *p __attribute__((counted_by(n))); };\n",
         "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint *f(struct S *s) { return __builtin_counted_by_ref(s->fam); }\n",

@@ -45,6 +45,7 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         { "1.5iQ", 0, UINT64_C(0x3fff800000000000), CHECK_LITERAL_RANGE_NONE, true },
         { "1.5QJ", 0, UINT64_C(0x3fff800000000000), CHECK_LITERAL_RANGE_NONE, true },
         { "1.5Jq", 0, UINT64_C(0x3fff800000000000), CHECK_LITERAL_RANGE_NONE, true },
+        { "0.1iQ", UINT64_C(0x999999999999999a), UINT64_C(0x3ffb999999999999), CHECK_LITERAL_RANGE_NONE, true },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(exact); i += 1)
     {
@@ -55,10 +56,10 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
         const CheckValue value = check_literal_value(literal);
         CheckValue copied = { .type = type };
         check_value_copy_floating(&copied, &value);
-        // A real one's bits, and its mirror theirs (c_check_quad.c); an imaginary one's long double, exactly.
-        const unsigned __int128 bits = exact[i].imaginary ? check_quad_widen(copied.imaginary, false) : value.integer;
+        // A real one's bits, and its mirror theirs (c_check_quad.c); an imaginary one's its imaginary part's.
+        const unsigned __int128 bits = exact[i].imaginary ? check_quad_complex_imaginary(&value) : value.integer;
         uint64_t words[2] = { (uint64_t)bits, (uint64_t)(bits >> 64) };
-        const bool mirrored = exact[i].imaginary || check_quad_mirror(bits) == copied.floating || isnan(copied.floating);
+        const bool mirrored = exact[i].imaginary ? value.integer == 0 : check_quad_mirror(bits) == copied.floating || isnan(copied.floating);
         CheckWarningEvent event = { 0 };
         const bool warned = check_literal_warning_event(&literal, 17, &event);
         char description[192];
@@ -82,8 +83,6 @@ static void check_test_literal_quad(CheckTest* test, Arena* scratch)
     }
     const char* refused[] =
     {
-        // An imaginary one whose value its long double can't hold, until _Complex __float128 constants keep their bits.
-        "0.1iQ",
         // Q is a floating suffix, not an integer suffix or a second format specifier.
         "1Q", "0x1q", "0x1.0q", "1.5qq", "1.5Qf", "1.5FQ", "1.5QL", "1.5iqj", "1'.5q", "1.5'q",
     };

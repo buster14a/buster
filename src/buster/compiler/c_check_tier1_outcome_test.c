@@ -503,7 +503,7 @@ static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUni
                 check_lanes_test_expect(tally, refused.tier1_failure.stage == CHECK_TIER1_LOWERING && refused.tier1_failure.cause == CHECK_TIER1_CAUSE_IR &&
                                         refused.tier1_failure.error == IR_ERROR_UNSUPPORTED && refused.tier1_failure.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN &&
                                         refused.token == unit->selected.program.bodies[bodies - 1].declaration,
-                                        "frame-address and musttail refusals preserve their lowering cause and source declaration", NULL);
+                                        "musttail's refusal preserves its lowering cause and source declaration", NULL);
             }
             free(refused.object);
         }
@@ -587,7 +587,6 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     static const char* const last_bodies[] = {
         "long f7(long x){return x+8;}\n",
         "__attribute__((naked)) long f7(long x){__asm__(\"leaq 8(%rdi), %rax\\n\\tret\");}\n",
-        "long f7(long x){return __builtin_frame_address(0)!=0?x+8:-1;}\n",
         "long f7(long x){__attribute__((musttail)) return f6(x+1);}\n",
     };
     for (uint32_t variant = 0; ready && variant < BUSTER_ARRAY_LENGTH(last_bodies); variant += 1)
@@ -602,15 +601,15 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
             written = fprintf(file, "long f%u(long x){return x+%u;}\n", f, f + 1) > 0;
         }
         // Real refusals at admission (a naked function, whose body is its own assembly, which admission leaves to Tier 0:
-        // #141 took long double and its x87 aggregates, which anchored it before) and at lowering (frame-address and
-        // musttail), not injected errors.
+        // #141 took long double and its x87 aggregates, which anchored it before) and at lowering (musttail; #1847 took
+        // the frame address, which anchored it too), not injected errors.
         written = written && fputs(last_bodies[variant], file) >= 0;
         const bool closed = file != NULL && fclose(file) == 0;
         check_lanes_test_expect(tally, written && closed, "write original Tier 1 coverage fixture", source);
         for (uint32_t scalar = 0; written && closed && scalar < 2; scalar += 1)
         {
             CheckLanesTestUnit unit;
-            check_lanes_test_compile(&unit, &pp, &parser, &identifiers, source, scalar != 0);
+            check_lanes_test_compile_tier1(&unit, &pp, &parser, &identifiers, source, scalar != 0);
             check_lanes_test_expect(tally, unit.ready && unit.selected.program.body_count == 8, "both frontend paths select all eight designated bodies", source);
             if (unit.ready)
             {

@@ -546,6 +546,10 @@ struct TypeTable
     // Whether the table has a QUALIFIED record (#1447), set when it makes its first and never cleared: a unit without one
     // reads no type's extended qualifiers (type_extended_qualifiers, type_object_qualifiers).
     bool extended;
+    // Whether the table has an extended vector (ext_vector_type), set when it makes its first and never cleared: only
+    // such a unit's source reader decodes a `->` member's name as a swizzle (check_input_vector_member), since `p->y`
+    // can name one only through a pointer to an extended vector.
+    bool ext_vectors;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, tags and members besides record 0,
@@ -727,6 +731,9 @@ struct TypeNames
     // Optional, per alias: the qualifiers its name covers where it matches a level unqualified, which then print only
     // the level's others (__builtin_dump_struct's `volatile CI` of a const int's CI, #148); null prints them all.
     const uint32_t* alias_covered;
+    // Optional, per alias: the qualifiers its use writes again beside it (`const CI` of a const int's CI, #1447), which
+    // print before its name, as clang's qualifiers over a typedef's sugar do, where the level has them.
+    const uint32_t* alias_written;
     // Optional: the aliases by place, as a declaration spells its types (__builtin_dump_struct's, #148): entry k the alias
     // (UINT32_MAX for none) of the k-th specifier the printer prints, a typedef's or a type's own, in the order a C
     // declaration writes them (the outer specifiers, then each nested parameter's). A level then takes no alias but its
@@ -2146,6 +2153,7 @@ static uint32_t type_append(TypeTable* table, uint8_t kind, uint8_t flags, TypeI
         result = types->count;
         types->kind[result] = kind;
         table->extended |= kind == BUSTER_TYPE_KIND_QUALIFIED;
+        table->ext_vectors |= kind == BUSTER_TYPE_KIND_EXT_VECTOR;
         types->code[result] = properties.code;
         types->flags[result] = flags | properties.flags;
         types->alignment_log2[result] = properties.alignment_log2;
@@ -6331,6 +6339,24 @@ static uint32_t type_print_alias(const TypeNames* names, TypeId type)
     return result;
 }
 
+// Whether an alias's type names a level under more qualifiers than its own (#1447): `volatile CI`'s
+// `const volatile int` of a const int's CI, which clang prints as the qualifier over the typedef's sugar.
+static bool type_print_alias_under(TypeId alias, TypeId type)
+{
+    const uint32_t own = type_qualifiers(alias);
+    return own != 0 && type_unqualified(alias) == type_unqualified(type) && (own & ~type_qualifiers(type)) == 0;
+}
+
+static uint32_t type_print_alias_qualified(const TypeNames* names, TypeId type)
+{
+    uint32_t result = UINT32_MAX;
+    for (uint32_t a = 0; names != 0 && a < names->alias_count; a += 1)
+    {
+        result = type_print_alias_under(names->alias_types[a], type) ? a : result;
+    }
+    return result;
+}
+
 // The alias a level takes (`whole` where it matches the level with its qualifiers), or UINT32_MAX: by type, or by place
 // (TypeNames.alias_order), the alias of the specifier the printer prints next.
 static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32_t* whole)
@@ -6349,6 +6375,7 @@ static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32
     {
         *whole = type_print_alias(names, type);
         sugar = *whole != UINT32_MAX ? *whole : type_print_alias(names, unqualified);
+        sugar = sugar != UINT32_MAX ? sugar : type_print_alias_qualified(names, type);
     }
     return sugar;
 }
@@ -6390,7 +6417,8 @@ static bool type_print_aliased(const TypePrinter* printer, TypeId type, uint32_t
     }
     else
     {
-        result = type_print_alias(names, type) != UINT32_MAX || type_print_alias(names, type_unqualified(type)) != UINT32_MAX;
+        result = type_print_alias(names, type) != UINT32_MAX || type_print_alias(names, type_unqualified(type)) != UINT32_MAX ||
+                 type_print_alias_qualified(names, type) != UINT32_MAX;
     }
     return result;
 }
@@ -6724,8 +6752,13 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             }
             // A typedef's name is the specifier. When it covers the level itself, it covers its qualifiers too;
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
-            const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] : 0;
-            const uint32_t outer = whole == UINT32_MAX ? type_qualifiers(type) & ~covered : 0;
+            // Without a covered set, the alias's own qualifiers are what it covers; those its use writes again print too.
+            const TypeId alias_type = printer->names->alias_types[sugar];
+            const bool qualified_alias = whole == UINT32_MAX && type_print_alias_under(alias_type, type);
+            const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] :
+                                     qualified_alias ? type_qualifiers(alias_type) : 0;
+            const uint32_t written = printer->names->alias_written != 0 ? printer->names->alias_written[sugar] & type_qualifiers(type) : 0;
+            const uint32_t outer = (whole == UINT32_MAX ? type_qualifiers(type) & ~covered : 0) | written;
             if (outer != 0 || outside)
             {
                 type_print_qualifiers(printer, outer, outside ? extended : 0);
@@ -7073,6 +7106,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         const uint64_t count = source->types.count;
         memcpy(table->types.kind, source->types.kind, count * sizeof(*table->types.kind));
         table->extended = source->extended;
+        table->ext_vectors = source->ext_vectors;
         memcpy(table->types.code, source->types.code, count * sizeof(*table->types.code));
         memcpy(table->types.flags, source->types.flags, count * sizeof(*table->types.flags));
         memcpy(table->types.alignment_log2, source->types.alignment_log2, count * sizeof(*table->types.alignment_log2));
