@@ -924,7 +924,18 @@ static bool predefines_test_print_tables(const char* directory)
             predefines_test_print_string(stdout, tables.macros[f]);
             printf(" },\n");
         }
-        printf("};\n\nstatic const PredefinesCPU predefines_cpus[] = {\n");
+        printf("};\n\n// Each feature's index in predefines_features: PREDEFINES_FEATURE_ and its name in capitals, with '.' and '-' as '_'.\n");
+        printf("typedef enum PredefinesFeatureIndex\n{\n");
+        for (uint32_t f = 0; f < tables.feature_count; f += 1)
+        {
+            printf("    PREDEFINES_FEATURE_");
+            for (const char* c = tables.feature_names[f]; *c != 0; c += 1)
+            {
+                putchar(*c == '.' || *c == '-' ? '_' : *c >= 'a' && *c <= 'z' ? *c - 'a' + 'A' : *c);
+            }
+            printf(",\n");
+        }
+        printf("    PREDEFINES_FEATURE_COUNT,\n} PredefinesFeatureIndex;\n\nstatic const PredefinesCPU predefines_cpus[] = {\n");
         for (uint32_t c = 0; c < tables.cpu_count; c += 1)
         {
             printf("    { \"%s\", ", tables.cpu_names[c]);
@@ -1561,23 +1572,67 @@ static bool predefines_test_dump(const char* directory)
     return result && failures == 0;
 }
 
-// predefines_target, without clang: the map to x86_target.c's features names, for each, a feature with its macro;
-// x86_target_parse's six profiles give its targets bit for bit; and -m switches, clang's other CPUs and -mtune give
-// what they resolve to.
+// predefines_target, without clang: the map to x86_target.c's features names, for each, a feature with its macro, and the
+// map to its extensions clang's feature of the extension's name (the names the maps had before they were indices,
+// #1444); x86_target_parse's six profiles give its targets bit for bit; and -m switches, clang's other CPUs and -mtune
+// give what they resolve to.
 static bool predefines_test_target(void)
 {
     bool result = true;
     for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
     {
-        const char* name = predefines_x86_features[f];
+        const int32_t index = (int32_t)predefines_x86_features[f] - 1;
+        const char* name = index >= 0 ? predefines_features[index].name : 0;
         const char* macro = x86_features[f].macro;
-        const int32_t index = name != 0 ? predefines_feature_index(name, strlen(name)) : -1;
         char line[128];
         snprintf(line, sizeof(line), "#define %s 1\n", macro != 0 ? macro : "");
         const bool named = name != 0 ? index >= 0 && macro != 0 && strstr(predefines_features[index].macros, line) != 0 : macro == 0;
         if (!named)
         {
             printf("predefines target: x86_target.c's feature %u (%s) isn't clang's %s\n", f, macro != 0 ? macro : "no macro", name != 0 ? name : "(none)");
+        }
+        result &= named;
+    }
+    // Each of x86_target.c's extensions maps to clang's feature of its name.
+    static const char* const extensions[X86_EXTENSION_COUNT] = {
+    [X86_EXTENSION_AVX512FP16] = "avx512fp16",
+    [X86_EXTENSION_AVXNECONVERT] = "avxneconvert",
+    [X86_EXTENSION_AVX10_2] = "avx10.2",
+    [X86_EXTENSION_XOP] = "xop",
+    [X86_EXTENSION_SHA512] = "sha512",
+    [X86_EXTENSION_SM3] = "sm3",
+    [X86_EXTENSION_SM4] = "sm4",
+    [X86_EXTENSION_MOVRS] = "movrs",
+    [X86_EXTENSION_AVX512BMM] = "avx512bmm",
+    [X86_EXTENSION_RAOINT] = "raoint",
+    [X86_EXTENSION_CLDEMOTE] = "cldemote",
+    [X86_EXTENSION_SERIALIZE] = "serialize",
+    [X86_EXTENSION_UINTR] = "uintr",
+    [X86_EXTENSION_PTWRITE] = "ptwrite",
+    [X86_EXTENSION_WAITPKG] = "waitpkg",
+    [X86_EXTENSION_LWP] = "lwp",
+    [X86_EXTENSION_RTM] = "rtm",
+    [X86_EXTENSION_TSXLDTRK] = "tsxldtrk",
+    [X86_EXTENSION_AMXTILE] = "amx-tile",
+    [X86_EXTENSION_AMXINT8] = "amx-int8",
+    [X86_EXTENSION_AMXBF16] = "amx-bf16",
+    [X86_EXTENSION_AMXFP16] = "amx-fp16",
+    [X86_EXTENSION_AMXCOMPLEX] = "amx-complex",
+    [X86_EXTENSION_AMXFP8] = "amx-fp8",
+    [X86_EXTENSION_AMXAVX512] = "amx-avx512",
+    [X86_EXTENSION_AMXMOVRS] = "amx-movrs",
+    [X86_EXTENSION_ENQCMD] = "enqcmd",
+    [X86_EXTENSION_USERMSR] = "usermsr",
+    [X86_EXTENSION_KL] = "kl",
+    [X86_EXTENSION_WIDEKL] = "widekl",
+    };
+    for (uint32_t e = 0; e < X86_EXTENSION_COUNT; e += 1)
+    {
+        const int32_t index = (int32_t)predefines_x86_extensions[e] - 1;
+        const bool named = index >= 0 && extensions[e] != 0 && strcmp(predefines_features[index].name, extensions[e]) == 0;
+        if (!named)
+        {
+            printf("predefines target: x86_target.c's extension %u isn't clang's %s\n", e, extensions[e] != 0 ? extensions[e] : "(none)");
         }
         result &= named;
     }
