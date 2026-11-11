@@ -10391,9 +10391,13 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
                   works != 0 && secondary != 0 && contexts != 0 && statement_previous != 0 && statement_owners != 0 && statement_levels != 0 && statements != 0;
     if (result)
     {
-        for (uint32_t i = 0; i < BUSTER_PARSE_DEPTH_PADDING; i += 1)
+        // Each parse writes the stacks' entries below depth 0, where nothing is open: K1 reads the 16 below a block's start,
+        // K2 the 128 (a top-level token's group is the entry at depth -1). A unit whose brackets don't balance puts openers
+        // there, and a borrowed scratch holds its owner's bytes: read unwritten, they gave a later unit's top-level tokens
+        // a group, and K5 settled statements that a fresh parser's doesn't (#2086).
+        for (int32_t i = -BUSTER_PARSE_DEPTH_PADDING; i < 0; i += 1)
         {
-            open_stack[i] = BUSTER_PARSE_NONE;
+            buffers->open_stack[i] = BUSTER_PARSE_NONE;
             group_roles[i] = PARSE_ROLE_NONE;
             group_typed[i] = 0;
             group_keywords[i] = PARSE_KIND_END;

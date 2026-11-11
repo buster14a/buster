@@ -2752,8 +2752,9 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
 
 // What the units of one check share, one unit after another (#2078): the intern table, reset to its predefined names
 // before each unit (intern_reset, after which each name gets the id it gets in a fresh table), and the parsers, which
-// parse unit after unit as fresh ones would (parse_test_borrowed_scratch checks that): the vector path's and the scalar
-// parser's, and each again tree-only. Each unit still gets a preprocessor of its own. Setting up a fresh table and four
+// parse unit after unit in the scratch the units before left, as a lane's do, and as fresh ones would
+// (parse_test_reused_scratch and parse_test_borrowed_scratch check that): the vector path's and the scalar parser's, and
+// each again tree-only. Each unit still gets a preprocessor of its own. Setting up a fresh table and four
 // fresh parsers for each unit, then releasing them, took most of the alignments' time: their pages faulted in again and
 // were unmapped again for each of the 34,624 units. parse_test_units_release releases them.
 typedef struct ParseTestUnits ParseTestUnits;
@@ -2813,13 +2814,6 @@ static bool parse_test_units_prepare(ParseTestUnits* units, CLanguage language)
     units->table_ready = units->table_ready || table;
     const bool same_language = units->language.standard == language.standard && units->language.gnu == language.gnu &&
                                units->language.gnu_keywords == language.gnu_keywords && units->language.digraphs == language.digraphs;
-    // Each parser's scratch as a fresh parser's (parse_test_units_clear): a parse that reads a temporary it didn't write
-    // must read what it reads on a fresh parser, for the checks to be a fresh parser's. The vector path does: on some
-    // invalid streams, K5's verdict follows what an earlier unit left in its temporaries (#2086).
-    for (uint32_t i = 0; units->parsers_ready && same_language && i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
-    {
-        parse_test_units_clear(&units->parsers[i].scratch);
-    }
     if (!units->parsers_ready || !same_language)
     {
         // The scalar parser's parse also derives the subtree sizes, which parse_test_postorders checks.
@@ -3729,6 +3723,109 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
     return failures;
 }
 
+// #2086: a parse reads only the temporaries its own unit wrote. Units in turn on one parser with a scratch of its own,
+// which nothing clears or dirties between them, as a lane's units reuse theirs, each against a parser whose scratch
+// parse_test_units_clear zeroes before each unit, as a fresh parser's: tokens, tree, postorder, diagnostics and
+// statistics alike (parse_test_parse_difference). The units: two random streams (seed 1, streams 20 and 1485), then
+// the `count` streams parse_test_streams checks, in its order. The first stream's brackets don't balance: K2 put its
+// groups on the group stacks below depth 0, where a top-level token's group is read (none, in a fresh scratch). The
+// second's top-level tokens took one of them: K5 settled its statements, and K6 flagged 77 of its tokens, where on a
+// fresh parser K5 sends it whole to the scalar parser.
+static uint32_t parse_test_reused_scratch(const PPOptions* options, const char* directory, uint64_t count, uint64_t seed)
+{
+    static const char* const pair[] = {
+        "/ <= { a = 1; } && ~ sizeof \"s\" { a = 1; } if (a) b; else x; ^ ) ! return\n"
+        "long f : else ^ ^ ; continue goto . case do <= 1 &&\n"
+        ": for ; f(a, b) < __builtin_offsetof T while { static ... ( if (a) b; else x; ) [ __builtin_va_arg default T ( > switch\n"
+        "extern static < return switch 0 int ( break -- 1 +=\n"
+        "~ ( ) ] do break >= && struct \n",
+        "{ a = 1; } for int return\n"
+        "continue f(a, b) struct switch ++ +\n"
+        "_Alignas extern\n"
+        "< & continue const -- + , enum - *\n"
+        "'c' char int a; a[0] void __extension__ return int \"s\" a = int a; extern\n"
+        "&&\n"
+        "__builtin_va_arg if (a) b; else x; T x; ( & :\n"
+        "int a; , / (int)a 'c' ++\n"
+        ">> \"s\" >> __extension__ ++\n"
+        "do void & >= a continue 1.5 1 if a for __extension__ extern , + )\n",
+    };
+    const uint64_t pairs = BUSTER_ARRAY_LENGTH(pair);
+    uint32_t failures = 0;
+    uint64_t state = seed ^ 0x5DEECE66Dull;
+    static char text[1 << 16];
+    static InternTable table;
+    static Preprocessor pp;
+    // The reused parser, then the cleared one.
+    static Parser parsers[2];
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/stream.c", directory);
+    const ParseOptions parse_options = { .scalar = false };
+    const bool table_ready = intern_initialize(&table);
+    bool ready = table_ready;
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
+    {
+        ready = parse_initialize(&parsers[i], &parse_options, options->language);
+    }
+    for (uint64_t u = 0; ready && u < pairs + count; u += 1)
+    {
+        size_t length = 0;
+        if (u < pairs)
+        {
+            length = (size_t)snprintf(text, sizeof(text), "%s", pair[u]);
+        }
+        else
+        {
+            const uint32_t pieces = 1 + (uint32_t)(parse_test_random(&state) % 300);
+            length = parse_test_stream(text, sizeof(text), &state, pieces, (u - pairs) % 2 == 1);
+        }
+        ready = intern_reset(&table) && pp_initialize(&pp, options, &table);
+        const bool preprocessed = ready && pp_run_source(&pp, path, (const uint8_t*)text, (uint32_t)length);
+        if (preprocessed)
+        {
+            parse_test_units_clear(&parsers[1].scratch);
+            parse_translation_unit(&parsers[0], &pp);
+            parse_translation_unit(&parsers[1], &pp);
+            const char* difference = parse_test_parse_difference(&parsers[0], &parsers[1]);
+            if (difference != 0)
+            {
+                failures += 1;
+                const ParseStatistics* x = &parsers[0].statistics;
+                const ParseStatistics* y = &parsers[1].statistics;
+                parse_test_report("reused scratch: unit %llu: %s; fallback %llu items, %llu tokens, %llu flagged, whole %u, %u errors, against a fresh parser's "
+                                  "%llu, %llu, %llu, %u, %u\n    %s", (unsigned long long)u, difference, (unsigned long long)x->fallback_items,
+                                  (unsigned long long)x->fallback_tokens, (unsigned long long)x->flagged_tokens, x->whole, parsers[0].errors,
+                                  (unsigned long long)y->fallback_items, (unsigned long long)y->fallback_tokens, (unsigned long long)y->flagged_tokens, y->whole,
+                                  parsers[1].errors, text);
+            }
+        }
+        else
+        {
+            failures += 1;
+            parse_test_report("reused scratch: unit %llu doesn't preprocess\n    %s", (unsigned long long)u, text);
+        }
+        if (ready)
+        {
+            pp_release(&pp);
+        }
+    }
+    if (!ready)
+    {
+        failures += 1;
+        printf("reused scratch: the parsers or the intern table couldn't be set up\n");
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
+    {
+        parse_release(&parsers[i]);
+    }
+    if (table_ready)
+    {
+        intern_release(&table);
+    }
+    printf("reused scratch: %llu units on one parser, against a fresh parser's scratch, %u differ\n", (unsigned long long)(pairs + count), failures);
+    return failures;
+}
+
 // #628: production vector scratch fits 80 bytes/token plus alignment. Benchmark traversal arrays must not put
 // live slots and fallback scratch beyond that prefix. Reserve through a dirty arena copy, keeping caller-owned
 // bytes below its mark; neither fresh zero pages nor a shared arena high-water mark is part of the contract.
@@ -4610,6 +4707,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             plain.include_count = 0;
             failures += parse_test_streams(streams, seed, &plain, directory, keep);
             failures += parse_test_borrowed_scratch(&plain, directory, seed);
+            failures += parse_test_reused_scratch(&plain, directory, streams, seed);
             failures += parse_test_alignments(0, &plain, directory);
             failures += parse_test_nesting(&plain, directory);
             failures += parse_test_driver(directory);

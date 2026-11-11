@@ -71,10 +71,11 @@ unit (`parse_test_check_unit`), with state kept from one unit to the next
 - **Intern table:** one, reset to its predefined names before each unit
   (`intern_reset`), so that each name gets a fresh table's id.
 - **Parsers:** the vector path's and the scalar parser's, full and tree-only,
-  each parsing unit after unit. Before a unit, each one's scratch reads as a
-  fresh parser's, zero (`parse_test_units_clear`): cleared in place up to
-  1 MB, given back to the kernel past that. The vector path reads temporaries a
-  unit didn't write (#2086).
+  each parsing unit after unit in the scratch the units before left, as a
+  lane's parsers do. Until each parse wrote its group stacks' entries below
+  depth 0, the vector path read some that an earlier unit left there, so each
+  scratch was zeroed before a unit (#2087, `parse_test_units_clear`, which the
+  reused scratch check below keeps for its fresh parser's; #2086).
 - **Arenas:** an arena pool (`arena_pool`), as a units lane has, takes the
   arenas each unit's preprocessor and the parsers' columns release.
 - **Preprocessor:** each unit's own. The alignments and the streams
@@ -127,6 +128,16 @@ has those runs and the hosted runners' (#2078). On:
   workspaces unused and the fallback statistics zero (#1369). Vector hosts
   must still exercise a valid unit through the fallback. Direct kernel tests
   retain the twins and their whole-unit retry on every host;
+- a reused scratch (#2086), without files: one parser with a scratch of its
+  own, which nothing clears or dirties between units, parses two random streams
+  (seed 1, streams 20 and 1485) and then the `--streams` streams in turn. Each
+  must parse as on a parser whose scratch is zeroed first, as a fresh one's,
+  tokens, tree, postorder, diagnostics and statistics alike. The first
+  stream's brackets don't balance, and its groups went below depth 0 on K2's
+  group stacks, where the second's top-level tokens read theirs: until each
+  parse wrote those entries itself, K5 settled the second's statements, and K6
+  flagged 77 of its tokens, where a fresh parser's K5 sends it whole to the
+  scalar parser;
 - the driver, without files: seventeen cases' exit statuses and exact messages
   (a valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past
