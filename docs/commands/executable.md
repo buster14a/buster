@@ -12,7 +12,16 @@ requirements. [Command index](README.md).
   [symbol-output contract](../../docs/executable-symbols.md) records producer
   ownership, supported definitions and pending parallel/performance gates.
 
-- `src/buster/compiler/executable.c` writes the direct path's executables: a
+- `src/buster/compiler/executable.c` provides the writer's shared types and
+  declaration, section names, hash helpers and unwind/debug readers.
+  `src/buster/compiler/executable_impl.c` contains the private layout, patching
+  and output implementation. DYNAMIC emits the same `executable_write` entry
+  point, while EXECUTABLE retains the private bodies for its direct tests.
+  Standalone consumers and a configured fuzz DRIVER retain the complete
+  implementation; other unity units use the shared interface. See the
+  [build ownership rules](build.md#production-parsing-and-implementation-dependencies).
+
+  The writer produces the direct path's executables: a
   link in that representation laid out, patched and written with a build ID
   by every lane of a group, as a static executable without libc (step 4 of
   the design's plan), as a dynamic PIE against glibc (step 5's third part),
@@ -73,8 +82,9 @@ requirements. [Command index](README.md).
 ## Direct executable tests
 
 `./build/compiler test-executable` (about 0.2 s on the 9700X) checks
-`executable.c` in a directory of its own under `--directory` (`TMPDIR` or
-`/tmp` by default), which it removes unless `--keep` says to leave it:
+the shared interface and private implementation in a directory of its own under
+`--directory` (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`
+says to leave it:
 
 - the build ID's chunk hash: every length up to 2,100 bytes, cut at random
   places, hashes as it does whole, and zeros of each length up to a page hash

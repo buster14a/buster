@@ -180,6 +180,9 @@ struct Tier1MasksFixture
     // register-assignment policy (#1395). Checked where `rows` isn't 0.
     uint32_t rows;
     uint32_t row_moves;
+    // Comparisons into a mask under another mask as their writemask (#1847, tier1_select_masked_compare): how many of
+    // its records are a vpcmp or a vcmpp with an opmask decoration, by either path. Checked where it isn't 0.
+    uint32_t masked_compares;
     // A row of AVX512-FP16's (#1283's review): its forms are test->fp16's, and it runs natively only where the host has
     // AVX512-FP16 (not the 9700X's Zen 5).
     bool fp16;
@@ -1017,6 +1020,48 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "  %138 = store.void %137, %114 align=2\n"
                 "  %139 = ret.void\n"
                 "}\n",
+    },
+    // A comparison into a mask ANDed with another mask (#1847, #1631's form of a masked comparison's row): the AND's
+    // pattern takes the comparison under the other mask as its writemask, one vpcmp or vcmpps, with the comparison
+    // either operand, at 64 and 32 bytes, of integers and of floats (NaNs among the random ones); and a comparison the
+    // function stores as well, which stays its own record and the AND a kand.
+    {
+        .name = "masked comparisons: a comparison into a mask ANDed with another, as its writemask",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v16i32 %1 align=1\n"
+                "  %3 = address.ptr %0 offset=64\n"
+                "  %4 = load.v16i32 %3 align=1\n"
+                "  %5 = load.m16 %0 align=2\n"
+                "  %6 = address.ptr %0 offset=2\n"
+                "  %7 = load.m8 %6 align=1\n"
+                "  %8 = vcmp.m16 %2, %4 lt\n"
+                "  %9 = and.m16 %8, %5\n"
+                "  %10 = address.ptr %0 offset=192\n"
+                "  %11 = store.void %10, %9 align=2\n"
+                "  %12 = address.ptr %0 offset=32\n"
+                "  %13 = load.v8i32 %12 align=1\n"
+                "  %14 = address.ptr %0 offset=96\n"
+                "  %15 = load.v8i32 %14 align=1\n"
+                "  %16 = vcmp.m8 %13, %15 ugt\n"
+                "  %17 = and.m8 %7, %16\n"
+                "  %18 = address.ptr %0 offset=194\n"
+                "  %19 = store.void %18, %17 align=1\n"
+                "  %20 = vcmp.m16 %4, %2 le lanes=f32\n"
+                "  %21 = and.m16 %20, %5\n"
+                "  %22 = address.ptr %0 offset=196\n"
+                "  %23 = store.void %22, %21 align=2\n"
+                "  %24 = vcmp.m16 %2, %4 eq\n"
+                "  %25 = and.m16 %24, %5\n"
+                "  %26 = address.ptr %0 offset=198\n"
+                "  %27 = store.void %26, %25 align=2\n"
+                "  %28 = address.ptr %0 offset=200\n"
+                "  %29 = store.void %28, %24 align=2\n"
+                "  %30 = ret.void\n"
+                "}\n",
+        .masked_compares = 3,
     },
     // The IR's lanes (#141's element types), at each width: 8-, 16- and 64-bit integers' arithmetic, products and shifts
     // by each lane's count (masked to twice the lane's bits, so that half shift past it), floats' and doubles'
@@ -3723,6 +3768,19 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
         {
             printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
+        }
+        // The masked comparisons' records (#1847): a vpcmp or a vcmpp under a writemask.
+        uint32_t masked_compares = 0;
+        for (uint32_t r = 0; fixture->masked_compares != 0 && r < emitted.code.count; r += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[r];
+            const char* mnemonic = x86_form_description(record->form)->mnemonic;
+            const bool compare = strncmp(mnemonic, "vpcmp", 5) == 0 || strncmp(mnemonic, "vcmpp", 5) == 0;
+            masked_compares += compare && (record->decorations & BUSTER_X86_DECORATION_MASK) != 0 ? 1 : 0;
+        }
+        if (fixture->masked_compares != 0 && !tier1_masks_test_expect(test, masked_compares == fixture->masked_compares, "a comparison ANDed with a mask is one compare under it as its writemask"))
+        {
+            printf("test-tier1-masks: %s, %s path: %u masked comparisons (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_compares, fixture->masked_compares);
         }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.

@@ -132,3 +132,90 @@ static void check_test_driver_symbol_pragmas(CheckTest* test, const char* clang,
     unlink(object);
     unlink(program);
 }
+
+// `#pragma weak A = T` (#1849): the weak aliases of the shapes whose A the unit declares, each symbol's binding and
+// visibility clang's by both paths, whose objects must be the same bytes, linked and run as clang's object; the shapes
+// still refused by name; and the warning for a T never declared, line for line clang's.
+static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "#include <stdio.h>\n"
+        "int t(void) { return 1; }\nlong w_storage = 5;\nstatic int s(void) { return 4; }\n"
+        "int a(void);\nextern long v;\nint ps(void);\nint b(void);\nint c(void) { return 3; }\n"
+        "int main(void) { printf(\"%d %ld %d %d %d\\n\", a(), v, ps(), b(), c()); return 0; }\n"
+        "#pragma weak a = t\n#pragma weak v = w_storage\n#pragma weak ps = s\n#pragma weak c = t\n#pragma weak b = later\n"
+        "int later(void) { return 9; }\n";
+    static const char* const names[] = { "t", "w_storage", "s", "a", "v", "ps", "b", "c", "later", "main" };
+    static const char* const refused[] = {
+        "int t(void) { return 1; }\n#pragma weak a = t\n",
+        "int t(void) { return 1; }\nint a(void);\n#pragma weak a = t\nint u(void) { return a(); }\n",
+        "int t(void) { return 1; }\nlong a(void);\n#pragma weak a = t\n",
+        "int t(void);\nint a(void);\n#pragma weak a = t\n",
+    };
+    char path[512];
+    char objects[3][512];
+    char programs[3][512];
+    char captured[3][256] = { { 0 } };
+    snprintf(path, sizeof(path), "%s/weak-aliases.c", directory);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1);
+    check_test_expect(test, written, "the weak alias pragmas' fixture is written");
+    for (uint32_t p = 0; written && p < 3; p += 1)
+    {
+        snprintf(objects[p], sizeof(objects[p]), "%s/weak-aliases-%u.o", directory, p);
+        snprintf(programs[p], sizeof(programs[p]), "%s/weak-aliases-%u", directory, p);
+        char* text = NULL;
+        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : NULL, NULL };
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        free(text);
+        check_test_expect(test, compiled, "weak alias pragmas compile through clang and both checker paths");
+        for (uint32_t n = 0; compiled && p != 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+        {
+            uint16_t ours = UINT16_MAX;
+            uint16_t theirs = UINT16_MAX - 1;
+            char description[160];
+            snprintf(description, sizeof(description), "a weak alias pragma leaves %s's binding clang's, by the %s path", names[n], p == 1 ? "vector" : "scalar");
+            check_test_expect(test, check_test_visibility_symbol(objects[p], names[n], &ours) && check_test_visibility_symbol(objects[0], names[n], &theirs) &&
+                                   ours == theirs, description);
+        }
+        char* const link[] = { (char*)clang, objects[p], "-o", programs[p], NULL };
+        const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
+        free(text);
+        check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "weak alias pragmas' objects link and run");
+    }
+    check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "weak alias pragmas' scalar and vector objects match byte for byte");
+    check_test_expect(test, captured[0][0] != 0 && strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0,
+                      "weak alias pragmas' programs run as clang's");
+    for (uint32_t p = 0; p < 3; p += 1)
+    {
+        unlink(objects[p]);
+        unlink(programs[p]);
+    }
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(refused); r += 1)
+    {
+        const bool shape = parse_test_write(path, refused[r], strlen(refused[r]));
+        char* text = NULL;
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-c", path, "-o", objects[1], NULL };
+        const int status = shape ? check_test_driver_spawn(arguments, &text) : 0;
+        check_test_expect(test, status != 0 && text != NULL && strstr(text, "'#pragma weak'") != NULL, "a weak alias pragma of a shape not modeled is refused by name");
+        free(text);
+        unlink(objects[1]);
+    }
+    // A target never declared: clang's warning at the alias's name, by both paths, at -fsyntax-only.
+    static const char undeclared[] = "#pragma weak d = undeclared_target\nint x;\n";
+    const bool shape = parse_test_write(path, undeclared, sizeof(undeclared) - 1);
+    char* theirs = NULL;
+    char* const clang_arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", path, NULL };
+    const int clang_status = shape ? check_test_driver_spawn(clang_arguments, &theirs) : -1;
+    for (uint32_t p = 0; shape && p < 2; p += 1)
+    {
+        char* ours = NULL;
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-fsyntax-only", path, p == 1 ? "--scalar" : NULL, NULL };
+        const int status = check_test_driver_spawn(arguments, &ours);
+        check_test_expect(test, status == clang_status && ours != NULL && theirs != NULL && strstr(ours, "warning: weak identifier 'undeclared_target' never declared") != NULL &&
+                                strstr(theirs, "1:14: warning: weak identifier 'undeclared_target' never declared") != NULL && strstr(ours, "1:14:") != NULL,
+                          "a weak alias pragma's target never declared warns as clang's");
+        free(ours);
+    }
+    free(theirs);
+    unlink(path);
+}

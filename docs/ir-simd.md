@@ -356,6 +356,15 @@ a scalar's or FP16's compare, SAE's form, a memory operand or any other
 decoration, and a target without one of those features leave the row a machine
 row, which runs it as before.
 
+Tier 1 takes that AND back into the comparison (#1847, `tier1_select_masked_compare`):
+the pattern of an AND of masks one of whose operands is a `vcmp` only it reads,
+in its block, is the comparison under the other operand as its writemask
+(`vpcmpd k1{k2}`, `vcmpps k1{k2}`), which leaves 0 in the lanes the writemask
+lacks, so that a masked comparison's row is one instruction again, as it was as a
+machine row. Its masked-off lanes raise no exception, as the row's didn't; the
+AND of an unmasked comparison would have. Where the comparison has another use
+it stays its own record, and the AND a `kand`.
+
 Measured by `--tier1 --tier1-report -march=znver5`, each compiler compiling
 the same sources: on `main_unit_frontend.c`, main `cf38957a` has 1,675 machine
 rows and 581,418 records, and this change 1,212 rows (−463) and 581,189

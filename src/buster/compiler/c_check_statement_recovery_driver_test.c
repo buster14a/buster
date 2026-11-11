@@ -387,16 +387,16 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         }
         unlink(source);
     }
-    // Rounds past the error limit's cut (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS, #1447): each body's incomplete object ends its
-    // reading's walk, so the first reading gives the first error and each round one more, until clang's error limit cuts
+    // Rounds past the error limit's cut (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS, #1447): each body's initialized incomplete object ends its
+    // reading's walk (an uninitialized one is an invalid declaration that recovers), so the first reading gives the first error and each round one more, until clang's error limit cuts
     // the output; the bodies after the cut are left out, and the warnings before it are given. The whole output, by
     // default, at a limit inside the errors, with -Wfatal-errors and without a limit, by the vector path, the scalar
     // one and deferred bodies on two lanes.
     static const char capped[] =
-        "void m1(void) { struct S1 s; }\nvoid m2(void) { struct S2 s; }\nvoid m3(void) { struct S3 s; }\n"
-        "void m4(void) { struct S4 s; }\nvoid m5(void) { struct S5 s; }\nvoid m6(void) { struct S6 s; }\n"
+        "void m1(void) { struct S1 s = {0}; }\nvoid m2(void) { struct S2 s = {0}; }\nvoid m3(void) { struct S3 s = {0}; }\n"
+        "void m4(void) { struct S4 s = {0}; }\nvoid m5(void) { struct S5 s = {0}; }\nvoid m6(void) { struct S6 s = {0}; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n"
-        "int h(int x) { x = x; struct S7 s; return x = x; }\n";
+        "int h(int x) { x = x; struct S7 s = {0}; return x = x; }\n";
     static const char* const limits[] = { NULL, "-ferror-limit=3", "-Wfatal-errors", "-ferror-limit=0" };
     snprintf(source, sizeof(source), "%s/statement-recovery-capped.c", directory);
     const bool capped_made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, capped, sizeof(capped) - 1);
