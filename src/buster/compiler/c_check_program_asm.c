@@ -222,6 +222,9 @@ struct CheckProgramAsm
     X86Instruction* inline_records;
     uint32_t inline_count;
     uint32_t inline_touched;
+    // The opmask registers its template's records write (k0 to k7, a bit each, check_asm_inline_touched's), which a Tier 1
+    // body's emission saves the live masks of around it as a call's (tier1_emit_cfg_asm).
+    uint8_t inline_masks;
     // Its template's local branches (Tier0AsmBody.branches and targets), relative to its first record.
     uint32_t* inline_branches;
     uint32_t* inline_targets;
@@ -1433,26 +1436,6 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     return at;
 }
 
-// Whether a template's records name an opmask register (k0 to k7) in any field. Tier 1's CFG consumer saves no mask value
-// around an asm body, as it saves them around a call (#1839), so that in a lowering for Tier 1
-// (CheckProgramOptions.asm_bodies) such a template keeps its helper, whose call it saves them around; Tier 0 takes an asm
-// body as a call, whose saves of the mask stack it makes.
-static bool check_asm_names_opmask(const AsmCode* code)
-{
-    bool named = false;
-    for (uint32_t r = 0; !named && r < code->count; r += 1)
-    {
-        X86Instruction record = code->records[r];
-        const Tier0Fields fields = tier0_operation_fields(&record);
-        for (uint32_t f = 0; f < fields.count; f += 1)
-        {
-            named |= fields.classes[f] == BUSTER_X86_CLASS_OPMASK;
-        }
-        named |= (record.decorations & 0x07) != 0;
-    }
-    return named;
-}
-
 // Whether `form` returns: ret, and its imm16, 16-bit, 32-bit and prefixed forms.
 static bool check_asm_return(uint32_t form)
 {
@@ -1517,9 +1500,11 @@ static bool check_asm_inline_takes(const CheckAsmPlace* places, uint32_t count)
 // record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
 // template's own to its labels, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register
 // holding the frame (rsp, rbp, r15), but on its way out of the function. A form x86_semantics.c doesn't cover takes
-// check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
-static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors)
+// check_asm_implicit's registers, or none for an x87 form's, or keeps the helper. Into `*masks`, the opmask registers its
+// records write (CheckProgramAsm.inline_masks).
+static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors, uint8_t* masks)
 {
+    uint32_t opmask_writes = 0;
     uint64_t written = (uint64_t)(taken & 0xffffu & ~(1u << X86_REGISTER_RSP)) | ((uint64_t)(vectors & 0xffffu) << 16);
     bool placed = true;
     for (uint32_t k = 0; k < count; k += 1)
@@ -1556,7 +1541,10 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         }
         uint64_t reads = 0;
         uint64_t writes = 0;
-        x86_instruction_effects_scalar(record, &reads, &writes);
+        // With the opmask registers it reads and writes: a record that names one otherwise resolves as everything.
+        uint16_t opmasks = 0;
+        x86_instruction_effects_opmasks_scalar(record, &reads, &writes, &opmasks);
+        opmask_writes |= (uint32_t)opmasks >> 8;
         if (effects->operation == X86_OPERATION_NONE)
         {
             uint32_t implicit = 0;
@@ -1589,6 +1577,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
     }
     const uint32_t touched = (uint32_t)written;
     placed = placed && (touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
+    *masks = (uint8_t)opmask_writes;
     return placed ? touched : UINT32_MAX;
 }
 
@@ -2783,6 +2772,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     const bool helped = code.count != 0 || x87 || flagged;
     Tier0Operation row;
     uint32_t inline_touched = 0;
+    uint8_t inline_masks = 0;
     // The held operands (BUSTER_CHECK_ASM_HELD): refused by a statement with a helper, which would read or write their
     // registers, and in one without an output's object or an input's value, which the lowering evaluates alone.
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
@@ -2830,8 +2820,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     else if (valid && reason == NULL && helped && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              !statement->is_goto && code.reference_count == 0 && code.label_count == 0 && check_asm_inline_takes(places, count) &&
-             !(program->asm_bodies && check_asm_names_opmask(&code)) &&
-             (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors)) != UINT32_MAX)
+             (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors, &inline_masks)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
@@ -2858,6 +2847,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_records = records;
         plan->inline_count = records_count;
         plan->inline_touched = inline_touched;
+        plan->inline_masks = inline_masks;
         plan->inline_leaves = returns;
         for (uint32_t r = 0; r < code.count; r += 1)
         {
@@ -3373,6 +3363,9 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     const CheckInput* input = program->input;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
+    // The helpers as they came, restored on failure: a later step without room (the names') must not leave the
+    // statements' helpers appended to them in the popped output.
+    const CheckProgramHelpers helpers_mark = *helpers;
     // A body's controls: its statements' (entry_count of them), then its statement expressions' (to count). A unit
     // without asm statements, the usual one, has none to walk for.
     uint32_t statements = 0;
@@ -3508,6 +3501,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
         const CheckProgramStatus status = result->status;
         const uint32_t token = result->token;
         arena_pop_to(output, output_mark);
+        *helpers = helpers_mark;
         *result = (CheckProgramAsms){ .status = status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : status, .token = token };
     }
     arena_pop_to(scratch, scratch_mark);

@@ -23,9 +23,8 @@ static CheckValue check_complex_component(const TypeTable* table, const CheckVal
         }
         else if (type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128)
         {
-            // A _Complex __float128 constant's parts are long doubles that hold them exactly (check_complex_convert): a
-            // part's bits are its long double's (c_check_quad.c).
-            check_quad_set(&value, check_quad_widen(imaginary ? input->imaginary : input->floating, false));
+            // A _Complex __float128 constant's parts are its bits (check_quad_complex_set), each part a real one's.
+            check_quad_set(&value, imaginary ? check_quad_complex_imaginary(input) : input->integer);
         }
         else
         {
@@ -73,15 +72,11 @@ static void check_complex_convert(const TypeTable* table, CheckValue* value, Typ
         value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         if (target_complex && real.fault == CHECK_FAULT_NONE && imaginary.fault == CHECK_FAULT_NONE)
         {
-            // A _Complex __float128 constant holds its parts as long doubles (#1250): only where they are its parts
-            // exactly, their mirrors their values (c_check_quad.c); another's is refused, as before __float128 kept
-            // bits.
+            // A _Complex __float128 constant keeps both parts' bits (#1250, check_quad_complex_set).
             const bool quad = type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128;
-            const bool exact = !quad || real.constant_kind != CHECK_CONSTANT_FLOATING || imaginary.constant_kind != CHECK_CONSTANT_FLOATING ||
-                               (check_quad_widen(real.floating, false) == real.integer && check_quad_widen(imaginary.floating, false) == imaginary.integer);
-            if (!exact)
+            if (quad && real.constant_kind == CHECK_CONSTANT_FLOATING && imaginary.constant_kind == CHECK_CONSTANT_FLOATING)
             {
-                check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
+                check_quad_complex_set(value, real.integer, imaginary.integer);
             }
             else if (real.constant_kind == CHECK_CONSTANT_FLOATING && imaginary.constant_kind == CHECK_CONSTANT_FLOATING)
             {
@@ -134,11 +129,209 @@ static CheckValue check_complex_integer_fold(CheckOp op, unsigned __int128 left,
     return value;
 }
 
+// Whether two binary128 values are equal: a NaN to none, a zero to either zero.
+static bool check_complex_quad_equal(unsigned __int128 left, unsigned __int128 right)
+{
+    const bool nan = check_quad_is_nan(left) || check_quad_is_nan(right);
+    return !nan && (left == right || ((left | right) & ~BUSTER_CHECK_QUAD_SIGN) == 0);
+}
+
+// Binary128 operations as clang's APFloat makes them (check_quad_arithmetic), for _Complex __float128's * and / (#1250).
+#define BUSTER_CHECK_QUAD_ONE ((unsigned __int128)0x3fff << 112)
+
+static unsigned __int128 check_complex_quad_op(CheckOp op, unsigned __int128 left, unsigned __int128 right)
+{
+    return check_quad_arithmetic(op, left, right);
+}
+
+static bool check_complex_quad_infinite(unsigned __int128 bits)
+{
+    return (bits & ~BUSTER_CHECK_QUAD_SIGN) == BUSTER_CHECK_QUAD_EXPONENT;
+}
+
+// APFloat's copySign of +`magnitude` (+1, +0, +inf) by `sign`'s sign.
+static unsigned __int128 check_complex_quad_sign(unsigned __int128 magnitude, unsigned __int128 sign)
+{
+    return magnitude | (sign & BUSTER_CHECK_QUAD_SIGN);
+}
+
+// APFloat's scalbn of a value by 2^`power`, rounded once (check_quad_scale); a NaN quiet, as its operations leave it.
+static unsigned __int128 check_complex_quad_scalbn(unsigned __int128 bits, int32_t power)
+{
+    return check_quad_is_nan(bits) ? bits | BUSTER_CHECK_QUAD_QUIET : check_quad_from_host(check_quad_scale(check_quad_host(bits), power));
+}
+
+// clang 23's HandleComplexComplexMul (ExprConstant.cpp): (ac - bd) + (ad + bc)i, and where both parts are NaNs, C11
+// Annex G's recovery of an infinite operand or product, each step APFloat's. Whether both of the formula's parts were NaNs
+// (where clang's code calls __multc3).
+static bool check_complex_quad_multiply(unsigned __int128 a, unsigned __int128 b, unsigned __int128 c, unsigned __int128 d, unsigned __int128 parts[2])
+{
+    const unsigned __int128 ac = check_complex_quad_op(CHECK_OP_MULTIPLY, a, c);
+    const unsigned __int128 bd = check_complex_quad_op(CHECK_OP_MULTIPLY, b, d);
+    const unsigned __int128 ad = check_complex_quad_op(CHECK_OP_MULTIPLY, a, d);
+    const unsigned __int128 bc = check_complex_quad_op(CHECK_OP_MULTIPLY, b, c);
+    parts[0] = check_complex_quad_op(CHECK_OP_SUBTRACT, ac, bd);
+    parts[1] = check_complex_quad_op(CHECK_OP_ADD, ad, bc);
+    const bool both = check_quad_is_nan(parts[0]) && check_quad_is_nan(parts[1]);
+    if (both)
+    {
+        bool recalculate = false;
+        if (check_complex_quad_infinite(a) || check_complex_quad_infinite(b))
+        {
+            a = check_complex_quad_sign(check_complex_quad_infinite(a) ? BUSTER_CHECK_QUAD_ONE : 0, a);
+            b = check_complex_quad_sign(check_complex_quad_infinite(b) ? BUSTER_CHECK_QUAD_ONE : 0, b);
+            c = check_quad_is_nan(c) ? check_complex_quad_sign(0, c) : c;
+            d = check_quad_is_nan(d) ? check_complex_quad_sign(0, d) : d;
+            recalculate = true;
+        }
+        if (check_complex_quad_infinite(c) || check_complex_quad_infinite(d))
+        {
+            c = check_complex_quad_sign(check_complex_quad_infinite(c) ? BUSTER_CHECK_QUAD_ONE : 0, c);
+            d = check_complex_quad_sign(check_complex_quad_infinite(d) ? BUSTER_CHECK_QUAD_ONE : 0, d);
+            a = check_quad_is_nan(a) ? check_complex_quad_sign(0, a) : a;
+            b = check_quad_is_nan(b) ? check_complex_quad_sign(0, b) : b;
+            recalculate = true;
+        }
+        if (!recalculate && (check_complex_quad_infinite(ac) || check_complex_quad_infinite(bd) || check_complex_quad_infinite(ad) ||
+                             check_complex_quad_infinite(bc)))
+        {
+            a = check_quad_is_nan(a) ? check_complex_quad_sign(0, a) : a;
+            b = check_quad_is_nan(b) ? check_complex_quad_sign(0, b) : b;
+            c = check_quad_is_nan(c) ? check_complex_quad_sign(0, c) : c;
+            d = check_quad_is_nan(d) ? check_complex_quad_sign(0, d) : d;
+            recalculate = true;
+        }
+        if (recalculate)
+        {
+            const unsigned __int128 real = check_complex_quad_op(CHECK_OP_SUBTRACT, check_complex_quad_op(CHECK_OP_MULTIPLY, a, c),
+                                                                 check_complex_quad_op(CHECK_OP_MULTIPLY, b, d));
+            const unsigned __int128 imaginary = check_complex_quad_op(CHECK_OP_ADD, check_complex_quad_op(CHECK_OP_MULTIPLY, a, d),
+                                                                      check_complex_quad_op(CHECK_OP_MULTIPLY, b, c));
+            parts[0] = check_complex_quad_op(CHECK_OP_MULTIPLY, BUSTER_CHECK_QUAD_EXPONENT, real);
+            parts[1] = check_complex_quad_op(CHECK_OP_MULTIPLY, BUSTER_CHECK_QUAD_EXPONENT, imaginary);
+        }
+    }
+    return both;
+}
+
+// clang 23's HandleComplexComplexDiv (ExprConstant.cpp): c and d scaled by 2^-ilogb(maxnum(|c|, |d|)) where that is
+// finite, (ac + bd) / (c^2 + d^2) and (bc - ad) / (c^2 + d^2) scaled back by the same power, and where both parts are
+// NaNs, Annex G's recovery of a zero denominator, an infinite dividend or an infinite divisor, each step APFloat's.
+static void check_complex_quad_divide(unsigned __int128 a, unsigned __int128 b, unsigned __int128 c, unsigned __int128 d, unsigned __int128 parts[2])
+{
+    const unsigned __int128 c_magnitude = c & ~BUSTER_CHECK_QUAD_SIGN;
+    const unsigned __int128 d_magnitude = d & ~BUSTER_CHECK_QUAD_SIGN;
+    // maxnum: a NaN loses to a number; of two numbers the larger, which the magnitudes' bits order.
+    const unsigned __int128 largest = check_quad_is_nan(c_magnitude) ? d_magnitude : check_quad_is_nan(d_magnitude) ? c_magnitude :
+                                      c_magnitude > d_magnitude ? c_magnitude : d_magnitude;
+    const bool finite = check_quad_finite(largest);
+    // ilogb of 0 is APFloat's IEK_Zero, whose scaling of a zero or a NaN changes neither.
+    const int32_t power = finite && largest != 0 ? -check_quad_logb(largest) : 0;
+    c = finite ? check_complex_quad_scalbn(c, power) : c;
+    d = finite ? check_complex_quad_scalbn(d, power) : d;
+    const unsigned __int128 denominator = check_complex_quad_op(CHECK_OP_ADD, check_complex_quad_op(CHECK_OP_MULTIPLY, c, c),
+                                                                check_complex_quad_op(CHECK_OP_MULTIPLY, d, d));
+    const unsigned __int128 real = check_complex_quad_op(CHECK_OP_ADD, check_complex_quad_op(CHECK_OP_MULTIPLY, a, c), check_complex_quad_op(CHECK_OP_MULTIPLY, b, d));
+    const unsigned __int128 imaginary = check_complex_quad_op(CHECK_OP_SUBTRACT, check_complex_quad_op(CHECK_OP_MULTIPLY, b, c),
+                                                              check_complex_quad_op(CHECK_OP_MULTIPLY, a, d));
+    parts[0] = check_complex_quad_scalbn(check_complex_quad_op(CHECK_OP_DIVIDE, real, denominator), power);
+    parts[1] = check_complex_quad_scalbn(check_complex_quad_op(CHECK_OP_DIVIDE, imaginary, denominator), power);
+    if (check_quad_is_nan(parts[0]) && check_quad_is_nan(parts[1]))
+    {
+        const bool finite_a = check_quad_finite(a);
+        const bool finite_b = check_quad_finite(b);
+        if (denominator == 0 && (!check_quad_is_nan(a) || !check_quad_is_nan(b)))
+        {
+            const unsigned __int128 infinity = BUSTER_CHECK_QUAD_EXPONENT | (c & BUSTER_CHECK_QUAD_SIGN);
+            parts[0] = check_complex_quad_op(CHECK_OP_MULTIPLY, infinity, a);
+            parts[1] = check_complex_quad_op(CHECK_OP_MULTIPLY, infinity, b);
+        }
+        else if ((check_complex_quad_infinite(a) || check_complex_quad_infinite(b)) && check_quad_finite(c) && check_quad_finite(d))
+        {
+            a = check_complex_quad_sign(check_complex_quad_infinite(a) ? BUSTER_CHECK_QUAD_ONE : 0, a);
+            b = check_complex_quad_sign(check_complex_quad_infinite(b) ? BUSTER_CHECK_QUAD_ONE : 0, b);
+            parts[0] = check_complex_quad_op(CHECK_OP_MULTIPLY, BUSTER_CHECK_QUAD_EXPONENT,
+                                             check_complex_quad_op(CHECK_OP_ADD, check_complex_quad_op(CHECK_OP_MULTIPLY, a, c),
+                                                                   check_complex_quad_op(CHECK_OP_MULTIPLY, b, d)));
+            parts[1] = check_complex_quad_op(CHECK_OP_MULTIPLY, BUSTER_CHECK_QUAD_EXPONENT,
+                                             check_complex_quad_op(CHECK_OP_SUBTRACT, check_complex_quad_op(CHECK_OP_MULTIPLY, b, c),
+                                                                   check_complex_quad_op(CHECK_OP_MULTIPLY, a, d)));
+        }
+        else if (check_complex_quad_infinite(largest) && finite_a && finite_b)
+        {
+            c = check_complex_quad_sign(check_complex_quad_infinite(c) ? BUSTER_CHECK_QUAD_ONE : 0, c);
+            d = check_complex_quad_sign(check_complex_quad_infinite(d) ? BUSTER_CHECK_QUAD_ONE : 0, d);
+            parts[0] = check_complex_quad_op(CHECK_OP_MULTIPLY, 0, check_complex_quad_op(CHECK_OP_ADD, check_complex_quad_op(CHECK_OP_MULTIPLY, a, c),
+                                                                                         check_complex_quad_op(CHECK_OP_MULTIPLY, b, d)));
+            parts[1] = check_complex_quad_op(CHECK_OP_MULTIPLY, 0, check_complex_quad_op(CHECK_OP_SUBTRACT, check_complex_quad_op(CHECK_OP_MULTIPLY, b, c),
+                                                                                         check_complex_quad_op(CHECK_OP_MULTIPLY, a, d)));
+        }
+    }
+}
+
+// A _Complex __float128 operation of constants (#1250), its parts' bits a and b of the left operand, c and d of the right,
+// `domains` as check_complex_fold's, as clang 23's evaluator folds it (ExprConstant.cpp's complex binary operators): + and
+// - part by part, a real operand's missing part kept (a - (c + di) is (a - c) - di); unary + and - (a sign change alone,
+// as changeSign's); * of a real operand part by part, else check_complex_quad_multiply; / by a real operand a / c and b /
+// c, else check_complex_quad_divide (of b = +0 for a real left operand). Each operation is check_quad_arithmetic's.
+// Outside required constant evaluation (`constant_evaluated` false) it folds what clang -O0's code computes as LLVM folds
+// it: its * where no two NaNs call __multc3, and not its / by a complex value, which is __divtc3's. Whether it folded.
+static __attribute__((noinline)) bool check_complex_quad_fold(CheckOp op, unsigned __int128 a, unsigned __int128 b, unsigned __int128 c, unsigned __int128 d,
+                                                              uint32_t domains, bool constant_evaluated, CheckValue* value)
+{
+    const bool left_real = domains == 2;
+    const bool right_real = domains == 1;
+    unsigned __int128 parts[2] = { a, b };
+    bool supported = true;
+    if (op == CHECK_OP_NEGATIVE)
+    {
+        parts[0] = a ^ BUSTER_CHECK_QUAD_SIGN;
+        parts[1] = b ^ BUSTER_CHECK_QUAD_SIGN;
+    }
+    else if (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
+    {
+        parts[0] = check_quad_arithmetic(op, a, c);
+        parts[1] = right_real ? b : left_real ? (op == CHECK_OP_ADD ? d : d ^ BUSTER_CHECK_QUAD_SIGN) : check_quad_arithmetic(op, b, d);
+    }
+    else if (op == CHECK_OP_MULTIPLY && (left_real || right_real))
+    {
+        // clang's evaluator takes a real right operand first (c * a); its code, which LLVM folds, the operands in order
+        // (a * c): of two NaNs the first's.
+        const bool swap = right_real && constant_evaluated;
+        parts[0] = swap ? check_quad_arithmetic(op, c, a) : check_quad_arithmetic(op, a, c);
+        parts[1] = swap ? check_quad_arithmetic(op, c, b) : right_real ? check_quad_arithmetic(op, b, c) : check_quad_arithmetic(op, a, d);
+    }
+    else if (op == CHECK_OP_MULTIPLY)
+    {
+        const bool both = check_complex_quad_multiply(a, b, c, d, parts);
+        supported = constant_evaluated || !both;
+    }
+    else if (op == CHECK_OP_DIVIDE && right_real)
+    {
+        parts[0] = check_quad_arithmetic(op, a, c);
+        parts[1] = check_quad_arithmetic(op, b, c);
+    }
+    else if (op == CHECK_OP_DIVIDE)
+    {
+        check_complex_quad_divide(a, left_real ? 0 : b, c, d, parts);
+        supported = constant_evaluated;
+    }
+    else
+    {
+        supported = op == CHECK_OP_POSITIVE;
+    }
+    if (supported)
+    {
+        check_quad_complex_set(value, parts[0], parts[1]);
+    }
+    return supported;
+}
+
 // `domains` retains the original operands' complex domains (bits 0 and 1), before their common-type conversions.
 // Host C then computes a mixed real/complex expression in that domain, as the runtime lowering does, preserving
 // signed zeros and avoiding the extra zero products that converting a real operand to complex would introduce.
 static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, uint32_t domains, CheckValue* value,
-                                   uint32_t node, uint32_t extensions)
+                                   uint32_t node, uint32_t extensions, bool constant_evaluated)
 {
     const TypeId element = type_element(table, type_strip_aligned(table, left->type));
     const bool unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE;
@@ -148,12 +341,19 @@ static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const Che
     const CheckValue br = check_complex_component(table, right, false);
     const CheckValue bi = check_complex_component(table, right, true);
     bool supported = true;
+    const bool quad = type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128;
     if (comparison)
     {
         const bool integer = check_action_is_integer(table, element);
-        const bool same = integer ? left->integer == right->integer : left->floating == right->floating && left->imaginary == right->imaginary;
+        const bool same = integer ? left->integer == right->integer :
+                          quad ? check_complex_quad_equal(ar.integer, br.integer) && check_complex_quad_equal(ai.integer, bi.integer) :
+                                 left->floating == right->floating && left->imaginary == right->imaginary;
         value->constant_kind = CHECK_CONSTANT_INTEGER;
         value->integer = op == CHECK_OP_EQUAL ? same : !same;
+    }
+    else if (quad)
+    {
+        supported = check_complex_quad_fold(op, ar.integer, ai.integer, br.integer, bi.integer, domains, constant_evaluated, value);
     }
     else if (check_action_float_supported(table, element))
     {
@@ -328,6 +528,10 @@ static void check_complex_conjugate(TypeTable* table, const CheckAction* action,
             {
                 result->value.constant_kind = CHECK_CONSTANT_NONE;
             }
+        }
+        else if (type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128)
+        {
+            check_quad_complex_set(&result->value, input.integer, imaginary.integer ^ BUSTER_CHECK_QUAD_SIGN);
         }
         else
         {

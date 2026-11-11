@@ -19,7 +19,9 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   while the control server lists benchpress online (a stale daemon: `tailscale
   status` lists peers that no ping reaches). A session whose checkout predates
   the hook, or whose hook ran before the daemon went stale, runs it again by
-  hand: `bash .claude/hooks/join-tailnet.sh`.
+  hand: `bash .claude/hooks/join-tailnet.sh`. A session that starts in the
+  folder holding the checkout runs it through `.claude/hooks/parent-folder.sh`
+  ([llm-memory](llm-memory.md#sessions-that-start-beside-the-checkout)).
 - **Only in a disposable session:** the hook manages the daemon only where the
   session is positively identified as disposable: Claude Code's cloud
   (`CLAUDE_CODE_REMOTE=true`), or an environment that sets

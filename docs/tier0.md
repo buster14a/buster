@@ -651,23 +651,48 @@ at the target's forms, by both of the checker's paths:
   The generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without AVX-512) run on
   pieces of the registers' width through memory, as a transport vector's do (`check_lower_vector_wide`, #1834):
   shuffles element by element, conversions and elementwise builtins each piece's row.
+  Compares of qwords without SSE4.1's `pcmpeqq` or SSE4.2's `pcmpgtq` (`check_vector_baseline_compare_qwords`, #1834)
+  are `pcmpeqd` ANDed with its qword's other dword (`pshufd` 0xb1) for `==` and `!=`, and for `p < q` the sign of
+  `p - q` (`psubq`) where p and q have the same sign bit, the sign of p (signed) or of q (unsigned) where they differ,
+  spread over the qword by `psrad` and `pshufd` 0xf5; `>` swaps the operands, and `<=` and `>=`, past a row's 8
+  records, are `>`'s and `<`'s rows followed by `~`'s (`check_vector_baseline_complement`), which `?:`, `!` and `&&`
+  take as they take the other compares.
   The integers' `__builtin_elementwise_min` and `_max` without SSE4.1's (or AVX-512's qword) instructions are a
   compare's blend (`check_vector_baseline_extremes`, #1834): the mask `pcmpgt` of a and b (of b and a for a minimum),
   unsigned elements' biased by their sign bits first (a constant operand, `xorps`), then `pand`, `pandn` and `por`;
   unsigned words' are `psubusw` with `paddw` or `psubw`. Absolute values without SSSE3 (or AVX-512's of qwords) are
   bytes' `pminub` and words' `pmaxsw` of each and its negation, and dwords' and qwords' xor with their sign less it
   (`check_vector_baseline_absolute`).
+  The floating elementwise builtins of vectors without AVX-512 (`check_vector_baseline_floating_rows`, #1834) are SSE's
+  and AVX's sequences of clang's code, operand for operand so that NaN payloads and zeros' signs are its: SSE4.1's
+  `roundps` and `roundpd` (round's of the value plus the largest value below 0.5 of its sign), canonicalize's multiply
+  by 1.0, copysign's masks, maxnum's and minnum's `maxps` of y and x with y where x is a NaN, and the IEEE maxima and
+  minima (`maximum`, `minimum` and their `_num` forms) `maxps` of x and y, its sign bit fixed by x's, then the NaNs'
+  operands selected: with AVX by `vblendvps`, without it by a chain of rows, each of the previous row's result, x and
+  y (`check_vector_baseline_select_row`). Without SSE4.1 the roundings, and without FMA the fused multiply-add, are the
+  C library's `ceilf` ... `round`, `fmaf` and `fma` an element (`check_lower_vector_library`), as clang's code calls
+  them. A fused multiply-add's product has b's register as its destination, as clang's `vfmadd213` does, so that of
+  two NaNs b's is the result.
+  The reductions without AVX-512 (#1834, `check_lower_reduce_baseline`): an integer one, whose result is any order's,
+  is folded element by element (`check_lower_transport_reduce`), as is one of 8- or 16-bit elements without AVX-512BW;
+  a floating one in clang's order, by pieces of the registers' bytes whose halves are paired first, then the piece's
+  halvings (`check_vector_baseline_reduce_floating_rows`): `pshufd` (`vextractf128`, `vpermilpd` and `vmovshdup` with
+  AVX) of the high part, combined with the low one by `addps` or llvm.maximum's and minimum's sequences, which without
+  AVX take two rows a halving (the first packs the low part beside the high one, the high one replaced by the low where
+  the low is a NaN). `max` and `min` fold the piece's lanes in order by #967's scalar rows.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
   dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
   and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
   8- or 16-bit integers and floats or doubles go through dwords by them.
+- A shuffle no row of these sequences takes (of bytes and words without SSSE3, of 32-byte vectors of them without
+  AVX-512, of any 32-byte vectors without AVX2) runs element by element through memory, as a wide vector's does
+  (`check_lower_transport_shuffle`, #1834).
 - A `__builtin_convertvector` between integers and floats or doubles that no row of SSE's or AVX's takes (of unsigned
   integers, and of 64-bit ones without AVX-512DQ) converts element by element, as C converts each scalar
   (`check_lower_transport_convertvector`, #1834): clang's sequences compute the same values.
-- What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
-  without AVX-512, minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
+- What has no form at the target is refused by name: minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
   and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
   without SSE4.1 its `ceilf` ... `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of
