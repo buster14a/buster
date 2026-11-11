@@ -65,6 +65,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NEGATIVE: result = "array size is negative"; break;
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
+        case CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT: result = "size of array element isn't a multiple of its alignment"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
@@ -4431,6 +4432,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && (kind == CHECK_INPUT_VECTOR_ELEMENT || kind == CHECK_INPUT_FUNCTION_RETURN || kind == CHECK_INPUT_ARRAY_FUNCTIONS ||
                                  kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE || kind == CHECK_INPUT_ARRAY_TOO_LARGE ||
+                                 kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT ||
                                  kind == CHECK_INPUT_ARRAY_NON_INTEGER ||
                                  ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE) && input->reports[index].type != 0)))
                         {
@@ -4493,6 +4495,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 }
                                 grouped[at] = 0;
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "array is too large (%s elements)", grouped);
+                            }
+                            else if (kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "size of array element of type %.*s (%llu bytes) isn't a multiple of its alignment (%u bytes)", (int)type.length,
+                                                      type.pointer, (unsigned long long)report->value, report->detail);
                             }
                             else if (kind == CHECK_INPUT_ARRAY_FUNCTIONS)
                             {

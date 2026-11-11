@@ -648,12 +648,7 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
         { "segment-struct-store-past-limit", "struct S{char c[1025];};void tested(struct S __seg_gs*p,struct S*q){*p=*q;}",
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
-        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): a complex value's store,
-        // a _BitInt and an _Atomic object.
-        { "segment-complex-store", "void tested(_Complex double __seg_gs*p,_Complex double v){*p=v;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an _Atomic object.
         { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
@@ -794,6 +789,27 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "_Complex float zf=*sc*2.0f;r+=(long)__real__ zf+(long)__imag__ zf;r+=sum(*fs)+(n?*ps:*fs).b;"
         "return (int)(r+gs_.a+gs_.b+gs_.c+ts.b+ts.c+gp.x+go.c[0]+go.c[11]+gu.c[1]);}",
         "segment-aggregates", clang);
+    // Complex values, __float128s and _BitInts (#1447): a complex value's store (a copy through the override), its updates
+    // and a real object's update by a complex value (check_lower_segment_update: the object copied to a frame object,
+    // updated there and copied back), its parts as lvalues (check_lower_element_segment: `__real__ *p` read, stored and
+    // updated), a __float128's and a wide _BitInt's updates the same way, and a narrow _BitInt's read, store and update,
+    // whose LOAD and STORE take the override as an integer's do. In %fs and %ss.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "static _Thread_local _Complex double tc=1.5+2.5i;static _Thread_local _BitInt(40) tb=-12345;static _Thread_local unsigned _BitInt(200) tw;"
+        "static _Complex float gc=3.0f-1.0if;static _BitInt(13) gb=100;static __float128 gq=2.5;static _BitInt(130) gw;static double gd=4.0;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();tw=77+n;gw=-5-n;"
+        "_Complex double __seg_fs*fc=(_Complex double __seg_fs*)((char*)&tc-tp);_BitInt(40) __seg_fs*fb=(_BitInt(40) __seg_fs*)((char*)&tb-tp);"
+        "unsigned _BitInt(200) __seg_fs*fw=(unsigned _BitInt(200) __seg_fs*)((char*)&tw-tp);_Complex float SS*sc=(_Complex float SS*)&gc;"
+        "_BitInt(13) SS*sb=(_BitInt(13) SS*)&gb;__float128 SS*sq=(__float128 SS*)&gq;_BitInt(130) SS*sw=(_BitInt(130) SS*)&gw;double SS*sd=(double SS*)&gd;"
+        "long r=0;*fc=3.0-4.0i;*fc+=n;*fc*=2.0i;_Complex double z=(*fc)++;r+=(long)__real__ z+(long)__imag__ *fc*3;"
+        "*sc=*sc/2.0f;*sc-=1.0if;r+=(long)(__real__ *sc*10)+(long)(__imag__ *sc*10);__real__ *fc=n;__imag__ *sc+=1.5f;--__imag__ *fc;"
+        "r+=(long)__real__ *fc+(long)__imag__ *fc+(long)(__imag__ *sc*4);"
+        "*fb=*fb*3+n;*fb+=100;(*fb)--;r+=(long)*fb;*sb=4000;*sb+=200;++*sb;r+=(long)*sb+(*sb>>2);"
+        "*fw=*fw*1000000007;*fw+=5;++*fw;r+=(long)(*fw%1000003);*sw=*sw*3;*sw-=1000;(*sw)++;r+=(long)*sw;"
+        "*sq=*sq*2;*sq+=n;(*sq)++;r+=(long)*sq;*sd+=1.0i;r+=(long)*sd;"
+        "return (int)(r+(long)__real__ tc+(long)(__imag__ gc*4)+(long)tb+(long)gb+(long)(tw%1000)+(long)gw+(long)gq);}",
+        "segment-complex-bit-int", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1177,6 +1193,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "ALL(int);ALL(unsigned);ALL(long long);ALL(float);ALL(double);M(signed char,4);M(signed char,16);M(short,8);M(unsigned short,4);\n"
           "munmap(page,8192);return (int)h;}\n"
         },
+        // The bit builtins without AVX-512 (#1834), element by element: popcount, bitreverse, clzg and ctzg (with a zero's
+        // operand, and without one of nonzero elements alone, which clang leaves undefined for zero), fshl and fshr, of
+        // signed and unsigned 8- to 64-bit elements of 4 to 64 bytes, zeros and single bits among them.
+        { "baseline-bit-builtins",
+          "#define T(E,W) do{typedef E V __attribute__((vector_size(W)));V a,b,c;fill(&a,W,n*11+W);fill(&b,W,n*13+W+1);fill(&c,W,n*17+W+2);for(unsigned k_=0;"
+          "k_<W/sizeof(E);k_+=3)a[k_]=0;for(unsigned k_=1;k_<W/sizeof(E);k_+=5)a[k_]=(E)1<<(k_%(8*sizeof(E)));"
+          "V r_[]={__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg(a,b),__builtin_elementwise_fshl(a,b,c),__builtin_elementwise_fshr(a,b,c)};FOLD(r_);V s_={0};for(unsigned k_=0;k_<W/sizeof(E);k_++)if(a[k_]){V t_=__builtin_elementwise_clzg(a);V u_=__builtin_elementwise_ctzg(a);s_[k_]=t_[k_]+u_[k_];}FOLD(s_);}while(0)\n"
+          "#define ALL(E) T(E,4);T(E,8);T(E,16);T(E,32);T(E,64)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "ALL(signed char);ALL(unsigned char);ALL(short);ALL(unsigned short);T(int,8);T(int,16);T(int,32);T(int,64);T(unsigned,16);T(unsigned,64);\n"
+          "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
@@ -1274,6 +1303,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "fill(&g,32,n+4);a2=__builtin_nontemporal_load(&a);b2=__builtin_nontemporal_load(&b);c2=__builtin_nontemporal_load(&c);e2=__builtin_nontemporal_load(&e);"
           "g2=__builtin_nontemporal_load(&g);__builtin_nontemporal_store(a2+1,&a);__builtin_nontemporal_store(b2*3,&b);__builtin_nontemporal_store(c2,&c);"
           "__builtin_nontemporal_store(e2,&e);__builtin_nontemporal_store(g2^7,&g);FOLD(a);FOLD(b);FOLD(c);FOLD(e);FOLD(g);FOLD(a2);FOLD(e2);return (int)h;}\n"
+        },
+        // Conversions between unsigned or 64-bit integers and floats or doubles without AVX-512 (#1834), element by
+        // element as C converts each: in range, the most negative and the largest values and halfway cases among them.
+        { "baseline-integer-floating-conversions",
+          "typedef unsigned u4 __attribute__((vector_size(16)));typedef unsigned u2 __attribute__((vector_size(8)));typedef unsigned long long uq2 __attribute__((vector_size(16)));"
+          "typedef double d4 __attribute__((vector_size(32),aligned(16)));typedef float f2 __attribute__((vector_size(8)));typedef long long q4 __attribute__((vector_size(32),aligned(16)));\n"
+          "int tested(int n){unsigned h=2166136261u;u4 a;uq2 b;v2di c;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);a[0]=0xffffffffu;a[1]=0x80000001u;b[0]=~0ull;"
+          "b[1]=(1ull<<63)+1025;c[0]=(long long)(1ull<<63);c[1]=(1ll<<53)+1;"
+          "v4sf fa=__builtin_convertvector(a,v4sf);d4 da=__builtin_convertvector(a,d4);v2df db=__builtin_convertvector(b,v2df);f2 fb=__builtin_convertvector(b,f2);"
+          "v2df dc=__builtin_convertvector(c,v2df);f2 fc=__builtin_convertvector(c,f2);FOLD(fa);FOLD(da);FOLD(db);FOLD(fb);FOLD(dc);FOLD(fc);\n"
+          "v4sf g={3e9f,1.5f,4294967040.0f,(float)(n*n)};v2df k={1.8e19,(double)(n*n)*1e15};v2df m={-9.2e18,(double)n*-3e14};v2df k2={4e9,(double)(n*n)+0.5};"
+          "u4 ga=__builtin_convertvector(g,u4);uq2 kb=__builtin_convertvector(k,uq2);v2di mc=__builtin_convertvector(m,v2di);u2 gk=__builtin_convertvector(k2,u2);"
+          "q4 gq=__builtin_convertvector(g,q4);FOLD(ga);FOLD(kb);FOLD(mc);FOLD(gk);FOLD(gq);return (int)h;}\n"
         },
         // Integer vectors' division and remainder, element by element at every target (#2216): of each element size and
         // signedness, of 8 to 128 bytes and an odd length, by a splat and in place; no divisor is 0, nor INT_MIN's -1.
