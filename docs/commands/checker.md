@@ -254,8 +254,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
   on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
   and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
-  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
-  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. A folded shift's count
+  warning there, and every runtime warning in an array bound (clang's ConstantEvaluated context, a variable array's
+  too: shift counts, divisions, sign comparisons, constant conversions, array indexes, null dereferences), is
+  dropped as clang's DiagRuntimeBehavior drops it (`check_common_bound`, the parser contexts' BOUND bit; a comma's
+  unused value stays). Still separate: a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
   reads outside a deferred typeof region. A statement expression in a static selection's chosen operand

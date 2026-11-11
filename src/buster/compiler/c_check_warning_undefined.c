@@ -394,6 +394,7 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
                 .completion = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .suborder = CHECK_WARNING_UNIT_END_UNDEFINED,
                 .payload = { .name = parser->tokens.names[declaration], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
             };
             const CheckWarningNote note = {
