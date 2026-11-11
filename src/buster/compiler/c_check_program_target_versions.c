@@ -681,6 +681,38 @@ static bool check_program_target_names(const CheckProgram* program, String8* nam
     return valid;
 }
 
+// The symbol whose name a block-scope static of function `object` takes before its own, where `object` is one of the
+// groups' (clang names it by its function's mangled name where clang emits the function): a target version's own
+// (s.avx512f.n) where the function was multiversioned there, as a static group's are when its deferred versions are
+// emitted, or as one declared after another version is; otherwise none, the function's identifier alone (f.n, a version
+// defined before the function became multiversioned). A target_clones function's is its body's first version's
+// (c.avx2.0.n). Whether `object` is one of theirs.
+static bool check_program_target_static_context(const CheckProgram* program, uint32_t object, SymbolId* symbol)
+{
+    bool found = false;
+    *symbol = 0;
+    for (uint32_t g = 0; !found && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        for (uint32_t v = group->version_first; !found && v < group->version_first + group->version_count; v += 1)
+        {
+            found = program->target_versions[v].object == object;
+            bool later = group->internal;
+            for (uint32_t other = group->version_first; found && other < group->version_first + group->version_count; other += 1)
+            {
+                later |= other != v && program->target_versions[other].declaration < program->target_versions[v].declaration;
+            }
+            *symbol = found && later && program->target_symbols != NULL ? program->target_symbols[v] : 0;
+        }
+    }
+    for (uint32_t g = 0; !found && g < program->target_group_count; g += 1)
+    {
+        found = program->target_groups[g].clones != 0 && program->target_groups[g].clones == object;
+        *symbol = found && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
+    }
+    return found;
+}
+
 // The link room the groups' code takes beyond the program's symbols: the resolvers' atoms; their symbols (the resolver,
 // f.ifunc's alias, each option's version) and their fixups.
 static void check_program_target_room(const CheckProgram* program, uint64_t* atoms, uint64_t* symbols, uint64_t* fixups)

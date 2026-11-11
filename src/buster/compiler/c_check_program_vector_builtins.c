@@ -2195,14 +2195,25 @@ static const char* check_vector_reduce_floating_target_rows(const X86Target* tar
                                                check_vector_baseline_reduce_floating_rows(target, builtin, shape, rows, count);
 }
 
+// The widest piece of a nontemporal load or store (`store`) of `bytes` bytes that one row moves where the target hasn't
+// AVX-512F and AVX-512VL (#1834): 16 bytes, 32 with AVX (a load's with AVX2: AVX's VMOVNTDQA is of 16), or `bytes`.
+static uint32_t check_vector_nontemporal_width(const X86Target* target, bool store, uint32_t bytes)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const uint64_t wide = store ? BUSTER_X86_FEATURE(AVX) : BUSTER_X86_FEATURE(AVX2);
+    const uint32_t width = (target->features & evex) == evex ? 64 : (target->features & wide) != 0 ? 32 : 16;
+    return bytes < width ? bytes : width;
+}
+
 // The row of __builtin_nontemporal_store(value, p) or __builtin_nontemporal_load(p) of a vector of `vector`'s type at
 // an address aligned to its bytes: VMOVNTPS, VMOVNTPD or VMOVNTDQ of the value by its elements, or VMOVNTDQA's load of
 // any, as clang's code's are; of a vector of 4 or 8 bytes, its bits through a scratch register stored by MOVNTI
 // (clang's for MMX's __m64, which takes SSE4A's MOVNTSD for floats where the target has it), and an ordinary load
-// (clang's). A store's operands are the value and the address, a load's the address.
-static void check_vector_nontemporal_row(const TypeTable* types, TypeId vector, bool store, Tier0Operation* row)
+// (clang's). A store's operands are the value and the address, a load's the address. Without SSE4.1 a load is an
+// ordinary one, as clang's code's is (#1834); vectors wider than the target's nontemporal moves (16 bytes without AVX,
+// a load's 32 without AVX2) are the lowering's pieces of `shape`'s bytes (check_vector_nontemporal_width).
+static void check_vector_nontemporal_row(const X86Target* target, CheckVectorShape shape, bool store, Tier0Operation* row)
 {
-    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
     const bool narrow = shape.bytes < 16;
     const bool wide = shape.bytes == 8;
@@ -2246,7 +2257,8 @@ static void check_vector_nontemporal_row(const TypeTable* types, TypeId vector, 
     else
     {
         static const CheckVectorForms loads = BUSTER_CHECK_VECTOR_FORMS(VMOVNTDQA_X_M128_EVEX, VMOVNTDQA_Y_M256_EVEX, VMOVNTDQA_Z_M512);
-        row->records[0] = check_x86_lower_memory(loads.forms[width], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_INTEGER(0));
+        const bool ordinary = (target->features & BUSTER_X86_FEATURE(SSE41)) == 0;
+        row->records[0] = check_x86_lower_memory(ordinary ? X86_FORM_VMOVDQU64_X_XM128 : loads.forms[width], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_INTEGER(0));
         row->operand_count = 1;
         row->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
         row->result_class = BUSTER_TYPED_CLASS_VECTOR;

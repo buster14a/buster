@@ -666,13 +666,15 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
-        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // complex value, a _BitInt and an _Atomic object.
-        { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
+        // An aggregate's copy past 8 of the target's widest vector registers, which clang stops on too ("cannot lower
+        // memory intrinsic in address space"): from the segment and into it.
+        { "segment-struct-copy-past-limit", "struct S{char c[1025];};void tested(struct S*q,struct S __seg_fs*p){*q=*p;}",
+          "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
+        { "segment-struct-store-past-limit", "struct S{char c[1025];};void tested(struct S __seg_gs*p,struct S*q){*p=*q;}",
+          "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
+        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): a complex value's store,
+        // a _BitInt and an _Atomic object.
+        { "segment-complex-store", "void tested(_Complex double __seg_gs*p,_Complex double v){*p=v;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -796,6 +798,26 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "r+=__atomic_compare_exchange_n(a,&x,9,0,5,5)+__atomic_fetch_max(c,(short)n,5)+__sync_fetch_and_or(c,6);"
         "return (int)(r+tl[0]+tl[1]+tl[2]+tl[3]+(long)tq+(long)ti+tv[n&3]+(long)(float)th+ta+tc);}",
         "segment-ss", clang);
+    // Aggregates (#1447): a read of a struct's, a union's or a complex value's object in a segment is a copy of its bytes
+    // through the override to a frame object (check_lower_segment_read), whose address its consumers take (a copy, a call's
+    // argument, a register return, a conditional's forwarding); a struct's assignment into one copies through it
+    // (check_lower_copy_segmented), and its value is the stored bytes. Sizes of 8, 13 and 24 bytes, in %fs and %ss.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "struct S{long a,b,c;};struct P{int x,y;};struct O{char c[13];};union U{double d;char c[12];};"
+        "static struct S gs_={1,2,3};static struct P gp={4,5};static struct O go={\"abcdefghijkl\"};static union U gu={.c=\"uvwxyzabcde\"};"
+        "static _Thread_local struct S ts={7,8,9};static _Thread_local _Complex double tc=1.5+2.5i;static _Complex float gc=3.0f-1.0if;"
+        "static long sum(struct S s){return s.a*100+s.b*10+s.c;}static int psum(struct P p){return p.x*7+p.y;}"
+        "static struct S cp(struct S SS*p){return *p;}static struct P cpp(struct P SS*p){return *p;}static void st(struct S SS*p,struct S s){*p=s;}"
+        "int tested(int n){char*tp=__builtin_thread_pointer();struct S SS*ps=(struct S SS*)&gs_;struct P SS*pp=(struct P SS*)&gp;"
+        "struct O SS*po=(struct O SS*)&go;union U SS*pu=(union U SS*)&gu;struct S __seg_fs*fs=(struct S __seg_fs*)((char*)&ts-tp);"
+        "_Complex double __seg_fs*fc=(_Complex double __seg_fs*)((char*)&tc-tp);_Complex float SS*sc=(_Complex float SS*)&gc;"
+        "long r=sum(*ps)+psum(*pp)+cp(ps).b+cpp(pp).y;struct S t=*fs;r+=t.a+t.c;struct S u={11,12,n};st(ps,u);*fs=u;fs->b=99;"
+        "struct O o=*po;r+=o.c[n&7]+o.c[12];struct O o2={\"zyxwvutsrqpo\"};*po=o2;union U v=*pu;r+=v.c[n&3];"
+        "struct S w;w=(*ps=t);r+=w.a;_Complex double z=*fc;r+=(long)(__real__ z*10)+(long)(__imag__ z*10);"
+        "_Complex float zf=*sc*2.0f;r+=(long)__real__ zf+(long)__imag__ zf;r+=sum(*fs)+(n?*ps:*fs).b;"
+        "return (int)(r+gs_.a+gs_.b+gs_.c+ts.b+ts.c+gp.x+go.c[0]+go.c[11]+gu.c[1]);}",
+        "segment-aggregates", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1262,6 +1284,16 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "int tested(int n){unsigned h=2166136261u;v2di a,b;uq4 c,d;sq8 e,f;e3 g,k;fill(&a,16,n);fill(&b,16,n+1);fill(&c,32,n+2);fill(&d,32,n+3);fill(&e,64,n+4);"
           "fill(&f,64,n+5);fill(&g,sizeof g,n+6);fill(&k,sizeof k,n+7);a[1]=-1;b[0]=(long long)(1ull<<63);"
           "v2di x[]={a*b,a*(long long)n,b*b};uq4 y[]={c*d,d*3u};sq8 z[]={e*f,f*-7};e3 w[]={g*k,g*g};FOLD(x);FOLD(y);FOLD(z);FOLD(w);return (int)h;}\n"
+        },
+        // Nontemporal loads and stores (#1834): an ordinary load without SSE4.1, and vectors wider than the target's
+        // nontemporal moves a piece at a time; of 8, 16, 32 and 64 bytes.
+        { "baseline-nontemporal",
+          "typedef int d2 __attribute__((vector_size(8),aligned(8)));typedef float f8 __attribute__((vector_size(32),aligned(32)));"
+          "typedef short w32 __attribute__((vector_size(64),aligned(64)));typedef long long q4 __attribute__((vector_size(32),aligned(32)));\n"
+          "int tested(int n){unsigned h=2166136261u;d2 a,a2;v4si b,b2;f8 c,c2;w32 e,e2;q4 g,g2;fill(&a,8,n);fill(&b,16,n+1);fillf((float*)&c,8,n+2);fill(&e,64,n+3);"
+          "fill(&g,32,n+4);a2=__builtin_nontemporal_load(&a);b2=__builtin_nontemporal_load(&b);c2=__builtin_nontemporal_load(&c);e2=__builtin_nontemporal_load(&e);"
+          "g2=__builtin_nontemporal_load(&g);__builtin_nontemporal_store(a2+1,&a);__builtin_nontemporal_store(b2*3,&b);__builtin_nontemporal_store(c2,&c);"
+          "__builtin_nontemporal_store(e2,&e);__builtin_nontemporal_store(g2^7,&g);FOLD(a);FOLD(b);FOLD(c);FOLD(e);FOLD(g);FOLD(a2);FOLD(e2);return (int)h;}\n"
         },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.

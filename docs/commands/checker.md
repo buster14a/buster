@@ -246,6 +246,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   fallback; they do not establish admitted deferred-reader coverage.
   A GNU statement expression in the expression operand of `sizeof`, `_Alignof`, `__alignof__` or `typeof` is
   unevaluated (#147). Its statements are graph roots of their own, outside the operand's evaluation facts.
+  A discarded statement expression whose value is a comparison warns as clang's DiagnoseUnusedExprResult of the
+  statement expression does: "expression result unused" at the comparison, `-Wunused-value`'s with no note,
+  queued after the statements before it (`check_common_statement_value`, #1447); a statement's own comparison keeps
+  `-Wunused-comparison`.
   Clang drops its unused-result, unused-comparison, comma-operand, `void *`-cast, self-assignment, division,
   bounds, sign-comparison and constant-conversion warnings there. `check_common_unevaluated` reads the token's
   parser context from `-Wvoid-ptr-dereference`'s `check_warning_graph_void_context`, only when one of these
@@ -279,9 +283,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   effect in the operand and stops at an expression whose location a macro wrote (an argument's too), a nested sizeof,
   a type, a specifier's operand, a static selection's other operands, and, in a statement expression, an
   unevaluated-argument builtin's call that is a statement's own expression. The scan is part of the warning graph's
-  16-node pass, and an operand's tokens are classified 64 at a time. Left: the operands the constant reader alone
-  reads (file-scope initializers, array bounds, enumerators, `_Static_assert`), and a bound of a pointer to a
-  variable array in a statement expression's declaration, which clang leaves out and the scan reads.
+  16-node pass, and an operand's tokens are classified 64 at a time. The sizeofs and alignofs the constant reader alone
+  reads (array bounds, enumerators' values, bit-field widths, case labels, `_Alignas`), which have no node, are found by
+  their keywords 64 tokens at a time (`check_warning_graph_constant_queries`): an expression operand's side effect there
+  is an assignment's operator (but a designator's `=`) or an increment's by its role or kind, and a type name's operand
+  warns of none. Left: a bound of a pointer to a variable array in a statement expression's declaration, which clang
+  leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
   A C-style cast from a pointer (an array, a string literal or a function that decays to one) to an integer type
@@ -339,16 +346,22 @@ unused-warning fixtures also check exact scope-completion tokens.
   A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
   arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
   expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a
-  displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Still
-  different: a short-circuited or unreachable statement expression's statements warn, and a comparison as its last
-  value warns as a comparison where clang says "expression result unused".
+  displaced condition's first. Its last value, its statement's and the statement expression's, is scanned once. Its
+  statements are evaluated as it is (`check_common_statement_roots`): a short-circuited operand's, a constant
+  conditional's other arm's and unreachable code's give none of their runtime or unused-value warnings, as clang's CFG
+  leaves their blocks unreachable. A body with statement expressions keeps its unreachable-code proof
+  (`check_common_unreachable`): the walk starts at each statement expression's first entry too, taken as reached, so
+  code after a `return` inside one is dropped as well. Still different: a comparison as its last value warns as a
+  comparison where clang says "expression result unused".
   A folded shift's warnings take clang's words (#1447, `check_driver_shift_message`): "shifting a negative signed
   value is undefined", and "signed shift result (0x…) requires N bits to represent, but 'T' only has W bits", the
   result's hexadecimal and its significant bits. Its `-Wshift-negative-value` is a runtime one like its counts: the
   driver stashes both (`CheckCommonShiftWarnings`) rather than reporting them, the common walk reports each at its
   shift and drops one it proves unevaluated (after a return, a `goto` or an endless loop, in a constant condition's
   other branch), so that a dropped `-Werror` one neither counts nor rejects the unit, and whatever no walk reached is
-  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Two
+  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Under
+  `-fwrapv` (or `-fno-strict-overflow` without `-fno-wrapv`) neither warns, as clang's DiagnoseBadShiftValues defines
+  signed overflow there (`isSignedOverflowDefined`); the counts' warnings stay. Two
   unevaluated places still warn, as clang's do: an unselected `_Generic` or `__builtin_choose_expr` arm, which has no CFG
   block, whose warnings keep the selection's order, and a reachable statement's condition that folds to a constant,
   whose range the program drops. That statement is reached by its keyword and by the first kept root of its executed arm
@@ -426,9 +439,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   Its candidates are the conversion walk's (`check_common_enum_cast_candidate`: an enumeration's target, from a source
   that may be one), and a brace initializer's plan is read for it where a value part's target is an enumeration
   (`CheckInitializer.enum_values`). They are tested only in a unit that names a named enumeration's enumerator or
-  variable (`CheckInput.enum_names`, set where the identifiers' leaves are made): a conversion whose source enumeration
-  is only a member's, a call's result or a cast's isn't looked for without one. A selection whose selected arm is a
-  constant (`_Generic(c, int: B)`) folds to its value, whose enumerator isn't looked for.
+  variable or defines a named enumeration (`CheckInput.enum_names`, set where the identifiers' leaves are made and by
+  `check_input_enum_records`), so that a source enumeration that is only a member's, a call's result or a cast's is
+  looked for too. A selection whose selected arm is an enumerator (`_Generic(c, int: B)`) converts that enumerator's
+  enumeration, as clang's fold of it keeps its type (`check_common_enum_cast_source`).
   `c_check_enum_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and with
   `-c`, with a generated matrix of the C23 underlying types' pairs.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
