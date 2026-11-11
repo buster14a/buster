@@ -231,13 +231,14 @@ build/costs --self-test --root .
 - **Provenance.** The `#:` lines record the row, the runner's CPUs, the
   revisions measured and the CPUs drawn, each with its jobs.
 - **Collect.** After a full run (the nightly snapshot's, or a dispatched
-  `full` run), fetch its shard jobs' logs (`gh api
-  repos/buster14a/buster/actions/jobs/ID/logs`) together with recent main
-  pushes' plain shards. Then run `build/costs collect --tests
-  tools/ci/correctness.tests --output tools/ci/costs LOG...`, which writes
-  each row the logs have. A log is data. One that lacks the job's name, its
-  CPU, its checkout, or the runner's shard line and summary is rejected, and
-  so is the same job twice.
+  `full` run), `bash tools/ci/costs.sh LOGS_DIRECTORY RUN...` fetches the given
+  runs' shard logs (`gh api repos/buster14a/buster/actions/jobs/ID/logs`, each
+  shard whose test step ran) and runs `costs collect --tests
+  tools/ci/correctness.tests --output tools/ci/costs LOG...`, then `costs
+  check`. Give it full runs together with recent main pushes, for more plain
+  samples. `collect` writes each row the logs have. A log is data. One that
+  lacks the job's name, its CPU, its checkout, or the runner's shard line and
+  summary is rejected, and so is the same job twice.
 - **Refresh.** A pull request that adds, renames or removes a heading runs
   `build/costs refresh --tests tools/ci/correctness.tests --costs
   tools/ci/costs`. It keeps every measurement, estimates the new commands and
