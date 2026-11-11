@@ -9316,6 +9316,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_sizes(&test, clang, executable, directory);
+                check_test_driver_asm_recovery(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
