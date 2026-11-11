@@ -14,9 +14,19 @@
 
 #define BUSTER_TEST_TEMPORARY_BYTES 4096
 
+// The buffer, one for the whole executable: main.c's unit defines it, and every other object, a unit of main.c or a
+// benchmark's object of its own, declares it. Every object that includes this file is linked with main.c's. A buffer of
+// each object's own was 19 of the executable's 22 pages of zero thread-local data, which the C library clears at every
+// thread's start, the process's first among them: 18 of an empty file's faults on the 9700X (#1444).
+#if defined(BUSTER_UNIT) && BUSTER_UNIT == BUSTER_UNIT_DRIVER
+_Thread_local char oracle_temporary_buffer[BUSTER_TEST_TEMPORARY_BYTES];
+#else
+extern _Thread_local char oracle_temporary_buffer[BUSTER_TEST_TEMPORARY_BYTES];
+#endif
+
 static inline __attribute__((unused)) const char* oracle_temporary_directory(void)
 {
-    static _Thread_local char directory[BUSTER_TEST_TEMPORARY_BYTES];
+    char* directory = oracle_temporary_buffer;
     const char* base = getenv("TMPDIR");
     base = base != 0 && base[0] != 0 ? base : "/tmp";
     size_t length = 0;
@@ -35,7 +45,7 @@ static inline __attribute__((unused)) const char* oracle_temporary_directory(voi
         {
             slash = false;
         }
-        if (length + 1 >= sizeof(directory))
+        if (length + 1 >= BUSTER_TEST_TEMPORARY_BYTES)
         {
             return base;
         }

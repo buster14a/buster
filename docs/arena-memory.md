@@ -82,10 +82,22 @@ the advice is only where the layout doesn't decide:
   host whose transparent huge pages are `madvise` needs, and which makes the
   kernel compact for them where they are `always`.
 
+On Linux 6.7 and later, whose `MAP_STACK` maps a region `VM_NOHUGEPAGE`, the
+reservations of the first kind, and a busy host's arenas (#672, base pages
+throughout), are mapped `MAP_STACK` rather than advised by a call of their own (#1444,
+`arena_stack_base_pages`, which `arena_page_policy` sets from the kernel's
+release once at the process's start): the whole mapping is then base pages
+until the first commit past `base + small` advises its huge pages, as before,
+and no advice call splits the reservation or takes the address space's lock.
+The pages are the same either way; on an older kernel, or in a process that
+doesn't set the page policy, the reservations advise as before. `test-lanes`
+reads both back.
+
 An arena that stays in its base pages, as most of a small unit's do, takes one
 `mmap` and one `mprotect` and no advice. An empty file's `-fsyntax-only` made
 146 `madvise` calls before, 48 since, and 12 once the preprocessor's tables
-were base pages throughout in one arena of tables (below).
+were base pages throughout in one arena of tables (below); 11 on `main` at
+`92da7275` and 6 with `MAP_STACK` (#1444).
 
 Fewer arenas save more than less advice: on the 9700X an arena costs 2 to 3.4
 µs with its teardown, by its size, though it holds a page or none, in its

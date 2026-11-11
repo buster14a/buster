@@ -303,6 +303,13 @@ Four kinds of case run in a clang process of their own (`isolated`):
   `unsafe_buffer_usage`) open (`Preprocessor.unterminated`);
 - one that leaves `#pragma clang diagnostic push` without its pop.
 
+With `test-preprocessor --clang-server`, each of these runs, as every other
+run of the batch, is a request to `tools/clang-server` rather than a process:
+the server builds a compiler instance for each run, so `__COUNTER__` and the
+regions start afresh in each as in a process, and `--differential` compares
+every request's status and streams with a process's
+([Served runs](commands/oracle-cache.md#served-runs)).
+
 Before its cases, the fuzz batch checks these rules on 12 small sources in
 each mode (`pp_fuzz_check_isolation`), a region whose end a line splice takes
 among them, and the comparison on 22 pairs of texts (`pp_fuzz_check_comparison`):
