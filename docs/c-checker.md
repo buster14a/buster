@@ -9484,18 +9484,19 @@ arguments against the function. The checker now gives these as clang does.
       type conflict, noted at the declaration its lookup found. One whose
       typedef carries the attribute, which crashes clang 23, keeps "conflicting
       types for 'f'";
-    - a declaration's convention attribute is clang's `AttributedType`, which
-      the type table doesn't keep. So `sysv_abi`, the default here, prints
-      nowhere, where clang prints a declared function's
-      (`'void (void) __attribute__((sysv_abi))'`). A pointer declarator's
-      attribute prints canonically: clang prints
-      `'__attribute__((preserve_most))  void ((*))(void)'` for
-      `void (*p)(void) __attribute__((preserve_most))`, and drops the
-      attribute after a macro written inside the pointer's parentheses
-      (`void (MS *p)(void)` is `'MS void (*)(void)'`);
-    - a convention's macro name, as an address space's, is per unit: a
-      convention the unit writes both ways, with two macros, or anywhere
-      through a keyword (`__regcall`), is spelled out.
+    - a declaration's convention sugar (below, "Type sugar") prints in a failed
+      conversion's source and target alone. Every other diagnostic prints the
+      type canonically, as before: a function designator's `preserve_*`
+      before it, and a convention's macro by the unit. A declaration keeps no
+      convention sugar in three cases, and its type prints the old way:
+      - it writes a typedef too (`I (*p)(void) PM` is clang's
+        `'PM I ((*))(void) __attribute__((preserve_most))'`);
+      - it redeclares without the attribute (clang's merged type keeps the
+        first declaration's sugar);
+      - it is a parameter's declarator;
+    - outside that sugar, a convention's macro name, as an address space's, is
+      per unit: a convention the unit writes both ways, with two macros, or
+      anywhere through a keyword (`__regcall`), is spelled out.
   - x86's `interrupt` (#147):
     - of the calls in operands the reader's evaluator alone reads (a
       `typeof`'s, a constant array bound's), a callee through anything but a
@@ -9959,6 +9960,28 @@ enables, which this checker doesn't all give.
   where its typedef holds them itself, as clang's `getUnqualifiedType` does
   (`CI`'s `'int'`). An array decays to a pointer to its qualified element
   (`'const int *'`).
+  A declaration's calling convention keeps clang's `AttributedType` where it
+  is written, in a type sugar node of its own (`c_types_sugar.c`, made by
+  `c_check_type_sugar_input.c`; `docs/c-types.md`'s "Type sugar"). A failed
+  conversion's source and target print it, from the operand's declaration
+  through `&`, `*` and subscripts (`check_driver_operand_sugar`):
+  - `void g(void) __attribute__((sysv_abi))` is
+    `'void (void) __attribute__((sysv_abi))'`, though the canonical type has
+    no `sysv_abi`;
+  - `void (*p)(void) __attribute__((preserve_most))` is
+    `'__attribute__((preserve_most))  void ((*))(void)'`: clang's
+    `ParenType` of the group, around the attribute's function;
+  - an attribute in a group before `*` goes on that group's type, its modified
+    type the function without it. A macro writing it prints that function
+    (`void (MS *r)(void)` is `'MS void (*)(void)'`);
+  - one after a `*` goes on the pointer;
+  - a C23 list before the specifiers goes on the whole type.
+
+  Each list a macro writes prints by that macro, per declaration
+  (`MacroQualifiedType`, `check_driver_sugar_type`). There is no a.k.a.,
+  since clang's `desugarForDiagnostic` doesn't look through these nodes.
+  `no_caller_saved_registers` beside a convention keeps none, since clang
+  rebuilds the type there.
   A target address space that one macro writes throughout the unit prints by
   that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
   `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.

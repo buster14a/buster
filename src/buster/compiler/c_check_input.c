@@ -1157,7 +1157,32 @@ struct CheckInput
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
     bool target_multiversion;
     bool resource;
+    // Type sugar (#1447, c_types_sugar.c), last, out of the hot fields' cache lines: the nodes, and the declaring tokens
+    // that have one, an open-addressed map of token plus one (0 empty) to node, `sugar_mask + 1` slots
+    // (check_input_declared_sugar). Both are empty (sugar_mask 0) until a declarator writes sugar the canonical type
+    // doesn't keep, which few declarations do (check_input_declarator_sugar).
+    TypeSugarTable sugar;
+    uint32_t* sugar_tokens;
+    uint32_t* sugar_nodes;
+    uint32_t sugar_mask;
+    uint32_t sugar_entries;
 };
+
+// The type sugar of the declaration at `token` (#1447, CheckInput.sugar_tokens), or 0.
+static __attribute__((unused)) uint32_t check_input_declared_sugar(const CheckInput* input, uint32_t token)
+{
+    uint32_t result = 0;
+    uint32_t slot = input->sugar_mask != 0 ? (token * 0x9e3779b1u) & input->sugar_mask : 0;
+    bool probing = input->sugar_mask != 0;
+    while (probing)
+    {
+        const uint32_t key = input->sugar_tokens[slot];
+        result = key == token + 1 ? input->sugar_nodes[slot] : 0;
+        probing = key != 0 && key != token + 1;
+        slot = (slot + 1) & input->sugar_mask;
+    }
+    return result;
+}
 
 // A declaring token's bits in CheckInput.declaration_bits (#1167), which were a byte column each: whether it defines its
 // entity, whether it is a tentative definition, whether its entity has static storage (an object's, or a function), a
@@ -7282,6 +7307,8 @@ static uint32_t check_input_attribute_group_close(const Parser* parser, uint32_t
     return open != UINT32_MAX ? parser->tree.parents[open] : UINT32_MAX;
 }
 
+#include "c_check_type_sugar_input.c"
+
 // clang's warnings of a declarator's function types' attributes (#147), which its GetFullTypeForDeclarator gives as it
 // builds the declarator's type, before ProcessDeclAttributes warns of the declaration's attributes: `common` the
 // specifiers', `own` the declarator's, split at `split` (its name, or where it would be) into its chunks' (a group's,
@@ -8283,6 +8310,17 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     }
                     type = check_input_declarator_abi(reader, frame->common_attributes, type, &abi_origin, false);
                     type = check_input_declarator_abi(reader, frame->attributes, type, &abi_origin, false);
+                    // The declaration's type sugar where its lists write a convention (#1447), and none where they don't
+                    // over a name that had some.
+                    const CheckInputAttributes* specifiers = frame->parameter ? frame->common_attributes : run->common_attributes;
+                    if (__builtin_expect(!frame->parameter && (check_input_sugar_list(specifiers) || check_input_sugar_list(frame->attributes)), 0))
+                    {
+                        check_input_declarator_sugar(reader, frame, specifiers, parts, reverse, type);
+                    }
+                    else if (__builtin_expect(reader->output->sugar_entries != 0 && !frame->parameter && frame->name != BUSTER_CHECK_NONE, 0))
+                    {
+                        check_input_set_sugar(reader, frame->name, 0);
+                    }
                 }
                 valid = type != 0;
                 const bool alignas_parameter = frame->parameter && ((frame->common_attributes != 0 && frame->common_attributes->has_alignas) ||
@@ -10471,6 +10509,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         const CheckNoderefType* noderef = reader->declarator_noderef;
         // (The specifiers' function-type attributes have had their warnings with the declarator's, check_input_declarator_step.)
         type = check_input_declarator_abi(reader, attributes, type, &abi_origin, false);
+        // Its sugar over the type its specifiers' convention makes (#1447).
+        const uint32_t declared_sugar = __builtin_expect(reader->output->sugar_entries != 0, 0) && name < reader->output->token_count ?
+                                        check_input_declared_sugar(reader->output, name) : 0;
+        if (__builtin_expect(declared_sugar != 0, 0) && reader->output->sugar.canonical[declared_sugar] != type)
+        {
+            check_input_set_sugar(reader, name, check_input_sugar_retype(reader, declared_sugar, type));
+        }
         valid &= check_input_declarator_conventions(reader, type, is_typedef, attributes, name);
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
         {
