@@ -539,14 +539,17 @@ static void check_builtin_atomic_rmw_test_added(CheckBuiltinAtomicRmwTest* test,
             input = check_builtin_atomic_rmw_test_call(ieee[i], arguments, 3, 1u << 2);
             check_builtin_atomic_rmw_one(table, &input, &result);
             const bool valid = t < 7;
-            const bool leaf = t < 2;
+            // A float's, a double's, a _Float16's and a __bf16's have leaves (#1843), the int operand converted.
+            const bool leaf = t < 4;
+            static const CheckBuiltinAtomicRmwFormat formats[] = { CHECK_BUILTIN_ATOMIC_RMW_F32_BITS, CHECK_BUILTIN_ATOMIC_RMW_F64_BITS, CHECK_BUILTIN_ATOMIC_RMW_F16_BITS,
+                                                                   CHECK_BUILTIN_ATOMIC_RMW_BF16_BITS };
             check_builtin_atomic_rmw_test_expect(test, valid ? result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.action.value.type == floating[t] &&
                 result.operation == ieee_operations[i] && result.atomic.store_value.type == floating[t] && result.atomic.rmw && result.atomic.volatile_access &&
                 result.reads_fp_environment && result.may_raise_fp_exceptions && (result.atomic.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_ORDER) != 0 &&
-                (leaf ? result.atomic.unsupported == 0 && result.format == (t == 0 ? CHECK_BUILTIN_ATOMIC_RMW_F32_BITS : CHECK_BUILTIN_ATOMIC_RMW_F64_BITS) :
+                (leaf ? result.atomic.unsupported == 0 && result.format == formats[t] :
                         result.atomic.unsupported != 0 && (result.atomic.unsupported & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW) == 0) :
                 result.atomic.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.atomic.action.diagnostic_operand == 0,
-                "the IEEE maximum and minimum of floating values alone but long double, a float's and a double's with leaves", i * 16 + t);
+                "the IEEE maximum and minimum of floating values alone but long double, a float's, a double's, a _Float16's and a __bf16's with leaves", i * 16 + t);
         }
         arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_CONST)), 21, 0);
         input = check_builtin_atomic_rmw_test_call(ieee[i], arguments, 3, 1u << 2);

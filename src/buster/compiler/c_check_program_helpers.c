@@ -287,7 +287,9 @@ static __attribute__((unused)) uint32_t check_program_helper_effects(const Check
     else if (family == CHECK_PROGRAM_HELPER_ATOMIC_RMW)
     {
         const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(helper->id);
-        const bool ieee = rule != NULL && check_builtin_atomic_rmw_ieee(rule->operation);
+        // A _Float16's or a __bf16's IEEE maximum and minimum compute in the integer registers (#1843), touching no
+        // floating environment, where a float's and a double's read and raise as clang's code does.
+        const bool ieee = rule != NULL && check_builtin_atomic_rmw_ieee(rule->operation) && !cbuiltin_atomic_rmw_half(helper->rmw_format);
         effects &= (helper->result_type == BUSTER_TYPE_VOID ? ~BUSTER_CHECK_HELPER_READS : ~0u) &
                    (ieee ? ~0u : ~(BUSTER_CHECK_HELPER_FP_ENVIRONMENT | BUSTER_CHECK_HELPER_FP_EXCEPTIONS));
     }
@@ -592,10 +594,13 @@ static uint32_t check_program_helper_key(CBuiltinId id, uint64_t bytes, bool rmw
     uint32_t key = UINT32_MAX;
     const CheckBuiltinAtomicRmwRule* rule = rmw ? check_builtin_atomic_rmw_rule(id) : NULL;
     const uint32_t width = bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
-    // A floating format's width is its type's.
+    // A floating format's width is its type's. A unit's _Float16 and __bf16 leaves (one format of each, its target's) share
+    // the 2-byte width with bool's layout, which is 1 byte alone, and the signed one, which min and max alone take.
     const uint32_t layout = format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS ? 0 : format == CBUILTIN_ATOMIC_RMW_BOOL_BITS ? 1 :
                             format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS ? 2 :
-                            format == CBUILTIN_ATOMIC_RMW_F32_BITS || format == CBUILTIN_ATOMIC_RMW_F64_BITS ? 3 : UINT32_MAX;
+                            format == CBUILTIN_ATOMIC_RMW_F32_BITS || format == CBUILTIN_ATOMIC_RMW_F64_BITS ? 3 :
+                            format == CBUILTIN_ATOMIC_RMW_F16_BITS || format == CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS ? 1 :
+                            format == CBUILTIN_ATOMIC_RMW_BF16_BITS || format == CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS ? 2 : UINT32_MAX;
     if (rule != NULL && (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8) && layout != UINT32_MAX)
     {
         key = BUSTER_CHECK_PROGRAM_HELPER_FIXED + ((uint32_t)(rule - check_builtin_atomic_rmw_rules) * 4 + width) * 4 + layout;
@@ -722,6 +727,19 @@ static const char* check_program_helper_atomic_reason(const CheckBuiltinAtomicEf
     return reason;
 }
 
+// The leaf format of clang's IEEE maximum and minimum of a _Float16 or a __bf16 (#1843), as the unit's target makes clang's
+// code: a _Float16 computed in half precision with AVX512-FP16, which quiets no NaN, else in float; a __bf16 converted back
+// by VCVTNEPS2BF16, which flushes denormals, with AVX512-BF16 or AVX-NE-CONVERT. A function whose own target differs is
+// refused at the lowering (check_lower_helper).
+static CBuiltinAtomicRmwFormat check_program_helper_half_format(const CheckProgram* program, TypeId plain)
+{
+    const X86Target* target = &program->target;
+    const bool native = (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0;
+    const bool flush = (target->features & BUSTER_X86_FEATURE(AVX512BF16)) != 0 || (target->extensions & BUSTER_X86_EXTENSION(AVXNECONVERT)) != 0;
+    return plain == BUSTER_TYPE_FLOAT16 ? (native ? CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS : CBUILTIN_ATOMIC_RMW_F16_BITS) :
+                                          (flush ? CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS : CBUILTIN_ATOMIC_RMW_BF16_BITS);
+}
+
 // A read/modify/write's leaf (c_builtin_atomic_rmw_helpers.c), of its builtin, width and value format: integer and pointer
 // bits, bool's 0 or 1, for min and max a signed integer's, and for GNU's exchange and clang's IEEE maximum and minimum a
 // float's or a double's (the lowering passes and takes their bits, check_lower_helper). A call passes the object's address and its fixed arguments
@@ -741,8 +759,9 @@ static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, 
     const bool integer = valid_type && check_action_integer_type(types, effect->value_type, &width, &is_signed);
     const bool pointer = valid_type && check_action_kind(types, effect->value_type) == BUSTER_TYPE_KIND_POINTER;
     const TypeId plain = valid_type ? type_unqualified(type_strip_aligned(types, effect->value_type)) : 0;
-    const bool floating = (rule->id == CBUILTIN_ATOMIC_EXCHANGE_N || check_builtin_atomic_rmw_ieee(rule->operation)) &&
-                          (plain == BUSTER_TYPE_FLOAT || plain == BUSTER_TYPE_DOUBLE);
+    const bool ieee = check_builtin_atomic_rmw_ieee(rule->operation);
+    const bool half = ieee && (plain == BUSTER_TYPE_FLOAT16 || plain == BUSTER_TYPE_BF16);
+    const bool floating = ((rule->id == CBUILTIN_ATOMIC_EXCHANGE_N || ieee) && (plain == BUSTER_TYPE_FLOAT || plain == BUSTER_TYPE_DOUBLE)) || half;
     // A legacy release is a store, no read/modify/write of its object, and so is a clear.
     const bool release = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_RELEASE || rule->operation == CHECK_BUILTIN_ATOMIC_RMW_CLEAR;
     if (effect->runtime_builtin != rule->id || !effect->compiler_barrier || effect->rmw == release || !valid_type ||
@@ -775,7 +794,8 @@ static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, 
             .result_type = release ? BUSTER_TYPE_VOID : BUSTER_TYPE_ULONG,
             .compiler_barrier = true,
             .required_alignment = (uint32_t)effect->object_size,
-            .rmw_format = boolean ? CBUILTIN_ATOMIC_RMW_BOOL_BITS : plain == BUSTER_TYPE_FLOAT && floating ? CBUILTIN_ATOMIC_RMW_F32_BITS :
+            .rmw_format = boolean ? CBUILTIN_ATOMIC_RMW_BOOL_BITS : half ? check_program_helper_half_format(program, plain) :
+                          plain == BUSTER_TYPE_FLOAT && floating ? CBUILTIN_ATOMIC_RMW_F32_BITS :
                           floating ? CBUILTIN_ATOMIC_RMW_F64_BITS : ordered && is_signed ? CBUILTIN_ATOMIC_RMW_SIGNED_BITS : CBUILTIN_ATOMIC_RMW_INTEGER_BITS,
             .rmw = true,
         };
