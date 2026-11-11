@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original diagnose_if and enable_if sources (#1447, c_check_condition.c). Clang supplies the external diagnostic oracle.
 // Include after c_check_warning_driver_test.c, whose fixture runner compares complete no-caret diagnostics through both
-// kernels and lane requests, under the default, -Werror and -w policies, with -fsyntax-only and -c. Each source has at
-// most one error the reader finds before its calls are checked: the driver gives a unit's first such error alone.
+// kernels and lane requests, under the default, -Werror and -w policies, with -fsyntax-only and -c. A condition's own
+// error drops its attribute and the reader goes on (#2383), as clang's does.
 
 static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] =
 {
@@ -52,6 +52,29 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .source = "int g; void f(int x) __attribute__((enable_if(g, \"a\")));\n",
         .errors = 1,
         .notes = 1,
+    },
+    // A volatile parameter's read is never a constant (#2383); each declaration's error drops its attribute, and the unit
+    // goes on to the next one's and to its calls.
+    {
+        .name = "enable_if and diagnose_if reading a volatile parameter",
+        .source = "int b7(volatile int a) __attribute__((enable_if(a > 0, \"\")));\n"
+                  "int b8(volatile int a) __attribute__((diagnose_if(a > 0, \"x\", \"warning\")));\n"
+                  "int g; int c(int x) __attribute__((enable_if(g, \"\")));\n"
+                  "int d(int x) __attribute__((enable_if(x, \"\")));\n"
+                  "void h(void) { b7(1); c(1); d(0); }\n",
+        .errors = 4,
+        .notes = 4,
+    },
+    {
+        .name = "a volatile parameter's read that some arguments skip",
+        .source = "int c1(int x, volatile int a) __attribute__((enable_if(x && a, \"\")));\n"
+                  "int c2(int x, volatile int a) __attribute__((enable_if(x || a, \"\")));\n"
+                  "int c3(int x, volatile int a) __attribute__((enable_if(x ? a : 1, \"\")));\n"
+                  "int c4(volatile int a) __attribute__((enable_if(sizeof(a) == 4, \"\")));\n"
+                  "int c5(volatile int *a) __attribute__((enable_if(a != 0, \"\")));\n"
+                  "void g(int* p) { c1(1, 2); c1(0, 2); c2(0, 3); c2(1, 3); c3(0, 1); c4(1); c5(p); }\n",
+        .errors = 4,
+        .notes = 4,
     },
     {
         .name = "enable_if with an argument that is no constant",
