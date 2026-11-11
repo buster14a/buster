@@ -3285,7 +3285,13 @@ What the lowering covers past scalars (#145's programs):
     element width. A 1- or 2-byte operand is padded into private storage for
     a minimum-width row, and only the result's actual bytes are stored.
     Libm functions, pdep, pext and the scalar clmul path read elements through
-    the same address/value handoff. These expansions, ordered floating sums
+    the same address/value handoff. An integer scalar's pdep, pext and clmul,
+    of up to 64 bits, is one row (`check_lower_scalar_lanes`, #2410): BMI2's
+    PDEP or PEXT, or PCLMULQDQ between general and xmm registers, of its
+    operands' bits zero-extended to 32 or 64 bits, the result truncated to
+    the scalar. A `_BitInt` scalar of up to 64 bits, of any width, takes the
+    integer sequences of `check_lower_integer_elements` as a 1-, 2-, 4- or
+    8-byte scalar does, a funnel shift's count modulo a width no power of two. These expansions, ordered floating sums
     and floating reduction trees are bounded to 1,024 elements and preserve
     the ordinary rows' element-type and target-feature refusals.
   - boolean elementwise builtins use packed bit operations at scalar and
@@ -3334,7 +3340,8 @@ What the lowering covers past scalars (#145's programs):
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars; nontemporal builtins of scalars and at underaligned addresses; bit
+  scalars wider than 64 bits (`__int128` and `_BitInt` past 64 bits, #2410), and of scalars, pdep and pext
+  without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
