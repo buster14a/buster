@@ -1893,7 +1893,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
         // function's, which realigns its stack (#1447, Tier0Function.realign_stack), and a function with segment overrides
         // (#1447, Tier0Function.segments: loads and stores in __seg_fs or __seg_gs, which the IR doesn't carry yet) are Tier
-        // 0's: ordinary Tier 1 falls back to them.
+        // 0's: ordinary Tier 1 falls back to them. A caller of setjmp's library kin lowers (Tier0Function.calls_returns_twice):
+        // only Tier 1's admission leaves it to Tier 0 (check_tier1_compile, #1847).
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)
