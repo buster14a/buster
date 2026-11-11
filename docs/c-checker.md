@@ -7776,7 +7776,10 @@ arguments against the function. The checker now gives these as clang does.
 - **`-Wgnu-alignof-expression`.** C11's `_Alignof` and C23's `alignof` of an
   expression get clang's "'_Alignof' applied to an expression is a GNU
   extension" at the keyword (`check_input_alignof_expression`), once whichever
-  evaluation reaches it. GNU's `__alignof__` doesn't.
+  evaluation reaches it. GNU's `__alignof__` doesn't. An operand that holds
+  an undeclared name, which the walk builds no node of, gets it too, after the
+  name's error, as clang reads it as an expression; a type name's doesn't
+  (`check_input_alignof_undeclared`, #1946).
 - **Attributes after a definition.** A function's or variable's declaration
   after the entity's definition may carry a declaration attribute that the
   definition lacks: the definition's own and those it took from earlier

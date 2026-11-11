@@ -2491,6 +2491,49 @@ static void check_input_alignof_expression(CheckInputReader* reader, uint32_t to
     }
 }
 
+// clang's -Wgnu-alignof-expression of an _Alignof or alignof whose operand holds an undeclared name (#1946): clang reads
+// the operand as an expression and gives the extension's warning of it after the name's error, where the reader's walk
+// builds no node for it (check_input_alignof_expression). From each undeclared name's report, its ancestors up to the
+// operand's `)`, whose keyword is the operator; a specifier on the way makes the operand a type name, which has none. An
+// outer one's operand holds the inner one, so the climb goes on to the statement.
+static void check_input_alignof_undeclared(CheckInputReader* reader)
+{
+    const CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t r = 0; !input->resource && r < input->report_count; r += 1)
+    {
+        uint32_t at = input->reports[r].message == CHECK_INPUT_UNDECLARED ? input->reports[r].token : BUSTER_CHECK_NONE;
+        bool typed = false;
+        for (uint32_t steps = 0; at < count && steps < count; steps += 1)
+        {
+            const uint8_t role = parser->tree.roles[at];
+            const uint32_t parent = parser->tree.parents[at];
+            typed |= role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG || role == PARSE_ROLE_CLOSE_SPECIFIER;
+            const bool closed = role == PARSE_ROLE_CLOSE_SIZEOF && parent < count && parser->tokens.kinds[parent] == PARSE_KIND_SIZEOF;
+            const uint32_t name = closed ? parser->tokens.names[parent] : 0;
+            if ((name == C_NAME_ALIGNOF_C11 || name == C_NAME_ALIGNOF) && !typed)
+            {
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION,
+                    .kind = CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION,
+                    .token = parent,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = at + 1,
+                    .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_once(reader, &event);
+            }
+            // A sizeof's or an alignof's operand is an expression of the operator around it.
+            typed = closed ? false : typed;
+            const bool statement = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || parent == at;
+            at = statement ? BUSTER_CHECK_NONE : parent;
+        }
+    }
+}
+
 static void check_input_warning_once(CheckInputReader* reader, const CheckWarningEvent* event)
 {
     const uint64_t key = (uint64_t)event->kind << 32 | ((uint64_t)event->token + 1);
@@ -15479,6 +15522,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_fallthrough_placements(&reader);
             }
             check_input_diagnostic_recover(&reader, resolved);
+            check_input_alignof_undeclared(&reader);
             if (input->graph.ns_constant_string != 0 && !input->resource)
             {
                 check_input_cfstring_class(&reader);
