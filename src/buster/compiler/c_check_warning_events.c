@@ -186,6 +186,9 @@ enum
     // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
     // is incompatible with C++" (#2168).
     CHECK_WARNING_ID_CXX_COMPAT = 136,
+    // A relational comparison whose left operand is one, unparenthesized (#2264, clang's diagnoseChainedComparison):
+    // -Wparentheses', an error by default.
+    CHECK_WARNING_ID_CHAINED_COMPARISON = 137,
     CHECK_WARNING_ID_COUNT,
 };
 

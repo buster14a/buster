@@ -5834,7 +5834,13 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. A divisor `-Wdivision-by-zero` reads
+`-Wdangling-else` and `-Wuninitialized`. A chained comparison (#2264,
+`check_common_chained_comparisons`) is clang's `-Wparentheses` error by
+default: a `<`, `>`, `<=` or `>=` whose left operand is one, unparenthesized,
+"chained comparison 'X < Y < Z' does not behave the same as a mathematical
+expression" at the outer operator; `-Wno-error=parentheses` demotes it and
+`-w` leaves it an error, which the common checks under `-w` still give
+(`check_common_default_error`), with no `-Werror,` in its option. A divisor `-Wdivision-by-zero` reads
 as clang's EvaluateAsInt does (`check_common_zero_divisor`): an integer
 constant, or, through integer casts, a const non-volatile object whose
 completed initializer's receipt (`CheckInput.const_values`) gives zero
