@@ -4930,6 +4930,19 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   the name was declared with linkage before, another call's implicit
   declaration or a block's extern (clang's `ExternCPrev`). The call still
   declares the function implicitly.
+- **An unknown builtin's call** (#2121): a `__builtin_` name that no clang
+  builtin row has in the unit's language mode, called directly before C23,
+  is declared implicitly as any undeclared function, with clang's
+  `warn_builtin_unknown`: "use of unknown builtin '__builtin_foo'
+  [-Wimplicit-function-declaration]", an error by default in every mode
+  (C89's too, and under `-w`), a warning under
+  `-Wno-error=implicit-function-declaration` and nothing under
+  `-Wno-implicit-function-declaration` (`PPOptions.implicit_builtin_diagnostic`,
+  `CheckInput.implicit_function_builtins`). Its error searches for a
+  correction in every mode. `__builtin_c23_va_start` is such a name before
+  C23, as clang's table makes it a builtin in C23 alone
+  (`check_constant_builtin_name`, `check_input_builtin_language`). In C23,
+  and where the name isn't called, it is an undeclared identifier.
 - **The limit.** At most 50 searches are made in a unit
   (`-fspell-checking-limit`), counted in source order: the values', the
   calls', and clang's search at each call of a prototyped function with too
@@ -4949,6 +4962,11 @@ use the dynamic-programming table, the twin that `test-checker` checks against
 with an undeclared name fails them and is read again in source order.
 
 Left as they were:
+
+- No search offers a builtin's name or a predefined type's (clang's
+  `use of undeclared identifier '__builtin_absx'; did you mean
+  '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
+  `__builtin_c23_va_start` named outside a call before C23).
 
 - At a statement's start clang parses the statement again with the keyword
   it takes (`retrn x;` is a `return`, `whil;` then gives "expected '(' after

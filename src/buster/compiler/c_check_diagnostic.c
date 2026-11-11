@@ -309,10 +309,14 @@ static CheckWarningSeverity check_diagnostic_range_severity(const CheckInput* in
     return quiet ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE, baseline);
 }
 
-static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t token)
+// The severity of the unit's `index`th implicit declaration's diagnostic: a library function's, an unknown builtin's
+// (clang's DefaultError "use of unknown builtin", #2121) or any other function's policy.
+static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t index)
 {
+    const uint32_t token = input->implicit_function_tokens[index];
     const bool library = token < input->token_count && input->function_flags != NULL && (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
-    const uint8_t policy = library ? input->implicit_library_diagnostic : input->implicit_function_diagnostic;
+    const bool builtin = input->implicit_function_builtins != NULL && input->implicit_function_builtins[index];
+    const uint8_t policy = builtin ? input->implicit_builtin_diagnostic : library ? input->implicit_library_diagnostic : input->implicit_function_diagnostic;
     const CheckWarningSeverity baseline = policy == 1 ? CHECK_WARNING_IGNORE : policy == 2 ? CHECK_WARNING_WARNING : CHECK_WARNING_ERROR;
     const CheckWarningSeverity severity = input->implicit_function_system || !check_graph_system_token(&input->graph, token) ?
         check_diagnostic_severity_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION, baseline) : CHECK_WARNING_IGNORE;
@@ -559,7 +563,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
     {
         const uint32_t at = input->implicit_function_tokens[i];
-        if (at < first && check_diagnostic_implicit_function(input, at) >= CHECK_WARNING_ERROR)
+        if (at < first && check_diagnostic_implicit_function(input, i) >= CHECK_WARNING_ERROR)
         {
             first = at;
         }
