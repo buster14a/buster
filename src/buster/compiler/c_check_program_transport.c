@@ -343,8 +343,9 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
     const bool brain = element_type == BUSTER_TYPE_BF16;
     const bool negation = op == CHECK_OP_NEGATIVE && element.floating && !brain;
     const uint32_t operands = unary ? 1 : 2;
-    // Integer division and remainder, element by element (check_lower_vector_divide's, #2216).
-    const bool divide = bits == NULL && (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !element.floating && !brain;
+    // Integer division and remainder, and products and shifts no row takes, element by element
+    // (check_lower_vector_lanewise's, #2216).
+    const bool divide = bits == NULL && !brain && check_vector_lower_lanewise(&writer->target, op, element, piece);
     Tier0Operation rows[2];
     uint32_t main_row = BUSTER_CHECK_NONE;
     uint32_t not_row = BUSTER_CHECK_NONE;
@@ -392,7 +393,7 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
             {
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
             }
-            check_lower_instruction(writer, op == CHECK_OP_DIVIDE ? BUSTER_TYPED_DIV : BUSTER_TYPED_MOD, computed, 0);
+            check_lower_instruction(writer, check_lower_binary((CheckOp)op), computed, 0);
             for (uint32_t j = operands; j-- > 0;)
             {
                 if (stored != computed)

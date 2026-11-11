@@ -630,11 +630,13 @@ the operations, of another class than its row's result or of an operand of anoth
 vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
 conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
 
-**Integer vector division (#2216).** No x86 instruction divides vectors of integers: at every target, `/` and `%` of
-them (and `/=` and `%=`) are element by element, as clang's code divides each (`check_lower_vector_divide`, and a
-transport vector's in `check_lower_transport_rows`): the operands set into frame temporaries, each lane's elements loaded,
-promoted to int or unsigned int where narrower, divided by the scalar `DIV` or `MOD`, truncated and set into the result's
-temporary; an extended vector's padding lanes are not divided.
+**Integer vector operators element by element (#2216).** No x86 instruction divides vectors of integers: at every
+target, `/` and `%` of them (and `/=` and `%=`) are element by element, as clang's code divides each; so are the
+products and shifts no row of the target's takes (bytes' at every target, and shifts by a vector's counts without
+AVX2): `check_vector_lower_lanewise` says which, `check_lower_vector_lanewise` lowers them (a transport vector's in
+`check_lower_transport_rows`): the operands set into frame temporaries, each lane's elements loaded, promoted to int or
+unsigned int where narrower, combined by the scalar `DIV`, `MOD`, `MUL`, `SHL` or `SHR`, truncated and set into the
+result's temporary; an extended vector's padding lanes are not computed.
 
 **Targets without AVX-512 (#775).** At `x86-64`, `x86-64-v2` and `x86-64-v3` a function's vector transport is 16 bytes
 of SSE2 or 32 of AVX (`vector_bytes`, #955), through the first free floating register, and its rows are the front end's

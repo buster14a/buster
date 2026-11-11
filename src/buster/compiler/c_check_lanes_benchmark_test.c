@@ -3,7 +3,7 @@
 //
 // benchmark-check-lanes' preparation (#1045): the program it emits is the one -c compiles for the target its options give.
 // Original fixtures run through the command on one lane and one pass: a unit of 512-bit vectors, which the baseline x86-64
-// profile refuses (their variable shifts: "vector shifts unavailable at this target", SSE2 having none) and znver5
+// profile refuses (their bf16 arithmetic: "vector arithmetic of bf16 elements without AVX512-BF16") and znver5
 // takes, must be measured with -march=znver5 and fail at its emission for the baseline, as -c does; and a baseline unit
 // whose function's target
 // attribute ("avx2") takes a 32-byte vector must be measured, which it is only when the program has the options'
@@ -55,10 +55,11 @@ static bool check_lanes_benchmark_test_run(char** arguments, uint32_t count, int
 static __attribute__((noinline)) void check_test_check_lanes_benchmark(CheckTest* test)
 {
     static const char* const fixtures[] = {
-        // Two functions that return and shift 512-bit vectors, which -c lowers for znver5 and refuses for the baseline.
-        "typedef int V __attribute__((vector_size(64)));\n"
-        "V add(V a, V b)\n{\n    return a << b;\n}\n"
-        "int first(V a)\n{\n    V c = add(a, a);\n    return c[0];\n}\n",
+        // Two functions that return and add 512-bit vectors of bf16, which -c lowers for znver5 (AVX512-BF16's) and refuses
+        // for the baseline.
+        "typedef __bf16 V __attribute__((vector_size(64)));\n"
+        "V add(V a, V b)\n{\n    return a + b;\n}\n"
+        "int first(V a)\n{\n    V c = add(a, a);\n    return (int)c[0];\n}\n",
         // A 32-byte vector in a function whose target attribute adds AVX2 to the baseline: the unit's target refuses it.
         "typedef int V8 __attribute__((vector_size(32)));\n"
         "__attribute__((target(\"avx2\"))) static int wide(int x)\n{\n    V8 a = { 0 };\n    a[0] = x;\n    V8 b = a + a;\n    return b[0];\n}\n"
