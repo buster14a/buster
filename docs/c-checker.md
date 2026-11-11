@@ -308,8 +308,16 @@ integer type of any width but `_BitInt` takes it. GNU attributes among the base'
 clang has them: ignored, but one that would make it a vector's (`vector_size`,
 `ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
 declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
-none. A declaration of it with a declarator (`enum E : int x;`) is refused at
-the `:`, and an enum without a base can't be given one, nor the other way round,
+none. A declaration of it with a declarator (`enum E : int x;`, a typedef's
+too) is clang's `-Welaborated-enum-base` error at the `:` (#2213, "non-defining
+declaration of enumeration with a fixed underlying type is only permitted as a
+standalone declaration; missing list of enumerators?"), an error by default
+(`BUSTER_CHECK_WARNING_DEFAULT_ERROR`) that `-Wno-error=elaborated-enum-base`
+makes a warning and `-Wno-elaborated-enum-base` silences. The reader goes on as
+clang's parser does, with an elaborated reference: a visible enum of the name is
+that enum, the base ignored (no mismatch with its own), and a new name is
+declared with the base, as `enum E : int;` declares it; the base's own warnings
+are given. An enum without a base can't be given one, nor the other way round,
 each where clang reports it. An `aligned` attribute after its body, which clang
 applies after the base completed it, sets its alignment then (#1447,
 `type_enum_realign`), as clang's does where nothing has asked its layout yet:

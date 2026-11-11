@@ -4925,11 +4925,24 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool same_scope = previous != 0 && reader->bindings.depth[previous - 1] == depth;
         valid &= name != 0 || body;
         valid &= !body || definition;
-        if (valid && fixed && !body && !forward)
+        // `enum E : T x;` (#2213): clang's ParseEnumSpecifier gives -Welaborated-enum-base, an error by default, at the `:`,
+        // and goes on with an elaborated reference: a visible tag of the name is that tag, the base ignored, and a new one is
+        // declared with the base, as `enum E : T;` would declare it.
+        const bool elaborated = valid && fixed && !body && !forward;
+        if (elaborated)
         {
-            // `enum E : T x;`, which clang reports at the `:`.
-            check_input_report(reader, colon, CHECK_INPUT_DECLARATION);
-            valid = false;
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_ELABORATED_ENUM_BASE,
+                .kind = CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
+                .token = colon,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_ERROR,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = colon,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
         }
         const TypeId underlying = valid && fixed ? check_input_enum_underlying(reader, colon, i) : 0;
         valid &= !fixed || underlying != 0;
@@ -5029,10 +5042,12 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             type = reader->declared_types[old];
             const uint32_t tag = type_kind(reader->types, type) == kind ? reader->types->types.index[type_index(type)] : 0;
             const uint8_t state = tag != 0 && kind == BUSTER_TYPE_KIND_ENUM ? reader->enum_fixed[tag] : BUSTER_CHECK_ENUM_NONE;
+            // (An elaborated reference's base is ignored: #2213.)
+            const bool based = fixed && !elaborated;
             valid = type_kind(reader->types, type) == kind &&
-                    (state == BUSTER_CHECK_ENUM_NONE ? !fixed && (!body || !type_is_complete(reader->types, type)) :
-                                                       (fixed || (!body && !forward)) && (!body || state == BUSTER_CHECK_ENUM_FIXED) &&
-                                                       (!fixed || reader->types->types.base[type_index(type)] == underlying));
+                    (state == BUSTER_CHECK_ENUM_NONE ? !based && (!body || !type_is_complete(reader->types, type)) :
+                                                       (based || (!body && !forward)) && (!body || state == BUSTER_CHECK_ENUM_FIXED) &&
+                                                       (!based || reader->types->types.base[type_index(type)] == underlying));
             if (!valid && type_kind(reader->types, type) == kind && kind == BUSTER_TYPE_KIND_ENUM)
             {
                 // A base that differs from the enum's, or that it hadn't or had (#1447): clang's CheckEnumRedeclaration at

@@ -196,6 +196,9 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
+    // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
+    CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 141,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -517,6 +520,8 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // An enum's fixed underlying type in a declaration with a declarator (#2213), at its `:`: its description's words.
+    CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -638,6 +643,9 @@ typedef enum CheckWarningUnitEnd
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
 // `#pragma pack`, `#pragma options align` or `#pragma align` warning, whose payload.name is its CheckPackMessage).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
+// An error by default, clang's DefaultError (#2213: -Welaborated-enum-base), which -Wno-error=NAME demotes to a warning;
+// its flag has no "-Werror," while it is one.
+#define BUSTER_CHECK_WARNING_DEFAULT_ERROR 0x40u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
 // warning group's index in pp_features_warning plus one, 0 for none.
