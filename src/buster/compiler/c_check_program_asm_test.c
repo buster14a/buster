@@ -791,6 +791,19 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){unsigned long long wide=((unsigned long long)(unsigned)n*2654435761u<<17)^0x123456789abcdefull;"
         "return mask_not((unsigned short)(n*977))+mask_byte((unsigned char)(n*31))*3+(int)mask_add((unsigned)n*40503u,0x10001u*(unsigned)n)+(int)(mask_shift(wide)>>7)+mask_tied((unsigned short)(n*12345))*5+mask_general((unsigned short)(n+77))*7;}",
         "asm-opmask", clang, masks_native);
+    // Explicit register variables in the other classes' registers (#1846, the owner's decision on #1447): mm2, k3 and
+    // st, each the register its template names explicitly too (the MMX one copied out through mm2, the opmask one through
+    // k3), whatever the constraint's letter, as clang's code places them.
+    check_test_program_source(test,
+        "static long mmx_variable(long x){register long m __asm__(\"mm2\")=x;long o;__asm__(\"paddd %1, %1\\n\\tmovq %%mm2, %0\" : \"=r\"(o), \"+y\"(m));long r=o+m;__asm__ volatile(\"emms\");return r;}"
+        "static long double x87_variable(long double x){register long double s __asm__(\"st\")=x;__asm__(\"fsqrt\" : \"+t\"(s));return s;}"
+        "int tested(int n){return (int)mmx_variable(n*3+1)+(int)(x87_variable((long double)(n*n))*4);}",
+        "asm-register-variable-mmx-x87", clang);
+    check_test_program_source_native(test,
+        "static __attribute__((target(\"avx512f\"))) unsigned short mask_variable(unsigned short x){register unsigned short k __asm__(\"k3\")=x;unsigned o;"
+        "__asm__(\"knotw %1, %1\\n\\tkmovw %%k3, %0\" : \"=r\"(o), \"+k\"(k));return (unsigned short)(o+k);}"
+        "int tested(int n){return mask_variable((unsigned short)(n*977));}",
+        "asm-register-variable-opmask", clang, masks_native);
     check_test_program_boundary_reason(test, "int tested(int n){unsigned short m=(unsigned short)n;__asm__(\"knotw %0, %0\" : \"+k\"(m));return m;}",
                                        "asm-opmask-baseline", true, false, 0, 1, "inline assembly opmask operands without AVX-512F");
     check_test_program_boundary_reason(test, "__attribute__((target(\"avx512f\"))) int tested(int n){unsigned m=(unsigned)n;__asm__(\"knotd %0, %0\" : \"+k\"(m));return (int)m;}",
