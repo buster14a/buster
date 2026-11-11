@@ -528,9 +528,18 @@ statement's first error alone is given, as clang returns there.
 Differences left: a `target` attribute on an earlier declaration alone, not
 the definition, doesn't widen an operand's limit, where clang's
 `getFunctionFeatureMap` reads the inherited attribute; an asm statement's
-constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369); and
-clang's "ignored asm label 'X' on automatic variable" warning is missing
-(#2370).
+constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369).
+
+An asm label on a block-scope object of automatic storage (none or `auto`,
+C23's inferred `auto` and `constexpr` too), not `register`, is clang's
+"ignored asm label 'X' on automatic variable" (#2370,
+`warn_asm_label_on_auto_decl`, in no group: `-Werror` makes it an error, `-w`
+silences it), at the label's first string, X its decoded text
+(`check_input_asm_labels`, `CHECK_WARNING_ID_ASM_LABEL_ON_AUTO`). A static,
+extern, function or typedef label is not warned, as clang's. Left: an asm label
+in a `for` statement's declaration is a syntax error here, where clang takes it (#2419),
+and a block-scope `_Thread_local` object's error is "invalid or unsupported
+declaration", not clang's (#2420).
 
 Such a variable has no object and no symbol (an initializer is ignored, as
 clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
