@@ -1098,24 +1098,33 @@ static void check_input_asm_labels(CheckInputReader* reader)
             }
         }
     }
-    // A register variable's label names its register.
+    // A local register variable's label names a register clang knows (#1846, check_input_register_name_valid), as clang's
+    // Sema checks it: here, after its body, so that a later syntax error's repair keeps it first. A global's is
+    // check_input_register_label's.
     for (uint32_t a = 0; a < attributed_count && !input->resource; a += 1)
     {
         const uint32_t token = attributed[a];
-        const CheckInputAttributes* attributes = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
+        // (In a body: a file-scope declaration's tokens are at depth 0.)
+        const bool local = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) && reader->parser->tree.depths[token] != 0;
+        const CheckInputAttributes* attributes = local ? check_input_attributes_at(input, token) : NULL;
         for (uint32_t i = 0; attributes != NULL && token < reader->expression_limit && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + i;
-            if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= reader->expression_limit)
+            if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= reader->expression_limit && !check_input_register_name_valid(attribute->text) &&
+                attribute->text.length < BUSTER_CHECK_REGISTER_NAME_UNSUITABLE)
             {
-                const CheckAsmText name =
+                // Its bytes stay in the reader's arena, as an asm constraint's (CHECK_INPUT_REGISTER_NAME).
+                uint8_t* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)attribute->text.length + 1);
+                const uint32_t before = input->report_count;
+                if (copy != NULL)
                 {
-                    .bytes = (const uint8_t*)attribute->text.pointer,
-                    .length = attribute->text.length,
-                };
-                if (!check_asm_register(name))
+                    memcpy(copy, attribute->text.pointer, attribute->text.length);
+                    check_input_report(reader, attribute->argument_first, CHECK_INPUT_REGISTER_NAME);
+                }
+                if (input->report_count > before)
                 {
-                    check_input_report(reader, attribute->argument_first, CHECK_INPUT_DECLARATION);
+                    input->reports[before].value = (uint64_t)(uintptr_t)copy;
+                    input->reports[before].detail = (uint32_t)attribute->text.length;
                 }
             }
         }
@@ -1199,6 +1208,16 @@ static void check_input_asm_finish(CheckInputReader* reader)
     }
 }
 
+// Whether expression `node` names a global register variable (#1846: `register long sp __asm__("rsp")` at file scope),
+// as clang's refersToGlobalRegisterVar takes it: the variable itself, past parentheses.
+static bool check_asm_global_register(const CheckInput* input, const CheckStream* stream, uint32_t node)
+{
+    const CheckValue value = node < stream->count && input->graph.ops[node] == CHECK_OP_VALUE ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    const uint32_t declaration = value.object != 0 && value.object <= input->token_count ? value.object - 1 : BUSTER_CHECK_NONE;
+    return declaration < input->token_count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) &&
+           check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
+}
+
 static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, uint32_t statement, uint32_t operand)
 {
@@ -1244,6 +1263,8 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
                     check_action_source_complete(types, value.type, &action);
         }
         valid &= !memory || (original.flags & BUSTER_CHECK_BIT_FIELD) == 0;
+        // Nor a global register variable of a constraint that allows memory (#1846), which has no address.
+        valid &= (source->flags & CHECK_ASM_MEMORY) == 0 || input->global_register_count == 0 || !check_asm_global_register(input, stream, source->node);
         // clang refuses a _BitInt operand of any constraint ("invalid type in asm input", #147), and takes a flag
         // output of any other type, whose size its code generation (and the lowering, by name) limits.
         valid &= check_action_kind(types, type_strip_aligned(types, original.type)) != BUSTER_TYPE_KIND_BIT_INT;
@@ -1290,6 +1311,9 @@ typedef enum CheckAsmError
     // A bit-field of a constraint that allows memory: "reference to a bit-field in asm input|output with a memory
     // constraint 'C'", clang's words of an output naming an input and of an input an output.
     CHECK_ASM_ERROR_BIT_FIELD,
+    // So a global register variable's (#1846): "reference to a global register variable in asm input|output with a memory
+    // constraint 'C'", with the same exchange.
+    CHECK_ASM_ERROR_GLOBAL_REGISTER,
     // A _BitInt's: "invalid type 'T' in asm input|output", with the same exchange.
     CHECK_ASM_ERROR_BIT_INT,
     // A void input of a constraint that allows a register: "invalid type 'void' in asm input for constraint 'C'".
@@ -1354,6 +1378,10 @@ static CheckAsmError check_asm_operand_error(const CheckInput* input, const Chec
     if (allows_memory && bit_field)
     {
         result = CHECK_ASM_ERROR_BIT_FIELD;
+    }
+    else if (allows_memory && input->global_register_count != 0 && check_asm_global_register(input, stream, source->node))
+    {
+        result = CHECK_ASM_ERROR_GLOBAL_REGISTER;
     }
     else if (write && kind == BUSTER_TYPE_KIND_BIT_INT)
     {

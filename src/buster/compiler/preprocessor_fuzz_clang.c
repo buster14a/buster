@@ -88,8 +88,9 @@ static bool preprocessor_fuzz_clang_read(Arena* arena, int descriptor, uint64_t 
 // oracle_cache.c's, which main.c includes after this file: the process's clang server (test-preprocessor
 // --clang-server, oracle_serve), which takes these runs where it can (oracle_serve_takes) and runs them
 // (oracle_serve_command), and with --differential the comparison of each with its child's (oracle_serve_compare).
-static bool oracle_serve_takes(char* const* arguments, bool* both);
-static int oracle_serve_command(char* const* arguments, const char* input, uint32_t timeout, bool both, char** output, uint64_t* output_length, char** errors, uint64_t* errors_length);
+static bool oracle_serve_takes(char* const* arguments, char* const* environment, bool* both);
+static int oracle_serve_command(char* const* arguments, char* const* environment, const char* input, uint32_t streams, uint32_t timeout, bool both, char** output,
+                                uint64_t* output_length, char** errors, uint64_t* errors_length);
 static void oracle_serve_compare(const char* purpose, char* const* arguments, const char* input, int status, const char* const* texts, const uint64_t* lengths, int served_status,
                                  const char* const* served, const uint64_t* served_lengths);
 
@@ -255,7 +256,7 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
     // A batch of rejected cases gives diagnostics for each (-ferror-limit=0): as much room as its output has.
     const uint64_t diagnostic_limit = output_limit > BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES ? output_limit : BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES;
     bool both = false;
-    const bool takes = oracle_serve_takes(arguments, &both);
+    const bool takes = oracle_serve_takes(arguments, 0, &both);
     char directory[PATH_MAX];
     char paths[3][PATH_MAX] = {0};
     int descriptors[3] =
@@ -293,7 +294,7 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
     // The server's result: the run's, unless the server couldn't take it or --differential runs it as a child too.
     char* served[2] = { 0, 0 };
     uint64_t served_lengths[2] = { 0, 0 };
-    const int served_status = valid && takes ? oracle_serve_command(arguments, paths[0], BUSTER_PPF_CLANG_TIMEOUT_SECONDS, both, &served[0], &served_lengths[0], &served[1], &served_lengths[1]) : -1;
+    const int served_status = valid && takes ? oracle_serve_command(arguments, 0, paths[0], 3, BUSTER_PPF_CLANG_TIMEOUT_SECONDS, both, &served[0], &served_lengths[0], &served[1], &served_lengths[1]) : -1;
     const bool within = served_status >= 0 && served_lengths[0] <= output_limit && served_lengths[1] <= diagnostic_limit;
     if (valid && (!takes || both || served_status < 0))
     {

@@ -365,6 +365,12 @@ struct CheckInputAttribute
     // A specifiers' objc_gc or objc_ownership that a declarator moved to its pointer, which its later declarators don't see
     // (#1447, check_input_attribute_objc).
     bool objc_moved;
+    // A C23 cfi_salt after the name of a declarator that has a function (#1447): its subjects' error, or where they take it
+    // clang's "cannot be applied to a declaration" (check_input_attribute_subjects).
+    bool salt_declaration;
+    // A C23 objc_gc or objc_ownership where a declaration's attributes are (#1447): before its specifiers or after a
+    // declarator's name, which check_input_attribute_objc applies as GNU's after a declarator.
+    bool objc_declaration;
     // An EXT_VECTOR_TYPE record's NEON kind (#1447): BUSTER_TYPE_FLAG_NEON for neon_vector_type, BUSTER_TYPE_FLAG_NEON_POLY
     // for neon_polyvector_type, which clang's HandleNeonVectorTypeAttr checks and makes a GNU vector of that kind of;
     // 0 for ext_vector_type. A C23 one after a declarator's name has its -Wdeprecated-attributes warning once its handler
@@ -699,10 +705,10 @@ static bool check_input_attribute_text_equal(String8 a, String8 b)
     return a.length == b.length && (a.length == 0 || memcmp(a.pointer, b.pointer, a.length) == 0);
 }
 
-// Which Objective-C pointer type attribute a record is (#1447): 1 for GNU's objc_gc, 2 for GNU's objc_ownership, else 0.
+// Which Objective-C pointer type attribute a record is (#1447): 1 for objc_gc, 2 for objc_ownership, in either syntax, else 0.
 static uint32_t check_input_objc_kind(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    const String8 name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->standard ? check_input_attribute_name(reader, attribute->name) :
+    const String8 name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) :
                                                                                                                       (String8){ 0 };
     return check_input_attribute_equal(name, "objc_gc") ? 1u : check_input_attribute_equal(name, "objc_ownership") ? 2u : 0u;
 }
@@ -1019,6 +1025,14 @@ typedef enum CheckAttributeArgumentError
     // check_input_attribute_swift_async_error), "'swift_async' attribute must be applied to a function annotated with
     // non-'none' attribute 'swift_async'", at the swift_async.
     CHECK_ARGUMENT_SWIFT_ASYNC_NONE,
+    // swift_error's (#1447, check_input_attribute_swift_error), at the attribute: "'X' attribute can only be applied to a
+    // function with an error parameter", and "'X' attribute with 'C' convention can only be applied to a function returning
+    // an integral type" (number 0) or "a pointer" (1), C the convention's identifier (the attribute's first argument).
+    CHECK_ARGUMENT_SWIFT_ERROR_PARAMETER,
+    CHECK_ARGUMENT_SWIFT_ERROR_RESULT,
+    // cfi_salt on a function type without a prototype (#1447, check_input_attribute_salt), "'X' attribute only applies to
+    // non-K&R-style functions", at the attribute.
+    CHECK_ARGUMENT_NON_KR,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -3676,7 +3690,8 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // Its resolved typedef uses are checked after expression reading, including constant-only type queries.
         "available_only_in_default_eval_method",
         "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
-        "objc_bridge", "objc_bridge_related", "swift_newtype", "swift_wrapper", "swift_async_error", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
+        "objc_bridge", "objc_bridge_related", "swift_newtype", "swift_wrapper", "swift_async_error",
+        "swift_name", "swift_async_name", "swift_error", "cfi_salt", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
         "ns_returns_not_retained", "ns_returns_autoreleased", "os_returns_retained", "os_returns_not_retained",
@@ -4274,12 +4289,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                              before_list == PARSE_KIND_COLON || before_list == PARSE_KIND_R_SQUARE;
         const bool declaration_place = valid && known && standard && place == BUSTER_CHECK_PLACE_DECLARATION && fact != NULL &&
                                        (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0;
-        const bool effect = check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
+        // (cfi_salt is a function type's too, #1447.)
+        const bool effect = check_input_attribute_equal(name, "cfi_salt") || check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
                             check_input_attribute_equal(name, "blocking") || check_input_attribute_equal(name, "allocating");
         // The NEON vectors and the address spaces (#1447), whose C23 spellings slide from a declaration to its type
         // (clang's slidesFromDeclToDeclSpecLegacyBehavior).
         const bool neon_name = check_input_attribute_equal(name, "neon_vector_type") || check_input_attribute_equal(name, "neon_polyvector_type") ||
-                               (rule != 0 && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE);
+                               (rule != 0 && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE) || check_input_attribute_equal(name, "objc_gc");
         // A NEON vector's list before a declaration's specifiers: a parameter's too (#1447).
         const bool neon_leading = leading || before_list == PARSE_KIND_L_PAREN || before_list == PARSE_KIND_COMMA;
         uint32_t tag_bound = 0;
@@ -4294,7 +4310,34 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
         const bool bare = declaration_place && leading && neon_name && list_opener > 0 && parser->tree.parents[list_opener - 1] + 2 < parser->tokens.count &&
                           parser->tokens.kinds[parser->tree.parents[list_opener - 1] + 2] == PARSE_KIND_SEMI;
-        if ((declaration_place && leading && effect) || (!reader->statement_attributes && ((declaration_place && annotate_type) || bare)))
+        // C23's objc_ownership on a declaration of no declarator (#1447): clang's "only applies to variables" at its `;`.
+        const uint32_t bare_semi = declaration_place && leading && check_input_attribute_equal(name, "objc_ownership") && list_opener > 0 &&
+                                   parser->tree.parents[list_opener - 1] + 2 < parser->tokens.count &&
+                                   parser->tokens.kinds[parser->tree.parents[list_opener - 1] + 2] == PARSE_KIND_SEMI ? parser->tree.parents[list_opener - 1] + 2 :
+                                   BUSTER_CHECK_NONE;
+        if (bare_semi != BUSTER_CHECK_NONE && !reader->statement_attributes)
+        {
+            check_input_attribute_argument_error(reader, attributes, &attribute, bare_semi, CHECK_ARGUMENT_OBJC_VARIABLES, 0);
+            valid = false;
+        }
+        // A function effect or cfi_salt after a declarator's name is that error too where the declarator has a function
+        // (#1447); without one it is the function types' warning (check_input_attribute_type_warnings).
+        bool declarator_function = false;
+        uint32_t scan = declaration_place && effect && !leading ? attribute.end : parser->tokens.count;
+        const uint32_t list_depth = list_opener < parser->tokens.count ? parser->tree.depths[list_opener] : 0;
+        for (uint32_t steps = 0; !declarator_function && scan < parser->tokens.count && steps < 256; steps += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[scan];
+            const bool stop = kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_EQUAL ||
+                              (kind == PARSE_KIND_COMMA && parser->tree.depths[scan] <= list_depth);
+            declarator_function = !stop && kind == PARSE_KIND_L_PAREN && parser->tree.roles[scan] == PARSE_ROLE_OPEN_FUNCTION;
+            scan = stop ? parser->tokens.count : scan + 1;
+        }
+        // (cfi_salt's subjects are checked first there: check_input_attribute_subjects.)
+        const bool salt_name = check_input_attribute_equal(name, "cfi_salt");
+        attribute.salt_declaration = declaration_place && salt_name && !leading && declarator_function && !reader->statement_attributes;
+        if ((declaration_place && effect && (leading || (declarator_function && !salt_name)) && !reader->statement_attributes) ||
+            (!reader->statement_attributes && ((declaration_place && annotate_type) || bare)))
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
@@ -4327,6 +4370,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         attribute.neon_deprecated = valid && declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword && neon_name && !neon_leading;
         attribute.neon_typedef = attribute.neon_deprecated && check_input_attribute_typedef(parser, list_opener >= 2 ? list_opener - 2 : 0);
+        attribute.objc_declaration = declaration_place && (check_input_attribute_equal(name, "objc_gc") || check_input_attribute_equal(name, "objc_ownership"));
         if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
@@ -4564,20 +4608,23 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool type_tag = check_input_type_tag_rule(name) || check_input_attribute_equal(name, "type_tag_for_datatype");
             reader->type_tag_attributes |= type_tag;
             check_input_lane_refuse(reader, reader->lane && type_tag, "a body declares a type tag attribute");
-            // Objective-C's pointer type attributes are a declarator's or a type name's (check_input_attribute_objc); C23's
-            // spellings, which apply to other types than GNU's do, are refused by name.
+            // Objective-C's pointer type attributes are a declarator's or a type name's (check_input_attribute_objc), C23's
+            // spellings where they are (#1447).
             const bool objc = check_input_attribute_equal(name, "objc_gc") || check_input_attribute_equal(name, "objc_ownership");
             reader->objc_attributes |= objc;
-            if (objc && standard)
-            {
-                check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
-                valid = false;
-            }
             check_input_lane_refuse(reader, reader->lane && merged, "a body declares an attribute its entity's redeclarations merge");
             // diagnose_as_builtin's builtin may be a library function the unit declares, whose declaration a body's lane
             // can't read (check_input_checks_library, #1447).
             check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "diagnose_as_builtin"),
                                     "a body declares diagnose_as_builtin, whose builtin the unit's declarations decide");
+            // cfi_salt's salt is a function type's (check_input_attribute_salt, #1447), whose spelling the unit's intern table
+            // takes, which a body's lane can't write to.
+            reader->salt_attributes |= check_input_attribute_equal(name, "cfi_salt");
+            check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "cfi_salt"), "a body declares cfi_salt, whose salt the unit interns");
+            // swift_error's error parameter is the unit's first struct bridged to NSError that a check meets
+            // (check_input_swift_cf_error, #1447), which a body's lane can't know.
+            check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "swift_error"),
+                                    "a body declares swift_error, whose CFError the unit's earlier checks decide");
             attribute.argument_count = count;
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
             // Without parentheses, availability's handler's checkExactlyNumArgs(1) and external_source_symbol's
@@ -7571,6 +7618,352 @@ static bool check_input_attribute_swift_async_error(CheckInputReader* reader, Ch
     return valid;
 }
 
+// Whether `text` is an ASCII identifier as clang's isValidAsciiIdentifier takes it: not empty, a letter or `_` first, then
+// letters, digits and `_`.
+static bool check_input_swift_identifier(String8 text)
+{
+    bool valid = text.length != 0;
+    for (uint64_t i = 0; valid && i < text.length; i += 1)
+    {
+        const uint8_t c = (uint8_t)text.pointer[i];
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+        valid = letter || (i != 0 && c >= '0' && c <= '9');
+    }
+    return valid;
+}
+
+// Whether `text` is a Swift context name as clang 23 takes it: identifiers (check_input_swift_identifier) joined by `.`.
+static bool check_input_swift_context(String8 text)
+{
+    bool valid = text.length != 0;
+    uint64_t start = 0;
+    for (uint64_t i = 0; valid && i <= text.length; i += 1)
+    {
+        if (i == text.length || text.pointer[i] == '.')
+        {
+            valid = check_input_swift_identifier((String8){ text.pointer + start, i - start });
+            start = i + 1;
+        }
+    }
+    return valid;
+}
+
+static bool check_input_swift_equal(String8 text, const char* literal)
+{
+    const uint64_t length = strlen(literal);
+    return text.length == length && memcmp(text.pointer, literal, length) == 0;
+}
+
+// A Swift function name's check as clang's validateSwiftFunctionName makes it (#1447): an optional "getter:" or "setter:",
+// a base name (with a context before a `.`), and its parameters' labels in parentheses, each followed by a `:`. Returns
+// BUSTER_CHECK_NONE where it is one, with its count of parameters in `*count` and whether it is a single-parameter init
+// in `*init`, else the warning's message (BUSTER_CHECK_SWIFT_NAME_*).
+static uint32_t check_input_swift_function_name(String8 name, uint32_t* count, bool* init)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    const bool getter = name.length >= 7 && memcmp(name.pointer, "getter:", 7) == 0;
+    const bool setter = !getter && name.length >= 7 && memcmp(name.pointer, "setter:", 7) == 0;
+    String8 rest = getter || setter ? (String8){ name.pointer + 7, name.length - 7 } : name;
+    *count = 0;
+    *init = false;
+    // (An empty name's last character is clang's StringRef::back() past its data; clang 23 takes it for no `)`.)
+    uint64_t open = 0;
+    while (open < rest.length && rest.pointer[open] != '(')
+    {
+        open += 1;
+    }
+    String8 base = { rest.pointer, open };
+    String8 parameters = open < rest.length ? (String8){ rest.pointer + open + 1, rest.length - open - 1 } : (String8){ "", 0 };
+    uint64_t dot = base.length;
+    for (uint64_t i = 0; i < base.length; i += 1)
+    {
+        dot = base.pointer[i] == '.' ? i : dot;
+    }
+    // (clang's rsplit at the last `.`: with nothing after it, the part before it is the base, and there is no context.)
+    const bool member = dot + 1 < base.length;
+    const String8 context = member ? (String8){ base.pointer, dot } : (String8){ "", 0 };
+    base = member ? (String8){ base.pointer + dot + 1, base.length - dot - 1 } : dot < base.length ? (String8){ base.pointer, dot } : base;
+    const bool subscript = check_input_swift_equal(base, "subscript");
+    if (rest.length == 0 || rest.pointer[rest.length - 1] != ')')
+    {
+        result = BUSTER_CHECK_SWIFT_NAME_FUNCTION;
+    }
+    else if (member && !check_input_swift_context(context))
+    {
+        result = BUSTER_CHECK_SWIFT_NAME_CONTEXT;
+    }
+    else if (!check_input_swift_identifier(base) || check_input_swift_equal(base, "_"))
+    {
+        result = BUSTER_CHECK_SWIFT_NAME_BASE;
+    }
+    else if (subscript && !getter && !setter)
+    {
+        result = BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_ACCESSOR;
+    }
+    else if (open >= rest.length)
+    {
+        result = BUSTER_CHECK_SWIFT_NAME_MISSING_PARAMETERS;
+    }
+    else
+    {
+        parameters.length -= 1;
+    }
+    if (result == BUSTER_CHECK_NONE && parameters.length == 0)
+    {
+        result = subscript ? BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_PARAMETER : setter ? BUSTER_CHECK_SWIFT_NAME_SETTER : BUSTER_CHECK_NONE;
+    }
+    else if (result == BUSTER_CHECK_NONE)
+    {
+        uint32_t self = BUSTER_CHECK_NONE;
+        uint32_t new_values = 0;
+        String8 current = { "", 0 };
+        uint64_t at = 0;
+        if (parameters.pointer[parameters.length - 1] != ':')
+        {
+            result = BUSTER_CHECK_SWIFT_NAME_FUNCTION;
+        }
+        while (result == BUSTER_CHECK_NONE && at < parameters.length)
+        {
+            uint64_t colon = at;
+            while (colon < parameters.length && parameters.pointer[colon] != ':')
+            {
+                colon += 1;
+            }
+            current = (String8){ parameters.pointer + at, colon - at };
+            at = colon + 1;
+            const bool is_self = member && check_input_swift_equal(current, "self");
+            if (!check_input_swift_identifier(current))
+            {
+                result = BUSTER_CHECK_SWIFT_NAME_PARAMETER;
+            }
+            else if (is_self && self != BUSTER_CHECK_NONE)
+            {
+                result = BUSTER_CHECK_SWIFT_NAME_SELVES;
+            }
+            self = is_self ? *count : self;
+            new_values += !is_self && check_input_swift_equal(current, "newValue") ? 1u : 0u;
+            *count += result == BUSTER_CHECK_NONE ? 1u : 0u;
+        }
+        const uint32_t expected = (getter ? 0u : 1u) + (self != BUSTER_CHECK_NONE ? 1u : 0u);
+        if (result == BUSTER_CHECK_NONE && subscript && self == BUSTER_CHECK_NONE)
+        {
+            result = BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_SELF;
+        }
+        else if (result == BUSTER_CHECK_NONE && subscript && *count < expected)
+        {
+            result = getter ? BUSTER_CHECK_SWIFT_NAME_GETTER : BUSTER_CHECK_SWIFT_NAME_SETTER;
+        }
+        else if (result == BUSTER_CHECK_NONE && subscript && setter && new_values == 0)
+        {
+            result = BUSTER_CHECK_SWIFT_NAME_NO_NEW_VALUE;
+        }
+        else if (result == BUSTER_CHECK_NONE && subscript && setter && new_values > 1)
+        {
+            result = BUSTER_CHECK_SWIFT_NAME_NEW_VALUES;
+        }
+        else if (result == BUSTER_CHECK_NONE && subscript && getter && new_values != 0)
+        {
+            result = BUSTER_CHECK_SWIFT_NAME_GETTER_NEW_VALUE;
+        }
+        else if (result == BUSTER_CHECK_NONE && !subscript && (getter || setter) && *count != expected)
+        {
+            result = getter ? BUSTER_CHECK_SWIFT_NAME_GETTER : BUSTER_CHECK_SWIFT_NAME_SETTER;
+        }
+        *init = result == BUSTER_CHECK_NONE && *count == 1 && check_input_swift_equal(base, "init") && !check_input_swift_equal(current, "_");
+    }
+    return result;
+}
+
+// swift_name's and swift_async_name's handlers (#1447, SemaSwift's handleName and handleAsyncName, DiagnoseName), past
+// their subjects and counts: the name, a string literal, must fit the declaration, or clang's warning at the string
+// (CHECK_WARNING_EVENT_SWIFT_NAME), which ignores the attribute. A function's is a Swift function name
+// (check_input_swift_function_name) of a prototype's (else -Wignored-attributes' "only applies to non-K&R-style
+// functions"), whose count of parameters must be the function's (an async name's one fewer: it drops the completion
+// handler, and a function of none is its own warning): more is right only for a single-parameter init of a function of
+// none, fewer only where the function's pointers to unqualified pointees, possible out parameters, make up the rest. An
+// enumerator's, a variable's, a typedef's, a tag's or a member's is an identifier, with a context before a `.`; another
+// declaration's (a label's) is "cannot be applied to this declaration".
+static void check_input_attribute_swift_name(CheckInputReader* reader, CheckInputAttribute* attribute, uint32_t declaration, TypeId type, bool async)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t string = attribute->argument_first;
+    const String8 name = check_input_checks_string(reader, string, check_input_checks_argument_end(parser, string, attribute->argument_end));
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool function = (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0 && bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool prototyped = function && (types->types.flags[type_index(bare)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    const uint32_t named = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_PARAMETER | BUSTER_CHECK_SUBJECT_FIELD | BUSTER_CHECK_SUBJECT_STRUCT |
+                           BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM | BUSTER_CHECK_SUBJECT_TYPEDEF | BUSTER_CHECK_SUBJECT_ENUMERATOR;
+    uint32_t code = BUSTER_CHECK_NONE;
+    uint32_t expected = 0;
+    uint32_t given = 0;
+    if (function && !prototyped)
+    {
+        code = BUSTER_CHECK_SWIFT_NAME_PROTOTYPE;
+    }
+    else if (function)
+    {
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = type_parameters(types, bare, &parameter_count);
+        bool init = false;
+        uint32_t swift_count = 0;
+        code = async && parameter_count == 0 ? BUSTER_CHECK_SWIFT_NAME_NO_PARAMETERS : check_input_swift_function_name(name, &swift_count, &init);
+        const uint32_t count = async && parameter_count != 0 ? parameter_count - 1 : parameter_count;
+        uint32_t outs = 0;
+        for (uint32_t i = 0; i < parameter_count; i += 1)
+        {
+            const TypeId parameter = type_unqualified(type_strip_aligned(types, parameters[i]));
+            const bool pointer = parameter != 0 && type_kind(types, parameter) == BUSTER_TYPE_KIND_POINTER;
+            outs += pointer && (type_qualifiers(type_element(types, parameter)) & BUSTER_TYPE_CONST) == 0 ? 1u : 0u;
+        }
+        const bool fits = swift_count == count || (swift_count > count ? init && count == 0 : swift_count + outs >= count);
+        code = code == BUSTER_CHECK_NONE && !fits ? BUSTER_CHECK_SWIFT_NAME_COUNT : code;
+        expected = count;
+        given = swift_count;
+    }
+    else if ((declaration & named) != 0 && !async)
+    {
+        uint64_t dot = name.length;
+        for (uint64_t i = 0; i < name.length; i += 1)
+        {
+            dot = name.pointer[i] == '.' ? i : dot;
+        }
+        // (clang's rsplit at the last `.`: with nothing after it, the part before it is the base, and there is no context.)
+        const bool member = dot + 1 < name.length;
+        const String8 base = member ? (String8){ name.pointer + dot + 1, name.length - dot - 1 } : dot < name.length ? (String8){ name.pointer, dot } : name;
+        const String8 context = member ? (String8){ name.pointer, dot } : (String8){ "", 0 };
+        code = member && !check_input_swift_context(context) ? BUSTER_CHECK_SWIFT_NAME_CONTEXT :
+               !check_input_swift_identifier(base) ? BUSTER_CHECK_SWIFT_NAME_BASE : BUSTER_CHECK_NONE;
+    }
+    else
+    {
+        code = BUSTER_CHECK_SWIFT_NAME_DECLARATION;
+    }
+    if (code != BUSTER_CHECK_NONE)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = code == BUSTER_CHECK_SWIFT_NAME_PROTOTYPE ? CHECK_WARNING_ID_IGNORED_ATTRIBUTES : CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE,
+            .kind = CHECK_WARNING_EVENT_SWIFT_NAME,
+            .token = string,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = string + 1,
+            .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                         .data = code | (expected & 0x1fffu) << 5 | (given & 0x1fffu) << 18 },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+        attribute->ignored = true;
+    }
+}
+
+// Whether `record` is the struct clang's Sema takes for CFError (#1447, isCFError): with none yet (CheckInputReader.cf_error),
+// a struct whose declaration so far has objc_bridge or objc_bridge_mutable of NSError, which becomes it; then that one alone.
+static bool check_input_swift_cf_error(CheckInputReader* reader, TypeId record)
+{
+    const Parser* parser = reader->parser;
+    const bool structure = record != 0 && type_kind(reader->types, record) == BUSTER_TYPE_KIND_STRUCT;
+    bool found = reader->cf_error != 0 && type_unqualified(record) == reader->cf_error;
+    const CheckSparseWide all = reader->output->attributes;
+    const bool scalar = parser->options.scalar;
+    const uint32_t end = parser->tokens.count;
+    for (uint32_t first = structure && reader->cf_error == 0 ? check_input_attributed_next(all, 0, end, scalar) : end; !found && first < end;
+         first = check_input_attributed_next(all, first + 16, end, scalar))
+    {
+        for (uint32_t selected = check_input_attributed_group(all, first, end, scalar); !found && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const CheckInputAttributes* attributes = type_unqualified(reader->tag_types[token]) == type_unqualified(record) ?
+                                                     check_input_attributes_at(reader->output, token) : NULL;
+            for (uint32_t i = 0; !found && attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                const String8 spelled = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored && !attribute->subject_ignored ?
+                                        check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
+                const bool bridge = check_input_attribute_equal(spelled, "objc_bridge") || check_input_attribute_equal(spelled, "objc_bridge_mutable");
+                found = bridge && attribute->argument_count == 1 && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_IDENTIFIER &&
+                        check_input_checks_spelled(reader, parser->tokens.names[attribute->argument_first], "NSError");
+            }
+        }
+    }
+    reader->cf_error = found && reader->cf_error == 0 ? type_unqualified(record) : reader->cf_error;
+    return found;
+}
+
+// swift_error's handler (#1447, SemaSwift's handleError), past its subjects and count: its convention, as written, none,
+// nonnull_error, null_result, zero_result or nonzero_result; another identifier is the warning "'X' attribute argument
+// not supported: 'Y'" at the attribute, which ignores it. Every convention but none needs an error parameter, a pointer to
+// a pointer to CFError (check_input_swift_cf_error): "'X' attribute can only be applied to a function with an error
+// parameter"; null_result a function returning a pointer, and zero_result and nonzero_result one returning an integer (an
+// enumeration's or bool too): "'X' attribute with 'C' convention can only be applied to a function returning a pointer"
+// or "an integral type", each at the attribute. A first argument of no identifier, on which clang 23 crashes
+// (handleError reads it as an identifier), is refused by name. Whether the declaration goes on.
+static bool check_input_attribute_swift_error(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId type)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t argument = attribute->argument_first;
+    const bool identifier = attribute->argument_count == 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = identifier ? parser->tokens.names[argument] : 0;
+    const uint32_t convention = check_input_checks_spelled(reader, word, "none") ? 1u : check_input_checks_spelled(reader, word, "nonnull_error") ? 2u :
+                                check_input_checks_spelled(reader, word, "null_result") ? 3u : check_input_checks_spelled(reader, word, "zero_result") ? 4u :
+                                check_input_checks_spelled(reader, word, "nonzero_result") ? 5u : 0u;
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool function = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_FUNCTION;
+    uint32_t parameter_count = 0;
+    const TypeId* parameters = function ? type_parameters(types, bare, &parameter_count) : NULL;
+    bool error_parameter = false;
+    for (uint32_t i = 0; convention >= 2 && !error_parameter && i < parameter_count; i += 1)
+    {
+        const TypeId outer = type_unqualified(type_strip_aligned(types, parameters[i]));
+        const TypeId inner = outer != 0 && type_kind(types, outer) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, outer))) : 0;
+        const TypeId record = inner != 0 && type_kind(types, inner) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, inner))) : 0;
+        error_parameter = record != 0 && check_input_swift_cf_error(reader, record);
+    }
+    const TypeId result = function ? type_unqualified(type_strip_aligned(types, type_return(types, bare))) : 0;
+    const uint8_t result_kind = result != 0 ? type_kind(types, result) : 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integral = result_kind == BUSTER_TYPE_KIND_ENUM || (result != 0 && check_action_integer_type(types, result, &width, &is_signed));
+    bool valid = false;
+    if (!identifier)
+    {
+        check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+    }
+    else if (convention == 0)
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN, attribute->first,
+                                             argument);
+        attribute->ignored = true;
+        valid = true;
+    }
+    else if (convention >= 2 && !error_parameter)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SWIFT_ERROR_PARAMETER, 0);
+    }
+    else if ((convention == 3 && result_kind != BUSTER_TYPE_KIND_POINTER) || (convention >= 4 && !integral))
+    {
+        // (The convention's token in the report's value, which the message quotes.)
+        const uint32_t before = reader->output->report_count;
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SWIFT_ERROR_RESULT, convention == 3 ? 1u : 0u);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].value = argument;
+        }
+    }
+    else
+    {
+        valid = true;
+    }
+    if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+    }
+    return valid;
+}
+
 // Whether two modular_format attributes have the same arguments (#1447): their implementation's name, its string, and
 // their aspects as sets (clang keeps them sorted; each attribute's are distinct).
 static bool check_input_modular_same(CheckInputReader* reader, const CheckInputAttribute* a, const CheckInputAttribute* b)
@@ -7686,7 +8079,7 @@ static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAtt
     {
         valid = check_input_availability_handle(reader, attributes, attribute);
     }
-    else if (check_input_attribute_equal(spelled, "objc_ownership") && !attribute->standard && attribute->count_check == BUSTER_CHECK_COUNT_NONE &&
+    else if (check_input_attribute_equal(spelled, "objc_ownership") && attribute->count_check == BUSTER_CHECK_COUNT_NONE &&
              (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM | BUSTER_CHECK_SUBJECT_ENUMERATOR |
                              BUSTER_CHECK_SUBJECT_LABEL)) != 0)
     {
@@ -7717,6 +8110,14 @@ static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAtt
     else if (check_input_attribute_equal(spelled, "swift_async_error"))
     {
         valid = check_input_attribute_swift_async_error(reader, attributes, attribute);
+    }
+    else if (check_input_attribute_equal(spelled, "swift_name") || check_input_attribute_equal(spelled, "swift_async_name"))
+    {
+        check_input_attribute_swift_name(reader, attribute, declaration, type, check_input_attribute_equal(spelled, "swift_async_name"));
+    }
+    else if (check_input_attribute_equal(spelled, "swift_error"))
+    {
+        valid = check_input_attribute_swift_error(reader, attributes, attribute, type);
     }
     else if (check_input_attribute_equal(spelled, "diagnose_as_builtin") && function)
     {
@@ -8250,8 +8651,23 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             valid = false;
             continue;
         }
-        const CheckInputSubjectRow* row = attribute->keyword || overflow || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
-                                          check_input_attribute_subject_of(reader, scope, attribute->name, scoped, attribute->standard);
+        // cfi_salt after a declarator's name, where no function of its type takes it (#1447): clang distributes it from the
+        // declarator and drops it with its warning, so its subjects aren't checked.
+        const bool salt_trailing = reader->salt_attributes && !attribute->keyword && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && name < parser->tokens.count &&
+                                   attribute->first > name && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_salt");
+        TypeId salted = salt_trailing ? type : 0;
+        while (salted != 0 && (type_kind(reader->types, salted) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(type_kind(reader->types, salted)) ||
+                               type_kind(reader->types, salted) == BUSTER_TYPE_KIND_ALIGNED || type_kind(reader->types, salted) == BUSTER_TYPE_KIND_QUALIFIED))
+        {
+            salted = reader->types->types.base[type_index(salted)];
+        }
+        // (A C23 one is a type's alone wherever it is, no subjects either, but after the name of a declarator with a
+        // function.)
+        const bool salt_type = (salt_trailing && (salted == 0 || type_kind(reader->types, salted) != BUSTER_TYPE_KIND_FUNCTION)) ||
+                               (reader->salt_attributes && attribute->standard && !attribute->salt_declaration && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN &&
+                                check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_salt"));
+        const CheckInputSubjectRow* row = attribute->keyword || overflow || salt_type || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ?
+                                          NULL : check_input_attribute_subject_of(reader, scope, attribute->name, scoped, attribute->standard);
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
         attribute->subject_ignored = false;
@@ -8284,6 +8700,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         else if (row != NULL && (row->subjects & subjects) == 0 && row->error)
         {
             check_input_report(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_SUBJECT);
+            valid = false;
+        }
+        else if (attribute->salt_declaration)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
         }
         else if (row != NULL && (row->subjects & subjects) == 0)

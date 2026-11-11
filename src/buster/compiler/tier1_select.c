@@ -313,6 +313,9 @@ typedef enum Tier1SelectRule
 // values[1] the mask and values[2] the passthrough: vpcompressb to vpexpandq merged under the mask into the destination,
 // which takes the passthrough first (tier1_select_compress).
 #define BUSTER_TIER1_VECTOR_COMPRESS 19
+// An AES round (#1840): `immediate` the round, values[0] the state and values[1] the round key: vaesenc or vaesenclast
+// (ir_simd_aes_forms; the VEX form where the target has no VL), the state in vvvv and the key in rm.
+#define BUSTER_TIER1_VECTOR_AES 20
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1905,7 +1908,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
         break;
     case TIER1_RULE_INTRINSIC:
-        if (holes->immediate >= BUSTER_IR_INTRINSIC_SADDO && holes->immediate < BUSTER_IR_INTRINSIC_COUNT)
+        if (holes->immediate >= BUSTER_IR_INTRINSIC_SADDO && holes->immediate <= BUSTER_IR_INTRINSIC_SMULO)
         {
             tier1_select_overflow(&result, holes);
         }
@@ -2139,6 +2142,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_COMPRESS)
         {
             tier1_select_compress(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_AES)
+        {
+            const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+            const uint32_t last = (uint32_t)holes->immediate & 1;
+            const X86Instruction record = {
+                .form = vex && at < 2 ? ir_simd_aes_vex_forms[last][at] : ir_simd_aes_forms[last][at],
+                .reg = x,
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            tier1_select_append(&result, record);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4527,7 +4543,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
+                                                                           c == BUSTER_IR_INTRINSIC_AES)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4626,6 +4643,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_AES)
+        {
+            // An AES round (#1840): its round in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_AES;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }

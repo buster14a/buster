@@ -121,10 +121,17 @@ static bool test_process_start(TestProcess* process)
     return child;
 }
 
+// oracle_cache.c's, which main.c includes after this file: the clang server a part started for its oracle runs
+// (--clang-server), stopped and waited for before the part exits.
+static void oracle_serve_exit(void);
+
 // In the child: sends `size` bytes of `result` to the parent and exits, or exits without sending them if its output
-// couldn't all be written, so that the parent reports the part as failed.
+// couldn't all be written, so that the parent reports the part as failed. First the clang server the part started
+// (oracle_serve_exit), so that the server's CPU time is the part's and its command's, which the runner counts: left to
+// end at its socket's end, it would end after the part, an orphan outside the command's processes (#2071).
 static __attribute__((noreturn)) void test_process_exit(const TestProcess* process, const void* result, size_t size)
 {
+    oracle_serve_exit();
     const bool flushed = fflush(stdout) == 0 && !ferror(stdout);
     const bool errors_flushed = fflush(stderr) == 0 && !ferror(stderr);
     const bool sent = flushed && errors_flushed && process->result >= 0 && write(process->result, result, size) == (ssize_t)size;

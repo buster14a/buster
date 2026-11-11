@@ -1760,6 +1760,69 @@ static void ir_simd_typed_test_compresses(IrTestTally* tally)
     printf("  IR SIMD rows: %u compresses and expands decode to the IR's compress and expand\n", decoded_rows);
 }
 
+// The AES rounds (#1840): vaesenc and vaesenclast, EVEX at each width and VEX at 16 and 32 bytes, VECTOR(0) the state
+// and VECTOR(1) the round key, decode as the IR's aes of their round at exactly their form's features; refused without
+// VAES and under 4 changes.
+static void ir_simd_typed_test_aes(IrTestTally* tally)
+{
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t form = 0; tables && form < 4; form += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const uint32_t last = form & 1;
+            const uint16_t record_form = form < 2 ? ir_simd_aes_forms[last][width] : ir_simd_aes_vex_forms[last][width];
+            if (record_form == X86_FORM_NONE)
+            {
+                continue;
+            }
+            const uint32_t bytes = 16u << width;
+            Tier0Operation row;
+            memset(&row, 0, sizeof(row));
+            row.records[0] = check_vector_lower_record(record_form, BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(1));
+            row.record_count = 1;
+            row.operand_count = 2;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_bytes[0] = (uint8_t)bytes;
+            row.operand_bytes[1] = (uint8_t)bytes;
+            row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+            row.result_bytes = (uint8_t)bytes;
+            const uint64_t needed = x86_target_requirement(record_form) & ~BUSTER_X86_TARGET_KNOWN;
+            IrSimdTypedOperation decoded;
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+            ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.aes && decoded.immediate == last && decoded.operand_count == 2 &&
+                                      (decoded.required_features & needed) == needed && needed != 0,
+                           "an AES round decodes as the IR's aes at its form's features");
+            decoded_rows += status == IR_SIMD_TYPED_OK && decoded.aes;
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const uint64_t crypto = BUSTER_X86_FEATURE(VAES) | BUSTER_X86_FEATURE(AES);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&row, all & ~crypto, &without), &without), "an AES round without AES and VAES stays the machine row");
+            for (uint32_t m = 0; m < 4; m += 1)
+            {
+                Tier0Operation changed = row;
+                X86Instruction* record = &changed.records[0];
+                switch (m)
+                {
+                case 0: record->decorations = BUSTER_TIER0_DECORATION_MASK(1); break;
+                case 1: record->mode = BUSTER_X86_MEMORY_BASE; break;
+                case 2: record->vvvv = BUSTER_TIER0_ROLE_VECTOR(1); break;
+                case 3: changed.operand_bytes[1] = (uint8_t)(bytes == 64 ? 32 : 64); break;
+                }
+                memset(&decoded, 0xa5, sizeof(decoded));
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, all, &decoded), &decoded), "a changed AES round's row is not the IR's aes");
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 2 * 3 + 2 * 2, "every AES round decodes");
+    printf("  IR SIMD rows: %u AES rounds decode to the IR's aes\n", decoded_rows);
+}
+
 // The masks to vectors and back (#1840): every MASK_VECTOR rule's row (`__builtin_ia32_cvtmask2b` to `_cvtmask2q`) and
 // every VECTOR_MASK rule's (`_cvtb2mask` to `_cvtq2mask`), at each width, as the opmask conversion leaves them, decodes
 // as the IR's select of all ones and zeros or its comparison of signed lanes less than zero, at the elements' lanes and
@@ -1965,6 +2028,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_permute2s(tally);
     ir_simd_typed_test_ternlogs(tally);
     ir_simd_typed_test_compresses(tally);
+    ir_simd_typed_test_aes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);

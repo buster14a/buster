@@ -127,6 +127,8 @@ struct IrSimdTypedOperation
     // A compress or an expand of a vector's lanes (#1840, ir_simd_typed_compress): its IR intrinsic
     // (BUSTER_IR_INTRINSIC_COMPRESS or _EXPAND) plus one, 0 for any other row, its lanes' bytes' log2 in `immediate`.
     uint8_t compress;
+    // An AES round (#1840, ir_simd_typed_aes): whether the row is one, its round (0, or 1 for the last) in `immediate`.
+    bool aes;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1277,6 +1279,48 @@ static IrSimdTypedStatus ir_simd_typed_ternlog(const Tier0Operation* source, uin
     return status;
 }
 
+// The AES rounds (#1840): a row of one record of vaesenc or vaesenclast, EVEX at any width or VEX at 16 and 32 bytes
+// (ir_simd_aes_forms, ir_simd_aes_vex_forms), register-direct and undecorated, VECTOR(0) the state (reg and vvvv) and
+// VECTOR(1) the round key (rm), both of the result's width (the aesenc builtins' rows): the IR's aes of the two, its
+// flags the round. Its features are its form's (VAES or AES) and its vectors' moves; otherwise it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_aes(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 && source->operand_count == 2 &&
+                          source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == bytes && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
+                          source->operand_bytes[1] == bytes;
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t form = 0; admitted && form < 4; form += 1)
+    {
+        const uint32_t last = form & 1;
+        const X86Instruction expected = {
+            .form = form < 2 ? ir_simd_aes_forms[last][width] : ir_simd_aes_vex_forms[last][width],
+            .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+            .vvvv = BUSTER_TIER0_ROLE_VECTOR(0),
+            .rm = BUSTER_TIER0_ROLE_VECTOR(1),
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        if (expected.form != X86_FORM_NONE && memcmp(record, &expected, sizeof(expected)) == 0)
+        {
+            candidate.aes = true;
+            candidate.immediate = (uint8_t)last;
+            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.aes && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 2;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // The compresses and expands into a register (#1840): a row of two records, VECTOR(0) the source and VECTOR(1) the
 // passthrough, both of the result's width (16, 32 or 64 bytes), and MASK(2) a writemask with a bit per lane: a
 // vpcompressb to vpcompressq of VECTOR(0) (reg) into VECTOR(1) (rm) or a vpexpandb to vpexpandq of VECTOR(0) (rm) into
@@ -1728,6 +1772,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_compress(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_aes(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {
