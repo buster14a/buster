@@ -550,7 +550,8 @@ static void ir_simd_typed_test_overflows(IrTestTally* tally)
 // with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and
 // of their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a
 // quadword one), and nothing else: a saturating byte addition's of two vectors (the IR's add has no saturation), a masked store's of an address, a vector and a
-// mask of no result, and a shift's of a count from a general register. Without each feature, TARGET with the result
+// mask of no result, and a shift's of a 64-bit count from a general register (the builtins' int counts are the IR's shift,
+// ir_simd_typed_test_shifts). Without each feature, TARGET with the result
 // untouched. An SSE carrier's (#1280: a vector of 8 or 4 bytes) row decodes with VL's moves. At a target without
 // AVX512VL (#1281), a 16- or 32-byte vector's moves are AVX's VEX ones: AVX2's saturating byte addition of two 32-byte vectors
 // takes AVX and AVX2 there, and nothing of AVX-512. A row of a class no row call takes (a vector of 2 or 12 bytes, a
@@ -578,12 +579,12 @@ static void ir_simd_typed_test_machine(IrTestTally* tally)
     rows[1].operand_bytes[1] = 16;
     rows[1].operand_bytes[2] = 2;
     rows[1].result_class = BUSTER_TYPED_CLASS_VOID;
-    rows[2].records[0] = (X86Instruction){ .form = X86_FORM_VMOVD_X_RM32_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    rows[2].records[0] = (X86Instruction){ .form = X86_FORM_VMOVQ_X_RM64_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(1), .mode = BUSTER_X86_REGISTER_DIRECT };
     rows[2].records[1] = (X86Instruction){ .form = X86_FORM_VPSRLQ_Y_Y_XM128_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
     rows[2].record_count = 2;
     rows[2].operand_count = 2;
     rows[2].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
-    rows[2].operand_classes[1] = BUSTER_TYPED_CLASS_I32;
+    rows[2].operand_classes[1] = BUSTER_TYPED_CLASS_I64;
     rows[2].operand_bytes[0] = 32;
     rows[2].result_class = BUSTER_TYPED_CLASS_VECTOR;
     rows[2].result_bytes = 32;
@@ -1154,6 +1155,87 @@ static void ir_simd_typed_test_permutes(IrTestTally* tally)
            decoded_rows[1], decoded_rows[2], decoded_rows[3]);
 }
 
+// The shifts by a scalar count (#1840): every front-end rule of the shifts by an int (CHECK_X86_LOWER_SHIFT:
+// __builtin_ia32_psllwi512 to __builtin_ia32_psraqi128, 27 of them) decodes as the IR's scalar shift of its lanes and
+// shift, written out from the builtin's name, at exactly its forms' features and its vectors' moves; refused without
+// each and under 8 changes.
+static void ir_simd_typed_test_shifts(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    uint32_t decoded_rows = 0;
+    uint32_t rules = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const char* name = rule->name;
+        const size_t prefix = sizeof("__builtin_ia32_ps") - 1;
+        if (rule->family != CHECK_X86_LOWER_SHIFT || strncmp(name, "__builtin_ia32_ps", prefix) != 0 || strlen(name) < prefix + 3)
+        {
+            continue;
+        }
+        rules += 1;
+        // The name's shift (ll, rl, ra) and lanes (w, d, q).
+        const uint32_t kind = name[prefix] == 'l' ? 0 : name[prefix + 1] == 'l' ? 1 : 2;
+        const char lane = name[prefix + 2];
+        const uint32_t lanes = lane == 'w' ? 1 : lane == 'd' ? 2 : 3;
+        const uint32_t flags = lanes | kind << 2;
+        Tier0Operation row;
+        char description[224];
+        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL;
+        snprintf(description, sizeof(description), "%s: its row is the front end's", name);
+        ir_test_expect(tally, made, description);
+        if (!made)
+        {
+            continue;
+        }
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (lanes == 1 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        snprintf(description, sizeof(description), "%s: the IR's shift of flags 0x%x at exactly its features", name, flags);
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.shift && decoded.immediate == flags && decoded.permute == 0 && decoded.convert == 0 &&
+                                  decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.operand_count == 2 && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                       description);
+        decoded_rows += status == IR_SIMD_TYPED_OK && decoded.shift;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            const bool needed = (expected & features[f]) != 0;
+            snprintf(description, sizeof(description), "%s: without a feature it needs it stays the machine row, and needs no other", name);
+            ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.shift, description);
+        }
+        for (uint32_t m = 0; m < 8; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* shift = &changed.records[1];
+            switch (m)
+            {
+            case 0: shift->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: shift->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: shift->rm = shift->vvvv; break;
+            case 3: changed.records[0].rm = BUSTER_TIER0_ROLE_INTEGER(0); break;
+            case 4: changed.operand_classes[1] = BUSTER_TYPED_CLASS_I64; break;
+            case 5: changed.record_count = 1; break;
+            case 6: shift->immediate = 1; break;
+            case 7: changed.records[0].form = X86_FORM_VMOVQ_X_RM64_EVEX; break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            snprintf(description, sizeof(description), "%s (change %u): not the IR's shift", name, m);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), description);
+        }
+    }
+    // Shifts left and both right of words, doublewords and quadwords at three widths.
+    ir_test_expect(tally, rules == 27 && decoded_rows == 27, "every shift rule decodes");
+    printf("  IR SIMD rows: the front end's %u shifts by an int decode to the IR's shift\n", decoded_rows);
+}
+
 // The conversions (#1840): every __builtin_convertvector row between integer vectors of other element sizes, by the real
 // producer (check_vector_convert_row) at every pair of sizes and signedness, every result width and the operand widths it
 // takes, decodes as the IR's extend or truncate of its lanes' sizes and sign, written out, at exactly its form's features
@@ -1404,6 +1486,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_selects(tally);
     ir_simd_typed_test_conversions(tally);
     ir_simd_typed_test_permutes(tally);
+    ir_simd_typed_test_shifts(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);

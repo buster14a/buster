@@ -98,6 +98,9 @@ struct CheckBuiltinCall
     bool alignment_side_effects;
     uint64_t alignment_low;
     uint64_t alignment_high;
+    // A _BitInt past 128 bits' alignment (#1447): its limbs (c_check_wide.c), whose low 128 bits are the halves above;
+    // 0 for a narrower one.
+    uint64_t alignment_limbs;
 };
 
 typedef struct CheckGraph CheckGraph;
@@ -2679,6 +2682,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
             .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
+            .alignment_limbs = witness != NULL ? witness->alignment_limbs : 0,
             .string_known = witness != NULL && witness->nan_payload_known,
             .string_cast = witness != NULL && witness->nan_payload_cast,
             .string_utf8 = witness != NULL && witness->nan_payload_utf8,

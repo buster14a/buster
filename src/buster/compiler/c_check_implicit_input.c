@@ -47,13 +47,17 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
     const Parser* parser = reader->parser;
     const uint32_t name = parser->tokens.names[token];
     const bool missing = check_input_library_binding(reader, name, token) == 0;
+    // A `__builtin_` name no catalog row names in the unit's language mode is an unknown builtin, which clang declares as any undeclared function
+    // before C23, with its own diagnostic (#2121, Sema's ImplicitlyDefineFunction: warn_builtin_unknown).
     const bool explicit_builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
-    if (missing && !explicit_builtin)
+    if (missing)
     {
         const BuiltinIntrinsicInfo* info = check_input_implicit_info(reader, name);
-        const bool library_name = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
+        const bool library_name = !explicit_builtin && info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
         const bool eligible = library_name && check_input_library_enabled(info, &reader->pp->options);
-        const bool ordinary = (info == NULL || library_name) && parser->language.standard < 2023 && check_input_intrinsic_call_shape(parser, token);
+        const bool unknown = explicit_builtin && (info == NULL || !check_input_builtin_language(info, &reader->pp->options));
+        const bool ordinary = ((!explicit_builtin && info == NULL) || library_name || unknown) && parser->language.standard < 2023 &&
+                              check_input_intrinsic_call_shape(parser, token);
         check_input_lane_refuse(reader, reader->lane && (eligible || ordinary), "an implicit function declaration needs source-order linkage");
         if (!reader->lane && (eligible || ordinary))
         {
@@ -117,7 +121,8 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                                           reader->implicit_function_capacity <= UINT32_MAX / 2 ? reader->implicit_function_capacity * 2 : 0;
                 uint32_t* tokens = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
                 uint32_t* corrections = tokens != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
-                if (corrections == NULL)
+                bool* builtins = corrections != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, bool, capacity) : NULL;
+                if (builtins == NULL)
                 {
                     input->resource = true;
                 }
@@ -127,9 +132,11 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                     {
                         memcpy(tokens, input->implicit_function_tokens, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
                         memcpy(corrections, input->implicit_function_corrections, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
+                        memcpy(builtins, input->implicit_function_builtins, (uint64_t)input->implicit_function_count * sizeof(bool));
                     }
                     input->implicit_function_tokens = tokens;
                     input->implicit_function_corrections = corrections;
+                    input->implicit_function_builtins = builtins;
                     reader->implicit_function_capacity = capacity;
                 }
             }
@@ -152,9 +159,11 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                     // The function its name may have meant, before its own declaration is bound (#1447): searched where
                     // clang's ImplicitlyDefineFunction searches, a C99 unit's undeclared function that no library names.
                     // Not where an earlier declaration of the name with linkage exists, a block's extern or another call's
-                    // implicit one (clang's ExternCPrev): no search is made then, nor counted.
-                    const bool searched = !eligible && parser->language.standard >= 1999 && linked == 0;
+                    // implicit one (clang's ExternCPrev): no search is made then, nor counted. An unknown builtin's error
+                    // searches in every language mode.
+                    const bool searched = !eligible && (parser->language.standard >= 1999 || explicit_builtin) && linked == 0;
                     input->implicit_function_corrections[input->implicit_function_count] = searched ? check_typo_function(reader, token) : BUSTER_CHECK_TYPO_UNSEARCHED;
+                    input->implicit_function_builtins[input->implicit_function_count] = explicit_builtin;
                     input->implicit_function_tokens[input->implicit_function_count++] = token;
                 }
                 input->declarations[token] = token;

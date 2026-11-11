@@ -10,8 +10,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-// IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC uses two values except for splat's one (#1450). IR_ATOMIC_RMW (#1059),
-// the last added, uses its address and its operand, as a store does, and a compare-exchange's desired value too.
+// IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC uses a, and b where it has one: splat's (#1450) and
+// the unary kinds' is none. IR_ATOMIC_RMW (#1059), the last added, uses its address and its operand, as a store does,
+// and a compare-exchange's desired value too.
 _Static_assert(IR_OP_COUNT == 64, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
@@ -58,8 +59,9 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
         case IR_INTRINSIC:
         {
             values[count++] = f->a[node];
-            // Splat and the bit operations (#1374) take one operand.
-            if (f->c[node] < BUSTER_IR_INTRINSIC_SPLAT)
+            // Splat, the bit operations (#1374) and the unary vector kinds (#1840: extract, widen, extend, truncate) take one
+            // operand, their b none; the binary ones take b, a vector or a shift's count.
+            if (f->b[node] != BUSTER_IR_NONE)
             {
                 values[count++] = f->b[node];
             }
