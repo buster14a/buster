@@ -2838,12 +2838,19 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         const uint32_t close = reader->parser->tokens.kinds[action->node] == PARSE_KIND_L_PAREN ?
                                reader->parser->tree.parents[action->node] : action->node;
+        // A direct call's parameter keeps its declaration's typedef (#1100, check_input_parameter_spelling).
+        const CheckConstantRange named = check_constant_action_source(input, callee, ranges, 0);
+        const uint32_t name = named.first < named.end && named.end == named.first + 1 ? named.first : BUSTER_CHECK_NONE;
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
             const CheckConstantRange source = check_constant_action_source(input, callee, ranges, i + 1);
             if (source.first >= input->first && source.first < source.end && source.end <= input->end)
             {
-                check_input_null_warning(reader, action->argument_conversions[i].type, action->arguments + i, source.first, source.end, close);
+                const TypeId destination = action->argument_conversions[i].type;
+                CheckWarningEvent probe;
+                const bool warns = check_warning_null_event(reader->parser, reader->types, destination, action->arguments + i, source.first, source.end, close, &probe);
+                const uint32_t spelling = warns ? check_input_parameter_spelling(reader->parser, reader->output, name, i) : 0;
+                check_input_null_spelling(reader, destination, destination, spelling, action->arguments + i, source.first, source.end, close);
             }
         }
     }

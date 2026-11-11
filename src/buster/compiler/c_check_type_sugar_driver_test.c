@@ -225,6 +225,35 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .options = { "-Wsign-compare" },
         .warnings = 8,
     },
+    {
+        // A null pointer constant argument's warning prints its parameter's type with the typedef the callee's declaration
+        // writes (#1100, check_input_parameter_spelling): a function's, a function pointer object's (through `*`), its
+        // typedef'd function type's and a member's own parameter list; a variadic argument has none.
+        .name = "call arguments' parameter typedefs in null pointer warnings",
+        .source = "typedef struct N { int x; } N;\n"
+                  "typedef N *NP;\n"
+                  "typedef int *IP;\n"
+                  "typedef void F(N *);\n"
+                  "void a(const N *q);\n"
+                  "void b(NP);\n"
+                  "void h(int x, IP p, N *const r);\n"
+                  "void e(N *q[]);\n"
+                  "void f(int n, N *(*g)(void), NP const r);\n"
+                  "void d(int, ...);\n"
+                  "void (*fp)(N *);\n"
+                  "F *gp;\n"
+                  "struct S { void (*m)(N *); } s;\n"
+                  "static int z = sizeof(a(1-1), 0);\n"
+                  "int main(void)\n"
+                  "{\n"
+                  "    a(1-1); b(1-1); h(0, 1-1, 1-1); e(1-1); f(0, 1-1, 1-1); d(1, 1-1);\n"
+                  "    (a)(1-1); fp(1-1); (*fp)(1-1); gp(1-1); s.m(1-1);\n"
+                  "    void (*lp)(int, N *) = 0;\n"
+                  "    lp(0, 1-1);\n"
+                  "    return 0;\n"
+                  "}\n",
+        .warnings = 13,
+    },
 };
 
 // A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs

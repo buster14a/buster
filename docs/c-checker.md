@@ -9351,6 +9351,12 @@ enables, which this checker doesn't all give.
   that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
   `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.
   An a.k.a. spells the space out.
+  A null pointer constant argument's warning (#1100) prints its parameter's
+  type with the typedef the callee's declaration writes
+  (`check_input_parameter_spelling`, `'N *' (aka 'struct N *')`): a
+  function's own parameter list, as the conversion notes find it, a function
+  pointer object's (through `*`), its typedef'd function type's
+  (`F *gp`), and a member's (`s.m(…)`).
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
@@ -9364,6 +9370,12 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
+  - A call into a redeclared function prints its parameters' sugar from the
+    declaration the call sees, where clang's composite type keeps the first
+    declaration's (`void c(N *q); void c(NP q);`'s call prints `'NP'`, clang
+    `'N *'`), in the null pointer warning and the conversion errors alike.
+    Neither the warning walk nor the driver keeps a redeclaration's first
+    declaration.
   - The reader's spelling helpers (`check_input_operand_type_spelling`,
     `check_input_object_spelling`), which run before the stream has types,
     don't follow members. The warnings the driver spells after checking
