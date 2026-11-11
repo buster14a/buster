@@ -451,6 +451,19 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
         // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
         // cannot supply the non-asm body constraint, which remains outside this whitelist.
         result |= report->message == CHECK_INPUT_NAKED_PARAMETER && role == PARSE_ROLE_CLOSE_ASM;
+        // An asm statement's constraint or clobber (#2369) is fixed by its complete original statement, whose `)` the
+        // string's ancestors reach before the view's end: clang's Sema error of it, whatever follows.
+        if ((report->message == CHECK_INPUT_ASM_CONSTRAINT || report->message == CHECK_INPUT_REGISTER_NAME) && kind == PARSE_KIND_STRING && !asm_name)
+        {
+            uint32_t ancestor = token;
+            uint32_t steps = 0;
+            while (ancestor < repair->original_end && view->tree.roles[ancestor] != PARSE_ROLE_CLOSE_ASM && steps < view->tokens.count)
+            {
+                ancestor = view->tree.parents[ancestor];
+                steps += 1;
+            }
+            result |= ancestor < repair->original_end && view->tree.roles[ancestor] == PARSE_ROLE_CLOSE_ASM;
+        }
         // A label's second definition, and a name a block's `__label__` lists declare twice, are the original's.
         result |= report->message == CHECK_INPUT_LABEL_REDEFINITION || report->message == CHECK_INPUT_LABEL_AMBIGUOUS;
         // A missing label, at a goto's name or a local label's in its list, is its function's once its body is complete;

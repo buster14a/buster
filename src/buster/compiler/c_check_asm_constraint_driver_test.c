@@ -133,3 +133,19 @@ static void check_test_driver_asm_sizes(CheckTest* test, const char* clang, cons
     };
     check_test_driver_asm_units(test, clang, executable, directory, units, BUSTER_ARRAY_LENGTH(units), "asm operand sizes");
 }
+
+// A constraint's or a clobber's error drops its statement and checking goes on (#2369), as clang's ActOnGCCAsmStmt returns
+// there: later statements' errors in the function, other bodies' on lanes, an asm goto's label still the function's, and a
+// later syntax error's repaired view, which keeps the complete statements' errors.
+static void check_test_driver_asm_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const units[] = {
+        "void f(int x) {\n    __asm__ volatile(\"\" : : \"=r\"(x));\n    __asm__ volatile(\"\" : : \"r\"(x) : \"spl\");\n    int a = missing;\n}\n",
+        "void k(void) { int r; __asm__(\"\" : : \"=r\"(r)); int u; __asm__(\"\" : \"=r\"(u) : : \"foo\"); }\n"
+        "int m(int x) { int y; __asm__ goto(\"\" : : \"&r\"(x) : : l); y = x; l: return y + x; }\n"
+        "int n(int x) { __asm__(\"\" : \"=r\"(x) : \"r\"(x), \"=r\"(x)); __asm__(\"\" : : \"r\"(x) : \"bar\", \"baz\"); return nope; }\n",
+        "void g(int x) { __asm__(\"\" : : \"=r\"(x)); int a = missing; }\nint h(int y) { __asm__(\"\" : \"=r\"(y) : : \"sil\"); return y + 1 }\n",
+        "void o(int x) { __asm__ volatile(\"\" : : \"=r\"(x)); __asm__(\"\" ::: \"rip\"); int a = missing;\n",
+    };
+    check_test_driver_asm_units(test, clang, executable, directory, units, BUSTER_ARRAY_LENGTH(units), "asm statement recovery");
+}

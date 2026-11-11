@@ -785,6 +785,13 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
     {
         check_input_report(reader, failed, CHECK_INPUT_DECLARATION);
     }
+    else if (!valid && input->report_count == reports + 1 &&
+             (input->reports[reports].message == CHECK_INPUT_ASM_CONSTRAINT || input->reports[reports].message == CHECK_INPUT_REGISTER_NAME))
+    {
+        // clang's Sema error of a constraint or a clobber (#2369): ActOnGCCAsmStmt drops the statement and checking goes on
+        // past it, so the error is recovered and the statement is no asm statement of the unit's.
+        check_input_recover_reports(reader, reports);
+    }
     arena_pop_to(reader->scratch, scratch_mark);
 }
 
