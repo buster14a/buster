@@ -334,6 +334,9 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *extent = (uint64_t)number;
             if (valid)
             {
+                // A constant bound, which no graph walk reads: its comma operators' left operands' -Wunused-value, which
+                // clang's constant-evaluated bound gives as it builds them, before the fold's warning (#2202).
+                check_input_attribute_unused(reader, first, end, true);
                 check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open, true);
             }
         }

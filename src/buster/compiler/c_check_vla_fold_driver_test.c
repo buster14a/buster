@@ -210,6 +210,35 @@ static const char check_driver_vla_cast_source[] =
     "int u2(int n) { return (int)sizeof(int[n++]) + n; }\n"
     "int u3(int n, int *v) { return (int)sizeof(*(int (*)[n++])v) + n; }\n";
 
+// The comma operators of constant bounds, bit-field widths and enumerators, which no graph walk reads (#2202): each
+// discarded left operand's -Wunused-value "left operand of comma operator has no effect" as clang's isUnusedResultAWarning
+// decides and places it (a binary or unary operator's at it, a cast's at its `(`, sizeof's at its keyword, a comma's at its
+// right operand's but a literal 0's), -Wunused-comparison's for a comparison, none for a cast to void or in sizeof's
+// operand, and in a dead conditional arm too; before the declarator's fold warning at file scope, and in a function body
+// with its queued diagnostics at its end.
+static const char check_driver_vla_fold_commas_source[] =
+    "int a1[(1, 2)];\n"
+    "int a2[1 ? 2 : (3, 4)];\n"
+    "int a3[(1, 2, 3)];\n"
+    "int a4[((void)0, 2)];\n"
+    "int a5[(1 + 1, 2)];\n"
+    "int a6[(sizeof(int), 2)];\n"
+    "int a7[sizeof((1, 2))];\n"
+    "int a8[((1, 0), 2)];\n"
+    "int a9[(1 == 1, 2)];\n"
+    "int a10[((char)1, 2)];\n"
+    "int a11[(-1, 2) + (3, 4)];\n"
+    "typedef int T[(5, 6)];\n"
+    "struct S { int m[(7, 8)]; int n : (1, 3); };\n"
+    "enum { E1 = (1, 2), E2 = ((void)0, 3), E3 = (E1, 4) };\n"
+    "int f(void)\n"
+    "{\n"
+    "    static int s[(1, 2)];\n"
+    "    enum { L = (3, 4) };\n"
+    "    int u = 1 / 0;\n"
+    "    return s[0] + L + u;\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -236,6 +265,23 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "a block's variable-length array with an initializer",
         .source = check_driver_vla_initializer_source,
         .errors = 11,
+    },
+    {
+        .name = "constant bounds' comma operators' discarded left operands",
+        .source = check_driver_vla_fold_commas_source,
+        .warnings = 31,
+    },
+    {
+        .name = "constant bounds' comma operators under -Wno-unused-value",
+        .source = check_driver_vla_fold_commas_source,
+        .options = { "-Wno-unused-value" },
+        .warnings = 13,
+    },
+    {
+        .name = "constant bounds' comma operators under -Wno-unused-value -Wunused-comparison",
+        .source = check_driver_vla_fold_commas_source,
+        .options = { "-Wno-unused-value", "-Wunused-comparison" },
+        .warnings = 14,
     },
     {
         .name = "folded bounds in each context, by default",

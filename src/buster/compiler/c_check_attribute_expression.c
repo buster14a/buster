@@ -328,10 +328,45 @@ static CheckAttributeUnused check_input_attribute_unused_of(CheckInputReader* re
     return result;
 }
 
+// The lookahead token after the `}` of the function body around `token`, where clang replays the body's queued runtime
+// diagnostics (check_common_function_boundary's), or `token + 1` outside a body (#2202).
+static uint32_t check_input_unused_completion(const Parser* parser, uint32_t token)
+{
+    uint32_t close = BUSTER_CHECK_NONE;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        close = role == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[at] : role == PARSE_ROLE_CLOSE_BODY ? at : close;
+        const uint32_t parent = parser->tree.parents[at];
+        at = parent == at ? BUSTER_CHECK_NONE : parent;
+    }
+    const uint32_t result = close < parser->tokens.count ? close + 1 : token + 1;
+    return result;
+}
+
+// Whether the comma at `comma` in a constant [first, end) is evaluated (#2202): not in a sizeof's, an alignof's or a
+// keyword's operand (typeof's, _Generic's, a builtin's), which clang leaves unevaluated. A type name's bound there is read
+// as its own constant.
+static bool check_input_bound_evaluated(const Parser* parser, uint32_t comma, uint32_t first, uint32_t end)
+{
+    bool evaluated = true;
+    uint32_t at = parser->tree.parents[comma];
+    while (evaluated && at >= first && at < end)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        evaluated = role != PARSE_ROLE_CLOSE_SIZEOF && role != PARSE_ROLE_CLOSE_KEYWORD;
+        const uint32_t parent = parser->tree.parents[at];
+        at = parent == at ? BUSTER_CHECK_NONE : parent;
+    }
+    return evaluated;
+}
+
 // clang's warnings of the comma operators' left operands in an attribute's expression argument [first, end) (#1447,
 // Sema's CheckCommaOperands), each once however often the argument is read: -Wunused-value's, or -Wunused-comparison's
-// with its note at an equality, where check_input_attribute_unused_of says the operand's value is unused.
-static void check_input_attribute_unused(CheckInputReader* reader, uint32_t first, uint32_t end)
+// with its note at an equality, where check_input_attribute_unused_of says the operand's value is unused. A constant array
+// bound's too (#2202, `bound`), which no graph walk reads: there clang queues them in a function body to its end.
+static void check_input_attribute_unused(CheckInputReader* reader, uint32_t first, uint32_t end, bool bound)
 {
     const Parser* parser = reader->parser;
     for (uint32_t comma = first; comma < end && !reader->output->resource; comma += 1)
@@ -339,6 +374,7 @@ static void check_input_attribute_unused(CheckInputReader* reader, uint32_t firs
         uint32_t operands[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t opener = BUSTER_CHECK_NONE;
         const bool binary = parser->tokens.kinds[comma] == PARSE_KIND_COMMA && check_input_attribute_comma(parser, comma) &&
+                            (!bound || check_input_bound_evaluated(parser, comma, first, end)) &&
                             check_input_attribute_operands(parser, comma, first, end, operands, &opener) == 2;
         const CheckAttributeUnused unused = binary ? check_input_attribute_unused_of(reader, operands[0], first, end) :
                                                      (CheckAttributeUnused){ .token = BUSTER_CHECK_NONE };
@@ -355,7 +391,7 @@ static void check_input_attribute_unused(CheckInputReader* reader, uint32_t firs
                 .token = unused.token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = unused.token + 1,
+                .completion = bound ? check_input_unused_completion(parser, unused.token) : unused.token + 1,
                 .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = unused.message },
             };
             const CheckWarningNote note =
@@ -365,7 +401,9 @@ static void check_input_attribute_unused(CheckInputReader* reader, uint32_t firs
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = unused.message },
             };
-            const bool noted = unused.message == BUSTER_CHECK_UNUSED_EQUALITY || unused.message == BUSTER_CHECK_UNUSED_INEQUALITY;
+            // (A constant bound's comparison has no lvalue on its left, which clang's note asks for: an lvalue's read is no
+            // constant.)
+            const bool noted = !bound && (unused.message == BUSTER_CHECK_UNUSED_EQUALITY || unused.message == BUSTER_CHECK_UNUSED_INEQUALITY);
             if (retained)
             {
                 check_input_warning_event(reader, &event, &note, noted ? 1u : 0u);
@@ -377,7 +415,7 @@ static void check_input_attribute_unused(CheckInputReader* reader, uint32_t firs
 static bool check_input_attribute_expression(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute,
                                               uint32_t first, uint32_t end, bool scoped, CheckValue* value, bool* call_failure)
 {
-    check_input_attribute_unused(reader, first, end);
+    check_input_attribute_unused(reader, first, end, false);
     const Parser* parser = reader->parser;
     CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
     uint32_t failed = BUSTER_CHECK_NONE;

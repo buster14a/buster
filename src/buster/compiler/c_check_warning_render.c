@@ -2662,6 +2662,13 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         // lexical phase would order file-scope objects ahead of earlier declarations.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_UNUSED_RESULT && event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN &&
+                             event->completion > event->token + 1)
+                    {
+                        // A constant bound's comma in a function body (#2202, check_input_unused_completion): with the body's
+                        // queued runtime diagnostics, at its end.
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else
                     {
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);

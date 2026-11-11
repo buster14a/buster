@@ -3248,7 +3248,14 @@ What the lowering covers past scalars (#145's programs):
     16-bit ones, VCVTDQ2PS/PD, or VCVTQQ2PS/PD with DQ), then VSCALEFPS/PD,
     a scalar's exponent converted in the typed stream from its promoted type
     as the signed integer of its width. Their constants (the masks, 1.0, 0.5's
-    predecessor) are operands past the arguments;
+    predecessor) are operands past the arguments. max and min of floating
+    values are llvm.maxnum and minnum, as clang's are, so they take maxnum's
+    and minnum's rows and calls (`check_vector_floating_alias`, #1834); abs of
+    them is llvm.fabs, the magnitude mask's AND (VPTERNLOGD 192, VANDPS, or
+    ANDPS without AVX), at every target, of scalars and vectors
+    (`check_vector_floating_builtin`). bf16 elements keep their own refusals,
+    and a long double's abs, which clang computes with x87's FABS, its named
+    one;
   - acos ... tanh, atan2, fmod and pow are the C library's functions, as
     clang's code calls them (sinf, sin; sinl of a long double), a vector's an
     element at a time, in element order, through frame objects of the vectors
@@ -10081,7 +10088,9 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   ignores a warning, not an error. An error by default has no `-Werror,` in
   its option, however it became one.
 - **Comma operators** (`check_input_attribute_unused`): a comma's left
-  operand in a condition, or in any attribute's expression argument, is
+  operand in a condition, or in any attribute's expression argument, or in a
+  constant the reader evaluates alone (#2202: a declarator's constant array
+  bound, a type name's bound, a bit-field's width, an enumerator's value), is
   clang's `CheckCommaOperands` warning, once however often the argument is
   read, where its value is unused as clang's `isUnusedResultAWarning` says:
   a nested comma's right operand's (quiet after a literal 0), a
@@ -10093,7 +10102,14 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   'void'?" for a cast to `void *`, and -Wunused-comparison's for a
   comparison, with its `=` or `|=` note. The parser reads an attribute
   argument's commas as separators; one in a chain that a group's
-  parentheses hold is the operator (`check_input_attribute_comma`).
+  parentheses hold is the operator (`check_input_attribute_comma`). In those
+  constants, a comma in an operand of `sizeof`, an alignof or a keyword is
+  unevaluated and quiet (`check_input_bound_evaluated`), a comparison takes no
+  note (its left operand is no lvalue in a constant), and in a function body
+  the warning is published with the body's queued diagnostics at its end
+  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it;
+  at file scope it precedes the declarator's fold warning
+  (`c_check_vla_fold_driver_test.c`).
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
@@ -10108,9 +10124,13 @@ the checker's error, not clang's "<overloaded function type>" with its
 candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
 above (a cast to void or to `void *` in a condition gives none of clang's
 "never produces a constant expression" errors, nor
-`-Wint-to-void-pointer-cast`); the comma warnings of the constant reader's
-other expressions (an enumerator's value, a file-scope array bound, a type
-name's bound in `sizeof`), which clang gives too; and, as everywhere in this driver, the uses' errors stop the unit's
+`-Wint-to-void-pointer-cast`); the comma warnings of a static assertion's
+condition, of a type name's bound that a constant expression reads (`sizeof(int[(1, 2)])`
+within a bound, an `_Alignof`, or a file-scope initializer's `sizeof`: their check reads
+constants again, which would make the constant walk recursive), and a const builtin call's "ignoring return value"
+as a left operand, which clang gives too; in a function body, a constant
+bound's comma warnings come before the body's graph-walked ones rather than
+among them in source order; and, as everywhere in this driver, the uses' errors stop the unit's
 later expression checks, so a call after one such error isn't diagnosed. A
 grouped
 diagnose_if under `-Weverything` meets every other warning that option
