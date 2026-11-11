@@ -195,6 +195,15 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "int main(void) { return 0; }\n",
         "__attribute__((target(\"avx2\"))) inline int f(void) { return 1; }\n"
         "__attribute__((target(\"default\"))) inline int f(void) { return 0; }\n",
+        // apxf (#1919): a plain target, versions of it (on and off), and a version of it with others.
+        "__attribute__((target(\"apxf\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"no-apxf,avx2\"))) int g(void) { return 1; }\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"apxf\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"apxf,avx2\"))) int f(void) { return 2; }\n"
+        "int main(void) { return f(); }\n",
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"no-apxf\"))) int f(void);\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
@@ -395,6 +404,7 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"default\"))) int f(int x) { return x + 1; }\n"
         "__attribute__((target(\"arch=znver4\"))) int f(int x) { return x + 4; }\n"
         "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x) { return x + 42; }\n"
+        "__attribute__((target(\"apxf\"))) int f(int x) { return x + 36; }\n"
         "static __attribute__((target(\"default\"))) int s(void) { return 10; }\n"
         "static __attribute__((target(\"avx512f\"))) int s(void) { return 20; }\n"
         "int call_s(void) { return s(); }\n"
@@ -412,6 +422,7 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"default\"))) int f(int x);\n"
         "__attribute__((target(\"arch=znver4\"))) int f(int x);\n"
         "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x);\n"
+        "__attribute__((target(\"apxf\"))) int f(int x);\n"
         "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x);\n"
         "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x);\n"
         "__attribute__((target(\"default\"))) int g(int x);\n"

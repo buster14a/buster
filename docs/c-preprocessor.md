@@ -1581,7 +1581,8 @@ flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
   - `-m80387` is `-mx87`;
   - `-mgeneral-regs-only` is `-mno-x87 -mno-mmx -mno-sse` in its place;
   - `-mapxf` turns on APX's features but `cf`, and `-mapx-features=` and
-    `-mno-apx-features=` name them one by one;
+    `-mno-apx-features=` name them one by one; a target attribute's `apxf`
+    and `no-apxf` stand for the same list (#1919);
   - `-mapx-inline-asm-use-gpr32` comes after the others.
 - Each feature has its own macros (`avx512f` has `__AVX512F__`, `sse2` has
   `__SSE2__`, `__SSE2_MATH__` and the `__FLT16_*` macros, `cx16` has
