@@ -477,7 +477,7 @@ global register variable of a constraint that allows memory is clang's
 constraint" (its words exchanged, as for a bit-field), and `&sp` is "address of
 register variable requested".
 
-### Clobbers and asm labels' errors
+### Clobbers', operand sizes' and asm labels' errors
 
 A clobber is checked as clang's `TargetInfo::isValidClobber` checks it (#2262):
 `memory`, `cc`, `unwind`, or a register name clang's x86-64 target knows
@@ -500,8 +500,21 @@ that conflict's own error, as clang's `mergeDeclAttributes` reports it
 (`check_input_asm_label_conflict`). `test-checker-driver`'s asm units compare
 both with clang's whole output.
 
-Differences left: an asm statement's constraint or clobber error ends its
-function's checking, where clang goes on past the statement (#2369); and
+An operand too wide for its constraint is clang's "invalid output|input size
+for constraint 'C'" (#2231, `X86TargetInfo::validateOperandSize`), at the
+operand, with the constraint as written: by its first letter past `=`, `+` and
+`&`, `x`, `v` and `Yz` take the function's widest vector register (512 bits
+with AVX-512F, 256 with AVX, else 128, by the unit's features or a `target`
+attribute's on the function's definition, `CheckInputAsm.vector_bits`); `y`,
+`k`, `Ym` and `Yk` 64 bits; `f`, `t` and `u` 128; and `Yi`, `Yt` and `Y2` any
+size, as SSE2 is every target's here. The check follows an operand's own
+(`check_asm_operand_checks` without `whole`) and precedes its tie's, and the
+statement's first error alone is given, as clang returns there.
+
+Differences left: a `target` attribute on an earlier declaration alone, not
+the definition, doesn't widen an operand's limit, where clang's
+`getFunctionFeatureMap` reads the inherited attribute; an asm statement's
+constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369); and
 clang's "ignored asm label 'X' on automatic variable" warning is missing
 (#2370).
 
@@ -1060,9 +1073,9 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector of 16, 32 or 64 bytes (as clang can't place another: "could not
   allocate"), or of any size in a template of no instructions that doesn't
   refer to it; and vectors of 32 bytes without AVX or 64 without AVX-512F, or
-  in XMM16 up or YMM16 up of 16 or 32 bytes without AVX-512VL (clang's Sema
-  rejects the sizes first: "invalid input size for constraint", which the
-  checker doesn't give yet, #2231);
+  in XMM16 up or YMM16 up of 16 or 32 bytes without AVX-512VL (the checker
+  gives clang's Sema error for the sizes first, "invalid input size for
+  constraint", #2231, so only a `v` operand's register class reaches this);
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
   (APX's r16 to r31, st(2) to st(7)), in rsp in a statement
