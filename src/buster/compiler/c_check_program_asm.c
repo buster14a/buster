@@ -3318,8 +3318,8 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
 // (its section names are the source's bytes). Its labels and references join the templates' names
 // (check_program_asm_names), so that its labels define symbols C declares and its references reach C's symbols, and
 // the emission publishes its atoms before the functions' (check_program_emit_asm_unit). Refused by name, which the
-// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take, CFI,
-// whose frames the emission's unwind table doesn't merge, and section groups, which the units' merge doesn't carry.
+// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take, and
+// section groups, which the units' merge doesn't carry.
 // False only for an arena without room.
 static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckProgram* program, const X86MatchIndex* index, bool scalar, Arena* output)
 {
@@ -3350,14 +3350,10 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
                                               (AsmResult){ 0 };
     const Link* link = &assembled.link;
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
-    // CFI's frames are an EH_FRAME atom, and a group's sections (COMDAT) a group the units' merge doesn't carry. Every other
-    // section is published as the assembler made it: notes, the arrays of constructors and destructors in their classes,
-    // merged strings and custom flags (#1848).
+    // A group's sections (COMDAT) are a group the units' merge doesn't carry. Every other section is published as the
+    // assembler made it: notes, the arrays of constructors and destructors in their classes, merged strings, custom flags,
+    // and CFI's frames, an EH_FRAME atom of their own beside the functions' (#1848).
     refused = refused == NULL && source != 0 && link->groups.count > 1 ? "file-scope assembly's section groups" : refused;
-    for (AtomId atom = 1; source != 0 && refused == NULL && atom < link->atoms.count; atom += 1)
-    {
-        refused = link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME ? "file-scope assembly's CFI directives" : NULL;
-    }
     result->file_unit = refused == NULL ? assembled : (AsmResult){ 0 };
     result->file_assembled = source != 0 && refused == NULL;
     result->file_reason = refused;

@@ -805,9 +805,12 @@ custom flags (`.pushsection __ex_table,"a"`), merged strings, notes (`-c`'s
 `SHT_NOTE`; the direct path keeps a note's bytes with its class's data, without
 a `PT_NOTE`), and the arrays of constructors and destructors
 (`.section .init_array,"aw"`), whose entries the direct path's executable runs
-as C's constructors'. Refused by name, at the first file-scope statement:
-templates the assembler refuses; CFI, whose frames the emission's unwind table
-doesn't merge; section groups (COMDAT), which the units' merge doesn't carry;
+as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
+beside the functions' unwind table, its CIE and FDEs as the assembler makes them
+(clang's object shares one CIE between the module's assembly and its
+functions), which the direct path's `.eh_frame_hdr` indexes with the
+functions'. Refused by name, at the first file-scope statement: templates the
+assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
 and what the templates' names refuse (a label another template defines too, or
 that the unit defines, a reference to another template's `.set` symbol).
 
