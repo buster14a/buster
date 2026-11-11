@@ -385,6 +385,10 @@ typedef enum CheckInputMessage
     // enumerator (`note_token`) and the earlier's (`attribute`). Its enclosing expressions' diagnostics are left out as an
     // undeclared name's are.
     CHECK_INPUT_AMBIGUOUS,
+    // A redeclaration whose asm label differs from an earlier declaration's (#2262, check_input_asm_labels): clang's
+    // "conflicting asm label" at its name, its note "previous declaration is here" at the earlier label's string
+    // (`note_token`).
+    CHECK_INPUT_ASM_LABEL_CONFLICT,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -553,6 +557,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_VM_EXTERN] = "variably modified type declaration cannot have 'extern' linkage",
     [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
     [CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION] = "expected identifier or '('",
+    [CHECK_INPUT_ASM_LABEL_CONFLICT] = "conflicting asm label",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -3758,6 +3763,29 @@ static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttri
         result = attributes->records[i].kind == kind && !attributes->records[i].ignored ? attributes->records + i : NULL;
     }
     return result;
+}
+
+// An object's redeclaration that conflicts with the visible declaration (a redefinition, another type or kind) whose asm
+// label differs from its (#2262): clang's mergeDeclAttributes reports "conflicting asm label" at its name, noted at the earlier
+// label, before the conflict's own error, and goes on. A linked redeclaration's label is check_input_asm_labels'.
+// Returns whether it reported, so that the conflict's error at the same name is published too (`repeated`).
+static bool check_input_asm_label_conflict(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    bool reported = false;
+    const CheckInputAttribute* label = reader->output->asm_capacity != 0 ? check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_ASM_LABEL) : NULL;
+    const CheckInputAttribute* earlier = label != NULL ? check_input_attribute_of(check_input_attributes_at(reader->output, previous), CHECK_ATTRIBUTE_ASM_LABEL) : NULL;
+    if (earlier != NULL && (earlier->text.length != label->text.length || memcmp(earlier->text.pointer, label->text.pointer, label->text.length) != 0))
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, token, CHECK_INPUT_ASM_LABEL_CONFLICT);
+        if (reader->output->report_count == before + 1)
+        {
+            reader->output->reports[before].note_token = earlier->argument_first;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+            reported = check_input_recover_reports(reader, before);
+        }
+    }
+    return reported;
 }
 
 // Whether a generic attribute is a function type's (#147): ns_returns_retained, cfi_unchecked_callee, the function effects'
@@ -12071,10 +12099,16 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
         }
         if (mismatch || (thread_local && !thread_local_alone))
         {
+            // An object's (MergeVarDecl merges the attributes first); a function's types are checked before (MergeFunctionDecl).
+            const bool labelled = kind == C_BINDING_OBJECT && check_input_asm_label_conflict(reader, token, previous);
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
             const uint32_t before = reader->output->report_count;
             check_input_redeclaration_report(reader, token, previous, judged, repeatable, parameter_conflict, true, message);
+            for (uint32_t r = before; labelled && r < reader->output->report_count; r += 1)
+            {
+                reader->output->reports[r].repeated = true;
+            }
             // clang marks the redeclaration invalid and leaves it out of its name's lookup, which finds the visible
             // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
             // bound or linked.
