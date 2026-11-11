@@ -98,11 +98,11 @@ static void ir_licm_classify(IrLicmWork* work)
         // Packed variable shifts are total even for oversized counts. Scalar shifts keep their fault exclusion.
         const __mmask16 vector_shift = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm_cmpge_epu8_mask(types, _mm_set1_epi8(IR_V4I32)) & _mm_cmple_epu8_mask(types, _mm_set1_epi8(IR_V16I32));
         const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
-        // A splat, the width changes, the permutes, the conversions and the scalar shifts (#1840: extract to shift, consecutive
-        // kinds) are pure and total.
+        // A splat, the width changes, the permutes, the conversions, the scalar shifts and the lane operations (#1840:
+        // extract to lane_op, consecutive kinds) are pure and total.
         const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(4)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
                                                                           (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
-                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SHIFT))));
+                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }

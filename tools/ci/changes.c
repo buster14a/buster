@@ -448,7 +448,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "backend-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
@@ -468,7 +468,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-debug",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|branch_sizing|calling_convention(_builtins)?|debug|foreign_test|lane|link|object_writer|"
+                   "c_types_transparent|c_types_sugar|branch_sizing|calling_convention(_builtins)?|debug|foreign_test|lane|link|object_writer|"
                    "object_writer_test|tier0|unwind[a-z0-9_]*|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|bind|import|runtime",
     },
@@ -476,7 +476,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-lanes",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -484,7 +484,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-units",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime|profile",
     },
@@ -496,21 +496,21 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "checker-bindings",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-deferred",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
@@ -579,7 +579,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "ir-source",
         .sources = "ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|ir_optimize[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|"
                    "c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|"
-                   "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|"
+                   "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|"
                    "tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|"
                    "x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
@@ -603,7 +603,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "lowering-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -660,7 +660,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .sources = "tier1_certificate[a-z0-9_]*|tier1_cfg[a-z0-9_]*|tier1_allocate|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|"
                    "ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
                    "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
                    "bind|import|runtime",
     },
@@ -673,7 +673,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "tier1_rematerialize|tier1_liveness|tier1_cfg[a-z0-9_]*|tier1_allocate|ir_optimize[a-z0-9_]*|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|"
                    "ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|"
                    "c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
                    "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
                    "bind|import|runtime",
     },
@@ -2791,13 +2791,13 @@ static bool changes_main_policy(Text workflow)
     } required[] = {
         { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
-        { 4, "    needs: [changes, evidence, agent-guide-size, dco-hooks]" },
-        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 4, "    needs: [changes, evidence, policy]" },
+        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}" },
         { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
-        { 1, "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]" },
+        { 1, "    needs: [changes, evidence, policy, prepare-hosted-tools]" },
         { 1, "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES },
         { 1, "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
-        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}" },
         { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
         { 1, BUSTER_CHANGES_HOST_ARCHES },
         { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
@@ -2882,12 +2882,12 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: true", "main cancellation" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: false", "lost PR cancellation" },
-        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "native reuse suppresses hosted tests" },
+        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}", "native reuse suppresses hosted tests" },
         { "  prepare-hosted-tools:", "needs.evidence.outputs.hosted == 'run'", "needs.evidence.outputs.hosted == 'reused'", "preparation excludes required hosted work" },
         { "  prepare-hosted-tools:", "    uses: ./.github/workflows/prepare-hosted-tools.yml", "    uses: ./.github/workflows/absent.yml", "missing preparation implementation" },
         { "  test:", "needs.prepare-hosted-tools.result == 'success' && ", "", "tests bypass preparation failure" },
         { "  test:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "tests accept skipped preparation" },
-        { "  test:", "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]", "    needs: [changes, evidence, agent-guide-size, dco-hooks]", "tests omit preparation dependency" },
+        { "  test:", "    needs: [changes, evidence, policy, prepare-hosted-tools]", "    needs: [changes, evidence, policy]", "tests omit preparation dependency" },
         { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
         { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"native\"]'", "missing baseline architecture" },
         { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"x86-64\", \"vector\"]'", "main's native row replaced before its qualification" },

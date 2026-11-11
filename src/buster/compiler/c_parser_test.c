@@ -627,6 +627,11 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },
     { "int f(void) { int x = 1\nreturn x; }\n", "1:24: expected ';' at end of declaration", 0 },
     { "int a[3 4];\n", "1:9: expected ']'", 0 },
+    // A parameter list whose first parameter starts with an attribute: both paths mark it a function's, in a definition
+    // and in a prototype (#1968).
+    { "int h(__attribute__((aligned(8))) int q) { int x; return q; }\n", "", 0 },
+    { "int p(__attribute__((unused)) int, __attribute__((unused)) char *);\nint (*fp)(__attribute__((unused)) int);\n", "", 0 },
+    { "int k([[maybe_unused]] int q);\nint m([[maybe_unused]] int q, __attribute__((unused)) int r) { return q + r; }\n", "", "c23" },
     // A comma at the top of an array declarator's size or an array designator's index (#1867); one in parentheses or a
     // call's arguments, or in a subscript, is an operator's.
     { "void f(int n, int m) { int u[n, m]; }\n", "1:31: expected ']'", 0 },
@@ -1777,21 +1782,6 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     return failures;
 }
 #endif
-// The role the paths can tell: a function declarator's parentheses look like a call's (both are postfix groups after
-// an operand, with the same tree), so they compare as one.
-static uint8_t parse_test_canonical_role(uint8_t role)
-{
-    uint8_t result = role;
-    if (role == PARSE_ROLE_OPEN_FUNCTION)
-    {
-        result = PARSE_ROLE_OPEN_CALL;
-    }
-    else if (role == PARSE_ROLE_CLOSE_FUNCTION)
-    {
-        result = PARSE_ROLE_CLOSE_CALL;
-    }
-    return result;
-}
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The tokens around `token`, the token itself marked, as one report.
 static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1874,7 +1864,7 @@ static uint32_t parse_test_compare_trees(const Parser* vector, const Parser* sca
     for (uint32_t i = 0; i < count && first == BUSTER_PARSE_NONE; i += 1)
     {
         const bool same = vector->tree.parents[i] == scalar->tree.parents[i] && vector->tree.depths[i] == scalar->tree.depths[i] &&
-                          parse_test_canonical_role(vector->tree.roles[i]) == parse_test_canonical_role(scalar->tree.roles[i]);
+                          vector->tree.roles[i] == scalar->tree.roles[i];
         first = same ? BUSTER_PARSE_NONE : i;
     }
     if (first != BUSTER_PARSE_NONE)
@@ -2387,7 +2377,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
             for (uint32_t i = 0; i < count && first == BUSTER_PARSE_NONE; i += 1)
             {
                 const bool same = kernels->parents[i] == scalar->tree.parents[i] && kernels->node_depths[i] == scalar->tree.depths[i] &&
-                                  parse_test_canonical_role(kernels->roles[i]) == parse_test_canonical_role(scalar->tree.roles[i]);
+                                  kernels->roles[i] == scalar->tree.roles[i];
                 first = same ? BUSTER_PARSE_NONE : i;
             }
             if (first != BUSTER_PARSE_NONE)
@@ -2762,8 +2752,9 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
 
 // What the units of one check share, one unit after another (#2078): the intern table, reset to its predefined names
 // before each unit (intern_reset, after which each name gets the id it gets in a fresh table), and the parsers, which
-// parse unit after unit as fresh ones would (parse_test_borrowed_scratch checks that): the vector path's and the scalar
-// parser's, and each again tree-only. Each unit still gets a preprocessor of its own. Setting up a fresh table and four
+// parse unit after unit in the scratch the units before left, as a lane's do, and as fresh ones would
+// (parse_test_reused_scratch and parse_test_borrowed_scratch check that): the vector path's and the scalar parser's, and
+// each again tree-only. Each unit still gets a preprocessor of its own. Setting up a fresh table and four
 // fresh parsers for each unit, then releasing them, took most of the alignments' time: their pages faulted in again and
 // were unmapped again for each of the 34,624 units. parse_test_units_release releases them.
 typedef struct ParseTestUnits ParseTestUnits;
@@ -2823,13 +2814,6 @@ static bool parse_test_units_prepare(ParseTestUnits* units, CLanguage language)
     units->table_ready = units->table_ready || table;
     const bool same_language = units->language.standard == language.standard && units->language.gnu == language.gnu &&
                                units->language.gnu_keywords == language.gnu_keywords && units->language.digraphs == language.digraphs;
-    // Each parser's scratch as a fresh parser's (parse_test_units_clear): a parse that reads a temporary it didn't write
-    // must read what it reads on a fresh parser, for the checks to be a fresh parser's. The vector path does: on some
-    // invalid streams, K5's verdict follows what an earlier unit left in its temporaries (#2086).
-    for (uint32_t i = 0; units->parsers_ready && same_language && i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
-    {
-        parse_test_units_clear(&units->parsers[i].scratch);
-    }
     if (!units->parsers_ready || !same_language)
     {
         // The scalar parser's parse also derives the subtree sizes, which parse_test_postorders checks.
@@ -3109,7 +3093,7 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
                 const uint8_t* bytes = pp_location_bytes(&pp, location);
                 const int length = bytes != 0 && end > location ? (int)(end - location < 24 ? end - location : 24) : 0;
                 const bool differ = vector.tree.parents[t] != scalar.tree.parents[t] || vector.tree.depths[t] != scalar.tree.depths[t] ||
-                                    parse_test_canonical_role(vector.tree.roles[t]) != parse_test_canonical_role(scalar.tree.roles[t]);
+                                    vector.tree.roles[t] != scalar.tree.roles[t];
                 printf("%7u %5u  %-24.*s %-14s | %-24s %3u %7d | %-24s %3u %7d%s\n", t, line, length, (const char*)bytes, parse_kind_names[scalar.tokens.kinds[t]],
                        parse_role_names[vector.tree.roles[t]], vector.tree.depths[t], (int)vector.tree.parents[t], parse_role_names[scalar.tree.roles[t]],
                        scalar.tree.depths[t], (int)scalar.tree.parents[t], differ ? "  <<" : "");
@@ -3739,6 +3723,110 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
     return failures;
 }
 
+// #2086: a parse reads only the temporaries its own unit wrote. Units in turn on one parser with a scratch of its own,
+// which nothing clears or dirties between them, as a lane's units reuse theirs, each against a parser whose scratch
+// parse_test_units_clear zeroes before each unit, as a fresh parser's: tokens, tree, postorder, diagnostics and
+// statistics alike (parse_test_parse_difference). The units: two random streams (seed 1, streams 20 and 1485), then
+// the first `count` streams parse_test_streams checks, in its order (256 of them: all 2,000 took 5% of test-parser's
+// time without files). The first stream's brackets don't balance: K2 put its groups on the group stacks below depth 0,
+// where a top-level token's group is read (none, in a fresh scratch). The second's top-level tokens took one of them:
+// K5 settled its statements, and K6 flagged 77 of its tokens, where on a fresh parser K5 sends it whole to the scalar
+// parser.
+static uint32_t parse_test_reused_scratch(const PPOptions* options, const char* directory, uint64_t count, uint64_t seed)
+{
+    static const char* const pair[] = {
+        "/ <= { a = 1; } && ~ sizeof \"s\" { a = 1; } if (a) b; else x; ^ ) ! return\n"
+        "long f : else ^ ^ ; continue goto . case do <= 1 &&\n"
+        ": for ; f(a, b) < __builtin_offsetof T while { static ... ( if (a) b; else x; ) [ __builtin_va_arg default T ( > switch\n"
+        "extern static < return switch 0 int ( break -- 1 +=\n"
+        "~ ( ) ] do break >= && struct \n",
+        "{ a = 1; } for int return\n"
+        "continue f(a, b) struct switch ++ +\n"
+        "_Alignas extern\n"
+        "< & continue const -- + , enum - *\n"
+        "'c' char int a; a[0] void __extension__ return int \"s\" a = int a; extern\n"
+        "&&\n"
+        "__builtin_va_arg if (a) b; else x; T x; ( & :\n"
+        "int a; , / (int)a 'c' ++\n"
+        ">> \"s\" >> __extension__ ++\n"
+        "do void & >= a continue 1.5 1 if a for __extension__ extern , + )\n",
+    };
+    const uint64_t pairs = BUSTER_ARRAY_LENGTH(pair);
+    uint32_t failures = 0;
+    uint64_t state = seed ^ 0x5DEECE66Dull;
+    static char text[1 << 16];
+    static InternTable table;
+    static Preprocessor pp;
+    // The reused parser, then the cleared one.
+    static Parser parsers[2];
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/stream.c", directory);
+    const ParseOptions parse_options = { .scalar = false };
+    const bool table_ready = intern_initialize(&table);
+    bool ready = table_ready;
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
+    {
+        ready = parse_initialize(&parsers[i], &parse_options, options->language);
+    }
+    for (uint64_t u = 0; ready && u < pairs + count; u += 1)
+    {
+        size_t length = 0;
+        if (u < pairs)
+        {
+            length = (size_t)snprintf(text, sizeof(text), "%s", pair[u]);
+        }
+        else
+        {
+            const uint32_t pieces = 1 + (uint32_t)(parse_test_random(&state) % 300);
+            length = parse_test_stream(text, sizeof(text), &state, pieces, (u - pairs) % 2 == 1);
+        }
+        ready = intern_reset(&table) && pp_initialize(&pp, options, &table);
+        const bool preprocessed = ready && pp_run_source(&pp, path, (const uint8_t*)text, (uint32_t)length);
+        if (preprocessed)
+        {
+            parse_test_units_clear(&parsers[1].scratch);
+            parse_translation_unit(&parsers[0], &pp);
+            parse_translation_unit(&parsers[1], &pp);
+            const char* difference = parse_test_parse_difference(&parsers[0], &parsers[1]);
+            if (difference != 0)
+            {
+                failures += 1;
+                const ParseStatistics* x = &parsers[0].statistics;
+                const ParseStatistics* y = &parsers[1].statistics;
+                parse_test_report("reused scratch: unit %llu: %s; fallback %llu items, %llu tokens, %llu flagged, whole %u, %u errors, against a fresh parser's "
+                                  "%llu, %llu, %llu, %u, %u\n    %s", (unsigned long long)u, difference, (unsigned long long)x->fallback_items,
+                                  (unsigned long long)x->fallback_tokens, (unsigned long long)x->flagged_tokens, x->whole, parsers[0].errors,
+                                  (unsigned long long)y->fallback_items, (unsigned long long)y->fallback_tokens, (unsigned long long)y->flagged_tokens, y->whole,
+                                  parsers[1].errors, text);
+            }
+        }
+        else
+        {
+            failures += 1;
+            parse_test_report("reused scratch: unit %llu doesn't preprocess\n    %s", (unsigned long long)u, text);
+        }
+        if (ready)
+        {
+            pp_release(&pp);
+        }
+    }
+    if (!ready)
+    {
+        failures += 1;
+        printf("reused scratch: the parsers or the intern table couldn't be set up\n");
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
+    {
+        parse_release(&parsers[i]);
+    }
+    if (table_ready)
+    {
+        intern_release(&table);
+    }
+    printf("reused scratch: %llu units on one parser, against a fresh parser's scratch, %u differ\n", (unsigned long long)(pairs + count), failures);
+    return failures;
+}
+
 // #628: production vector scratch fits 80 bytes/token plus alignment. Benchmark traversal arrays must not put
 // live slots and fallback scratch beyond that prefix. Reserve through a dirty arena copy, keeping caller-owned
 // bytes below its mark; neither fresh zero pages nor a shared arena high-water mark is part of the contract.
@@ -3992,10 +4080,10 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     // A warning, which the driver prints by preprocessing the unit again for its history: with code after it; and in a
     // unit of directives alone, whose output is empty, after a #if line of 300 expansions, for which the replay's history
     // grows while it runs (parse_test_driver_limits fails that growth too, which the empty output wouldn't show).
-    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only [-W#warnings]\n", false },
     { PARSE_TEST_DRIVER_TEXT,
       "#define A(x) x\n#define B A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)\n#define C B+B+B+B+B+B+B+B\n#define D C+C+C+C\n#if D\n#endif\n#warning only\n", 0, 0,
-      "%s:7:2: warning: only\n", false },
+      "%s:7:2: warning: only [-W#warnings]\n", false },
 };
 
 // Whether a run of case `c` did what it must.
@@ -4004,6 +4092,88 @@ static bool parse_test_driver_expected(const ParseTestDriverCase* c, const char*
     char expected[1024];
     snprintf(expected, sizeof(expected), c->message, path);
     return status == c->status && (c->prefix ? strncmp(text, expected, strlen(expected)) == 0 : strcmp(text, expected) == 0);
+}
+
+// Reads the file at `path` (a /proc file) into `text`, as much as fits.
+static void parse_test_read_proc(const char* path, char* text, size_t capacity)
+{
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    size_t length = 0;
+    ssize_t got = fd >= 0 ? 1 : 0;
+    while (got > 0 && length + 1 < capacity)
+    {
+        got = read(fd, text + length, capacity - 1 - length);
+        length += got > 0 ? (size_t)got : 0;
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    text[length] = 0;
+}
+
+// Whether `other`, lines ending in '\n', has the line of `length` bytes at `line`.
+static bool parse_test_has_line(const char* other, const char* line, size_t length)
+{
+    bool result = false;
+    const char* at = other;
+    while (!result && *at != 0)
+    {
+        const char* end = strchr(at, '\n');
+        const size_t other_length = end != 0 ? (size_t)(end - at) : strlen(at);
+        result = other_length == length && memcmp(at, line, length) == 0;
+        at += other_length + (end != 0);
+    }
+    return result;
+}
+
+// Prints each line of `text` that `other` doesn't have, after `mark`.
+static void parse_test_print_lines_missing(const char* text, const char* other, const char* mark)
+{
+    const char* at = text;
+    while (*at != 0)
+    {
+        const char* end = strchr(at, '\n');
+        const size_t length = end != 0 ? (size_t)(end - at) : strlen(at);
+        if (!parse_test_has_line(other, at, length))
+        {
+            dprintf(STDOUT_FILENO, "driver:   %s: %.*s\n", mark, (int)length, at);
+        }
+        at += length + (end != 0);
+    }
+}
+
+// What a probe's child prints to the standard output it shares with its parent when its run left the address space at
+// `size` bytes, not `base` (`start` when the run began), or the lowest free descriptor at `after`, not `before` (#2089):
+// the mappings and the descriptors that differ from the parent's. The parent waits for the child meanwhile, so its own
+// are as they were at the fork; the child's standard error is `capture`, which the parent has open too.
+static __attribute__((noinline)) void parse_test_report_residue(uint64_t base, uint64_t start, uint64_t size, int before, int after, int capture)
+{
+    static char parent_maps[1 << 18];
+    static char child_maps[1 << 18];
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", (int)getppid());
+    parse_test_read_proc(path, parent_maps, sizeof(parent_maps));
+    parse_test_read_proc("/proc/self/maps", child_maps, sizeof(child_maps));
+    dprintf(STDOUT_FILENO, "driver: a child's run left VmSize %llu, not %llu (%llu when it began; VmStk %llu), the lowest free descriptor %d, not %d\n",
+            (unsigned long long)size, (unsigned long long)base, (unsigned long long)start, (unsigned long long)parse_test_status_bytes("VmStk:"), after, before);
+    parse_test_print_lines_missing(parent_maps, child_maps, "the parent's mapping, not the child's");
+    parse_test_print_lines_missing(child_maps, parent_maps, "the child's mapping, not the parent's");
+    for (int fd = 0; fd < 1024; fd += 1)
+    {
+        char parent_target[4096];
+        char child_target[4096];
+        snprintf(path, sizeof(path), "/proc/%d/fd/%d", (int)getppid(), fd == 2 ? capture : fd);
+        const ssize_t parent_length = readlink(path, parent_target, sizeof(parent_target) - 1);
+        snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+        const ssize_t child_length = readlink(path, child_target, sizeof(child_target) - 1);
+        parent_target[parent_length > 0 ? parent_length : 0] = 0;
+        child_target[child_length > 0 ? child_length : 0] = 0;
+        if (strcmp(parent_target, child_target) != 0)
+        {
+            dprintf(STDOUT_FILENO, "driver:   descriptor %d: the parent's \"%s\", the child's \"%s\"\n", fd, parent_target, child_target);
+        }
+    }
 }
 
 // A run in a child whose address space may grow `limit` bytes past `base` (the parent's): its exit status (-1 if it
@@ -4018,10 +4188,19 @@ struct ParseTestProbe
     char text[1024];
 };
 
-static __attribute__((unused)) ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared, bool preprocess)
+// With `warm`, the run is in this process instead, and the caller restores its RLIMIT_AS and standard error after it.
+// That run takes the frame and the observations a child's takes, from the same caller (out of line, so the frame is the
+// same), so that the stack has grown as far as the children's runs take it. A child's run that reached further than any
+// of the parent's grew the stack by a page, though it released everything, when the stack's lowest page boundary fell
+// within the bytes it reached past them: run from parse_test_drive's frame, the parent's reached 64 bytes short of a
+// child's, and the kernel offsets the stack's top at random within a page, so about one run in 64 of a file that went
+// deeper than the files before it failed (#2089). The standard output is flushed first, so that what a child prints
+// (parse_test_report_residue) follows what the parent printed.
+static __attribute__((noinline, unused)) ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared, bool preprocess, bool warm)
 {
     *shared = (ParseTestProbe){ .status = -1 };
-    const pid_t child = fork();
+    fflush(stdout);
+    const pid_t child = warm ? 0 : fork();
     if (child == 0)
     {
         struct rlimit space;
@@ -4029,12 +4208,21 @@ static __attribute__((unused)) ParseTestProbe parse_test_probe(char** arguments,
         space.rlim_cur = base + limit;
         limited = limited && setrlimit(RLIMIT_AS, &space) == 0 && dup2(capture, 2) == 2;
         const int before = parse_test_lowest_descriptor();
+        const uint64_t start = parse_test_status_bytes("VmSize:");
         const int status = !limited ? -1 : preprocess ? run_preprocessor_command(count, arguments) : run_parse_command(count, arguments);
         const int after = parse_test_lowest_descriptor();
         shared->peak = parse_test_status_bytes("VmPeak:") - base;
-        shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
+        const uint64_t size = parse_test_status_bytes("VmSize:");
+        shared->clean = size == base && after == before;
         shared->status = status;
-        _exit(0);
+        if (!warm && !shared->clean)
+        {
+            parse_test_report_residue(base, start, size, before, after, capture);
+        }
+        if (!warm)
+        {
+            _exit(0);
+        }
     }
     int child_status = 0;
     pid_t waited = child;
@@ -4042,7 +4230,7 @@ static __attribute__((unused)) ParseTestProbe parse_test_probe(char** arguments,
     {
     }
     ParseTestProbe result = *shared;
-    result.status = child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0 ? result.status : -1;
+    result.status = warm || (child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0) ? result.status : -1;
     parse_test_read_capture(capture, result.text, sizeof(result.text));
     return result;
 }
@@ -4253,16 +4441,33 @@ static uint32_t parse_test_driver_limits(char** arguments, int count, int captur
     printf("driver: %s: reservations failed in turn aren't checked under ThreadSanitizer, whose shadow grows the address space\n", name);
 #else
     char text[1024];
-    // A run without a limit, which also grows the stack as far as a run takes it, and one in a child, for its peak.
+    // A run without a limit; the same run here through a child's frame and observations, with its limit, which grows the
+    // stack as far as the children's runs take it (parse_test_probe); and one in a child, for its peak.
     const int status = parse_test_drive(arguments, count, capture, text, sizeof(text), preprocess);
+    struct rlimit space;
+    const int errors = dup(2);
+    const bool saved = errors >= 0 && getrlimit(RLIMIT_AS, &space) == 0;
+    const uint64_t warm_base = parse_test_status_bytes("VmSize:");
+    const ParseTestProbe warm = saved ? parse_test_probe(arguments, count, capture, warm_base, 1ull << 46, shared, preprocess, true) : (ParseTestProbe){ .status = -1 };
+    const bool restored = saved && setrlimit(RLIMIT_AS, &space) == 0 && dup2(errors, 2) == 2;
+    if (errors >= 0)
+    {
+        close(errors);
+    }
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t base = parse_test_status_bytes("VmSize:");
-    const ParseTestProbe whole = parse_test_probe(arguments, count, capture, base, 1ull << 46, shared, preprocess);
-    const bool same = whole.status == status && strcmp(whole.text, text) == 0 && whole.clean && whole.peak != 0 && base != 0;
-    if (!same)
+    const ParseTestProbe whole = parse_test_probe(arguments, count, capture, base, 1ull << 46, shared, preprocess, false);
+    const bool warmed = restored && warm.status == status && strcmp(warm.text, text) == 0;
+    const bool same = warmed && whole.status == status && strcmp(whole.text, text) == 0 && whole.clean && whole.peak != 0 && base != 0;
+    if (!warmed)
     {
-        parse_test_report("driver: %s: a run in a child gave status %d and \"%s\" (peak %llu), not %d and \"%s\"\n", name, whole.status, whole.text,
-                          (unsigned long long)whole.peak, status, text);
+        parse_test_report("driver: %s: a run through a child's frame here gave status %d and \"%s\"%s, not %d and \"%s\"\n", name, warm.status, warm.text,
+                          restored ? "" : " (its limit or standard error not restored)", status, text);
+    }
+    else if (!same)
+    {
+        parse_test_report("driver: %s: a run in a child gave status %d and \"%s\" (peak %llu, %s), not %d and \"%s\"\n", name, whole.status, whole.text,
+                          (unsigned long long)whole.peak, whole.clean ? "clean" : "left memory or a descriptor behind", status, text);
     }
     failures += !same;
     uint32_t runs = 0;
@@ -4272,7 +4477,7 @@ static uint32_t parse_test_driver_limits(char** arguments, int count, int captur
         // A refused run's peak steps the limit below the reservation that failed; an admitted one (a refused
         // reservation can retry compact, so the run can still finish) halves it, which reaches each tier in turn.
         const uint64_t limit = peak - page;
-        const ParseTestProbe probe = parse_test_probe(arguments, count, capture, base, limit, shared, preprocess);
+        const ParseTestProbe probe = parse_test_probe(arguments, count, capture, base, limit, shared, preprocess, false);
         failures += parse_test_check_probe(&probe, limit, name, status, text);
         peak = strstr(probe.text, "fatal error: ") != 0 ? probe.peak : (probe.peak + 1) / 2;
         runs += 1;
@@ -4620,6 +4825,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             plain.include_count = 0;
             failures += parse_test_streams(streams, seed, &plain, directory, keep);
             failures += parse_test_borrowed_scratch(&plain, directory, seed);
+            failures += parse_test_reused_scratch(&plain, directory, streams < 256 ? streams : 256, seed);
             failures += parse_test_alignments(0, &plain, directory);
             failures += parse_test_nesting(&plain, directory);
             failures += parse_test_driver(directory);

@@ -81,6 +81,16 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "nomerge before a call", "int g(int (*p)(void)) {\n__attribute__((nomerge)) p();\nreturn 0;\n}\n" },
         { "suppress before an expression", "int g(int x) {\n__attribute__((suppress(\"x\"))) x++;\nreturn x;\n}\n" },
         { "suppress without strings", "int g(int x) {\n__attribute__((suppress)) x++;\nreturn x;\n}\n" },
+        // A suppress whose argument is no string literal, which clang's parser drops (#1844): with no GNU attribute left, the
+        // statement is a declaration, whose first token is clang's parser's second error; one left keeps it a statement.
+        { "malformed suppress before an expression", "int g(int x) {\n__attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
+        { "malformed __suppress__ before a call", "int f(int);\nint g(int x) {\n__attribute__((__suppress__(x))) f(x);\nreturn x;\n}\n" },
+        { "two malformed suppresses before an increment", "int g(int x) {\n__attribute__((suppress(1), suppress(2))) ++x;\nreturn x;\n}\n" },
+        { "malformed suppresses in two lists before a constant", "int g(int x) {\n__attribute__((suppress(1))) __attribute__((suppress(\"a\", 2))) 3;\nreturn x;\n}\n" },
+        { "malformed suppress beside a kept one", "typedef int T;\nint g(int x) {\n__attribute__((suppress(\"a\"), suppress(1))) x++;\n"
+                                                  "__attribute__((suppress(1))) __attribute__((suppress)) x++;\n__attribute__((suppress(((\"a\"))))) x++;\n"
+                                                  "__attribute__((suppress(1))) T y = x;\n__attribute__((suppress(1))) return y;\n}\n" },
+        { "malformed suppress after a control head", "int g(int x) {\nif (x) __attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
         { "nomerge and suppress before an if", "int g(int x) {\n__attribute__((nomerge, suppress(\"a\", \"b\"))) if (x) x++;\nreturn x;\n}\n" },
         { "clang::nomerge before a return", "int g(int (*p)(void)) {\n[[clang::nomerge]] return p();\n}\n" },
         { "fallthrough in a switch, beside noinline", "int f(int);\nint g(int x) {\nswitch (x) {\ncase 0:\nx = f(x);\n__attribute__((noinline, fallthrough));\n"
@@ -245,6 +255,47 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "case 16: if (0 || ((y & 4) == 3)) ; else return 16; __attribute__((fallthrough)); x++;\n"
           "case 17: for (; (y > 1 || y < 3) || x;) ; __attribute__((fallthrough)); x++;\n"
           "case 18: return 0;\n}\nreturn 0;\n}\n" },
+        // The tautology checks' other constants and operands (#1844): floating literals, and integer ones their implicit
+        // conversion makes floating, compared in the wider type at clang's APFloat values; enumerators of one enumeration
+        // (a C23 fixed underlying type's too); members (`s.m`, `p->m`, `s.in.k` through parentheses) and elements (`a[1]`
+        // with `a[1u]`, `a[i]`, an enumerator's index), as Expr::isSameComparisonOperand takes them; a float compared
+        // with a float literal and with a double one, whose conversions differ but whose name is the same; _Float16's
+        // constants rounded to it (2049 is 2048, and their mean 2048 again).
+        { "unreachable fallthroughs after tautologies of other constants and operands",
+          "enum E { A = 3, B = 5 };\nstruct In { int k; };\nstruct S { int m; struct In in; int a[4]; double r; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, float g, long double ld, int i, _Float16 h) {\nswitch (x) {\n"
+          "case 1: if (d > 5.0 && d < 3.0) ; else return 1; __attribute__((fallthrough)); x++;\n"
+          "case 2: if (d < 5.0 || d > 3.0) return 2; __attribute__((fallthrough)); x++;\n"
+          "case 3: if (g > 1.0f && g < 0.5f) ; else return 3; __attribute__((fallthrough)); x++;\n"
+          "case 4: if (d > 5 && d < -3) ; else return 4; __attribute__((fallthrough)); x++;\n"
+          "case 5: if (ld > 5.0L && ld < 3.0L) ; else return 5; __attribute__((fallthrough)); x++;\n"
+          "case 6: if (d == 1.0 && d == 2.0) ; else return 6; __attribute__((fallthrough)); x++;\n"
+          "case 7: if (y > B && y < A) ; else return 7; __attribute__((fallthrough)); x++;\n"
+          "case 8: if ((y) > (B) && y < (A)) ; else return 8; __attribute__((fallthrough)); x++;\n"
+          "case 9: if (y != A || y != B) return 9; __attribute__((fallthrough)); x++;\n"
+          "case 10: if (s.m > 5 && s.m < 3) ; else return 10; __attribute__((fallthrough)); x++;\n"
+          "case 11: if (p->m < 5 || p->m > 3) return 11; __attribute__((fallthrough)); x++;\n"
+          "case 12: if (s.in.k > 5 && (s.in).k < 3) ; else return 12; __attribute__((fallthrough)); x++;\n"
+          "case 13: if (s.m || !s.m) return 13; __attribute__((fallthrough)); x++;\n"
+          "case 14: if (arr[1] > 5 && arr[1] < 3) ; else return 14; __attribute__((fallthrough)); x++;\n"
+          "case 15: if (arr[i] > 5 && arr[i] < 3) ; else return 15; __attribute__((fallthrough)); x++;\n"
+          "case 16: if (s.a[1] > 5 && s.a[1u] < 3) ; else return 16; __attribute__((fallthrough)); x++;\n"
+          "case 17: if (arr[A] > 5 && arr[A] < 3) ; else return 17; __attribute__((fallthrough)); x++;\n"
+          "case 18: if (y > (-5) && y < (-9)) ; else return 18; __attribute__((fallthrough)); x++;\n"
+          "case 19: if (g > 0.1f && g < 0.1) ; else return 19; __attribute__((fallthrough)); x++;\n"
+          "case 20: if (s.r > 1 && s.r < -1) ; else return 20; __attribute__((fallthrough)); x++;\n"
+          "case 21: if (d > 1e999 || d <= 1e999) return 21; __attribute__((fallthrough)); x++;\n"
+          "case 22: if (y | B) return 22; __attribute__((fallthrough)); x++;\n"
+          "case 23: if (h > 1.0f16 && h < 0.5f16) ; else return 23; __attribute__((fallthrough)); x++;\n"
+          "case 24: if (h > 2049 && h < 2050) ; else return 24; __attribute__((fallthrough)); x++;\n"
+          "case 25: if (h != 65504 || h != 70000) return 25; __attribute__((fallthrough)); x++;\n"
+          "case 26: return 0;\n}\nreturn 0;\n}\n" },
+        { "unreachable fallthroughs after tautologies of fixed enumerations' enumerators",
+          "enum E : long { A = 3, B = 5 };\nenum G : unsigned char { P = 1, Q = 2 };\nint f(int x, long y, enum G g) {\nswitch (x) {\n"
+          "case 1: if (y > B && y < A) ; else return 1; __attribute__((fallthrough)); x++;\n"
+          "case 2: if (g > Q && g < P) ; else return 2; __attribute__((fallthrough)); x++;\n"
+          "case 3: if (x > B && x < A) ; else return 3; __attribute__((fallthrough)); x++;\n"
+          "case 4: return 0;\n}\nreturn 0;\n}\n" },
         // But not inside the parentheses of a condition that is no logical operator, nor past `!`, which clang's
         // tryEvaluateBool doesn't look through, nor in a do loop's parenthesized operand, nor across types, nor in
         // __builtin_assume's argument (each alone).
@@ -260,6 +311,49 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "case 1: y++; __builtin_assume(y > 5 && y < 3); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         { "a reachable fallthrough after a satisfiable comparison", "int f(int x, int y) {\nswitch (x) {\n"
           "case 1: y++; if (y > 3 && y < 5) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        // But not a literal its comparison converts otherwise than IntegralCast or IntegralToFloating, or inside
+        // parentheses; enumerators of two enumerations, or one and a literal; a member or an element under conversions of
+        // different kinds; an index other than a literal or the same operand; a member of an element or a dereference;
+        // `-` of an enumerator; nor values that a mean of infinities leaves unknown (each alone).
+        { "a reachable fallthrough after a float literal its comparison converts", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (d > 5.0f && d < 3.0f) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a long double compared with double literals", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (ld > 5.0 && ld < 3.0) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after parenthesized literals their comparison converts", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (l > (5) && l < (3)) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after enumerators of two enumerations", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (y > B && y < C) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after an enumerator and a literal", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (y > B && y < 3) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a member's literals of two types", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (s.m > 5 && s.m < 3.0) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after an integer's literal and a floating one", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (y > 5 && y < 3.0) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after an element of a parenthesized index", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (arr[(1)] > 5 && arr[(1)] < 3) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after an element of a computed index", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (arr[i + 1] > 5 && arr[i + 1] < 3) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after an element's member", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (p[2].m > 5 && p[2].m < 3) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a dereference's member", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if ((*p).m > 5 && (*p).m < 3) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a negated enumerator", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (y > -B && y < -A) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after infinities around a value", "enum E { A = 3, B = 5 };\nenum F { C = 3, D = 5 };\nstruct S { int m; } s, *p;\nint arr[4];\n"
+          "int f(int x, int y, double d, long double ld, long l, int i) {\nswitch (x) {\n"
+          "case 1: if (d > -1e999 && d < 1e999) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         // A loop whose breaks can't run never ends, as clang's CFG prunes an if's branch its folded condition doesn't take
         // (#1126's review): `if (0) break;`, an else of a true condition, a break of a nested loop or switch, and a body
         // that is an if itself. But a break that can run ends it (each alone, as above).

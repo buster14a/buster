@@ -68,6 +68,12 @@ struct CheckProgramCode
     AtomId* asm_atoms;
     ObjectAtomSection* asm_sections;
     uint32_t asm_atom_count;
+    // Its section groups (COMDAT, #1848), the assembler's (asm_object_groups) with the program's names, symbols and atoms,
+    // group 0 null, and each asm atom's group (0 for none), parallel to asm_atoms; check_program_sections publishes them
+    // with selectany's in the link's LinkGroups. None for a unit whose assembly makes none.
+    LinkGroup* asm_groups;
+    uint32_t* asm_atom_groups;
+    uint32_t asm_group_count;
     // GNU's retain attribute (#147): the symbols of the program whose declarations have one before their definitions, in
     // symbol order, whose definitions -c's object puts in sections of their own with SHF_GNU_RETAIN
     // (check_program_sections); none in a unit without one.
@@ -2545,6 +2551,69 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
     return valid;
 }
 
+// The file-scope assembly's section groups (#1848), once check_program_emit_asm_unit published its atoms, the unit's
+// atom a at result->asm_atoms[a - 1]: each group of the assembler's (asm_object_groups) as the program's, in `output`
+// (CheckProgramCode.asm_groups), its signature the program's symbol of its name (asm_symbols, as the unit's symbols
+// map), or, for a section's name, that section's atom, or, for a name the unit has no symbol of (a group's own, as
+// `other_group` in `.section .data.x,"awG",@progbits,other_group,comdat`), none, which asks the object writer for the
+// local symbol clang's assembler makes in the group's section. The scans are scalar: only a unit whose assembly makes
+// groups takes them, and it makes a few. False for an arena without room.
+static bool check_program_emit_asm_groups(CheckProgramCode* result, const CheckProgramAsms* asms, const AsmResult* unit, const SymbolId* asm_symbols, Arena* output)
+{
+    const Link* source = &unit->link;
+    const LinkGroups* groups = &source->groups;
+    const bool grouped = groups->count > 1 && groups->atom_count == source->atoms.count && result->asm_atom_count + 1 == source->atoms.count;
+    result->asm_groups = grouped ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, groups->count) : 0;
+    result->asm_atom_groups = grouped ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, result->asm_atom_count) : 0;
+    bool valid = groups->count <= 1 || (result->asm_groups != 0 && result->asm_atom_groups != 0);
+    if (valid && grouped)
+    {
+        result->asm_groups[0] = (LinkGroup){ 0 };
+        for (uint32_t a = 0; a < result->asm_atom_count; a += 1)
+        {
+            result->asm_atom_groups[a] = groups->atom_groups[a + 1];
+        }
+    }
+    for (uint32_t g = 1; valid && grouped && g < groups->count; g += 1)
+    {
+        const LinkGroup group = groups->data[g];
+        const String8 spelling = group.signature != 0 ? check_asm_unit_name(unit, group.signature) : (String8){ 0 };
+        const uint32_t n = spelling.length != 0 ? check_program_emit_asm_name(asms, spelling) : BUSTER_CHECK_NONE;
+        const AtomId signature_atom = group.signature_atom != 0 && group.signature_atom < source->atoms.count ? result->asm_atoms[group.signature_atom - 1] : 0;
+        SymbolId signature = n != BUSTER_CHECK_NONE ? asm_symbols[n] : 0;
+        // A name the assembly has no symbol of may be C's (`int sig;` beside `.section ...,sig,comdat`), whose symbol is
+        // the signature, as one module's symbol is clang's; a common one stays the group's own, which no group has.
+        const bool named = signature == 0 && signature_atom == 0 && group.name != 0 && group.name < source->names.count;
+        for (SymbolId s = 1; named && signature == 0 && s < result->link.symbols.count; s += 1)
+        {
+            const NameId other = result->link.symbols.name[s];
+            const bool same = other != 0 && result->link.names.length[other] == source->names.length[group.name] &&
+                              memcmp(result->link.names.bytes[other], source->names.bytes[group.name], source->names.length[group.name]) == 0 &&
+                              (result->link.symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_COMMON;
+            signature = same ? s : 0;
+        }
+        // A member's unit, the program's.
+        AtomId member = signature_atom;
+        for (uint32_t a = 0; member == 0 && a < result->asm_atom_count; a += 1)
+        {
+            member = result->asm_atom_groups[a] == g ? result->asm_atoms[a] : 0;
+        }
+        const NameId name = signature != 0 ? result->link.symbols.name[signature] :
+                            group.name != 0 && group.name < source->names.count ? link_add_name(&result->link, source->names.bytes[group.name], source->names.length[group.name]) :
+                                                                                  0;
+        valid = name != 0 && result->link.error == LINK_ERROR_NONE;
+        result->asm_groups[g] = (LinkGroup){
+            .name = name,
+            .signature = signature,
+            .signature_atom = signature != 0 ? 0 : signature_atom,
+            .unit = member != 0 ? result->link.atoms.unit[member] : 0,
+            .flags = group.flags,
+        };
+    }
+    result->asm_group_count = valid && grouped ? groups->count : 0;
+    return valid;
+}
+
 // A unit helper's unwind entry, from the frame it published (CheckProgramAsm.saved and .frame) and its length: the pushes'
 // and the reservation's transitions at the prologue, and the reservation's release and the pops' at the epilogue, with
 // the body between them unknown. `length` is the unit's entry atom's size.
@@ -2856,7 +2925,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     arena_pop_to(reserved, 0);
     Arena* columns = column_bytes != 0 && reserved->base != 0 ? reserved : scratch;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
-    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
+    // (And the resolvers' of multiversioning by target strings, #1838, after them.)
+    const uint32_t target_frames = unwind && program->target_group_count != 0 ? check_program_target_frames(program) : 0;
+    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) + target_frames : 0;
     CheckEmitRun run = {
         .program = program,
         .parser = parser,
@@ -3757,6 +3828,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     // And multiversioning by target strings' (#1838).
     check_program_target_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
+    // And `#pragma weak A = T`'s symbols of undeclared A's (#1849, check_program_define_pragma_aliases), a name each.
+    for (uint32_t i = 0; program->input->symbol_pragmas != NULL && i < program->input->symbol_pragmas->count; i += 1)
+    {
+        cpu_symbols += program->input->symbol_pragmas->records[i].alias_target != BUSTER_CHECK_NONE ? 1u : 0u;
+    }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
                                 (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
@@ -3838,7 +3914,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 // an inline-only function, which has no symbol, and then no label).
                 const uint32_t function = opening < input->token_count ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
                 const uint32_t function_object = function != BUSTER_CHECK_NONE ? input->objects[function] : 0;
-                const SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                // (A multiversioned function's are clang's: its versions' references reach the group's IFUNC, #1838.)
+                SymbolId version_symbol = 0;
+                if (program->target_group_count != 0 && check_program_target_static_context(program, function_object, &version_symbol))
+                {
+                    function_symbol = version_symbol;
+                }
                 const String8 label = function_symbol != 0 ? symbol_names[function_symbol] : (String8){ 0 };
                 const uint32_t function_identifier = function != BUSTER_CHECK_NONE ? parser->tokens.names[function] : 0;
                 const uint8_t* context = label.length != 0 ? (const uint8_t*)label.pointer : intern_bytes(identifiers, function_identifier);
@@ -4174,6 +4256,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint64_t entry_length = 0;
         valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
                                             scratch, &entry_atom, &entry_bytes, &entry_length);
+        valid = valid && check_program_emit_asm_groups(result, asms, file_unit, asm_symbols, output);
         // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
         // copy did before (#619): a failure is the bytes arena's.
         result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
@@ -4422,7 +4505,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
     // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
-    valid = valid && (program->target_group_count == 0 || check_program_target_atoms(result, program, bytes));
+    const uint64_t target_first = frames - target_frames;
+    SymbolId* target_frame_symbols = valid && target_frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, target_frames) : 0;
+    valid = valid && (target_frames == 0 || target_frame_symbols != 0);
+    valid = valid && (program->target_group_count == 0 ||
+                      check_program_target_atoms(result, program, target_frames != 0 ? run.frames + target_first : NULL, target_frame_symbols, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
@@ -4440,7 +4527,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = atom != 0;
         for (uint32_t f = 0; valid && f < frames; f += 1)
         {
-            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : helpers->items[f - count].symbol;
+            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : f < target_first ? helpers->items[f - count].symbol :
+                                    target_frame_symbols[f - target_first];
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
         }
     }
@@ -4686,6 +4774,42 @@ static bool check_program_define_aliases(CheckProgramCode* code, const CheckProg
     return valid;
 }
 
+// `#pragma weak A = T` whose A the unit never declares (#1849, CheckInputSymbolPragma.alias_target): a weak symbol A of
+// its own at T's definition, of T's type and size, as clang's clone of T's declaration is. No C reference names A, so it
+// is a symbol of the object alone, added once T's atom exists. Units with no such directive pay one test.
+static bool check_program_define_pragma_aliases(CheckProgramCode* code, const CheckProgram* program)
+{
+    const CheckInput* input = program->input;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const InternTable* identifiers = program->identifiers != NULL ? program->identifiers :
+                                     program->parser->preprocessor != NULL ? program->parser->preprocessor->table : NULL;
+    Link* link = &code->link;
+    bool valid = true;
+    for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t object = record->alias_target < input->token_count ? input->objects[record->alias_target] : 0;
+        const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+        const SymbolId base = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+        const AtomId atom = base != 0 && base < link->symbols.count ? link->symbols.atom[base] : 0;
+        // A unit of several (#777) without T's definition leaves the alias to the unit with it.
+        if (record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
+        {
+            const NameId name = link_add_name(link, intern_bytes(identifiers, record->name), intern_length(identifiers, record->name));
+            const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK);
+            const SymbolId symbol = name != 0 ? link_add_symbol(link, name, atom, link->symbols.value[base], link->symbols.size[base], flags, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            valid = symbol != 0;
+            if (!valid)
+            {
+                code->status = CHECK_PROGRAM_BACKEND;
+                code->reason = "a '#pragma weak' alias's symbol couldn't be defined at its target's definition";
+                code->token = record->token;
+            }
+        }
+    }
+    return valid;
+}
+
 // The named sections of the unit's emitted definitions (#619), once its static data is published, for -c's object
 // (ObjectOptions.atom_sections) and the direct path alike: each definition CheckInputSections.placements names a
 // section for, which the unit defines in an atom of the link, gets a descriptor of that name, of the kind LLVM gives a
@@ -4854,12 +4978,16 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         // Retained and selectany definitions (#147) need their named section or one of their own, their
         // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
         // getELFSectionNameForGlobal), of its class's type and flags. Retain adds SHF_GNU_RETAIN; selectany supplies the
-        // group signature, which also makes otherwise equal explicit section names distinct between groups.
-        const uint32_t previous_groups = link->groups.count != 0 ? link->groups.count : 1;
+        // group signature, which also makes otherwise equal explicit section names distinct between groups. The
+        // file-scope assembly's groups (#1848, CheckProgramCode.asm_groups) come first, once, as its atoms do.
+        const uint32_t base_groups = link->groups.count != 0 ? link->groups.count : 1;
+        const uint32_t asm_groups = link->groups.count == 0 && code->asm_group_count > 1 ? code->asm_group_count - 1 : 0;
+        const uint32_t previous_groups = base_groups + asm_groups;
         const uint64_t group_count = (uint64_t)previous_groups + code->selectany_count;
-        LinkGroup* groups = valid && code->selectany_count != 0 && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
+        const bool grouping = code->selectany_count != 0 || asm_groups != 0;
+        LinkGroup* groups = valid && grouping && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
         uint32_t* memberships = groups != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, link->atoms.count) : NULL;
-        valid = valid && (code->selectany_count == 0 || (groups != NULL && memberships != NULL));
+        valid = valid && (!grouping || (groups != NULL && memberships != NULL));
         code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
         if (valid && groups != NULL)
         {
@@ -4869,6 +4997,15 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             {
                 memcpy(groups, link->groups.data, (uint64_t)link->groups.count * sizeof(LinkGroup));
                 memcpy(memberships, link->groups.atom_groups, (uint64_t)link->groups.atom_count * sizeof(uint32_t));
+            }
+            for (uint32_t g = 0; g < asm_groups; g += 1)
+            {
+                groups[base_groups + g] = code->asm_groups[g + 1];
+            }
+            for (uint32_t a = 0; asm_groups != 0 && a < code->asm_atom_count; a += 1)
+            {
+                const uint32_t group = code->asm_atom_groups[a];
+                memberships[code->asm_atoms[a]] = group != 0 ? base_groups + group - 1 : 0;
             }
         }
         const uint64_t unique_count = (uint64_t)code->retained_count + code->selectany_count;
@@ -4969,7 +5106,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             code->reason = constant ? "inline assembly .comm of a read-only definition" : "a .comm of a definition whose static data wasn't emitted";
         }
     }
-    valid = valid && check_program_define_aliases(code, program);
+    valid = valid && check_program_define_aliases(code, program) && check_program_define_pragma_aliases(code, program);
     // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
     // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
     // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.

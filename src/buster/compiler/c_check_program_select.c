@@ -835,6 +835,19 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 definition_flags[definition - 1] |= BUSTER_C_LOWERING_ALIAS_TARGET;
             }
         }
+        // `#pragma weak A = T`'s T whose A the unit never declares (#1849, CheckInputSymbolPragma.alias_target): the alias
+        // check_program_define_pragma_aliases makes is at its definition, as an alias attribute's is at its base's.
+        const CheckInputSymbolPragmas* weak_aliases = input->symbol_pragmas;
+        for (uint32_t i = 0; valid && weak_aliases != NULL && i < weak_aliases->count; i += 1)
+        {
+            const uint32_t target = weak_aliases->records[i].alias_target;
+            const uint32_t object = target < input->token_count ? input->objects[target] : 0;
+            const uint32_t definition = object != 0 && object < objects ? object_definitions[object] : 0;
+            if (definition != 0)
+            {
+                definition_flags[definition - 1] |= BUSTER_C_LOWERING_ALIAS_TARGET;
+            }
+        }
         // A static function multiversioned by target strings whose resolver the unit emits (#1838): clang emits each
         // version, which the resolver reaches though no reference names its object (references reach R).
         for (uint32_t g = 0; valid && g < full->target_group_count; g += 1)
@@ -1015,6 +1028,21 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
         }
     }
+    // target_clones' bodies' copies (#1838, check_program_target_copies), each after its body: one for each of the group's
+    // options that has its own.
+    uint32_t copies = 0;
+    for (uint32_t g = 0; valid && full->clone_copied != NULL && g < full->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = full->target_groups + g;
+        for (uint32_t body = 0; group->copies && body < full->body_count; body += 1)
+        {
+            for (uint32_t o = 0; body_selected[body] && full->bodies[body].object == group->clones && o < group->option_count; o += 1)
+            {
+                copies += full->clone_copied[group->clone_first + o];
+            }
+        }
+    }
+    candidate.selected_functions += copies;
     if (valid)
     {
         candidate.program = *full;
@@ -1030,6 +1058,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         const bool targeted = full->body_targets != 0 && candidate.selected_functions != 0;
         candidate.program.body_targets = targeted ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_functions) : 0;
         candidate.program.body_eager = eager_needed && candidate.selected_functions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, candidate.selected_functions) : 0;
+        candidate.program.body_options = copies != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_functions) : 0;
         candidate.program.references = body_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body_references) : 0;
         candidate.program.regions = full->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramRegion, full->region_count) : 0;
         candidate.data.objects = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, candidate.selected_objects) : 0;
@@ -1038,7 +1067,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.data.references = data_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, data_references) : 0;
         candidate.program.object_symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, objects);
         valid = (candidate.selected_functions == 0 || (candidate.program.bodies != 0 && (!eager_needed || candidate.program.body_eager != 0))) &&
-                (!targeted || candidate.program.body_targets != 0) &&
+                (!targeted || candidate.program.body_targets != 0) && (copies == 0 || candidate.program.body_options != 0) &&
                 (body_references == 0 || candidate.program.references != 0) &&
                 (full->region_count == 0 || candidate.program.regions != 0) && candidate.program.object_symbols != 0 &&
                 (candidate.selected_objects == 0 || (candidate.data.objects != 0 && candidate.data.reference_offsets != 0 && candidate.data.reference_counts != 0)) &&
@@ -1063,12 +1092,40 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     candidate.program.body_eager[bodies] = check_program_body_eager(full, data, source);
                 }
                 candidate.program.bodies[bodies] = *source;
-                candidate.program.bodies[bodies++].reference_first = references;
+                candidate.program.bodies[bodies].reference_first = references;
+                if (candidate.program.body_options != 0)
+                {
+                    candidate.program.body_options[bodies] = 0;
+                }
+                bodies += 1;
                 for (uint32_t r = 0; r < source->reference_count; r += 1)
                 {
                     const uint32_t object = full->references[source->reference_first + r];
                     candidate.program.references[references++] = object;
                     needed[object] = 1;
+                }
+                // Its copies, as target_clones' versions (#1838): the same body, of each version's instruction set and
+                // references.
+                for (uint32_t g = 0; copies != 0 && g < full->target_group_count; g += 1)
+                {
+                    const CheckProgramTargetGroup* group = full->target_groups + g;
+                    for (uint32_t o = 0; group->copies && group->clones == source->object && o < group->option_count; o += 1)
+                    {
+                        if (full->clone_copied[group->clone_first + o] != 0)
+                        {
+                            candidate.program.bodies[bodies] = candidate.program.bodies[body_map[body]];
+                            candidate.program.body_options[bodies] = o;
+                            if (candidate.program.body_targets != 0)
+                            {
+                                candidate.program.body_targets[bodies] = full->clone_targets[group->clone_first + o];
+                            }
+                            if (candidate.program.body_eager != 0)
+                            {
+                                candidate.program.body_eager[bodies] = candidate.program.body_eager[body_map[body]];
+                            }
+                            bodies += 1;
+                        }
+                    }
                 }
             }
         }

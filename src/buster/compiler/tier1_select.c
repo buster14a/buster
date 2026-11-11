@@ -298,6 +298,9 @@ typedef enum Tier1SelectRule
 // lanes less than zero (vpmovb2m to vpmovq2m) (tier1_select_mask_vector).
 #define BUSTER_TIER1_VECTOR_MASK_EXPAND 14
 #define BUSTER_TIER1_VECTOR_SIGN_MASK 15
+// A lane operation (#1840): `operation` the IR's flags (its lanes and operation), values[0] and values[1] its operands,
+// the first in vvvv (ir_simd_lane_op_forms: vpminub to vpmaxsq, vpaddusb to vpsubsw).
+#define BUSTER_TIER1_VECTOR_LANE_OP 16
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -659,7 +662,7 @@ struct Tier1SelectHoles
     bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
-    // A load's or a store's segment override (#1447, BUSTER_IR_SEGMENT's FS or GS), which its access's record takes
+    // A load's or a store's segment override (#1447, BUSTER_IR_SEGMENT's FS, GS or SS), which its access's record takes
     // (tier1_select_segment), or 0.
     uint8_t segment;
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
@@ -1508,7 +1511,9 @@ static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1Selec
 // A load's or a store's segment override (#1447, Tier1SelectHoles.segment) on its access's records: each with a memory
 // operand, as Tier 0's tier0_apply_segments gives its own (form + segment * X86_FORM_COUNT, the encoder's form with the
 // override). A load's, a store's or an xchg's expansion has one such record, the access; its other records are moves of
-// registers. A RIP-relative operand takes it too: `%gs:sym(%rip)` is clang's access of a global in the segment.
+// registers. A RIP-relative operand takes it too: `%gs:sym(%rip)` is clang's access of a global in the segment. A form
+// without SS's (x86_form_has_segment: APX's EVEX forms, which no access's pattern selects) becomes NONE, which the
+// target's validation refuses, rather than an access without its override.
 static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
 {
     for (uint32_t r = 0; r < records->count; r += 1)
@@ -1516,7 +1521,7 @@ static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
         X86Instruction* record = &records->records[r];
         if ((record->mode & BUSTER_X86_MODE_MEMORY) != 0 && record->form < X86_FORM_COUNT)
         {
-            record->form = (uint16_t)(record->form + segment * X86_FORM_COUNT);
+            record->form = x86_form_has_segment(record->form, segment) ? (uint16_t)(record->form + segment * X86_FORM_COUNT) : (uint16_t)X86_FORM_NONE;
         }
     }
 }
@@ -1980,6 +1985,13 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_SHIFT)
         {
             tier1_select_vector_shift(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_LANE_OP)
+        {
+            const uint32_t flags = (uint32_t)holes->operation;
+            const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+            const X86Instruction record = { .form = ir_simd_lane_op_forms[(flags >> 2) & 7][flags & 3][at], .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
+            tier1_select_append(&result, record);
         }
         else if (kind == BUSTER_TIER1_VECTOR_MASK_EXPAND || kind == BUSTER_TIER1_VECTOR_SIGN_MASK)
         {
@@ -4372,7 +4384,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHIFT))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4455,6 +4467,22 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.intrinsic_cost = 1;
             if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_OP)
+        {
+            // A lane operation (#1840): its lanes and operation in the IR's flags; no candidate where its width has no form.
+            const uint32_t flags = function->flags[node];
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_LANE_OP;
+            base.operation = (uint8_t)flags;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            if (ir_simd_lane_op_forms[(flags >> 2) & 7][flags & 3][vector_width == 16 ? 0 : vector_width == 32 ? 1 : 2] != X86_FORM_NONE)
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
