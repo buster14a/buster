@@ -604,6 +604,26 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = IROPT_OVERDEFINED;
         }
     }
+    else if (op == IR_INTRINSIC && (f->c[i] == BUSTER_IR_INTRINSIC_EXTRACT || f->c[i] == BUSTER_IR_INTRINSIC_WIDEN || f->c[i] == BUSTER_IR_INTRINSIC_INSERT))
+    {
+        // A width change (#1840): bits moved whole, exact, folded by the model once every operand is constant.
+        const bool insert = f->c[i] == BUSTER_IR_INTRINSIC_INSERT;
+        const uint8_t left = work->states[a];
+        const uint8_t right = insert ? work->states[b] : IROPT_CONSTANT;
+        result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
+        if (result == IROPT_CONSTANT)
+        {
+            const IrSimdValue operands[2] = { ir_optimize_simd_value(work, a), insert ? ir_optimize_simd_value(work, b) : (IrSimdValue){ 0 } };
+            const IrSimdValue* pointers[3] = { &operands[0], insert ? &operands[1] : 0, 0 };
+            const IrSimdAction action = {
+                .operation = f->c[i] == BUSTER_IR_INTRINSIC_EXTRACT ? IR_SIMD_EXTRACT : f->c[i] == BUSTER_IR_INTRINSIC_WIDEN ? IR_SIMD_WIDEN : IR_SIMD_INSERT,
+                .result = ir_simd_shape(f->type[i]),
+                .operands = { ir_simd_shape(f->type[a]), insert ? ir_simd_shape(f->type[b]) : IR_SIMD_NONE, IR_SIMD_NONE },
+                .index = f->flags[i],
+            };
+            result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+        }
+    }
     else if (op == IR_COPY || op == IR_BITCAST)
     {
         result = work->states[a];
