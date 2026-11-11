@@ -794,6 +794,26 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A parameter's bound past its `static` and qualifiers (review on #1819).
         "void f(int a[static 0x2000000000000000]);\n",
         "void g(int a[const volatile 0x2000000000000000]);\n",
+        // A tag defined in an _Atomic's or a typeof's type name (#1447), nested too, read before the specifiers: at file
+        // scope, in members, blocks, typedefs and type names, its type usable after it; the unit's error is a later one.
+        "_Atomic(struct A { int a; char c; }) m;\n_Atomic(union U { int a; float f; }) u;\n_Atomic(enum E { E1, E2 }) e;\n"
+        "typeof(struct T { long t[3]; }) const t;\ntypedef _Atomic(struct B { long b; }) AB;\n"
+        "typeof(_Atomic(struct Z { short z; })) zz;\n_Static_assert(sizeof zz == 2 && _Alignof(_Atomic(struct A)) == 8, \"\");\n"
+        "struct H { _Atomic(struct I { int i; }) inner; typeof(struct J { char j; }) jj; };\n"
+        "int f(void) { _Atomic(struct L { int l; }) x; typeof(struct M { int m; }) y = {1}; "
+        "return sizeof(_Atomic(struct N { int n; })) + (int)sizeof(typeof(struct O { int o; })) + y.m + E2; }\n"
+        "int g(void) { return sizeof(struct A) + sizeof(struct I) + sizeof(enum E) + sizeof(struct J) + t.t[1] + missing; }\n",
+        "const _Atomic(struct A { int a; }) *p, q;\n_Atomic(struct A) r;\nint k(void) { int unused; return (int)sizeof(*p) + undeclared; }\n"
+        "void l(void) { for (_Atomic(struct F { int f; }) i;;) { (void)i; break; } int quiet; }\n",
+        // In a prototype's parameters (review on #1891): a tag of prototype scope, with clang's -Wvisibility before C23, in a
+        // declaration's parameter, a pointer's, a nested group's and a definition's.
+        "void f(_Atomic(struct P { int x; }) p);\nvoid g(typeof(struct Q { long y; }) *q);\nvoid h(typeof(_Atomic(struct R { short z; })) r);\n"
+        "int k(_Atomic(struct A { int a; }) a, typeof(struct B { char b; }) b) { int unused; return (int)sizeof a + b.b; }\nint z = missing;\n",
+        // ...whose tag stays the prototype's or the definition's: a later file-scope use names another, incomplete one (second
+        // review on #1891), and a file-scope definition of its name is no redefinition.
+        "void f(typeof(struct T { int x; }) *p);\nstruct T *global;\nint n = sizeof(struct T);\n",
+        "void f(typeof(struct T { int x; }) *p) { (void)p; }\nstruct T *global;\nint n = sizeof(struct T);\n",
+        "void f(typeof(struct T { int x; }) *p);\nstruct T { long y; } t;\nint n = sizeof(struct T);\nint g(void) { int unused; return missing; }\n",
         // Invalid declarations in a row, whose uses are quiet: in later bodies, which keep their -Wall warnings, in a body's
         // own invalid declarations, and in constant contexts (a bound, typeof, an enumerator, _Static_assert, a bit-field's
         // width, a case label), which read a stand-in int.

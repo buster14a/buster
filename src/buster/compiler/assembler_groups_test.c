@@ -258,8 +258,8 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
     {
         asm_test_oracle(test, unique_name, directory, X86_ARCH_BASELINE);
     }
-    // Explicit flags must retain the conventional array entry sizes. In particular,
-    // the file-scope assembly path relies on accepting these before refusing their kind.
+    // Explicit flags must retain the conventional array entry sizes, and the arrays are their classes' atoms (#1848),
+    // which the direct path runs.
     static const char arrays[] = ".section .init_array,\"aw\"\n.quad 0\n.section .fini_array,\"aw\"\n.quad 0\n";
     test->scalar.length = 0;
     test->vector.length = 0;
@@ -267,6 +267,22 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
     const AsmResult scalar_arrays = asm_assemble(array_source, test->index, (AsmOptions){0}, &test->scalar);
     const AsmResult vector_arrays = asm_assemble(array_source, test->index, (AsmOptions){.vectorized = true}, &test->vector);
     asm_test_check(test, scalar_arrays.error == 0 && vector_arrays.error == 0, "ordinary array section flags retain their entry size", vector_arrays.error);
+    uint32_t array_atoms = 0;
+    for (uint32_t a = 1; vector_arrays.error == 0 && a < vector_arrays.link.atoms.count; a += 1)
+    {
+        const uint8_t class = vector_arrays.link.atoms.class[a];
+        array_atoms += vector_arrays.link.atoms.size[a] == 8 && (class == BUSTER_LINK_CLASS_INIT_ARRAY || class == BUSTER_LINK_CLASS_FINI_ARRAY);
+    }
+    asm_test_check(test, array_atoms == 2, "arrays of constructors and destructors are their classes' atoms", vector_arrays.error);
+    // Section types by name and by `@type`, as GNU as gives them: notes, and arrays of any name with their entries' size.
+    // (With a symbol: the hosted runners' GNU as writes no symbol table for an object without one, and the comparison wants one.)
+    static const char typed[] = ".section .note.x,\"a\",@note\n.globl buster_typed\nbuster_typed:\n.long 1\n.section .init_array.00100,\"aw\"\n.quad 0\n"
+                                ".section .fini_array,\"aw\",@fini_array\n.quad 0\n.section .note.y\n.byte 2\n";
+    asm_test_pair(test, (String8){.pointer = (char*)typed, .length = sizeof(typed) - 1}, 1, X86_ARCH_BASELINE);
+    if (cross_check)
+    {
+        asm_test_oracle(test, typed, directory, X86_ARCH_BASELINE);
+    }
     static const char* const section_signatures[] = {
         ".section foo,\"G\",@progbits,foo,comdat\n.long foo\n",
         ".section foo,\"\",@progbits\n.section bar,\"G\",@progbits,foo,comdat\n.byte 1\n",

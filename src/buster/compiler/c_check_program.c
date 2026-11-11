@@ -318,13 +318,11 @@ typedef enum CheckProgramAliasError
     CHECK_PROGRAM_ALIAS_TO_FUNCTION,
     // "ifunc resolver function must return a pointer".
     CHECK_PROGRAM_ALIAS_RESOLVER,
-    // Refused: an alias declared thread-local of a definition that isn't, or the other way, whose references the code
-    // would reach as its own declaration says and the symbol isn't (clang's code is as wrong).
+    // An alias declared thread-local of a definition that isn't, or the other way: its symbol is its definition's type,
+    // as clang's object has it, where nothing refers to it; refused where the selection's code does
+    // (BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED), whose references would reach it as its own declaration says and the
+    // symbol isn't (clang's code is as wrong, #1849).
     CHECK_PROGRAM_ALIAS_THREAD_LOCAL,
-    // Refused: an alias variable that the unit also defines tentatively, which the static data would define too: after it
-    // (`extern int w __attribute__((alias("v"))); int w;`), which clang takes as the alias's declaration, or before it,
-    // clang's error "alias definition of 'w' after tentative definition", which the reader doesn't make.
-    CHECK_PROGRAM_ALIAS_DEFINED,
 } CheckProgramAliasError;
 
 // An object's alias, ifunc or weakref, from its first declaration with one (in token order), whose attributes give the
@@ -361,6 +359,9 @@ struct CheckProgramAlias
 // doesn't select), clang's error that it isn't defined.
 #define BUSTER_CHECK_PROGRAM_ALIAS_WEAK 1u
 #define BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED 2u
+// An alias whose thread-local storage isn't its definition's (CHECK_PROGRAM_ALIAS_THREAD_LOCAL) that the selection's code
+// refers to (#1849), which the emission refuses: its references would reach it as its declaration says.
+#define BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED 4u
 
 // A group of clang's cpu_specific and cpu_dispatch functions of one name (#1447, c_check_program_cpu_dispatch.c): its
 // first declaration with an attribute (its name and linkage), its reference object R (its symbol f.ifunc, which every
@@ -3476,7 +3477,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0))
+                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 ? (mask & (1u << a)) != 0 : mask == UINT32_MAX))
                     {
                         const CheckOverloadResult* selected = check_program_overload_address(program, node, a + 3);
                         if (selected != NULL)

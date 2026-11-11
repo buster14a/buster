@@ -487,9 +487,10 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
         {
             // Forwarding alone is silent. If the substituted token is itself subsequently expanded, Clang also
-            // shows the parameter through which the macro name arrived (CALL(F), where CALL(f) expands to f()).
+            // shows the parameter through which the macro name arrived (CALL(F), where CALL(f) expands to f()), and
+            // so it does where a diagnostic's range spans more than the argument's one token (render_spans).
             const PPSubstitution* substitution = &pp->substitutions[index];
-            if (count != 0 || pp->diagnostic_arguments)
+            if (count != 0 || pp->render_spans || pp->diagnostic_arguments)
             {
                 notes[count++] = (PPDiagnosticSource)
                 {
@@ -627,6 +628,7 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 .source_notes = owned_notes,
                 .source_note_count = note_count,
                 .severity = (uint8_t)severity,
+                .spans = pp->diagnostic_spans,
                 .arguments = pp->diagnostic_arguments,
             };
             if (note_bytes != 0)
@@ -786,8 +788,10 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                         .message = record->note_message,
                         .macro = record->note_macro,
                     };
+                    owner->render_spans = record->spans;
                     pp_render_message(owner, severity, record->location, record->origin,
                                       record->note_message != NULL || record->note_macro != 0 ? &note : NULL, "%s", record->message);
+                    owner->render_spans = false;
                     for (uint32_t i = 0; i < record->source_note_count; i += 1)
                     {
                         const PPDiagnosticSourceNote* source = &record->source_notes[i];
@@ -868,7 +872,9 @@ static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, u
         }
         else
         {
+            pp->render_spans = pp->diagnostic_spans;
             pp_render_diagnostic(pp, severity, location, origin, NULL, format, arguments);
+            pp->render_spans = false;
             for (uint32_t i = 0; notes != NULL && i < note_count; i += 1)
             {
                 const uint32_t at = notes[i].token;

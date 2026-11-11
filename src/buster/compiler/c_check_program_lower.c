@@ -1007,7 +1007,8 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
 // swifttailcc's callee-popped frame (swiftasynccall's) are no frame or location Tier 0 has.
 static const char* check_lower_convention(const TypeTable* types, TypeId function)
 {
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    // (no_caller_saved_registers beside a convention, #1447, is that convention's arguments.)
+    const TypeFunctionABI convention = type_function_convention(types, function);
     const char* result = NULL;
     switch (convention)
     {
@@ -1040,6 +1041,7 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
 static const char* check_lower_convention_call(const TypeTable* types, TypeId function, uint64_t target)
 {
     const char* result = check_lower_convention(types, function);
+    // (One with no_caller_saved_registers keeps every register, #1447: its abi_kind is the bit's, which this isn't.)
     if (result == NULL && type_function_abi_kind(types, function) == TYPE_FUNCTION_ABI_INTEL_OCL && (target & BUSTER_X86_FEATURE(AVX512F)) != 0)
     {
         result = "calls of intel_ocl_bicc functions on an AVX-512 target, whose callees don't keep rbp, r12 and r13";
@@ -1061,10 +1063,12 @@ static const char* check_lower_convention_call(const TypeTable* types, TypeId fu
 // zmm31 and the mask registers, k4 to k7 of them (Tier 0's block keeps k0 to k7). Nothing for another convention.
 static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, bool interrupt, Tier0Function* output)
 {
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    // no_caller_saved_registers beside another convention keeps every register too (#1447, LLVM's getCalleeSavedRegs takes
+    // x86_intrcc's set for the attribute whatever the convention).
+    const bool every = type_function_keeps_registers(types, function) || interrupt;
+    const TypeFunctionABI convention = every ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED : type_function_abi_kind(types, function);
     const bool most = convention == TYPE_FUNCTION_ABI_PRESERVE_MOST;
     const bool all = convention == TYPE_FUNCTION_ABI_PRESERVE_ALL;
-    const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED || interrupt;
     const bool wide = every && (target & BUSTER_X86_FEATURE(AVX512F)) != 0;
     const uint16_t general = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |
                                         1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10);
@@ -8515,7 +8519,8 @@ static void check_lower_complex_builtin(CheckLowerWriter* writer, uint32_t node)
 // from its width, and a long double's 10 bytes are followed by 6 zeros (both, as clang's, an unsigned integer of the
 // item's size). A __float128's 16 bytes and a 2-byte vector's 2 are its object's (the value's address), read into the
 // item's temporaries as it is evaluated. Data of a type whose bytes clang's code doesn't make (past 16 bytes, which
-// clang's code generation crashes on) is refused by name.
+// clang's code generation crashes on) is refused by name. Up to 255 data arguments are taken, as clang's Sema takes them
+// (#1785); a format of more than 255 items, whose count byte clang's code truncates, is refused by name.
 static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -8526,9 +8531,9 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t arguments = count >= 2 ? count - 2 : 0;
-    bool valid = witness != NULL && witness->os_log_known && count >= 2 && count <= 31 && witness->os_log_count <= 255;
+    bool valid = witness != NULL && witness->os_log_known && count >= 2 && count <= 2 + 255 && witness->os_log_count <= 255;
     uint8_t summary = 0;
-    bool taken[31] = { false };
+    bool taken[255] = { false };
     for (uint32_t i = 0; valid && i < witness->os_log_count; i += 1)
     {
         const CheckOSLogItem* item = witness->os_log_items + i;
@@ -8544,12 +8549,12 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
     // Each taken argument's promoted type, its class and bytes, whether it is its address, the count a signed _BitInt's
     // value is shifted by to zero-extend it in its unsigned computing class (`extend`), and for a __float128 or a 2-byte
     // vector, whose value is its object's address, the classes of the parts its bytes are read in (`parts`).
-    uint8_t classes[31] = { 0 };
-    TypeId targets[31] = { 0 };
-    bool addresses[31] = { false };
-    uint64_t sizes[31] = { 0 };
-    uint32_t extend[31] = { 0 };
-    uint8_t parts[31] = { 0 };
+    uint8_t classes[255] = { 0 };
+    TypeId targets[255] = { 0 };
+    bool addresses[255] = { false };
+    uint64_t sizes[255] = { 0 };
+    uint32_t extend[255] = { 0 };
+    uint8_t parts[255] = { 0 };
     for (uint32_t k = 0; valid && k < arguments; k += 1)
     {
         if (taken[k])
@@ -8584,7 +8589,11 @@ static void check_lower_os_log(CheckLowerWriter* writer, uint32_t node)
             valid = sized && (targets[k] == bare || addresses[k] || check_lower_class(writer, bare) != UINT8_MAX);
         }
     }
-    if (!valid)
+    if (witness != NULL && witness->os_log_known && witness->os_log_count > 255)
+    {
+        check_lower_unsupported(writer, "__builtin_os_log_format of more than 255 items, whose count clang's code truncates");
+    }
+    else if (!valid)
     {
         check_lower_unsupported(writer, "__builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)");
     }
@@ -16905,7 +16914,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
             const TypeFunctionABI convention = type_function_abi_kind(types, type);
-            const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+            const bool every = type_function_keeps_registers(types, type);
             const bool ocl = convention == TYPE_FUNCTION_ABI_INTEL_OCL;
             static const char* const reasons[3][4] = {
                 { "__builtin_eh_return in an interrupt service routine", "__builtin_eh_return in a function with no_caller_saved_registers",

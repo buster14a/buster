@@ -154,14 +154,15 @@ static void check_test_label_prefix_capacity(CheckTest* test)
                 check_sparse_values(input.label_targets, count, targets);
                 check_test_expect(test, !input.resource && scratch.length == 0 && reader.fragment_end == count,
                                   "label capacity fits the insertion bound and restores scratch and fragment limits");
-                check_test_expect(test, input.report_count == (prefix != 0 ? 0 : addresses) && input.label_address_count == (prefix != 0 ? addresses : 0),
+                // A function's missing label is reported once, at its first reference, as clang's are (#2020).
+                check_test_expect(test, input.report_count == (prefix != 0 ? 0 : distinct) && input.label_address_count == (prefix != 0 ? addresses : 0),
                                   "prefix reserves synthetic labels while full completion diagnoses missing definitions");
                 for (uint32_t i = 0; i < addresses; i += 1)
                 {
                     const uint32_t token = 8 + 4 * i;
                     const uint32_t expected = prefix != 0 ? 8 + 4 * (i % distinct) : BUSTER_CHECK_NONE;
                     check_test_expect(test, targets[token] == expected, "colliding label references retain their first canonical target");
-                    if (prefix == 0)
+                    if (prefix == 0 && i < distinct)
                     {
                         check_test_expect(test, reports[i].token == token + 1 && reports[i].message == CHECK_INPUT_LABEL_UNDECLARED,
                                           "missing labels retain source-ordered diagnostics with a one-slot empty table");

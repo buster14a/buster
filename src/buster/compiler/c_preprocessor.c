@@ -1423,6 +1423,8 @@ struct PPDiagnosticRecord
     PPDiagnosticSourceNote* source_notes;
     uint32_t source_note_count;
     uint8_t severity;
+    // The diagnostic's highlighted range spans more than one token (Preprocessor.diagnostic_spans).
+    bool spans;
     // Whether its macro notes show the argument it came from (Preprocessor.diagnostic_arguments).
     bool arguments;
 };
@@ -1565,6 +1567,12 @@ struct Preprocessor
     uint32_t history_anchor;
     uint32_t history_spelling;
     uint32_t diagnostic_origin;
+    // Set by a caller around a diagnostic whose highlighted range spans more than one token, which clang's macro backtrace
+    // shows a macro's argument's own "expanded from macro" note for (DiagnosticRenderer::emitMacroExpansions, whose
+    // rangesInsideSameMacroArgExpansion leaves it out where every range is one token of an argument). render_spans is
+    // that flag while the diagnostic's primary line renders, its collected record's or its own.
+    bool diagnostic_spans;
+    bool render_spans;
     // The include location of the last diagnostic's file (pp_presumed_include), whose include stack a diagnostic prints
     // only when its own differs.
     uint32_t diagnostic_include_range;

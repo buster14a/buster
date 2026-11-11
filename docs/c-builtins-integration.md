@@ -2269,8 +2269,12 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
     the item's temporaries as it is evaluated.
   - A 32- or 64-byte vector and a `_BitInt` past 128 bits are refused by
     name: clang's code generation crashes on them.
-- **Limits.** At most 31 arguments are taken, and clang takes up to the
-  format's plus 255.
+- **Limits.** Up to 255 data arguments are taken, as clang's Sema takes
+  them (the required arguments plus 0xff): "too many arguments to function
+  call, expected at most 256" (257 for `__builtin_os_log_format`) past them.
+  Those past the operands' 32-bit mask are evaluated and reached through its
+  full mask (#1785). A format of more than 255 items, whose count byte clang's
+  code truncates (300 items store 0x2c), is refused by name.
 
 `__builtin_dump_struct(pointer, printer, rest...)` (0x4b3, #148) is clang's
 record dump, as `BuiltinDumpStruct` checks it.
@@ -3271,7 +3275,7 @@ program links without libm as clang's does; but a declaration with an asm
 label, which clang's code calls by its label, `check_program_call_extreme`;
 `-fno-builtin` and `-fno-builtin-NAME` keep the call, and
 `test-checker-driver`'s library runs check all three; a definition's
-`no_builtin` is #1958's): `__builtin_elementwise_maxnum`'s
+`no_builtin` keeps it too, below): `__builtin_elementwise_maxnum`'s
 rows and its kin's
 (`check_vector_floating_scalar_row`), which glibc's functions would not match.
 clang's code of `llvm.maxnum` and `llvm.minnum` gives its first operand of two
@@ -3318,7 +3322,17 @@ no C library has. Each is a builtin of the unit unless `-fno-builtin`,
 and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. The list is pinned to Clang 23.1.4's official build, CI's
+answers by. In a function whose definition has clang's `no_builtin`
+attribute (#1958), with no arguments or with a string naming the function
+(`no_builtin("strlen")`), a call of the unit's declaration of one is that
+declaration's call, as clang's code makes it (`EmitDirectCallee`'s
+`no-builtin-NAME` and `no-builtins`): no fold, no inline `fmax` and no inline
+`<stdbit.h>` function (`check_input_no_builtin`, which the reader asks where it
+marks such a call); a string clang warns names no builtin (`"*"`) covers
+nothing, and the `__builtin_` forms are builtins still. clang's constant
+contexts still fold such a call (its evaluator doesn't read the attribute),
+which this doesn't in the function's own static initializers. The list is
+pinned to Clang 23.1.4's official build, CI's
 reference: its GNU rows include `strlcat` and `strlcpy`, as every upstream 23.x
 release's do (the `llvmorg-23.1.4` and `llvmorg-23.1.5` tags' `Builtins.td` and
 `release/23.x` keep them). Debian's and Ubuntu's clang packages, apt.llvm.org's
