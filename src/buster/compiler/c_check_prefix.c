@@ -350,13 +350,14 @@ struct CheckPrefixEdit
 };
 
 // A tentative typo's tail (#1447, check_driver_typo_tail): `end` answers, for an error of a view whose tokens'
-// originals `origin` has (NULL for the original's own), the token that ends the tail the view leaves out from the
-// error's token, or 0 where the error is no such tail. The view takes each one as it takes a missing `;` (its diagnostic
-// is pending with ParseDiagnostic.tail), so that one pass finds a body's every one.
+// originals `origin` has (NULL for the original's own), the token that ends the tail the view leaves out, or 0 where the
+// error is no such tail; the tail starts at `*begin`, which it sets (the error's token, or before it), and `*name` is the
+// name it is of. The view takes each one as it takes a missing `;`: its diagnostic is pending at the tail's start with
+// ParseDiagnostic.tail and the name as its argument, so that one pass finds a body's every one.
 typedef struct CheckPrefixTails CheckPrefixTails;
 struct CheckPrefixTails
 {
-    uint32_t (*end)(const Parser* view, const uint32_t* origin, const ParseDiagnostic* diagnostic, const void* context);
+    uint32_t (*end)(const Parser* view, const uint32_t* origin, const ParseDiagnostic* diagnostic, uint32_t* begin, uint32_t* name, const void* context);
     const void* context;
 };
 
@@ -622,7 +623,11 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
             {
                 ParseDiagnostic diagnostic = current->diagnostics[d];
-                const uint32_t end = diagnostic.error && !diagnostic.resumed ? tails->end(current, origin, &diagnostic, tails->context) : 0;
+                uint32_t begin = diagnostic.token;
+                uint32_t name = BUSTER_PARSE_NONE;
+                const uint32_t end = diagnostic.error && !diagnostic.resumed ? tails->end(current, origin, &diagnostic, &begin, &name, tails->context) : 0;
+                diagnostic.token = end != 0 ? begin : diagnostic.token;
+                diagnostic.argument = end != 0 ? name : diagnostic.argument;
                 diagnostic.resumed = diagnostic.resumed || end != 0;
                 diagnostic.resume_delete = diagnostic.resume_delete || end != 0;
                 diagnostic.resume_end = end != 0 ? end : diagnostic.resume_end;

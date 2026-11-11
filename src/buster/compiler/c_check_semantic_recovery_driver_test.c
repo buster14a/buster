@@ -769,6 +769,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void take(int, int);\nint g(int a)\n{\n    int w = sizeo * 2;\n    int v = sizeo a b, k = zzz1;\n    take(sizeo a, zzz2);\n"
         "    a = sizeo a + zzz3; zzz4;\n    if (sizeo a) zzz5;\n    a = 1 + sizeo \"abc\"; zzz6;\n    int y = retrn 5;\n    return sizeo a + zzz7;\n"
         "}\nint h(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        // A block item's GNU attributes before a name that a correction takes as a value (#1447, check_driver_typo_tail):
+        // clang's typo error, then "expected identifier or '('" there, the item skipped; the body's unused variable is quiet.
+        "int counter;\nvoid f(int n)\n{\n    int value;\n    __attribute__((unused)) valu = 1;\n"
+        "    __attribute__((unused)) __attribute__((cold)) valu;\n    __attribute__((unused)) countr = 2;\n    int unused;\n"
+        "    if (n = 1) value = 2;\n}\nint h(int a) { int u2; if (a = 1) return 2; return 0; }\n",
+        // A name no correction takes is still an implicit int's declarator, whose error ends the body here.
+        "int value;\nvoid g(void)\n{\n    __attribute__((unused)) zzzz = 2;\n    __attribute__((unused)) valu = 3;\n}\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
