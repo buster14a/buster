@@ -6261,7 +6261,9 @@ reports.
 Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
 `check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
 conditions of statements and conditionals (`CheckBoolLikeConversion`, the
-operand itself and never a conditional's arms), and an initializer's,
+operand itself and never a conditional's arms), a static assertion's condition
+(#2409, `check_common_assertion_reach`; left: a failed assertion's, whose
+root its error leaves unwalked, gives none, where clang's precedes the error), and an initializer's,
 assignment's, return's or argument's conversion, whose conditional arms and
 comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
 or of two literals, always evaluates to one truth, which clang's evaluation
