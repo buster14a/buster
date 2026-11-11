@@ -1660,8 +1660,8 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
     return valid;
 }
 
-// The builtin an identifier names, cached per identifier (CheckInputReader.builtin_names): the catalog's
-// (cbuiltin_resolve), or one of C23's <stdbit.h> functions as library builtins (cbuiltin_stdc_library_resolve), which a
+// The builtin an identifier names in the unit's language mode, cached per identifier (CheckInputReader.builtin_names): the
+// catalog's (cbuiltin_resolve), or one of C23's <stdbit.h> functions as library builtins (cbuiltin_stdc_library_resolve), which a
 // call is only where it calls the unit's declaration of the function (check_input_stdc_library_call), never where no
 // declaration binds the name.
 static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t identifier)
@@ -1673,6 +1673,9 @@ static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t i
         const char* spelling = (const char*)reader->pp->table->records + span.offset;
         builtin = (uint16_t)cbuiltin_resolve(spelling, span.length);
         builtin = builtin != CBUILTIN_NONE ? builtin : (uint16_t)cbuiltin_stdc_library_resolve(spelling, span.length);
+        // __builtin_c23_va_start is clang's builtin in C23 alone (its C23_LANG row, cbuiltin_languages): before C23 its
+        // name is an unknown builtin's (#2121, check_input_implicit_function).
+        builtin = builtin == CBUILTIN_C23_VA_START && reader->pp->options.language.standard < 2023 ? (uint16_t)CBUILTIN_NONE : builtin;
         reader->builtin_names[identifier] = builtin;
     }
     return builtin;

@@ -555,7 +555,7 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
                              (uint64_t)options->assembly << 4 | (uint64_t)options->clang_features << 5 | (uint64_t)options->no_standard_includes << 6 |
                              (uint64_t)options->no_builtin_includes << 7 | (uint64_t)options->buster_headers << 8 | (uint64_t)options->implicit_function_system << 9 | (uint64_t)options->scalar << 10 |
                              (uint64_t)options->dollars << 16 | (uint64_t)options->raw_strings << 24 | (uint64_t)options->implicit_function_diagnostic << 32 |
-                             (uint64_t)options->implicit_library_diagnostic << 40;
+                             (uint64_t)options->implicit_library_diagnostic << 40 | (uint64_t)options->implicit_builtin_diagnostic << 48;
     digest = check_request_mix_word(digest, 5, lexical);
     // The predefines' fields the checker and the backend read beside their macros, then the macros' text itself.
     const uint64_t semantic = (uint64_t)predefines->char_unsigned | (uint64_t)predefines->short_wchar << 1 | (uint64_t)predefines->long_double << 8 |

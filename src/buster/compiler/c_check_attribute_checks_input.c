@@ -450,6 +450,47 @@ static uint32_t check_input_objc_bridge_related_parse(CheckInputReader* reader, 
     return result;
 }
 
+// swift_newtype's and swift_wrapper's argument as clang's ParseSwiftNewTypeAttribute reads it (#1447): `struct` or `enum`,
+// then the `)`. Empty parentheses are "argument required after attribute" at the `)`; another token is the warning
+// "'X' attribute argument not supported: 'Y'" at it (CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN), which drops the
+// attribute, the token past it unless it is a parenthesis, a bracket, a brace or a string literal (clang's
+// isTokenSpecial); then a token that is no `)` is "expected ')'" with its note.
+static uint32_t check_input_swift_newtype_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t end = attribute->argument_end;
+    const uint32_t open = attribute->argument_first - 1;
+    uint32_t t = attribute->argument_first;
+    const uint32_t name = t < end ? parser->tokens.names[t] : 0;
+    const bool kind = t < end && ((kinds[t] == PARSE_KIND_STRUCT && name == C_NAME_STRUCT) || (kinds[t] == PARSE_KIND_ENUM && name == C_NAME_ENUM));
+    uint32_t result = BUSTER_CHECK_CUSTOM_KEPT;
+    if (t == end)
+    {
+        check_input_custom_error(reader, attributes, attribute, t, CHECK_ARGUMENT_REQUIRED_AFTER, 0, BUSTER_CHECK_NONE);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    else if (!kind)
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN, t, t);
+        const uint8_t token = kinds[t];
+        const bool special = token == PARSE_KIND_L_PAREN || token == PARSE_KIND_R_PAREN || token == PARSE_KIND_L_SQUARE || token == PARSE_KIND_R_SQUARE ||
+                             token == PARSE_KIND_L_BRACE || token == PARSE_KIND_R_BRACE || token == PARSE_KIND_STRING;
+        t += special ? 0u : 1u;
+        result = BUSTER_CHECK_CUSTOM_DROPPED;
+    }
+    else
+    {
+        t += 1;
+    }
+    if (result != BUSTER_CHECK_CUSTOM_ERROR && t != end)
+    {
+        check_input_custom_close(reader, attributes, attribute, t, open);
+        result = BUSTER_CHECK_CUSTOM_ERROR;
+    }
+    return result;
+}
+
 // An availability attribute's entry where its declarations meet (#1447, the AvailabilityAttr clang's Sema makes): its
 // platform (its index, or BUSTER_CHECK_AVAILABILITY_NAMED with an unknown one's name) and its token, its stages' versions as
 // Sema takes them (canonical: check_availability_canonical), unavailable, its first token, where its messages are, and
@@ -834,14 +875,14 @@ static const BuiltinIntrinsicInfo* check_input_checks_library(CheckInputReader* 
 // diagnose_as_builtin's checks (#1447, clang's handleDiagnoseAsBuiltinAttr), on a function of type `function` named at `name`
 // whose declarator's named parameters CheckInputReader.attribute_parameters links. Its first argument names a builtin
 // function (getBuiltinID): a name no declaration hides of one of the catalogue's builtins this language has but a library
-// function's, which clang declares implicitly, or the unit's declaration of a library function that is its builtin
-// (check_input_checks_library); any other first argument is clang's error at its expression's place. Then its builtin's
+// function's, or the unit's declaration of a library function that is its builtin (check_input_checks_library), which an
+// undeclared one's name has made as clang's lookup does (check_input_generic_undeclared); any other first argument is
+// clang's error at its expression's place. Then its builtin's
 // parameters (its prototype as GetBuiltinType declares it, past any custom checking) must be as many as its other
 // arguments, each of which is the index, from 1, of the function's parameter whose type (canonical, unqualified) is that
 // builtin parameter's: in 32 bits (checkUInt32Argument's errors), within the function's parameters. Refused by name where
-// clang's diagnostics are its own (an undeclared library function's implicit declaration, a builtin's name in another
-// expression, a redeclared builtin), where it crashes (an index of 0), where the checker can't spell a builtin parameter's
-// type in its error, and for more than 32 arguments. A definition's identifier list compares its parameters by their
+// clang crashes (an index of 0), where the checker can't spell a builtin parameter's type in its error, and for more than
+// 32 arguments. A definition's identifier list compares its parameters by their
 // declarations' types, the promoted prototype's standing aside (clang's ParmVarDecl types). Nothing else changes: the
 // -Wfortify-source warnings it would give the function's calls, as a builtin's, the checker doesn't make. Whether the
 // declaration goes on.
