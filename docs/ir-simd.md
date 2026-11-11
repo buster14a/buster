@@ -1045,6 +1045,67 @@ The tests:
   C model. They cover 4 tables, both lane sizes and 3 widths, merging and
   zeroing, each under a mask from the input.
 
+## Compresses and expands (#1840)
+
+`compress` and `expand` (`BUSTER_IR_INTRINSIC_COMPRESS`, `_EXPAND`) are two
+more ternary kinds:
+
+```text
+%3 = intrinsic.v16i32 %2, %1, %2 compress 2
+```
+
+- **Operands:** a is the source, b the result's mask at the lanes in flags
+  (their bytes' log2, 0 to 3), and the third operand the passthrough.
+- **Compress:** a's lanes whose bits are set, packed from lane 0, followed by
+  the passthrough's lanes past them.
+- **Expand:** a's next lane from lane 0 at each set bit's lane, and the
+  passthrough's lanes elsewhere.
+- **Passes:** the model's `IR_SIMD_COMPRESS` and `IR_SIMD_EXPAND` compute them.
+  The verifier and SCCP read each operand's own shape, the mask's among them.
+
+`ir_simd_typed_compress` decodes the compress and expand builtins' register
+rows. Each is two records:
+
+- `vpcompressb` to `vpcompressq` (source in reg, destination in rm) or
+  `vpexpandb` to `vpexpandq` (destination in reg, source in rm), merged under
+  MASK(2) into VECTOR(1), the passthrough;
+- then a whole move of VECTOR(1) into VECTOR(0).
+
+The target needs VBMI2 and BW for bytes and words, VL below 64 bytes, and DQ
+for a one-byte mask or BW for a mask of 4 bytes or more. The memory forms, the
+compress-stores, stay machine rows until the masked stores' design is decided
+([#1840](https://github.com/buster14a/buster/issues/1840#issuecomment-6802134965)).
+
+Tier 1 (`BUSTER_TIER1_VECTOR_COMPRESS`) merges into the destination under the
+mask's k register, with a move of the passthrough there first unless the
+destination already holds it. The vector scratch register keeps the source
+across that move where the destination holds the source.
+
+The 24 masked register forms had no Zen 5 row. On the 9700X they measured
+about 2.25, 4 and 5 cycles of latency at 16, 32 and 64 bytes, one per cycle and
+two macro-ops each
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-compress-1840-2026-11-11)).
+
+Machine rows at `--tier1 -march=znver5`, both compilers compiling this change's
+sources, against the bitwise functions (`3249be86`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 340 | 299 |
+| `main_unit_backend.c` | 587 | 570 |
+
+The tests:
+
+- `test-ir`: both verifiers admit them exactly where the flags name b's mask
+  type. The model is checked against C's lanes on random vectors and masks.
+- `test-ir-parse` and `test-ir-optimize`: the text form round-trips, and SCCP
+  folds them of constants under a constant mask, on both paths.
+- `test-ir-simd`: the 24 rows decode at exactly their features. Each is refused
+  without a feature it needs and under 6 changes.
+- `test-tier1-masks`: the 12 rows the x86-64-v4 target allows (dwords and
+  quadwords) run under a mask from the input, through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C's lanes.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

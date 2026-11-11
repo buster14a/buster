@@ -1675,6 +1675,91 @@ static void ir_simd_typed_test_ternlogs(IrTestTally* tally)
     printf("  IR SIMD rows: %u bitwise functions of three vectors decode to the IR's ternlog\n", decoded_rows);
 }
 
+// The compresses and expands into a register (#1840): vpcompressb to vpcompressq and vpexpandb to vpexpandq at each
+// width, merged under MASK(2) into VECTOR(1) and moved into VECTOR(0), decode as the IR's compress or expand of their
+// lanes, at exactly the features written out; refused without each and under 6 changes.
+static void ir_simd_typed_test_compresses(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ), BUSTER_X86_FEATURE(AVX512VBMI2) };
+    static const uint16_t moves[3] = { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 };
+    const uint64_t all = UINT64_MAX;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t expand = 0; tables && expand < 2; expand += 1)
+    {
+        for (uint32_t size = 0; size < 4; size += 1)
+        {
+            for (uint32_t width = 0; width < 3; width += 1)
+            {
+                const uint32_t bytes = 16u << width;
+                const uint32_t lanes = bytes >> size;
+                const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+                Tier0Operation row;
+                memset(&row, 0, sizeof(row));
+                const uint16_t form = expand != 0 ? ir_simd_expand_forms[size][width] : ir_simd_compress_forms[size][width];
+                row.records[0] = check_vector_lower_record(form, expand != 0 ? v1 : v0, 0, expand != 0 ? v0 : v1);
+                row.records[0].decorations = BUSTER_TIER0_DECORATION_MASK(2);
+                row.records[1] = check_vector_lower_record(moves[width], v0, 0, v1);
+                row.record_count = 2;
+                row.operand_count = 3;
+                row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+                row.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+                row.operand_classes[2] = BUSTER_TYPED_CLASS_MASK;
+                row.operand_bytes[0] = (uint8_t)bytes;
+                row.operand_bytes[1] = (uint8_t)bytes;
+                row.operand_bytes[2] = (uint8_t)mask_bytes;
+                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+                row.result_bytes = (uint8_t)bytes;
+                // Written out: AVX512F, VL below 64 bytes, BW and VBMI2 for bytes and words, a byte's mask's DQ and 4
+                // bytes' BW.
+                const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                          (size <= 1 ? BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512VBMI2) : 0) | (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) |
+                                          (mask_bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+                char description[160];
+                snprintf(description, sizeof(description), "%s of %u-byte lanes at %u bytes: the IR's own at exactly its features", expand != 0 ? "vpexpand" : "vpcompress", 1u << size, bytes);
+                ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.compress == (expand != 0 ? BUSTER_IR_INTRINSIC_EXPAND : BUSTER_IR_INTRINSIC_COMPRESS) + 1 &&
+                                          decoded.immediate == size && !decoded.ternlog && !decoded.permute2 && decoded.operand_count == 3 &&
+                                          (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                               description);
+                decoded_rows += status == IR_SIMD_TYPED_OK && decoded.compress != 0;
+                for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+                {
+                    IrSimdTypedOperation without;
+                    memset(&without, 0x5a, sizeof(without));
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                    const bool required = (expected & features[f]) != 0;
+                    ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.compress != 0,
+                                   "a compress or expand without a feature it needs stays the machine row, and needs no other");
+                }
+                for (uint32_t m = 0; m < 6; m += 1)
+                {
+                    Tier0Operation changed = row;
+                    switch (m)
+                    {
+                    case 0: changed.records[0].decorations = 0; break;
+                    case 1: changed.records[0].mode = BUSTER_X86_MEMORY_BASE; break;
+                    case 2: changed.records[1].rm = v0; break;
+                    case 3: changed.operand_bytes[2] = (uint8_t)(mask_bytes == 8 ? 4 : mask_bytes * 2); break;
+                    case 4: changed.record_count = 1; break;
+                    case 5: changed.records[0].decorations = BUSTER_TIER0_DECORATION_MASK(2) | BUSTER_X86_DECORATION_ZEROING; break;
+                    }
+                    memset(&decoded, 0xa5, sizeof(decoded));
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                    ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), "a changed compress or expand row is not the IR's");
+                }
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 2 * 4 * 3, "every compress and expand decodes");
+    printf("  IR SIMD rows: %u compresses and expands decode to the IR's compress and expand\n", decoded_rows);
+}
+
 // The masks to vectors and back (#1840): every MASK_VECTOR rule's row (`__builtin_ia32_cvtmask2b` to `_cvtmask2q`) and
 // every VECTOR_MASK rule's (`_cvtb2mask` to `_cvtq2mask`), at each width, as the opmask conversion leaves them, decodes
 // as the IR's select of all ones and zeros or its comparison of signed lanes less than zero, at the elements' lanes and
@@ -1879,6 +1964,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_lane_ops(tally);
     ir_simd_typed_test_permute2s(tally);
     ir_simd_typed_test_ternlogs(tally);
+    ir_simd_typed_test_compresses(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);
