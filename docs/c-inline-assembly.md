@@ -448,7 +448,8 @@ helper, whose rsp would be its own: a template that takes directives, or one
 that keeps a helper for another reason, refuses it by name. A function with a
 body that moves a value into rsp (`Tier0AsmBody.stack`) leaves its frame to the
 program, as one whose template returns does: `--verify` doesn't read its frame
-events. (`spl` isn't a register variable's name for clang, which rejects it.)
+events, and Tier 1's code certificate leaves it uncertified (`IrAsmBody.stack`,
+a dynamic frame's reason). (`spl` isn't a register variable's name for clang, which rejects it.)
 
 The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
