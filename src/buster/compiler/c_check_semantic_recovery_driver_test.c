@@ -809,6 +809,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // declaration's parameter, a pointer's, a nested group's and a definition's.
         "void f(_Atomic(struct P { int x; }) p);\nvoid g(typeof(struct Q { long y; }) *q);\nvoid h(typeof(_Atomic(struct R { short z; })) r);\n"
         "int k(_Atomic(struct A { int a; }) a, typeof(struct B { char b; }) b) { int unused; return (int)sizeof a + b.b; }\nint z = missing;\n",
+        // ...whose tag stays the prototype's or the definition's: a later file-scope use names another, incomplete one (second
+        // review on #1891), and a file-scope definition of its name is no redefinition.
+        "void f(typeof(struct T { int x; }) *p);\nstruct T *global;\nint n = sizeof(struct T);\n",
+        "void f(typeof(struct T { int x; }) *p) { (void)p; }\nstruct T *global;\nint n = sizeof(struct T);\n",
+        "void f(typeof(struct T { int x; }) *p);\nstruct T { long y; } t;\nint n = sizeof(struct T);\nint g(void) { int unused; return missing; }\n",
         // Invalid declarations in a row, whose uses are quiet: in later bodies, which keep their -Wall warnings, in a body's
         // own invalid declarations, and in constant contexts (a bound, typeof, an enumerator, _Static_assert, a bit-field's
         // width, a case label), which read a stand-in int.
