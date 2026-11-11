@@ -340,7 +340,9 @@ work on both v3 and v4 policies; the checker driver's overflow-staging fixture
 cross-links them with clang under `--verify`. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
-bits. The IR's switches and selects of floating
+bits. Asm statements placed in their callers are Tier 1's as asm bodies (#1839,
+[the selection guide](tier1-selection.md)'s "Asm bodies"), but a template that
+returns from its function, whose function is Tier 0's. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and
@@ -439,7 +441,13 @@ A vector passed by value is an object already; one returned in registers comes
 back split across xmm0 and xmm1, xmm0 to xmm3 or ymm0 and ymm1 (#1193), which
 selection, both consumers and the code's certificate now take as up to four
 result parts (`tier1_select_result_parts`, staged in the red zone one after
-another on the way out).
+another on the way out). At an AVX-512 target a 128-byte vector comes back in
+zmm0 and zmm1, two 64-byte parts (#1847). The parts must fit the red zone's 16
+eightbyte slots (`tier1_select_result_staged`, which the consumer and the
+certificate check too): four 32-byte parts or two 64-byte ones take all of
+them, so a 256-byte vector's four zmm parts are still refused, and Tier 0
+compiles its function. `test-checker-driver`'s wide results' unit returns a
+128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0.
 
 Measured by `--tier1 --tier1-refusals --verify` of the compiler's own units,
 whose scalar host's emulations of AVX2's and AVX-512's intrinsics

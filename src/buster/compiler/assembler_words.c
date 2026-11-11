@@ -117,6 +117,12 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
     number_width = _mm512_mask_mov_epi64(number_width, opmask, _mm512_setzero_si512());
     const __m512i numbered_description = _mm512_or_si512(_mm512_set1_epi64(X86_OPERAND_REGISTER), _mm512_or_si512(_mm512_slli_epi64(number, 8), _mm512_or_si512(_mm512_slli_epi64(class, 16), _mm512_slli_epi64(number_width, 24))));
     descriptions = _mm512_mask_mov_epi64(descriptions, number_valid, numbered_description);
+    // MMX's mm0 to mm7 (#1846), 8 bytes wide.
+    const __m512i mmx_number = _mm512_sub_epi64(_mm512_and_si512(_mm512_srli_epi64(words, 16), byte_mask), _mm512_set1_epi64('0'));
+    const __mmask8 mmx = three & _mm512_cmpeq_epi64_mask(_mm512_and_si512(words, _mm512_set1_epi64(65535)), _mm512_set1_epi64('m' | 'm' << 8)) &
+                         _mm512_cmple_epu64_mask(mmx_number, _mm512_set1_epi64(7));
+    const __m512i mmx_description = _mm512_or_si512(_mm512_set1_epi64(X86_OPERAND_REGISTER | BUSTER_X86_CLASS_MMX << 16 | 8u << 24), _mm512_slli_epi64(mmx_number, 8));
+    descriptions = _mm512_mask_mov_epi64(descriptions, mmx, mmx_description);
     const __mmask8 rip = three & _mm512_cmpeq_epi64_mask(words, _mm512_set1_epi64('r' | 'i' << 8 | 'p' << 16));
     descriptions = _mm512_mask_mov_epi64(descriptions, rip, _mm512_set1_epi64(X86_OPERAND_REGISTER | 255u << 16 | 8u << 24));
     // Register numbers have canonical spelling: leading-zero names such as r08 and xmm00 are symbols.

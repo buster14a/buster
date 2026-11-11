@@ -257,9 +257,13 @@ struct CheckProgramOptions
     uint32_t patchable_offset;
     String8 patchable_section;
     // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
-    // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
-    // statement's row and calls its helper as any function's.
+    // lowering Tier 1's IR takes without asm bodies (the IR's source tools, whose text form has none), which has no
+    // operation for a placed statement's row and calls its helper as any function's.
     bool asm_helpers;
+    // Every asm statement placed in its caller is an asm body, none a row (#1839, check_asm_inline_code): for a lowering
+    // Tier 1's IR takes (the C driver's --tier1), whose body calls run asm bodies (IrCall.body) but which has no
+    // operation for a statement's row. A function Tier 1 refuses falls back to Tier 0, which takes bodies as it does rows.
+    bool asm_bodies;
     // The helper families (a bit each, CheckProgramHelperFamily's) whose every operation takes its helper where it has a
     // direct form (#1059's paired measurements: the C driver's --helper-forms, measure-helpers): the fences', the atomic
     // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
@@ -314,13 +318,11 @@ typedef enum CheckProgramAliasError
     CHECK_PROGRAM_ALIAS_TO_FUNCTION,
     // "ifunc resolver function must return a pointer".
     CHECK_PROGRAM_ALIAS_RESOLVER,
-    // Refused: an alias declared thread-local of a definition that isn't, or the other way, whose references the code
-    // would reach as its own declaration says and the symbol isn't (clang's code is as wrong).
+    // An alias declared thread-local of a definition that isn't, or the other way: its symbol is its definition's type,
+    // as clang's object has it, where nothing refers to it; refused where the selection's code does
+    // (BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED), whose references would reach it as its own declaration says and the
+    // symbol isn't (clang's code is as wrong, #1849).
     CHECK_PROGRAM_ALIAS_THREAD_LOCAL,
-    // Refused: an alias variable that the unit also defines tentatively, which the static data would define too: after it
-    // (`extern int w __attribute__((alias("v"))); int w;`), which clang takes as the alias's declaration, or before it,
-    // clang's error "alias definition of 'w' after tentative definition", which the reader doesn't make.
-    CHECK_PROGRAM_ALIAS_DEFINED,
 } CheckProgramAliasError;
 
 // An object's alias, ifunc or weakref, from its first declaration with one (in token order), whose attributes give the
@@ -357,6 +359,9 @@ struct CheckProgramAlias
 // doesn't select), clang's error that it isn't defined.
 #define BUSTER_CHECK_PROGRAM_ALIAS_WEAK 1u
 #define BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED 2u
+// An alias whose thread-local storage isn't its definition's (CHECK_PROGRAM_ALIAS_THREAD_LOCAL) that the selection's code
+// refers to (#1849), which the emission refuses: its references would reach it as its declaration says.
+#define BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED 4u
 
 // A group of clang's cpu_specific and cpu_dispatch functions of one name (#1447, c_check_program_cpu_dispatch.c): its
 // first declaration with an attribute (its name and linkage), its reference object R (its symbol f.ifunc, which every
@@ -497,9 +502,10 @@ struct CheckProgram
     uint32_t constraint_count;
     uint32_t constraint_capacity;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target, frame_pointer and probe_stack.
+    // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer and probe_stack.
     bool unselected_operands;
     bool asm_helpers;
+    bool asm_bodies;
     uint32_t helper_forms;
     X86Target target;
     uint8_t frame_pointer;
@@ -4049,6 +4055,16 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
             }
         }
+        // A version of a function multiversioned by target strings (#1838): a function of its name another object with a
+        // target attribute has (the checker keeps each version apart). A lone "default" is still compiled as the function.
+        for (uint32_t e = low; input->target_multiversion && !versions && e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
+        {
+            const uint32_t token = (uint32_t)keys[e];
+            for (uint32_t other = 0; !versions && other < count; other += 1)
+            {
+                versions = (uint32_t)(keys[other] >> 32) != body.object && program->parser->tokens.names[(uint32_t)keys[other]] == program->parser->tokens.names[token];
+            }
+        }
         uint32_t target = versions ? BUSTER_CHECK_PROGRAM_TARGET_VERSIONS : 0;
         const String8 text = specific != 0 && !versions ? check_program_cpu_version_features(program, specific, output) : applied != 0 ? applied->text : (String8){ 0 };
         valid &= specific == 0 || versions || text.pointer != 0;
@@ -4302,7 +4318,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
+                               .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
                                .probe_stack = options.probe_stack, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
                                .patchable_section = options.patchable_section, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };

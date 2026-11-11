@@ -8505,153 +8505,6 @@ static void check_lower_complex_builtin(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
-// __builtin_clear_padding's limits (#148): its object's bytes, which a bitmap of their bits on the stack covers, the
-// nesting of its type's arrays, records, complex and atomic types, and its stores' entries, within a builtin's
-// BUSTER_CBUILTIN_LOWER_ENTRIES.
-#define BUSTER_CHECK_LOWER_PADDING_BYTES 4096u
-#define BUSTER_CHECK_LOWER_PADDING_DEPTH 64u
-#define BUSTER_CHECK_LOWER_PADDING_ENTRIES 460u
-
-// The bits a scalar of `type` holds, as clang's PaddingClearer counts them (getScalarOccupiedSizeInBits): an x87 long
-// double's 80, a _BitInt's width, any other's size.
-static uint64_t check_lower_occupied_bits(const TypeTable* types, TypeId type)
-{
-    const TypeId bare = type_unqualified(type_strip_aligned(types, type));
-    const uint8_t kind = type_kind(types, bare);
-    return bare == BUSTER_TYPE_LONG_DOUBLE ? 80 : kind == BUSTER_TYPE_KIND_BIT_INT ? types->types.extent[type_index(bare)] : type_size(types, bare) * 8;
-}
-
-// The stores of __builtin_clear_padding on an object of `type` (#148), as clang's PaddingClearer makes them: the bits
-// no scalar, bit-field or vector of the object holds (an unnamed bit-field's among them, a union's bits that none of its
-// members holds, an x87 long double's last 48, a _BitInt's past its width) are zeros. A frame per array, record, complex
-// or atomic type walks its elements or members in turn (an explicit stack, no recursion), each scalar setting its bits
-// in a bitmap of the object's; then each byte with no bit set is a zero, in runs, and each with some an AND of its
-// bits'. Each entry is the byte offset << 32, the run's bytes << 8 and the mask kept (0 for a run of zeros). Returns the
-// entries' count, or UINT32_MAX where the object, its nesting or its stores pass the limits above.
-static uint32_t check_lower_padding(const TypeTable* types, TypeId type, uint64_t* entries)
-{
-    typedef struct
-    {
-        uint64_t offset;
-        TypeId type;
-        uint64_t index;
-    } Frame;
-    uint64_t occupied[BUSTER_CHECK_LOWER_PADDING_BYTES / 8] = { 0 };
-    Frame stack[BUSTER_CHECK_LOWER_PADDING_DEPTH];
-    const uint64_t size = type_size(types, type);
-    bool valid = size <= BUSTER_CHECK_LOWER_PADDING_BYTES;
-    uint32_t depth = 0;
-    if (valid)
-    {
-        stack[depth++] = (Frame){ .offset = 0, .type = type, .index = 0 };
-    }
-    while (valid && depth != 0)
-    {
-        Frame* top = stack + depth - 1;
-        const TypeId bare = type_unqualified(type_strip_aligned(types, top->type));
-        const uint8_t kind = type_kind(types, bare);
-        const uint32_t index = type_index(bare);
-        uint64_t first = 0;
-        uint64_t last = 0;
-        TypeId pushed = 0;
-        uint64_t at = 0;
-        if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_COMPLEX)
-        {
-            const TypeId element = types->types.base[index];
-            const uint64_t count = kind == BUSTER_TYPE_KIND_COMPLEX ? 2 : types->types.extent[index];
-            pushed = top->index < count ? element : 0;
-            at = top->offset + top->index * type_size(types, element) * 8;
-            top->index += 1;
-            depth -= pushed == 0 ? 1 : 0;
-        }
-        else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
-        {
-            const uint32_t tag = types->types.index[index];
-            const uint32_t member = types->tags.member_begin[tag] + (uint32_t)top->index;
-            const bool more = top->index < types->tags.member_count[tag];
-            const bool bits = more && (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
-            // An unnamed bit-field is padding.
-            first = bits && types->members.name[member] != 0 ? top->offset + types->members.offset[member] : 0;
-            last = bits && types->members.name[member] != 0 ? first + types->members.bit_width[member] : 0;
-            pushed = more && !bits ? types->members.type[member] : 0;
-            at = more ? top->offset + types->members.offset[member] : 0;
-            top->index += 1;
-            depth -= more ? 0 : 1;
-        }
-        else if (kind == BUSTER_TYPE_KIND_ATOMIC)
-        {
-            top->type = types->types.base[index];
-        }
-        else
-        {
-            // A vector holds its elements' bits from its start (a vector of bools one bit each); anything else is a
-            // scalar's. An array of no size (a flexible member) holds none.
-            const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
-            const TypeId element = vector ? types->types.base[index] : bare;
-            const uint64_t count = vector ? types->types.extent[index] : 1;
-            const uint64_t each = vector && type_unqualified(type_strip_aligned(types, element)) == BUSTER_TYPE_BOOL && kind == BUSTER_TYPE_KIND_EXT_VECTOR ? 1 :
-                                  kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? 0 : check_lower_occupied_bits(types, element);
-            first = top->offset;
-            last = top->offset + each * count;
-            depth -= 1;
-        }
-        valid = last <= size * 8 && kind != BUSTER_TYPE_KIND_VARIABLE_ARRAY && (pushed == 0 || depth < BUSTER_CHECK_LOWER_PADDING_DEPTH);
-        for (uint64_t bit = first; valid && bit < last; bit += 1)
-        {
-            occupied[bit / 64] |= (uint64_t)1 << (bit & 63);
-        }
-        if (valid && pushed != 0)
-        {
-            stack[depth++] = (Frame){ .offset = at, .type = pushed, .index = 0 };
-        }
-    }
-    uint32_t count = 0;
-    uint32_t cost = 0;
-    for (uint64_t byte = 0; valid && byte < size;)
-    {
-        const uint8_t held = (uint8_t)(occupied[byte / 8] >> ((byte & 7) * 8));
-        uint64_t run = 0;
-        while (held == 0 && byte + run < size && run < 0xffffff && (uint8_t)(occupied[(byte + run) / 8] >> (((byte + run) & 7) * 8)) == 0)
-        {
-            run += 1;
-        }
-        if (held != 0xff)
-        {
-            // A run's stores of 8, 4, 2 and 1 bytes take 6 entries each, a byte's AND 12.
-            const uint64_t pieces = held == 0 ? run / 8 + __builtin_popcountll(run & 7) : 1;
-            cost += (uint32_t)(held == 0 ? pieces * 6 : 12);
-            valid = count < BUSTER_CHECK_LOWER_PADDING_ENTRIES && cost <= BUSTER_CHECK_LOWER_PADDING_ENTRIES;
-            if (valid)
-            {
-                entries[count++] = byte << 32 | (held == 0 ? run : 1) << 8 | held;
-            }
-        }
-        byte += held == 0 ? run : 1;
-    }
-    return valid ? count : UINT32_MAX;
-}
-
-// __builtin_clear_padding's plan for an object of `type` (#148): an array's elements, through arrays of arrays, each
-// cleared in a loop by its element's stores (*elements of *stride bytes), any other object by its own stores (one element),
-// and a variable length array, whose padding clang's code doesn't clear, by none. Returns check_lower_padding's answer.
-static uint32_t check_lower_padding_plan(const TypeTable* types, TypeId type, uint64_t* entries, uint64_t* elements, uint64_t* stride)
-{
-    TypeId element = type;
-    uint64_t count = 1;
-    uint8_t kind = type_kind(types, type_strip_aligned(types, element));
-    while (kind == BUSTER_TYPE_KIND_ARRAY)
-    {
-        const TypeId bare = type_strip_aligned(types, element);
-        count *= types->types.extent[type_index(bare)];
-        element = types->types.base[type_index(bare)];
-        kind = type_kind(types, type_strip_aligned(types, element));
-    }
-    const bool variable = kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-    *elements = variable ? 0 : count;
-    *stride = variable ? 0 : type_size(types, element);
-    return variable || count == 0 ? 0 : check_lower_padding(types, element, entries);
-}
-
 // __builtin_os_log_format(buffer, format, data...) at run time (#148, clang's emitBuiltinOSLogFormat, whose helper's
 // stores are made here in place): the buffer's pointer and the format's (discarded) are evaluated, then each item's data,
 // in the items' order, an argument again for each item that takes it, as clang evaluates an item's expression as it
@@ -9035,15 +8888,46 @@ static void check_lower_dump_field_address(CheckLowerWriter* writer, uint32_t ba
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, base);
 }
 
-// What a value of `type` passed to a dump's printer needs that isn't lowered here: an aggregate's, a 128-bit integer's, a
-// half-precision value's, any type check_lower_call_passed refuses; a vector passes as a call's does. NULL where none.
+// What a value of `type` passed to a dump's printer needs that isn't lowered here: check_lower_passed's (a half-precision
+// value passes as a call's does, check_lower_call_halves'), a transparent union's or an _Atomic aggregate's, which a
+// call converts as an argument's conversion says; NULL where none. A struct's, a union's, a complex value's, a 128-bit
+// integer's and a vector's pass as a call's do (check_lower_dump_argument).
 static const char* check_lower_dump_passed(CheckLowerWriter* writer, TypeId type)
 {
-    const char* passed = check_lower_call_passed(writer, type);
-    const bool vector = check_lower_vector_of(writer, type) != 0;
-    const bool refused = passed != NULL || check_lower_aggregate(writer, type) || (check_lower_wide(writer, type) && !vector) || check_lower_quad(writer, type) ||
-                         check_lower_class(writer, type) == UINT8_MAX;
-    return refused ? "__builtin_dump_struct whose printer takes an aggregate, a 128-bit or a half-precision value" : NULL;
+    const char* passed = check_lower_passed(writer, type);
+    const bool converted = check_lower_aggregate(writer, type) &&
+                           (check_lower_transparent(writer, type) != 0 || check_action_kind(writer->program->types, type) == BUSTER_TYPE_KIND_ATOMIC);
+    return passed != NULL ? passed : converted ? "__builtin_dump_struct whose printer takes a transparent union or an _Atomic aggregate" : NULL;
+}
+
+// An argument of `type` of a dump's printer's call, as check_lower_call_body records a call's: a struct's, a union's or a
+// complex value's bytes at its address, a 128-bit integer's or a vector's in an object of its own, a half-precision
+// value's as an F32's, any other its class's value.
+static void check_lower_dump_argument(CheckLowerWriter* writer, TypeId type)
+{
+    const bool aggregate = check_lower_aggregate(writer, type);
+    const uint32_t vector = check_lower_vector_of(writer, type);
+    const bool wide = check_lower_wide(writer, type) || vector != 0;
+    writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(writer->program->types, type) : vector != 0 ? vector : wide ? 16 : 0;
+    writer->aggregates |= aggregate || wide;
+    writer->argument_classes[writer->argument_count++] = wide ? BUSTER_TYPED_CLASS_U64 :
+                                                         check_lower_half_of(writer, type) != CHECK_HALF_NONE ? BUSTER_TYPED_CLASS_F32 : check_lower_value_class(writer, type);
+}
+
+// The value of an argument of `type` as a dump's printer's call passes it (check_lower_dump_argument's), after its
+// operand's evaluation (the tasks run in the reverse of their pushes).
+static void check_lower_dump_value(CheckLowerWriter* writer, TypeId type)
+{
+    if (check_lower_wide(writer, type) || check_lower_vector_of(writer, type) != 0)
+    {
+        const uint32_t local = check_lower_temporary_of(writer, type);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, type), local);
+    }
+    else if (check_lower_half_of(writer, type) != CHECK_HALF_NONE)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, check_lower_class(writer, type), 0);
+    }
 }
 
 // __builtin_dump_struct(pointer, printer, rest...) at run time (#148): its calls of the printer, as clang's
@@ -9094,17 +8978,24 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                      type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_HALF ? BUSTER_TYPE_DOUBLE :
                      kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM ? type_promote(types, type) : type;
         refused = addresses[r] ? NULL : check_lower_dump_passed(writer, targets[r]);
-        refused = refused == NULL && check_lower_vector_of(writer, targets[r]) != 0 ? "__builtin_dump_struct whose other arguments are vectors" : refused;
     }
     const TypeId format = rest < parameters ? parameter_types[rest] : BUSTER_TYPE_ULONG;
     if (valid && refused == NULL && type_kind(types, type_strip_aligned(types, format)) != BUSTER_TYPE_KIND_POINTER && format != BUSTER_TYPE_ULONG)
     {
         refused = "__builtin_dump_struct whose printer's format parameter is no pointer";
     }
-    const bool aggregate_result = valid && result != BUSTER_TYPE_VOID && type_unqualified(type_strip_aligned(types, result)) != BUSTER_TYPE_VOID &&
-                                  (check_lower_aggregate(writer, result) || check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0 ||
-                                   check_lower_class(writer, result) >= BUSTER_TYPED_CLASSES);
-    refused = refused == NULL && aggregate_result ? "__builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" : refused;
+    // A struct, union or complex result lands in an object of the call's, a 128-bit integer or a vector in one of its own
+    // (check_lower_call_body's), and each is discarded.
+    const bool returns = valid && result != BUSTER_TYPE_VOID && type_unqualified(type_strip_aligned(types, result)) != BUSTER_TYPE_VOID;
+    const bool aggregate_result = returns && check_lower_aggregate(writer, result);
+    const bool wide_result = returns && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0);
+    const char* returned = !returns ? NULL : aggregate_result ? check_lower_by_value(writer, result, true) :
+                                             check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
+    refused = refused == NULL ? returned : refused;
+    for (uint32_t p = 0; valid && refused == NULL && p < parameters; p += 1)
+    {
+        refused = check_lower_dump_passed(writer, parameter_types[p]);
+    }
     // A record in a segment's space (#1447), whose fields' loads would take no override (its first argument's pointee).
     refused = refused == NULL && __builtin_expect(writer->segments, 0) && check_lower_segment(types, check_lower_atomic_pointee(writer, node))
                   ? "__builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)"
@@ -9131,8 +9022,15 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
     else
     {
         CheckLowerAbi* abi = writer->abi;
-        const uint8_t result_class = type_unqualified(type_strip_aligned(types, result)) == BUSTER_TYPE_VOID ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, result);
+        const uint8_t result_class = !returns || aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, result);
         const uint32_t base = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        // The result's object, which every call's result lands in (a callee takes a hidden result pointer as aligned to
+        // the result's canonical type, check_lower_call_body's).
+        const uint32_t declared = aggregate_result ? type_alignment_log2(types, result) : 0;
+        const uint32_t canonical = aggregate_result ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
+        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
+                                wide_result ? check_lower_temporary_of(writer, result) : BUSTER_CHECK_NONE;
+        writer->aggregates |= aggregate_result || wide_result;
         for (uint32_t l = dump->line_count; l-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const CheckLowerDumpLine* line = dump->lines + l;
@@ -9147,7 +9045,7 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             writer->call_first[call] = writer->argument_count;
             writer->call_counts[call] = arguments;
             writer->call_variadic[call] = variadic;
-            writer->call_result_objects[call] = 0;
+            writer->call_result_objects[call] = object != BUSTER_CHECK_NONE ? object + 1 : 0;
             abi->first[abi->count] = abi->argument_count;
             abi->results[abi->count] = result;
             abi->counts[abi->count] = arguments;
@@ -9157,11 +9055,8 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             {
                 const CheckLowerDumpOperand* operand = a > rest ? dump->operands + line->first + (a - rest - 1) : NULL;
                 const TypeId type = a < rest ? targets[a] : a == rest ? format : operand->kind == CHECK_LOWER_DUMP_VALUE ? operand->promoted : BUSTER_TYPE_ULONG;
-                const uint32_t vector = check_lower_vector_of(writer, type);
                 abi->arguments[abi->argument_count++] = type;
-                writer->argument_sizes[writer->argument_count] = vector;
-                writer->aggregates |= vector != 0;
-                writer->argument_classes[writer->argument_count++] = vector != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, type);
+                check_lower_dump_argument(writer, type);
             }
             if (result_class != BUSTER_TYPED_CLASS_VOID)
             {
@@ -9201,9 +9096,11 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                 else
                 {
                     const uint8_t class = check_lower_class(writer, operand->type);
-                    if (check_lower_vector_of(writer, operand->promoted) != 0)
+                    if (check_lower_vector_of(writer, operand->promoted) != 0 || check_lower_wide(writer, operand->promoted))
                     {
-                        // A vector passes from an object of its bytes, as a call's.
+                        // A vector or a 128-bit integer passes from an object of its bytes, as a call's
+                        // (check_lower_dump_argument's); clang's formats print a 128-bit field by its address, so only
+                        // a vector reaches here today.
                         const uint32_t local = check_lower_temporary_of(writer, operand->promoted);
                         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, operand->promoted), local);
@@ -9219,6 +9116,10 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             check_lower_dump_string_address(writer, dump, line->format);
             for (uint32_t r = rest; r-- > 0;)
             {
+                if (!addresses[r])
+                {
+                    check_lower_dump_value(writer, targets[r]);
+                }
                 check_lower_operand(writer, node, 3 + 2 + r, addresses[r], targets[r]);
             }
             if (!direct)
@@ -9422,18 +9323,23 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         *call = (CBuiltinMiscLowerCall){ .id = probability ? CBUILTIN_EXPECT : aligned ? CBUILTIN_ALLOCA_WITH_ALIGN :
                                                runtime == CBUILTIN_ALLOCA_UNINITIALIZED ? CBUILTIN_ALLOCA : relocate ? CBUILTIN_MEMMOVE : runtime,
                                          .argument_count = evaluated };
+        uint32_t padding_pool = BUSTER_CHECK_NONE;
         if (runtime == CBUILTIN_CLEAR_PADDING)
         {
-            // clear_padding's object's type, whose stores check_lower_miscellaneous_emit makes (check_lower_padding).
-            uint64_t entries[BUSTER_CHECK_LOWER_PADDING_ENTRIES];
-            uint64_t elements = 0;
-            uint64_t stride = 0;
-            const TypeId pointer = type_strip_aligned(program->types, stream->argument_conversions[first].type);
-            const TypeId pointee = type_kind(program->types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(program->types, pointer) : 0;
-            call->result_type = pointee;
-            if (pointee == 0 || check_lower_padding_plan(program->types, pointee, entries, &elements, &stride) == UINT32_MAX)
+            // clear_padding's plan (check_lower_padding_prepare's): its stores in place, or its table's pool's address, a
+            // second argument of the recipe's.
+            const CheckLowerPadding* plan = check_lower_padding_find(&writer->output->initializers, node);
+            if (plan == NULL || plan->refusal != NULL)
             {
-                check_lower_unsupported(writer, "__builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores");
+                check_lower_unsupported(writer, plan != NULL ? plan->refusal : "__builtin_clear_padding of no object type");
+            }
+            else
+            {
+                call->padding = plan->entries;
+                call->padding_count = plan->count;
+                call->padding_elements = plan->elements;
+                call->padding_stride = plan->stride;
+                padding_pool = plan->pool;
             }
         }
         if (aligned)
@@ -9540,7 +9446,18 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             }
             call->arguments[i] = check_lower_temporary(writer, limbs ? check_lower_value_class(writer, type) : check_lower_class(writer, type));
         }
+        if (padding_pool != BUSTER_CHECK_NONE)
+        {
+            call->arguments[1] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            call->argument_count = 2;
+        }
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = check_stream_type(stream, node) });
+        if (padding_pool != BUSTER_CHECK_NONE)
+        {
+            // The table's address, set after the pointer's evaluation (the tasks run in the reverse of their pushes).
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->arguments[1]);
+            check_lower_instruction(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, writer->output->initializers.symbol_base + padding_pool);
+        }
         for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             // A frame object's value is its value class's (a 128-bit integer's), as SET_LOCAL writes it.
@@ -10303,15 +10220,6 @@ static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerT
     if (!done && cbuiltin_bits(call.id))
     {
         check_lower_miscellaneous_bits(writer, &call);
-    }
-    // clear_padding's stores, of its object's type (check_lower_padding), which its preparation found within the limits.
-    uint64_t padding[BUSTER_CHECK_LOWER_PADDING_ENTRIES];
-    if (call.id == CBUILTIN_CLEAR_PADDING)
-    {
-        const uint32_t count = check_lower_padding_plan(writer->program->types, call.result_type, padding, &call.padding_elements, &call.padding_stride);
-        call.padding = padding;
-        call.padding_count = count != UINT32_MAX ? count : 0;
-        call.result_type = 0;
     }
     if (!done)
     {
@@ -12042,6 +11950,18 @@ static void check_lower_reduce_operand(CheckLowerWriter* writer, uint32_t node, 
 
 #include "c_check_program_transport.c"
 
+// Whether `type` is a vector wider than the target's widest registers (check_lower_transport_width: 16 bytes without
+// AVX, 32 without AVX-512), which a builtin's row can't take whole: its builtins run on pieces of the registers' width
+// through memory, as a transport vector's do (#1834), as LLVM's legalization splits them. A target with AVX-512F but not
+// AVX-512VL (knl's) is one without AVX-512 here, as every row of the checker's is (check_lower_vector_row splits its
+// operators at 32 bytes too). A wide shuffle runs element by element (check_lower_transport_shuffle): an output piece
+// may read any input piece, and splitting one into register-width rows needs a plan across the pieces, which #1834
+// leaves for later.
+static bool check_lower_vector_wide(const CheckLowerWriter* writer, TypeId type)
+{
+    return check_lower_vector_of(writer, type) > check_lower_transport_width(writer);
+}
+
 // The generic vector builtins' X86 entries (c_check_program_vector_builtins.c), or their refusal by name. A row's
 // operands are the builtin's vector arguments at their types, whose tasks run before its entry's (the tasks run in the
 // reverse of their pushes):
@@ -12102,7 +12022,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const bool fused = narrow && check_lower_vector_of(writer, result) != 0;
         const TypeId operand = fused ? stream->argument_conversions[graph->argument_offsets[a]].type : source;
         // Of transport vectors, or into one (#137), element by element: its entries are its own.
-        const bool transport = !fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0);
+        const bool transport = !fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                                          check_lower_vector_wide(writer, source) || check_lower_vector_wide(writer, result));
         if (transport)
         {
             check_lower_transport_shuffle(writer, node);
@@ -12175,7 +12096,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             }
         }
         // Of a transport vector, or into one (#137), element by element: its entries are its own.
-        const bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0;
+        const bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                               check_lower_vector_wide(writer, operand_type) || check_lower_vector_wide(writer, result);
         if (transport)
         {
             check_lower_transport_convertvector(writer, node);
@@ -12195,8 +12117,9 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if ((check_lower_transport_type(types, result) ||
-              (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && check_lower_transport_type(types, stream->argument_conversions[first + 1].type))) &&
+    else if ((check_lower_transport_type(types, result) || check_lower_vector_wide(writer, result) ||
+              (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && (check_lower_transport_type(types, stream->argument_conversions[first + 1].type) ||
+                                                                      check_lower_vector_wide(writer, stream->argument_conversions[first + 1].type)))) &&
              (check_builtin_vector_elementwise(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP) &&
              !check_lower_libm_builtin(builtin) && !check_lower_strict_round(graph, node, builtin) && builtin != CBUILTIN_ELEMENTWISE_PDEP &&
              builtin != CBUILTIN_ELEMENTWISE_PEXT && builtin != CBUILTIN_ELEMENTWISE_CLMUL)

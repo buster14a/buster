@@ -3194,6 +3194,61 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
     return result;
 }
 
+// Whether the typedef name at `token`, in the arguments of a counted_by family attribute (frame `frame`, a GNU attribute's
+// call), names a member of a record being defined, which clang's lookup in the attribute's argument finds before the
+// typedef (#1842): a declarator's name of its name in an enclosing struct or union body before it. A name is an identifier
+// after a specifier, a typedef or tag name, `*`, `,`, a body's `}` or a declarator's grouping `(`, and before `;`, `,`, `:`, `[`,
+// a grouping `)` or an attribute. Parentheses group a declarator after a specifier, a typedef or tag name, `*`, `,`, `}` or
+// another grouping `(` (`int (n);`, `int ((n));`); any others (a function declarator's parameters, an attribute's
+// arguments, sizeof's operand) hold no member's name. The bodies of named records nested in it hold their own records'
+// members; each body's own scan finds the members of a named record still open.
+static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFrame* frame, uint32_t token)
+{
+    static const char* const names[] = { "counted_by", "sized_by", "counted_by_or_null", "sized_by_or_null" };
+    bool counted = frame->role == PARSE_ROLE_OPEN_CALL && frame->opener > 0 && parse_scalar_gnu_attribute_group(parser, frame);
+    bool spelled = false;
+    for (uint32_t n = 0; counted && !spelled && n < sizeof(names) / sizeof(names[0]); n += 1)
+    {
+        spelled = parse_scalar_attribute_spelled(parser, parser->names[frame->opener - 1], true, names[n]);
+    }
+    bool found = false;
+    for (uint32_t f = 0; spelled && !found && f < parser->frame_count; f += 1)
+    {
+        const ParseFrame* body = parser->frames + f;
+        // The depth of the parentheses open since the body's `{`, the depth of the first that groups no declarator (0
+        // where none is open), and the depth of a named record's body the scan skips.
+        uint32_t parentheses = 0;
+        uint32_t other = 0;
+        uint32_t named = 0;
+        for (uint32_t t = body->role == PARSE_ROLE_OPEN_STRUCT ? body->opener + 1 : token; !found && t < token; t += 1)
+        {
+            const uint8_t kind = parser->kinds[t];
+            const uint8_t before = parser->kinds[t - 1];
+            const uint8_t after = parser->kinds[t + 1];
+            const bool place = before == PARSE_KIND_TYPE || before == PARSE_KIND_QUALIFIER || before == PARSE_KIND_STAR || before == PARSE_KIND_COMMA ||
+                               before == PARSE_KIND_R_BRACE ||
+                               (before == PARSE_KIND_IDENTIFIER && (parse_scalar_is_typedef_name(parser, t - 1) || parser->kinds[t - 2] == PARSE_KIND_STRUCT ||
+                                                                    parser->kinds[t - 2] == PARSE_KIND_ENUM));
+            const bool opens = kind == PARSE_KIND_L_BRACE && (named != 0 || before == PARSE_KIND_IDENTIFIER);
+            named = named + (opens ? 1u : 0u) - (named != 0 && kind == PARSE_KIND_R_BRACE ? 1u : 0u);
+            const bool open = named == 0 && kind == PARSE_KIND_L_PAREN;
+            const bool close = named == 0 && kind == PARSE_KIND_R_PAREN && parentheses != 0;
+            // A `(` that groups: after a declarator's place or a grouping `(`.
+            const bool grouping = open && other == 0 && (place || before == PARSE_KIND_L_PAREN);
+            parentheses += open ? 1u : 0u;
+            other = open && !grouping && other == 0 ? parentheses : other;
+            const bool closes_other = close && other == parentheses;
+            other = closes_other ? 0 : other;
+            parentheses -= close ? 1u : 0u;
+            const bool declarator = place || (before == PARSE_KIND_L_PAREN && other == 0);
+            const bool ends = after == PARSE_KIND_SEMI || after == PARSE_KIND_COMMA || after == PARSE_KIND_COLON || after == PARSE_KIND_L_SQUARE ||
+                              after == PARSE_KIND_ATTRIBUTE || (after == PARSE_KIND_R_PAREN && parentheses != 0);
+            found = named == 0 && other == 0 && kind == PARSE_KIND_IDENTIFIER && parser->names[t] == parser->names[token] && declarator && ends;
+        }
+    }
+    return found;
+}
+
 // clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
 // (ParseAvailabilityAttribute) and external_source_symbol's (ParseExternalSourceSymbolAttribute), by their GNU names, a
 // keyword's underscores too. Their arguments are a balanced run of tokens, which the checker reads as clang's parser does.
@@ -3356,7 +3411,9 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
             parser->frames[parser->frame_count - 3].flags |= statement ? BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE : BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE;
         }
         // GNU's `&&label` names a label, whatever the ordinary names mean.
-        const bool ordinary = !attribute && !(previous == PARSE_KIND_AMPAMP && parser->roles[(int64_t)i - 1] == PARSE_ROLE_PREFIX);
+        // A counted_by family's count names a member before a typedef of its name (parse_scalar_counted_member).
+        const bool ordinary = !attribute && !(previous == PARSE_KIND_AMPAMP && parser->roles[(int64_t)i - 1] == PARSE_ROLE_PREFIX) &&
+                              !(parse_scalar_is_typedef_name(parser, i) && parse_scalar_counted_member(parser, frame, i));
         if (ordinary && parse_scalar_is_typedef_name(parser, i) && previous == PARSE_KIND_SIZEOF)
         {
             parse_scalar_error_argument(parser, i, PARSE_MESSAGE_EXPECTED_PARENTHESES_AROUND_TYPE_NAME, BUSTER_PARSE_AFTER_PREVIOUS, i - 1);
@@ -3408,7 +3465,8 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     else if (kind == PARSE_KIND_SIZEOF)
     {
         step->role = PARSE_ROLE_PREFIX;
-        frame->mode = parser->kinds[i + 1] == PARSE_KIND_L_PAREN ? PARSE_MODE_SIZEOF_PAREN : PARSE_MODE_OPERAND;
+        // (`sizeof ({ ... })`'s `(` is its statement expression's own: clang's parser reads a parenthesized expression.)
+        frame->mode = parser->kinds[i + 1] == PARSE_KIND_L_PAREN && parser->kinds[i + 2] != PARSE_KIND_L_BRACE ? PARSE_MODE_SIZEOF_PAREN : PARSE_MODE_OPERAND;
         frame->flags &= ~BUSTER_PARSE_FRAME_EMPTY_OK;
     }
     else if (kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_GENERIC)
@@ -5462,7 +5520,7 @@ static uint8_t parse_role_rule(ParseKernels* kernels, uint32_t i, bool typed, bo
                 {
                     result = PARSE_ROLE_OPEN_FOR;
                 }
-                else if (previous == PARSE_KIND_SIZEOF)
+                else if (previous == PARSE_KIND_SIZEOF && next != PARSE_KIND_L_BRACE)
                 {
                     result = PARSE_ROLE_OPEN_SIZEOF;
                 }
@@ -7915,7 +7973,9 @@ static void parse_role_statics_avx512(ParseKernels* kernels, uint32_t start, uin
         // `...`, a function's; else a group's. An attribute's `(` and an asm's go by the token before their keyword, which
         // their code in `facts` indexes ParseRoleTables.paren_by_before with.
         const __m512i paren_previous = parse_table8(t->paren_previous, vk_previous);
-        const __mmask64 by_previous = class_paren & _mm512_test_epi8_mask(paren_previous, paren_previous);
+        // (`sizeof ({ ... })`'s `(` is a group's, its statement expression's.)
+        const __mmask64 by_previous = class_paren & _mm512_test_epi8_mask(paren_previous, paren_previous) &
+                                      ~(parse_equal8(vk_previous, PARSE_KIND_SIZEOF) & parse_equal8(vk_next, PARSE_KIND_L_BRACE));
         const __mmask64 attribute_list = class_paren & parse_equal8(vk_previous, PARSE_KIND_L_PAREN) & parse_equal8(vk_before, PARSE_KIND_ATTRIBUTE);
         const __mmask64 next_starts_type = _mm512_test_epi8_mask(next_bits, _mm512_set1_epi8(BUSTER_PARSE_VKIND_STARTS_TYPE));
         const __mmask64 next_function = parse_equal8(vk_next, PARSE_KIND_R_PAREN) | parse_equal8(vk_next, PARSE_KIND_ELLIPSIS);

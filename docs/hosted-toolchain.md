@@ -8,9 +8,10 @@ absent or damaged inputs, in this order:
 
 **exact verified Actions cache → digest-pinned GHCR mirror → original upstream URL.**
 
-The test/fuzz matrix (`9700x.yml`) and both self-host bootstrap rows
-(`selfhost.yml`) depend on successful preparation; they never independently fall
-back to a remote source. `build.yml`'s single job is its workflow's only
+The test/fuzz matrix (`9700x.yml`, whose rows' jobs, a portable row's compiler
+build among them, are `hosted-correctness.yml`'s) and both self-host bootstrap
+rows (`selfhost.yml`) depend on successful preparation; they never independently
+fall back to a remote source. `build.yml`'s single job is its workflow's only
 consumer, so the `hosted-tools` action, given an empty `artifact-name`, runs the
 same preparation inside that job. `build-pgo.yml` and the 9700X need only CMake
 and Ninja: `setup-build-tools.sh` without `BUSTER_HOSTED_RELEASES` acquires each
@@ -59,6 +60,14 @@ staging tree, checks versions/runtimes and publishes the completed tree. Relativ
 linker links survive relocation. A failed extraction publishes no installation.
 The selected compiler, resource directory, runtime/library path and tools remain
 explicit; no runner-provided Clang is silently substituted.
+
+Of the LLVM release the tree holds the compilers, lld, the object and DWARF
+tools, the headers, clang's resource directory, the bundled `libclang-cpp` (the
+pragma oracle's) and the static archives of LLVM, Polly and clang. Clang's 93
+archives, 238 MB of the tree's 2.0 GB, are the clang server's (#2071): with
+LLVM's they link it with one copy of LLVM, which `libclang-cpp`, bundling LLVM
+without the targets' initializers, can't give it. They add no measurable
+extraction time, which decompressing the whole 12 GB stream dominates.
 
 For standalone hosted-environment preparation, first prepare a private input
 directory with `hosted-release.sh prepare DIRECTORY` and set

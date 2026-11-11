@@ -97,9 +97,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   release what they map), with the captured stream in a `memfd`;
   `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
   `tools/clang-server` (built by `tools/clang-server/build.sh` against that
-  clang's `libclang-cpp` where the toolchain lets it hold one copy of LLVM: a
-  shared-LLVM toolchain's, not the official release's, whose hosted rows then
-  run the oracle clang as children), which runs each command line through clang's own
+  clang's libraries with one copy of LLVM: a shared-LLVM toolchain's
+  `libclang-cpp`, or the official release's static clang and LLVM archives,
+  which the hosted rows install; the build checks one request against a
+  spawned clang), which runs each command line through clang's own
   driver and cc1 in its process, in the run's directory and environment;
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
@@ -238,13 +239,18 @@ unused-warning fixtures also check exact scope-completion tokens.
   statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
   The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
   original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
-  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
-  in such a statement expression, which need the evaluation facts themselves; the input reader's
-  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  controls and a value that decays from a variable array. For `-Wuninitialized`, a statement
+  expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
+  on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
+  and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
+  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
-  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
-  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
-  expression as `_Generic`'s controlling expression.
+  isn't implemented; and two forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
+  reads outside a deferred typeof region. And a statement expression in a chosen `_Generic` arm
+  (`_Generic(1, int: ({ u; }))`), whose statements the selection's token range marks unselected, so that
+  `-Wuninitialized` reads none of them (#2023).
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
