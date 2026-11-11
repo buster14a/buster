@@ -1148,15 +1148,14 @@ static uint32_t parse_scalar_skip_group(const ParseScalar* parser, uint32_t open
     return j;
 }
 
-// A comma at the top of an array declarator's size or an array designator's index, whose `]` clang's balanced tracker
-// skips to (its SkipUntil, which stops at a `;`): ParseBracketDeclarator and ParseInitializerWithPotentialDesignator go
-// on with what came before the comma (#1867). The diagnostic-only view drops [comma, `]`); without a `]` before a `;`,
-// nothing is resumed.
-static void parse_scalar_resume_at_square(ParseScalar* parser, uint32_t comma)
+// After the first error at `token`, where clang's balanced tracker skips to the group's `closer` (its SkipUntil, which
+// stops at a `;`) and goes on as if the tokens from `token` to it weren't there: the diagnostic-only view drops them
+// (ParseDiagnostic.resume_delete). Without the closer before a `;`, nothing is resumed.
+static void parse_scalar_resume_at_closer(ParseScalar* parser, uint32_t token, uint8_t closer)
 {
-    uint32_t tail = comma;
+    uint32_t tail = token;
     bool balanced = true;
-    while (balanced && tail < parser->count && parser->kinds[tail] != PARSE_KIND_R_SQUARE && parser->kinds[tail] != PARSE_KIND_SEMI)
+    while (balanced && tail < parser->count && parser->kinds[tail] != closer && parser->kinds[tail] != PARSE_KIND_SEMI)
     {
         const uint8_t next = parser->kinds[tail];
         if (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_L_BRACE)
@@ -1169,7 +1168,7 @@ static void parse_scalar_resume_at_square(ParseScalar* parser, uint32_t comma)
             tail += 1;
         }
     }
-    if (balanced && tail < parser->count && parser->kinds[tail] == PARSE_KIND_R_SQUARE)
+    if (balanced && tail < parser->count && parser->kinds[tail] == closer)
     {
         parser->error_resumed = true;
         parser->error_resume_delete = true;
@@ -3834,7 +3833,9 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
             parse_scalar_unexpected(parser, i, frame);
             if (first_error && ((flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) || designator_subscript) && parser->error_message == PARSE_MESSAGE_EXPECTED_R_SQUARE)
             {
-                parse_scalar_resume_at_square(parser, i);
+                // ParseBracketDeclarator and ParseInitializerWithPotentialDesignator go on with what came before the comma
+                // (#1867).
+                parse_scalar_resume_at_closer(parser, i, PARSE_KIND_R_SQUARE);
             }
         }
         else if (flags & BUSTER_PARSE_FRAME_DECLARATION)

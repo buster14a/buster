@@ -318,10 +318,10 @@ keeps is one the scalar parser accepts with the same tree. Each token gets:
   designators don't take, ...);
 - a **mode**: its group's type (a file, a block, a struct or enum body, a
   parameter list, a call's arguments, a declarator in parentheses, a
-  subscript, an array declarator, an initializer, `for`'s clauses, an
-  attribute, a builtin's arguments, 27 in all) and its part of its item (its
-  start, a declaration's specifiers and declarators, an initializer, a
-  bit-field's width, a statement): 49 modes.
+  subscript, an array declarator, an array designator, an initializer, `for`'s
+  clauses, an attribute, a builtin's arguments, 28 in all) and its part of its
+  item (its start, a declaration's specifiers and declarators, an initializer, a
+  bit-field's width, a statement): 50 modes.
 
 A token passes if its class may follow the class before it (`follows`, 128 by
 128 classes), may appear in its mode (`allows`), may end its group when the
