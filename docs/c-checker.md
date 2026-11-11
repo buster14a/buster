@@ -4256,6 +4256,11 @@ take clang's words and places:
 - **A negative constant bound**, at the bound: "'a' declared as an array with
   a negative size", or "array size is negative" in a type name
   (`CHECK_INPUT_ARRAY_NEGATIVE`, `check_input_vla_bound`).
+- **A bound of another type than an integer's** (#2170), at the bound: "size
+  of array has non-integer type 'double'" (`CHECK_INPUT_ARRAY_NON_INTEGER`).
+  A constant's (`int a[1.5]`) and a variable array's (`int a[d]` of a
+  `double d`) both get it, and the declaration recovers as a negative bound's
+  does. A member's, as a member's negative bound, still stops the unit.
 - **An array of functions**, at its `[`: "'a' declared as array of functions
   of type 'F' (aka 'int (void)')" (`CHECK_INPUT_ARRAY_FUNCTIONS`).
 - **An incomplete element**, at its `[`: "array has incomplete element type
