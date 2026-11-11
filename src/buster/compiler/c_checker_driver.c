@@ -8038,7 +8038,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .noreturn_warnings = !quiet,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
-                        .asm_helpers = lanes != NULL && lanes->tier1,
+                        // Tier 1's IR takes asm bodies (#1839), not a statement's row.
+                        .asm_bodies = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
