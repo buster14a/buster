@@ -280,6 +280,20 @@ other 79 differ only in throughput, by the column's 1/64-cycle step (`ktest`'s
 and `kortest`'s by their 0.5 or 1 cycle passes), or in pipe bits. Their 1,349
 rows share 156 IDs.
 
+[#1840](https://github.com/buster14a/buster/issues/1840)'s width changes added
+six register rows, `vextracti32x4` of a ymm and a zmm register, `vextracti64x4`,
+`vinserti32x4` into a ymm and a zmm register and `vinserti64x4`, which Tier 1
+selects for the IR's `extract` and `insert`. They were measured by one `--missing
+--table` process on the 9700X (CPU 2, under the lock, built `BUSTER_HOST_ARCH=znver5
+BUSTER_DEBUG_INFO=0` at `cb608c1` with the change): the extracts have a latency
+of 2 cycles and a throughput of 0.25, the inserts 2 and 0.5, each one macro-op. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09)
+(buster-performance#354) has the process's output. Its permutes then added 19 more,
+measured the same way: `vpermb` of xmm and ymm registers, `vpermw` and
+`vpshufb` at every width, `vpermd` of ymm and zmm registers, `vpermq` of zmm
+ones, `valignd` and `valignq` at every width, and `vshufi64x2` of ymm and zmm
+registers.
+
 What the rows say, a few families (cycles; derived values in italics):
 
 | Family | Latency | Throughput | Macro-ops |

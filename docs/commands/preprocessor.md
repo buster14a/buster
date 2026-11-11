@@ -22,9 +22,12 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
-- `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
-  unit's token stream from its files' refined tokens (C23's `#embed` among its
-  directives), and `./build/compiler -E` (as `clang -E`, with `-dM` and `--embed-dir=`).
+- `src/buster/compiler/c_preprocessor.c` supplies the shared preprocessor state,
+  declarations, feature tables and reader helpers; `c_preprocessor_impl.c`
+  contains its private implementation and generated predefines. Together they
+  produce one translation unit's token stream from its files' refined tokens
+  (C23's `#embed` among its directives), and supply `./build/compiler -E` output
+  (as `clang -E`, with `-dM` and `--embed-dir=`).
   `src/buster/include` holds the compiler's own freestanding headers, which
   `--buster-headers` puts where clang's resource directory goes (the default),
   with clang's after them for the headers they don't supply (never for a name
@@ -60,8 +63,10 @@ requirements. [Command index](README.md).
   and refuses the others where their last option turns them on
   (`pp_take_family`, `pp_settle_families`).
 - `src/buster/compiler/c_preprocessor_history.c`, included by `c_preprocessor.c`,
-  records macro expansion history in cold records and compressed output runs;
-  `pp_diagnose_output` renders a diagnostic for an output-token index.
+  holds the shared history reader and diagnostic declarations.
+  `c_preprocessor_history_impl.c`, included by `c_preprocessor_impl.c`, records
+  macro expansion history in cold records and compressed output runs and
+  renders diagnostics; `pp_diagnose_output` accepts an output-token index.
   With `PPOptions.defer_history` a unit records none while it runs: its
   diagnostics, and `pp_history_ensure` for a later reader, record it by
   preprocessing the unit again (`docs/c-preprocessor.md`, "Deferred history").
@@ -97,8 +102,9 @@ implements this interface;
 [the frozen oracle guide](../../docs/preprocessor-oracle.md) records the pinned
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
-`./build/compiler test-preprocessor [--clang] [--keep] [--seed N] [--count N]
-[--part K/N] [options] [file...]`, or `test-preprocessor --tables path...`:
+`./build/compiler test-preprocessor [--clang] [--clang-server PATH [--differential]]
+[--keep] [--seed N] [--count N] [--part K/N] [options] [file...]`, or
+`test-preprocessor --tables path...`:
 
 - without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They run in 32 parts, the
@@ -255,6 +261,25 @@ spellings.
 Every case and file runs with clang's answers to the feature queries
 (`--clang-features`, the oracle's mode), and a check runs a line of queries both
 ways: by default they answer what buster implements.
+
+`--clang-server PATH` sends the runs of `clang` to `tools/clang-server`: the
+oracle cache's (`pp_test_clang_process`'s, for the cases and for the files
+given to it, and the predefines' jobs') and the fuzz batch's, which start clang
+outside the cache (`preprocessor_fuzz_clang_process`: its seeds, batches and
+checks as before, its standard input a file, and its 30 s limit kept by the
+client, which stops a server past it). `--differential` also runs each as
+before and fails on a difference ([Served runs](oracle-cache.md#served-runs)).
+These run as before:
+
+- the library-builtin release fixture's 17 runs (`pp_test_builtin_release`),
+  through a wrapper script, another program: it has a `--version` of its own,
+  it reaches clang through its trampoline's `exec`, the awkward path the
+  fixture checks, and `/bin/sh` sets `PWD` where the environment's is missing
+  or stale, which LLVM reads for its working directory. A served run would
+  stand for clang, not for the script;
+- the checks that start clang themselves, outside the cache: the history's and
+  the system warnings' diagnostics, the directive tables' commands, the
+  predefines' shell commands, and `clang --version` for the reference report.
 
 `--clang` also compares every case and file with `clang -E` and the same
 options (but `--predefines`, `--location-limit` and `--window-bytes`, ours alone), token spelling by token spelling, and then where clang's line markers

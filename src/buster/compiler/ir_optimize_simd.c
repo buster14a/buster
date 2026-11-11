@@ -604,6 +604,27 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = IROPT_OVERDEFINED;
         }
     }
+    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+    {
+        // A width change or a permute (#1840): bits moved whole, exact, folded by the model once every operand is constant.
+        static const uint8_t operations[] = { IR_SIMD_EXTRACT, IR_SIMD_WIDEN, IR_SIMD_INSERT, IR_SIMD_PERMUTE, IR_SIMD_SHUFFLE, IR_SIMD_ALIGN, IR_SIMD_SHUFFLE_LANES };
+        const bool binary = f->c[i] != BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] != BUSTER_IR_INTRINSIC_WIDEN;
+        const uint8_t left = work->states[a];
+        const uint8_t right = binary ? work->states[b] : IROPT_CONSTANT;
+        result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
+        if (result == IROPT_CONSTANT)
+        {
+            const IrSimdValue operands[2] = { ir_optimize_simd_value(work, a), binary ? ir_optimize_simd_value(work, b) : (IrSimdValue){ 0 } };
+            const IrSimdValue* pointers[3] = { &operands[0], binary ? &operands[1] : 0, 0 };
+            const IrSimdAction action = {
+                .operation = (IrSimdOperation)operations[f->c[i] - BUSTER_IR_INTRINSIC_EXTRACT],
+                .result = ir_simd_shape(f->type[i]),
+                .operands = { ir_simd_shape(f->type[a]), binary ? ir_simd_shape(f->type[b]) : IR_SIMD_NONE, IR_SIMD_NONE },
+                .index = f->flags[i],
+            };
+            result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+        }
+    }
     else if (op == IR_COPY || op == IR_BITCAST)
     {
         result = work->states[a];

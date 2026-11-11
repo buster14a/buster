@@ -391,7 +391,13 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             }
             else if (type == BUSTER_TYPE_FLOAT128)
             {
-                represented = check_literal_quad(spelling, &end, &value);
+                // Its bits in `integer` and `high`, its mirror the value (c_check_quad.c), as check_literal_value reads
+                // them.
+                unsigned __int128 bits = 0;
+                represented = check_literal_quad(spelling, &end, &bits);
+                value = check_quad_mirror(bits);
+                result->integer = (uint64_t)bits;
+                result->high = (uint64_t)(bits >> 64);
             }
             else
             {
@@ -469,6 +475,15 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             check_literal_number_plain(spelling, length - 1, scratch, result);
             // A bit-precise constant has no imaginary form: clang refuses 5wbi's suffix.
             result->valid &= result->bit_width == 0;
+            if (result->valid && result->type == BUSTER_TYPE_FLOAT128)
+            {
+                // A _Complex __float128 constant holds its components as long doubles (#1250): an imaginary q/Q literal
+                // is taken where its long double mirror is its value exactly, and keeps no bits.
+                const unsigned __int128 bits = (unsigned __int128)result->high << 64 | result->integer;
+                result->valid = check_quad_widen(result->floating, false) == bits;
+                result->integer = 0;
+                result->high = 0;
+            }
             if (result->valid)
             {
                 result->type = BUSTER_TYPE_COMPLEX(type_index(result->type));
@@ -754,6 +769,27 @@ static CheckStringSpan check_literal_string_span(const CheckStringPart* part)
     }
     result.valid = valid;
     return result;
+}
+
+// The length of a string literal's encoding prefix (L, u, U or u8; a raw one's R is no part of it), 0 for none: clang reads
+// an unevaluated string literal past it, with -Winvalid-unevaluated-string's warning at it (#1447), as an ordinary one.
+static __attribute__((unused)) uint32_t check_literal_encoding_prefix(const uint8_t* bytes, uint32_t length)
+{
+    const bool prefixed = length >= 2 && (bytes[0] == 'L' || bytes[0] == 'u' || bytes[0] == 'U');
+    const bool utf8 = prefixed && bytes[0] == 'u' && bytes[1] == '8';
+    return prefixed ? (utf8 ? 2u : 1u) : 0u;
+}
+
+// `count` string literal parts read as an unevaluated string literal's: each past its encoding prefix
+// (check_literal_encoding_prefix).
+static __attribute__((unused)) void check_literal_unevaluated_parts(CheckStringPart* parts, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t prefix = parts[i].bytes != NULL ? check_literal_encoding_prefix(parts[i].bytes, parts[i].length) : 0;
+        parts[i].bytes += prefix;
+        parts[i].length -= prefix;
+    }
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_literal_string_part, once per unit of a string.

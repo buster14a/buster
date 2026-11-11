@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-
-//
+// Private fixtures belong to the frontend unit; common test helpers stay at their original positions for other units.
+// Standalone source preprocessing, without a unity-unit selector, keeps the whole file.
 // test-parser: c_parser.c's checks (AGENTS.md, "Parser tests"). Every unit goes through both paths, the vector path
 // (with its fallback) and the scalar parser alone, which must agree: on a valid unit the same tree, which must keep the
 // tree's invariants and whose postorder must be a depth-first walk's; and each kernel against its scalar twin. On:
@@ -83,7 +83,7 @@ static ParseTestOutcome parse_test_outcome(const Parser* parser, Preprocessor* p
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // Preprocesses and parses `path` with `options`, by the scalar parser alone if `scalar`. Diagnostics are not printed.
 static ParseTestOutcome parse_test_parse_file(const char* path, const PPOptions* options, bool scalar)
 {
@@ -110,7 +110,7 @@ static ParseTestOutcome parse_test_parse_file(const char* path, const PPOptions*
     }
     return result;
 }
-
+#endif
 // A run of the tests' pseudo-random numbers (SplitMix64, public domain).
 static uint64_t parse_test_random(uint64_t* state)
 {
@@ -294,9 +294,10 @@ static uint32_t parse_test_clang_processes(uint32_t count)
     return result != 0 ? result : 1;
 }
 
-// parse_test_clang's runs through the oracle cache (oracle_cache.c, #542): a clang process per file, as many at once as
-// parse_test_clang_processes gives for one file per process, its dependencies listed, each one's errors read for its
-// file. A file's result is the one a process on several gives it, since clang checks each file on its own.
+// parse_test_clang's runs through the oracle cache (oracle_cache.c, #542): a clang process (or a run of the clang
+// server's, oracle_serve) per file, as many at once as parse_test_clang_processes gives for one file per process, its
+// dependencies listed, each one's errors read for its file. A file's result is the one a process on several gives it,
+// since clang checks each file on its own.
 static bool parse_test_clang_cached(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
 {
     uint32_t variables = 0;
@@ -372,17 +373,17 @@ static bool parse_test_clang_cached(const char* clang_path, const char* const* a
 }
 
 // Runs `clang -fsyntax-only` with `arguments` on `count` files, and reads each file's first error into `results`, as
-// parse_test_clang_parse does. With the oracle cache on, a file at a time through it (parse_test_clang_cached); else
-// the files are split in order among parse_test_clang_processes processes that run at once, each one's output read for
-// its own files: the same results as one process on them all, since clang checks each file on its own. Returns false if
-// a process couldn't be run, or didn't parse its files.
+// parse_test_clang_parse does. With the oracle cache on or a clang server (oracle_serve), a file at a time through the
+// cache's runs (parse_test_clang_cached); else the files are split in order among parse_test_clang_processes processes
+// that run at once, each one's output read for its own files: the same results as one process on them all, since clang
+// checks each file on its own. Returns false if a process couldn't be run, or didn't parse its files.
 static bool parse_test_clang(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
 {
     for (uint32_t i = 0; i < count; i += 1)
     {
         results[i] = (ParseTestClang){ 0 };
     }
-    const bool cached = oracle_cache_active(oracle_cache());
+    const bool cached = oracle_cache_active(oracle_cache()) || oracle_serving.server.path != 0;
     const uint32_t processes = cached ? 0 : parse_test_clang_processes(count);
     FILE* outputs[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
     pid_t children[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
@@ -409,7 +410,7 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // ---------------------------------------------------------------------------------------------------------------------
 // The snippets
 
@@ -1091,7 +1092,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int a) { switch (a) { case 1:\n", "1:37: expected expression", 0 },
     { "void f(int a) { do { { a -= 1; }\n", "1:33: expected '}'", 0 },
 };
-
+#endif
 // Writes `text` to `path`. Returns false if it can't.
 static bool parse_test_write(const char* path, const char* text, size_t length)
 {
@@ -1103,7 +1104,7 @@ static bool parse_test_write(const char* path, const char* text, size_t length)
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The options a snippet is preprocessed with: no system headers, and its language mode.
 static PPOptions parse_test_snippet_options(const ParseTestSnippet* snippet)
 {
@@ -1752,7 +1753,7 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     }
     return failures;
 }
-
+#endif
 // The role the paths can tell: a function declarator's parentheses look like a call's (both are postfix groups after
 // an operand, with the same tree), so they compare as one.
 static uint8_t parse_test_canonical_role(uint8_t role)
@@ -1768,7 +1769,7 @@ static uint8_t parse_test_canonical_role(uint8_t role)
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The tokens around `token`, the token itself marked, as one report.
 static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
@@ -3011,7 +3012,7 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
     intern_release(&table);
     return failures;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The files and the mutations
 
@@ -3101,7 +3102,7 @@ static char* parse_test_preprocessed(const char* path, const PPOptions* options,
     intern_release(&table);
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // One mutation of `text`: a token deleted, duplicated, or swapped with the next (`kind` 0, 1, 2), with a space on each
 // side of what changed, so that no two tokens join. `starts` and `ends` are the text's tokens. The result is malloc'd.
 static char* parse_test_mutate(const char* text, size_t length, const uint32_t* starts, const uint32_t* ends, uint32_t token, uint32_t kind, size_t* mutated_length)
@@ -3186,9 +3187,9 @@ static void parse_test_compare(ParseTestTally* tally, const char* label, const P
                           theirs->message, ours->errors != 0 ? "" : "accepted ", ours->line, ours->column, ours->message);
     }
 }
-
+#endif
 #define BUSTER_PARSE_TEST_BATCH 32
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The mutations: `count` mutated copies of the files, spread over them in turn, each checked against clang, or without
 // `clang`, by both paths, which must agree as they must on any file (parse_test_check_file).
 static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PPOptions* options, const char* const* clang_arguments, uint32_t clang_argument_count,
@@ -3762,7 +3763,7 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
     remove(path);
     return failures;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The driver
 
@@ -3802,7 +3803,7 @@ static void parse_test_read_capture(int capture, char* text, size_t capacity)
         text[0] = 0;
     }
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // Runs the driver on `arguments` (or with `preprocess`, -E's, run_preprocessor_command, whose arguments start with
 // "-E") with its stderr in `capture` (an empty file, which it leaves empty), and what it printed in `text`. Returns its
 // exit status.
@@ -4311,8 +4312,9 @@ static uint32_t parse_test_driver(const char* directory)
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
-// `test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [options] [file or directory...]`, with
-// -E's options for the files; --reports sets how many differences the checks print (200).
+// `test-parser [--clang [PATH] [--clang-server PATH [--differential]]] [--mutations N] [--seed N] [--keep] [--reports N]
+// [options] [file or directory...]`, with -E's options for the files; --reports sets how many differences the checks
+// print (200).
 static int run_parser_tests(int argument_count, char** arguments)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -4320,6 +4322,10 @@ static int run_parser_tests(int argument_count, char** arguments)
     const bool epoch = oracle_epoch_begin();
     uint32_t failures = 0;
     const char* clang = 0;
+    // --clang-server PATH: clang's oracle runs through tools/clang-server (oracle_serve, oracle_cache.c), with
+    // --differential each also run as before and compared.
+    const char* clang_server = 0;
+    bool differential = false;
     uint64_t mutations = 0;
     uint64_t seed = 1;
     bool keep = false;
@@ -4344,6 +4350,15 @@ static int run_parser_tests(int argument_count, char** arguments)
             const bool path = i + 1 < argument_count && arguments[i + 1][0] != '-' && strchr(arguments[i + 1], '/') != 0 && strstr(arguments[i + 1], "clang") != 0;
             clang = path ? arguments[i + 1] : "clang";
             i += path;
+        }
+        else if (strcmp(argument, "--clang-server") == 0 && i + 1 < argument_count)
+        {
+            clang_server = arguments[i + 1];
+            i += 1;
+        }
+        else if (strcmp(argument, "--differential") == 0)
+        {
+            differential = true;
         }
         else if (strcmp(argument, "--mutations") == 0 && i + 1 < argument_count)
         {
@@ -4438,12 +4453,14 @@ static int run_parser_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = oracle_temporary_directory();
     snprintf(directory, sizeof(directory), "%s/buster-test-parser-XXXXXX", temporary);
-    // --files-only leaves out the checks without input, which only a run with files may do without.
+    // --files-only leaves out the checks without input, which only a run with files may do without. The server stands
+    // for --clang's clang.
     valid = valid && (!files_only || input_count != 0);
+    valid = valid && (clang_server == 0 || clang != 0);
     valid = valid && mkdtemp(directory) != 0;
     if (!valid)
     {
-        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [--files-only] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
+        printf("usage: test-parser [--clang [PATH] [--clang-server PATH [--differential]]] [--mutations N] [--seed N] [--keep] [--reports N] [--files-only] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
         failures += 1;
     }
     else if (print_tree != 0)
@@ -4453,8 +4470,13 @@ static int run_parser_tests(int argument_count, char** arguments)
     }
     else
     {
-        // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
+        // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542), and its
+        // clang server, which takes --clang's runs.
         OracleCache* oracle = oracle_cache();
+        if (clang_server != 0)
+        {
+            oracle_serve(clang_server, clang, differential);
+        }
         if (!files_only)
         {
             failures += parse_test_check_postorder_self(&arena);
@@ -4513,6 +4535,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             rmdir(directory);
         }
         oracle_cache_report(oracle, "test-parser");
+        failures += !oracle_serve_end("test-parser");
     }
     printf("test-parser: %s\n", failures == 0 ? "passed" : "FAILED");
     arena_release(&arena);
@@ -4523,3 +4546,4 @@ static int run_parser_tests(int argument_count, char** arguments)
     oracle_epoch_end(epoch);
     return returned;
 }
+#endif

@@ -88,8 +88,16 @@ static uint8_t check_test_alias_abi(const char* path)
     return result;
 }
 
+static void check_test_alias_lines(const char* text, char* lines, uint64_t capacity, bool warnings);
+
 // The lines of `text` that are errors or notes (": error: ", ": note: "), each followed by a newline, into `lines`.
 static void check_test_alias_diagnostics(const char* text, char* lines, uint64_t capacity)
+{
+    check_test_alias_lines(text, lines, capacity, false);
+}
+
+// The lines of `text` that are errors, notes, or with `warnings` warnings too, each followed by a newline, into `lines`.
+static void check_test_alias_lines(const char* text, char* lines, uint64_t capacity, bool warnings)
 {
     uint64_t used = 0;
     const char* line = text;
@@ -97,7 +105,8 @@ static void check_test_alias_diagnostics(const char* text, char* lines, uint64_t
     {
         const char* end = strchr(line, '\n');
         const uint64_t length = end != NULL ? (uint64_t)(end - line) : strlen(line);
-        const bool kept = (memmem(line, length, ": error: ", 9) != NULL || memmem(line, length, ": note: ", 8) != NULL) && used + length + 2 < capacity;
+        const bool kept = (memmem(line, length, ": error: ", 9) != NULL || memmem(line, length, ": note: ", 8) != NULL ||
+                           (warnings && memmem(line, length, ": warning: ", 11) != NULL)) && used + length + 2 < capacity;
         if (kept)
         {
             memcpy(lines + used, line, length);
@@ -148,6 +157,78 @@ static void check_test_alias_errors(CheckTest* test, const char* clang, const ch
     }
     unlink(object);
     unlink(path);
+}
+
+// clang's code generation warnings at aliases and ifuncs it accepts (#1849): `source`'s warnings, errors and notes by
+// clang and both checker paths, with -c and -fsyntax-only (where clang's code generation doesn't run) and `flag`, each
+// line of ours clang's, with `expected` among -c's.
+static void check_test_alias_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* source,
+                                      const char* flag, const char* expected)
+{
+    char path[512];
+    char object[512];
+    snprintf(path, sizeof(path), "%s/alias-warnings.c", directory);
+    snprintf(object, sizeof(object), "%s/alias-warnings.o", directory);
+    const bool written = parse_test_write(path, source, strlen(source));
+    for (uint32_t mode = 0; written && mode < 2; mode += 1)
+    {
+        char theirs[8192];
+        char* text = NULL;
+        char* const clang_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-fno-caret-diagnostics", mode == 0 ? "-c" : "-fsyntax-only", path, "-o", object,
+                                          (char*)flag, NULL };
+        const int clang_status = check_test_driver_spawn(clang_arguments, &text);
+        check_test_alias_lines(text != NULL ? text : "", theirs, sizeof(theirs), true);
+        free(text);
+        for (uint32_t p = 0; p < 2; p += 1)
+        {
+            char ours[8192];
+            char* const arguments[] = { (char*)executable, "-std=gnu17", "-O0", mode == 0 ? "-c" : "-fsyntax-only", path, "-o", object, (char*)flag,
+                                        flag != NULL && p == 1 ? "--scalar" : NULL, NULL };
+            char* const plain[] = { (char*)executable, "-std=gnu17", "-O0", mode == 0 ? "-c" : "-fsyntax-only", path, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+            const int status = check_test_driver_spawn(flag != NULL ? arguments : plain, &text);
+            check_test_alias_lines(text != NULL ? text : "", ours, sizeof(ours), true);
+            free(text);
+            char description[16384];
+            snprintf(description, sizeof(description), "%s: the %s path's %s diagnostics are clang's:\n%s against\n%s", name, p == 0 ? "vector" : "scalar",
+                     mode == 0 ? "-c" : "-fsyntax-only", ours, theirs);
+            check_test_expect(test, (status != 0) == (clang_status != 0) && strcmp(ours, theirs) == 0 && (mode != 0 || expected == NULL || strstr(theirs, expected) != NULL),
+                              description);
+        }
+    }
+    unlink(object);
+    unlink(path);
+}
+
+static void check_test_driver_alias_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "void f(void) {}\nvoid wf(void) __attribute__((weak, alias(\"f\")));\n"
+        "extern int a1(void) __attribute__((section(\".s\"), alias(\"wf\")));\n"
+        "int x = 1;\nextern int b1 __attribute__((section(\".s2\"), alias(\"x\")));\n"
+        "void *res(void) { return 0; }\nextern int i1(void) __attribute__((section(\".s3\"), ifunc(\"res\")));\n"
+        "extern int i2(void) __attribute__((ifunc(\"wr\")));\nvoid *wr(void) __attribute__((weak, alias(\"res\")));\n"
+        "extern int ok1 __attribute__((section(\".data\"), alias(\"x\")));\n"
+        "static int sx __attribute__((section(\".s9\"))) = 2;\nextern int ok2 __attribute__((section(\".s9\"), alias(\"sx\")));\n"
+        "void g(void);\nvoid g(void) {}\nextern int t1(void) __attribute__((alias(\"g\")));\nextern void t2() __attribute__((alias(\"g\")));\n"
+        "static int h(int v) { return v; }\nlong t3(int) __attribute__((alias(\"h\")));\nint t4(const int) __attribute__((alias(\"h\")));\n"
+        "int t5(unsigned) __attribute__((alias(\"h\")));\nint t6(int, ...) __attribute__((alias(\"h\")));\nint t7() __attribute__((alias(\"h\")));\n"
+        "long t8(void) __attribute__((alias(\"t1\")));\nextern long dt __attribute__((alias(\"x\")));\n"
+        "extern int iv __attribute__((ifunc(\"res\")));\n";
+    check_test_alias_warnings(test, clang, executable, directory, "alias warnings", source, NULL, "alias and aliasee have different types");
+    check_test_alias_warnings(test, clang, executable, directory, "alias warnings without -Wattributes", source, "-Wno-attributes", "alias and aliasee have different types");
+    check_test_alias_warnings(test, clang, executable, directory, "alias warnings without -Wattribute-alias", source, "-Wno-attribute-alias",
+                              "alias will not be in section");
+    check_test_alias_warnings(test, clang, executable, directory, "alias warnings as errors", source, "-Werror=attribute-alias", "alias and aliasee have different types");
+    check_test_alias_warnings(test, clang, executable, directory, "alias warnings beside an error",
+                              "int x = 1;\nextern int b1 __attribute__((section(\".s2\"), alias(\"x\")));\n"
+                              "extern void g1(void) __attribute__((alias(\"undefined_thing\")));\n"
+                              "extern int b2 __attribute__((section(\".s4\"), alias(\"x\")));\n",
+                              NULL, "alias must point to a defined variable or function");
+    check_test_alias_warnings(test, clang, executable, directory, "alias warnings under a pragma",
+                              "int x = 1;\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wignored-attributes\"\n"
+                              "extern int b1 __attribute__((section(\".s2\"), alias(\"x\")));\n#pragma clang diagnostic pop\n"
+                              "extern int b2 __attribute__((section(\".s4\"), alias(\"x\")));\n",
+                              NULL, "alias will not be in section '.s4'");
 }
 
 // Aliases of overloadable functions, whose names are their symbols' as the emission gives them: the mangled names of
@@ -232,6 +313,7 @@ static void check_test_driver_alias_compile_failure(CheckTest* test, const char*
 static void check_test_driver_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_alias_compile_failure(test, directory);
+    check_test_driver_alias_warnings(test, clang, executable, directory);
     check_test_driver_alias_overloads(test, clang, executable, directory);
     static const char source[] =
         "#include <stdio.h>\n"
@@ -250,6 +332,9 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
         "static int local_data_alias __attribute__((alias(\"hidden_data\")));\n"
         "static const char text[] = \"aliased\";\nextern const char text_alias[8] __attribute__((alias(\"text\")));\n"
         "_Thread_local int tls_value = 13;\nextern _Thread_local int tls_alias __attribute__((alias(\"tls_value\")));\n"
+        "int tentative_base = 17;\nextern int tentative_alias __attribute__((alias(\"tentative_base\")));\nint tentative_alias;\nint tentative_alias;\n"
+        "int plain_base = 23;\nextern _Thread_local int thread_mismatch __attribute__((alias(\"plain_base\")));\n"
+        "_Thread_local int thread_base = 24;\nextern int plain_mismatch __attribute__((alias(\"thread_base\")));\n"
         "static int add_one(int n) { return n + 1; }\nstatic int (*resolve_add(void))(int) { return add_one; }\n"
         "int dispatched(int) __attribute__((ifunc(\"resolve_add\")));\n"
         "int dispatched_alias(int) __attribute__((alias(\"dispatched\")));\n"
@@ -276,6 +361,8 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
         "           weak_strong() + alias_fixture_strong(), weak_only ? weak_only() : -3, weak_counter);\n"
         "    printf(\"%d %d %d %d %d %d %d\\n\", pointers[0](10), pointers[1](11), pointers[2](12), pointers[3](13), pointers[4](14), *data_pointers[0],\n"
         "           *data_pointers[1]);\n"
+        "    tentative_alias += 1;\n"
+        "    printf(\"%d %d\\n\", tentative_base, tentative_alias);\n"
         "    return weak_puts(\"done\") < 0;\n"
         "}\n";
     static const char helper[] = "int alias_fixture_strong(void) { return 20; }\n";
@@ -286,14 +373,14 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
         "implementation", "global_target", "exported_alias", "weak_alias", "local_alias", "chained", "hidden_alias", "declared_first", "counter",
         "counter_alias", "hidden_data", "data_alias", "local_data_alias", "text", "text_alias", "tls_value", "tls_alias", "resolve_add", "dispatched",
         "dispatched_alias", "resolve_twice", "quiet_dispatch", "puts", "alias_fixture_missing", "alias_fixture_strong", "alias_fixture_weak", "pointers",
-        "data_pointers", "main",
+        "data_pointers", "main", "tentative_base", "tentative_alias", "plain_base", "thread_mismatch", "thread_base", "plain_mismatch",
     };
     // Each alias or ifunc, and the definition its symbol is at.
     static const char* const placed[][2] = {
         { "exported_alias", "implementation" }, { "weak_alias", "global_target" }, { "local_alias", "implementation" }, { "chained", "implementation" },
         { "hidden_alias", "global_target" }, { "declared_first", "implementation" }, { "counter_alias", "counter" }, { "data_alias", "hidden_data" },
         { "local_data_alias", "hidden_data" }, { "text_alias", "text" }, { "tls_alias", "tls_value" }, { "dispatched", "resolve_add" }, { "dispatched_alias", "resolve_add" },
-        { "quiet_dispatch", "resolve_twice" },
+        { "quiet_dispatch", "resolve_twice" }, { "tentative_alias", "tentative_base" }, { "thread_mismatch", "plain_base" }, { "plain_mismatch", "thread_base" },
     };
     char path[512] = { 0 };
     char helper_path[512] = { 0 };
@@ -470,6 +557,32 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
                             "weakref declaration of 'wf' must also have an alias attribute", true);
     check_test_alias_errors(test, clang, executable, directory, "typedef weakref", "typedef int wt __attribute__((weakref(\"x\")));\n",
                             "'weakref' attribute only applies to variables and functions", true);
+    // A reference to an alias whose thread-local storage isn't its definition's (#1849) is refused by name: clang's
+    // code reaches it as its declaration says, which its symbol isn't.
+    {
+        char path[512];
+        char object[512];
+        snprintf(path, sizeof(path), "%s/alias-thread.c", directory);
+        snprintf(object, sizeof(object), "%s/alias-thread.o", directory);
+        static const char thread[] = "int plain = 1;\nextern _Thread_local int mismatch __attribute__((alias(\"plain\")));\nint get(void) { return mismatch; }\n";
+        const bool written = parse_test_write(path, thread, sizeof(thread) - 1);
+        for (uint32_t p = 0; written && p < 2; p += 1)
+        {
+            char* text = NULL;
+            char* const arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-c", path, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+            const int status = check_test_driver_spawn(arguments, &text);
+            check_test_expect(test, status != 0 && text != NULL && strstr(text, "a reference to an alias whose thread-local storage isn't its definition's") != NULL,
+                              "a reference to an alias whose thread-local storage isn't its definition's is refused by name");
+            free(text);
+        }
+        unlink(path);
+        unlink(object);
+    }
+    // clang drops the alias and reads on (#1849): the later errors are reported, and the variable is a plain one.
+    check_test_alias_errors(test, clang, executable, directory, "an alias after a tentative definition, then other errors",
+                            "int x = 1;\nint t;\nextern int t __attribute__((alias(\"x\")));\nint t = 2;\nint q = \"s\";\n"
+                            "void f(void) { undeclared_thing; }\n",
+                            "alias definition of 't' after tentative definition", true);
 }
 
 static void check_test_driver_accepted(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* source);

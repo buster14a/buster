@@ -1390,12 +1390,39 @@ So no compile takes the sweep; its code stays in the branch's history.
 The checker's types carry clang's address spaces (docs/c-types.md's "Extended
 qualifiers"). clang's x86 target maps 256, 257 and 258 (`__seg_gs`, `__seg_fs`)
 to the `%gs`, `%fs` and `%ss` segments: its -O0 code loads and stores there with
-a segment override (`mov %gs:(%rax),%eax`). Tier 0's and Tier 1's memory operands
-carry no segment (the encoder has the overrides, which thread-local storage's
-forms alone use), so the lowering refuses such a load or store by name, rather
-than compile it as a plain access: an lvalue of one of those spaces read (not an
-address taken: `&`, a member's or a subscript's base), and an assignment's,
-compound assignment's, increment's or decrement's operand in one; a vector's
+a segment override (`mov %gs:(%rax),%eax`).
+
+`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs` or `%gs`
+the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
+typed stream), from the accessed lvalue's type: a read's own, an assignment's
+target's (the assignment's value has lost the space), an update's stored type
+for its load and its store (the postfix one's too). It marks the function
+(`Tier0Function.segments`), which Tier 0 compiles with the override on the
+access's memory operand, and which Tier 1 leaves to Tier 0. A global in one of
+those spaces goes through its address (GLOBAL_ADDRESS, then LOAD or STORE), as a
+memory class's does: `lea sym(%rip)` and `%gs:(%rax)` reach the byte clang's
+`%gs:sym(%rip)` does. What takes the override (`check_lower_segment_carried`):
+a read by indirection, member, subscript (not a vector's element's) or name, and an assignment, compound assignment, increment or
+decrement, of an integer's, a floating value's (long double's too), a 128-bit
+integer's or a vector's class (not a transport vector), which one LOAD or STORE
+moves. An array's lvalue isn't read: its value is its address. A bit-field's
+read and store take it on each piece of its unit (`check_lower_bit_unit`,
+`check_lower_bit_store`): its place (`CheckLowerBitField.segment`, packed in its
+task's bits 14 and 15) has its record's override, from the member's type
+(`check_lower_bit_member`). An atomic builtin's
+object in `%fs` or `%gs` takes it where a direct plan (#1059) takes the builtin:
+its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),
+`ATOMIC_CAS` (`lock cmpxchg`) and a fetch's loop of a relaxed LOAD and
+`ATOMIC_CAS`. Its space is its object type's, or else its pointer argument's
+pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
+`__atomic_test_and_set`'s, doesn't carry it).
+
+The rest the lowering refuses by name, rather than compile it as a plain access:
+an aggregate's copy, a complex, half-precision or `_BitInt` value
+and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
+builtin another plan takes (a generic one by pointer, `__atomic_clear`,
+`__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
+form of the encoder's has its `36` prefix); a vector's
 element read or written through a vector in one (the element's type has lost the
 space); and an atomic builtin's object in one, which its pointer argument reaches
 (`check_lower_segment_access`). An asm statement's register output in one is
@@ -1605,8 +1632,9 @@ none of its subset's programs makes a name twice in clang's objects.
   path's, and compares its checking, by both paths, and its `-c` object with
   clang's (`test-checker-corpus --symbols-minimum 1`). The TSan and MSan rows
   run the compiles in a separate step after the suite, and leave out only the
-  checking comparison, whose 6,323,682-token unit exceeds their hosted
-  runner's memory (docs/ci.md).
+  checking comparison, whose unit (4,864,411 tokens on 2026-11-10, with
+  `-DBUSTER_COMPLETE_DRIVER=1`) exceeds their hosted runner's memory
+  (docs/ci.md).
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined. The dropped ones were the other units' commands,
   each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which

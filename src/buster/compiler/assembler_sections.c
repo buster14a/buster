@@ -173,7 +173,13 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         object.flags = asm_section_prefix(name, ".text.") ? SHF_ALLOC | SHF_EXECINSTR :
                        asm_section_prefix(name, ".rodata.") ? SHF_ALLOC :
                        asm_section_prefix(name, ".data.") || asm_section_prefix(name, ".bss.") ? SHF_ALLOC | SHF_WRITE : 0;
-        object.type = asm_section_prefix(name, ".bss.") ? SHT_NOBITS : SHT_PROGBITS;
+        // And types, as GNU as and LLVM's assembler give them by name (#1848): notes', and the arrays' of
+        // constructors and destructors, whose class is their own (below).
+        object.type = asm_section_prefix(name, ".bss.") ? SHT_NOBITS :
+                      asm_section_prefix(name, ".note") ? SHT_NOTE :
+                      asm_section_prefix(name, ".init_array") ? SHT_INIT_ARRAY :
+                      asm_section_prefix(name, ".fini_array") ? SHT_FINI_ARRAY :
+                                                                SHT_PROGBITS;
     }
     const bool attributes = named && asm_take(parser, ',');
     if (attributes)
@@ -219,6 +225,18 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 else if (asm_is(parser, parser->at, "nobits"))
                 {
                     object.type = SHT_NOBITS;
+                }
+                else if (asm_is(parser, parser->at, "note"))
+                {
+                    object.type = SHT_NOTE;
+                }
+                else if (asm_is(parser, parser->at, "init_array"))
+                {
+                    object.type = SHT_INIT_ARRAY;
+                }
+                else if (asm_is(parser, parser->at, "fini_array"))
+                {
+                    object.type = SHT_FINI_ARRAY;
                 }
                 else
                 {
@@ -290,8 +308,12 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     // Merged strings take characters of 1, 2 or 4 bytes: GCC's wide literals are `.rodata.str4.4,"aMS",@progbits,4`
     // (#1115).
     const bool characters = object.entry_size == 1 || object.entry_size == 2 || object.entry_size == 4;
+    const bool array = object.type == SHT_INIT_ARRAY || object.type == SHT_FINI_ARRAY;
+    // GNU as gives every array of constructors or destructors its entries' size.
+    object.entry_size = array && (object.flags & SHF_MERGE) == 0 ? 8 : object.entry_size;
     if (name.length == 0 || (zero && (executable || (object.flags & SHF_MERGE) != 0)) ||
-        ((object.flags & SHF_STRINGS) != 0 && ((object.flags & SHF_MERGE) == 0 || !characters)))
+        ((object.flags & SHF_STRINGS) != 0 && ((object.flags & SHF_MERGE) == 0 || !characters)) ||
+        (array && (object.flags & (SHF_EXECINSTR | SHF_TLS | SHF_MERGE | SHF_STRINGS)) != 0))
     {
         asm_fail(parser, location, "unsupported section attributes");
     }
@@ -320,7 +342,10 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         section->group = group;
         // The Link's string pools are of bytes: wider characters' strings are read-only data, as the importer classes
         // them, whose section keeps its merge flags and entry size (the object writer's descriptor).
+        // An array of constructors or destructors is its class's, whatever its name and flags, so that the direct path
+        // runs its entries as an executable's linker does (#1848).
         section->class = zero ? (tls ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS) :
+                         object.type == SHT_INIT_ARRAY ? BUSTER_LINK_CLASS_INIT_ARRAY : object.type == SHT_FINI_ARRAY ? BUSTER_LINK_CLASS_FINI_ARRAY :
                          executable ? BUSTER_LINK_CLASS_TEXT : tls ? BUSTER_LINK_CLASS_TDATA :
                          (object.flags & SHF_WRITE) != 0 ? BUSTER_LINK_CLASS_DATA :
                          (object.flags & SHF_STRINGS) != 0 && object.entry_size == 1 ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA;

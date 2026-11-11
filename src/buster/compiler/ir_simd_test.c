@@ -511,8 +511,235 @@ static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
     }
 }
 
+// The width changes (#1840): extract, widen and insert of every pair of vector widths and every part to 4, admitted by
+// both verifiers exactly where the result's, the operands' and the part's widths agree (an extract's narrower part of
+// its wider operand, a widen's wider result, an insert's narrower part into its own type), every other kind's flags
+// refused; and the model's values against bytes written out: an extract's the operand's part, a widen's the operand and
+// zeros past it, an insert's the first operand with its part the second's.
+static void ir_test_width_changes(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint32_t admitted_count = 0;
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t kind = BUSTER_IR_INTRINSIC_EXTRACT; kind <= BUSTER_IR_INTRINSIC_INSERT; kind += 1)
+    {
+        for (uint32_t result = 0; result < 3; result += 1)
+        {
+            for (uint32_t first = 0; first < 3; first += 1)
+            {
+                for (uint32_t second = 0; second < 3; second += 1)
+                {
+                    for (uint32_t part = 0; part < 5; part += 1)
+                    {
+                        const bool insert = kind == BUSTER_IR_INTRINSIC_INSERT;
+                        if (!insert && second != 0)
+                        {
+                            continue;
+                        }
+                        IrFunction function = {0};
+                        const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                        const bool created = ir_create(output, &sizes, &function) == IR_OK;
+                        ir_test_expect(test, created, "width change verifier fixture allocation");
+                        if (!created)
+                        {
+                            continue;
+                        }
+                        const IrType type = (IrType)(IR_V4I32 + result);
+                        const IrType a = (IrType)(IR_V4I32 + first);
+                        const IrType b = (IrType)(IR_V4I32 + second);
+                        const uint32_t result_bytes = 16u << result;
+                        const uint32_t a_bytes = 16u << first;
+                        const uint32_t b_bytes = 16u << second;
+                        const bool admitted = kind == BUSTER_IR_INTRINSIC_EXTRACT ? result_bytes < a_bytes && part < a_bytes / result_bytes :
+                                              kind == BUSTER_IR_INTRINSIC_WIDEN   ? a_bytes < result_bytes && part == 0 :
+                                                                                    a == type && b_bytes < result_bytes && part < result_bytes / b_bytes;
+                        admitted_count += admitted;
+                        function.result_type = IR_VOID;
+                        function.block_offsets[1] = 4;
+                        ir_test_instruction(&function, 0, IR_UNDEF, a, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        ir_test_instruction(&function, 1, IR_UNDEF, b, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        ir_test_instruction(&function, 2, IR_INTRINSIC, type, 0, insert ? 1 : BUSTER_IR_NONE, kind);
+                        ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                        function.flags[2] = (uint8_t)part;
+                        ir_test_pair(test, &function, scratch, NULL, admitted, "a width change is admitted exactly where its widths and part agree");
+                        if (admitted)
+                        {
+                            ir_test_expect(test, ir_value_mask(&function, 2) == (insert ? 3u : 1u), "a width change uses its operands alone, its part in flags");
+                            function.b[2] = insert ? BUSTER_IR_NONE : 0;
+                            ir_test_pair(test, &function, scratch, NULL, false, "an insert needs its second operand and the others refuse one");
+                            function.b[2] = insert ? 1 : BUSTER_IR_NONE;
+                            function.c[2] = BUSTER_IR_INTRINSIC_SPLAT;
+                            ir_test_pair(test, &function, scratch, NULL, false, "another kind's flags are refused");
+                            function.c[2] = kind;
+                            // The model, against bytes written out.
+                            IrSimdValue values[2];
+                            for (uint32_t w = 0; w < 8; w += 1)
+                            {
+                                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                                values[0].words[w] = w < a_bytes / 8 ? state : 0;
+                                values[1].words[w] = w < b_bytes / 8 ? ~state * 3 : 0;
+                            }
+                            const IrSimdValue* operands[3] = { &values[0], insert ? &values[1] : 0, 0 };
+                            const IrSimdAction action = {
+                                .operation = kind == BUSTER_IR_INTRINSIC_EXTRACT ? IR_SIMD_EXTRACT : kind == BUSTER_IR_INTRINSIC_WIDEN ? IR_SIMD_WIDEN : IR_SIMD_INSERT,
+                                .result = ir_simd_shape(type),
+                                .operands = { ir_simd_shape(a), insert ? ir_simd_shape(b) : IR_SIMD_NONE, IR_SIMD_NONE },
+                                .index = (uint8_t)part,
+                            };
+                            IrSimdValue value;
+                            memset(&value, 0xa5, sizeof(value));
+                            bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+                            const uint8_t* bytes_a = (const uint8_t*)values[0].words;
+                            const uint8_t* bytes_b = (const uint8_t*)values[1].words;
+                            for (uint32_t byte = 0; exact && byte < 64; byte += 1)
+                            {
+                                const uint32_t start = insert ? part * b_bytes : 0;
+                                const uint8_t expected = byte >= result_bytes                                 ? 0 :
+                                                         kind == BUSTER_IR_INTRINSIC_EXTRACT                  ? bytes_a[part * result_bytes + byte] :
+                                                         kind == BUSTER_IR_INTRINSIC_WIDEN                    ? (byte < a_bytes ? bytes_a[byte] : 0) :
+                                                         byte >= start && byte < start + b_bytes             ? bytes_b[byte - start] :
+                                                                                                                bytes_a[byte];
+                                exact = ((const uint8_t*)value.words)[byte] == expected;
+                            }
+                            ir_test_expect(test, exact, "the model moves a width change's bytes whole and zeroes its sparse tail");
+                            IrSimdAction wrong = action;
+                            wrong.lane = IR_SIMD_LANE_I8;
+                            ir_test_expect(test, !ir_simd_evaluate(&wrong, operands, 0, 0, 0, &value), "a width change reads no lanes");
+                        }
+                        arena_pop_to(output, mark);
+                    }
+                }
+            }
+        }
+    }
+    // Extracts: 16 of 32 (2 parts), 16 of 64 (4), 32 of 64 (2); widens: 3 pairs; inserts: the same 8 parts as extracts.
+    ir_test_expect(test, admitted_count == 8 + 3 + 8, "every width change of the IR's vector widths is admitted, and no other");
+}
+
+// An independent byte model of the permutes (#1840) for the model's check: byte `byte` of a permute of a and b of
+// `bytes` bytes, kind past BUSTER_IR_INTRINSIC_PERMUTE, by the IR's flags.
+static uint8_t ir_test_permute_byte(uint32_t kind, uint32_t flags, uint32_t bytes, const uint8_t* a, const uint8_t* b, uint32_t byte)
+{
+    uint8_t value = 0;
+    if (kind == 0)
+    {
+        const uint32_t size = 1u << flags;
+        uint64_t index = 0;
+        for (uint32_t k = 0; k < size; k += 1)
+        {
+            index |= (uint64_t)b[byte / size * size + k] << (8 * k);
+        }
+        value = a[(uint32_t)(index % (bytes / size)) * size + byte % size];
+    }
+    else if (kind == 1)
+    {
+        value = b[byte] >= 0x80 ? 0 : a[byte / 16 * 16 + b[byte] % 16];
+    }
+    else if (kind == 2)
+    {
+        // b's elements, then a's: the 2 * bytes of their concatenation from the count's elements on.
+        const uint32_t size = 1u << (flags >> 4);
+        const uint32_t at = byte + (flags & 15) * size;
+        value = at < bytes ? b[at] : a[at - bytes];
+    }
+    else
+    {
+        const uint32_t lanes = bytes / 16;
+        const uint32_t lane = byte / 16;
+        const uint32_t bits = lanes == 2 ? 1 : 2;
+        const uint32_t selected = (flags >> (bits * lane)) % lanes;
+        value = (lane < lanes / 2 ? a : b)[selected * 16 + byte % 16];
+    }
+    return value;
+}
+
+// The permutes (#1840): permute, shuffle, align and shuffle_lanes of two vectors at every width and every flags byte,
+// admitted by both verifiers exactly where ir_permute_flags_valid's rule, written out again here, says (permute's lanes'
+// sizes 0 to 3; shuffle's 0; align's sizes 2 and 3 in bits 4 and 5 with a count below the lanes; shuffle_lanes' 2 bits of a
+// 32-byte vector's, any byte of a 64-byte one's, none of 16), refused with operands of another type or a missing b; and
+// the model's bytes against ir_test_permute_byte on random vectors.
+static void ir_test_permutes(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint32_t admitted_count = 0;
+    uint64_t state = UINT64_C(0xd1b54a32d192ed03);
+    for (uint32_t kind = 0; kind < 4; kind += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const uint32_t bytes = 16u << width;
+            for (uint32_t flags = 0; flags < 256; flags += 1)
+            {
+                const uint32_t size = flags >> 4;
+                const bool admitted = kind == 0 ? flags <= 3 : kind == 1 ? flags == 0 :
+                                      kind == 2 ? (size == 2 || size == 3) && (flags & 15) < bytes >> size : (bytes == 32 && flags < 4) || bytes == 64;
+                admitted_count += admitted;
+                // Every admitted flags byte, and a sample of the refused ones.
+                if (!admitted && (flags % 17) != 0)
+                {
+                    continue;
+                }
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "permute verifier fixture allocation");
+                    continue;
+                }
+                const IrType type = (IrType)(IR_V4I32 + width);
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 4;
+                ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_PERMUTE + kind);
+                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[2] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a permute is admitted exactly where its kind's flags are valid at its width");
+                if (admitted)
+                {
+                    function.type[1] = (uint8_t)(IR_V4I32 + (width + 1) % 3);
+                    ir_test_pair(test, &function, scratch, NULL, false, "a permute's operands have its type");
+                    function.type[1] = (uint8_t)type;
+                    function.b[2] = BUSTER_IR_NONE;
+                    ir_test_pair(test, &function, scratch, NULL, false, "a permute has two operands");
+                    function.b[2] = 1;
+                    IrSimdValue values[2];
+                    for (uint32_t w = 0; w < 8; w += 1)
+                    {
+                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                        values[0].words[w] = w < bytes / 8 ? state : 0;
+                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                        values[1].words[w] = w < bytes / 8 ? state : 0;
+                    }
+                    const IrSimdValue* operands[3] = { &values[0], &values[1], 0 };
+                    const IrSimdAction action = {
+                        .operation = (IrSimdOperation)(IR_SIMD_PERMUTE + kind),
+                        .result = ir_simd_shape(type),
+                        .operands = { ir_simd_shape(type), ir_simd_shape(type), IR_SIMD_NONE },
+                        .index = (uint8_t)flags,
+                    };
+                    IrSimdValue value;
+                    memset(&value, 0xa5, sizeof(value));
+                    bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+                    for (uint32_t byte = 0; exact && byte < 64; byte += 1)
+                    {
+                        const uint8_t expected = byte < bytes ? ir_test_permute_byte(kind, flags, bytes, (const uint8_t*)values[0].words, (const uint8_t*)values[1].words, byte) : 0;
+                        exact = ((const uint8_t*)value.words)[byte] == expected;
+                    }
+                    ir_test_expect(test, exact, "the model's permutes move each byte as written out, and zero the sparse tail");
+                }
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    // Permute 4 sizes at 3 widths, shuffle 3, align (4 + 2) + (8 + 4) + (16 + 8), shuffle_lanes 4 + 256.
+    ir_test_expect(test, admitted_count == 12 + 3 + 42 + 260, "every permute's valid flags are admitted, and no other");
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
+    ir_test_permutes(test, output, scratch);
+    ir_test_width_changes(test, output, scratch);
     ir_test_bit_intrinsics(test, output, scratch);
     ir_test_overflow_intrinsics(test, output, scratch);
     ir_test_splats(test, output, scratch);

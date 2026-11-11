@@ -95,22 +95,33 @@ can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
 
 `--shard K/N` runs the K-th of N shards of the list, for N machines that each
-run one: the hosted test job runs each row's inventory as 4 shards, a runner
-each (`--shard K/4`), since its 2,437 s of CPU took 14.6 minutes on one 4-CPU
-runner. The runner deals the list's commands to the shards, the costliest first
-(of two that cost the same, the earlier in the list), each to the shard whose
-commands cost the least so far (of those, the first), and runs its shard's in
-the list's order (`parallel_shards`). The deal depends on the list and the costs
-alone, never on the machine or `--jobs`, so the N shards run every command once.
+run one: the hosted test job runs each row's inventory as the row's own number
+of shards, a runner each (`--shard K/N`), since a plain row's 2,437 s of CPU
+took 14.6 minutes on one 4-CPU runner. The runner deals the list's commands to
+the shards, the costliest first (of two that cost the same, the earlier in the
+list), each to the shard whose commands cost the least so far (of those, the
+first), and runs its shard's in the list's order (`parallel_shards`).
 `--costs FILE` gives the costs, a line `SECONDS TITLE` for each command (blank
 lines and `#` comments aside): its time times the CPUs it held, as a runner's
 report gives both, then its title as its heading has it. A command without a
 line costs its CPUs times 10 s, and a line whose title the list doesn't have is
 left out, so a stale file only unbalances the shards.
-`tools/ci/correctness.costs` holds the hosted plain rows' costs; refresh it from
-a hosted run's report when the shards' times drift apart. The report's first
-line names the shard: `parallel: shard K of N, M of T commands, at most J CPUs
-at once`. A shard may have no commands (N past the list's), which passes.
+
+A FILE may also name the CPUs of the runner its costs were measured on, in a
+line `#: runner-cpus N` (N from 1 to 1,024, once). With it, the deal minds each
+shard's schedule (`test_deal_scheduled` in `test_deal.h`, #2031). It still takes
+the costliest first, but gives each to the shard that would end the earliest
+with it, run on N CPUs as the runner runs it (in the list's order, each command
+holding its CPUs, at most N, for its cost over them). A deal by costs alone
+can't see that a long command starts only after the 8-CPU commands before it on
+its shard, which hold every CPU. Either way the deal depends on the list and the
+file alone, never on the machine or `--jobs`, so the N shards run every command
+once. The hosted rows' tables, `tools/ci/costs/ROW.costs`, are
+`tools/ci/costs.c`'s output from the rows' own job logs, and name their runner
+([Shard costs](ci.md#shard-costs)). `costs plan` predicts the same deal. The
+report's first line names the shard: `parallel: shard K of N, M of T commands,
+at most J CPUs at once`. A shard may have no commands (N past the list's), which
+passes.
 
 The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
 test through it, with `--timeout 600`, before the benchmarks, which run one at
@@ -238,12 +249,15 @@ as expected with its times and CPU times written as `*`:
   in exactly one; 2 shards without costs; a shard without commands, which
   passes; the most shards (4294967295), the first with the costliest command and
   the last with none, which the deal takes without room for each shard (past the
-  list's commands, no shard gets one); then each error of the options (`--shard`
-  0/2, 3/2, 1/0, 2, a/b, /2, twice and without a value, and `--costs` without
-  `--shard`, each with the usage) and of the costs, at its line (letters for
-  seconds, a title without its blank, none, a '.' without digits, four digits
-  after it, a sign, too many seconds, a title twice and a NUL byte), and costs
-  that can't be read;
+  list's commands, no shard gets one); costs that name their runner's CPUs
+  (`#: runner-cpus 4`), whose deal gives a 60 s command a shard of its own while
+  the same costs without them put an 8-CPU command before it; then each error of
+  the options (`--shard` 0/2, 3/2, 1/0, 2, a/b, /2, twice and without a value,
+  and `--costs` without `--shard`, each with the usage) and of the costs, at its
+  line (letters for seconds, a title without its blank, none, a '.' without
+  digits, four digits after it, a sign, too many seconds, a title twice and a NUL
+  byte), of the runner's CPUs (0, past 1,024, letters after the count, none, and
+  twice), and costs that can't be read;
 - the command: its report and exit status for lists on standard input and in a
   file that pass and fail, a report with no reader (the run stops, and the
   runner ends at once with its command killed), with SIGPIPE at its default and

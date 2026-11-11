@@ -692,9 +692,10 @@ and its old-style `member: value` field designator (#1251), with the values clan
 gives, whatever begins the value. The old field spelling uses the same member
 selection, positional continuation, constant evaluation and override history as
 `.member = value`; an unknown field names the selected record in its diagnostic.
-Quad-precision `q`/`Q` literals are accepted on supported glibc hosts only when
-their binary128 values are exactly representable by the checker's x87 storage;
-wider values and unsupported hosts remain refused (#1250).
+Quad-precision `q`/`Q` literals are read on supported glibc hosts by
+`strtof128`, rounded once, and keep their binary128 bits (#1250,
+`c_check_quad.c`); an imaginary one is taken only where its long double holds
+it exactly, and unsupported hosts refuse them.
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or

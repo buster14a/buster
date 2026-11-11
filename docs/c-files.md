@@ -753,7 +753,7 @@ without it:
 ./build/compiler test-files --flat src
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h \
-    src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+    -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 ./build/compiler benchmark-files --flat ~/azp-bench/c-tokenizer/corpus/libc
 ./build/compiler benchmark-files --rounds path/to/sqlite3.c
 # in musl-1.2.5, with its generated headers (docs/c-preprocessor.md):

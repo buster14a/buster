@@ -87,7 +87,7 @@
 #define BUSTER_ABI_TEST_DEFAULT_SIGNATURES 400
 #define BUSTER_ABI_TEST_ARENA_BYTES (1ull << 30)
 #define BUSTER_ABI_TEST_FRAMES 4096
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 typedef struct AbiTestTally AbiTestTally;
 struct AbiTestTally
 {
@@ -3875,7 +3875,8 @@ static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool scalar)
     free(records);
     return valid;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // Wide records used to share one frontier without waiting for their members when no LARGER type existed. Both ID
 // orders must still have the independent memory ABI after scheduling the full dependency chain (#629 review).
 static bool abi_test_wide_dependencies(bool reverse, bool scalar)
@@ -4039,7 +4040,7 @@ static bool abi_test_fixtures(void)
     abi_test_report("fixtures", tally);
     return tally.failures == 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Worlds: random types for the calling convention, in a TypeTestWorld (c_types_test.c) so that the cross-check can
 // write them as C. Small aggregates mostly, which is where the classes are decided member by member. `gcc` leaves out
@@ -4291,7 +4292,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
     table->last_error = TYPE_ERROR_NONE;
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // The records clang's directed signatures pass (abi_test_cross_signatures): runs of bit-fields past an eightbyte that
 // are one i128 or two parts, packed and not (see abi_bit_field_unit). Returns how many it made into `directed`.
 #define BUSTER_ABI_TEST_DIRECTED 5
@@ -4335,7 +4336,8 @@ static uint32_t abi_test_world_directed(AbiTestWorld* world, TypeId* directed)
     }
     return count;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // The record a compiled clang world's directed signatures pass (#137): a union of 16 bytes whose high eightbyte is padding,
 // an int beside an empty struct aligned to 16, which clang passes as its low eightbyte alone, an i64, once the uncounted
 // nullptr_t before it leaves clang's count a general register that LLVM has used: in one 8-byte slot, the next argument's
@@ -4366,14 +4368,14 @@ static uint32_t abi_test_world_directed_compiled(AbiTestWorld* world, TypeId* di
     table->last_error = TYPE_ERROR_NONE;
     return count;
 }
-
+#endif
 // Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2), and its integer and floating depths
 // (BUSTER_TIER0_INTEGER_DEPTHS and BUSTER_TIER0_FLOATING_DEPTHS), within which a compiled world's calls with
 // memory-class values keep (abi_test_cross_signatures). tier0_test.c, which main.c includes after tier0.c and this file,
 // checks them.
-#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
-#define BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS 15
-#define BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS 16
+#include "buster/compiler/calling_convention_test_limits.h"
+
+
 
 // Whether a compiled world makes an _Atomic of `base`: an integer (bool and the 128-bit ones too; not a _BitInt, which
 // clang doesn't make atomic), an enum, a pointer, a floating type (_Float16 and __bf16 too, whose atomics' buffers the
@@ -4702,7 +4704,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         }
     }
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // A record's line and its members' lines as the table has them, for a failure's report (abi_test_dump).
 static void abi_test_dump_record(const TypeTable* table, const AbiTable* abi, uint32_t index, uint32_t depth)
 {
@@ -4922,7 +4924,8 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
     abi_test_report("worlds", tally);
     return tally.failures == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // The rule GCC's worlds keep for bit-fields (abi_test_member_alignment), whatever --seed draws. First on fixed fields:
 // `unsigned long : 45` and `unsigned : 20` aligned below their types' (GCC's worlds drop it), at and past them, a member
 // that isn't a bit-field and one without an alignment (both keep theirs). Then on worlds of the cross-check's size from
@@ -5029,7 +5032,8 @@ static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
            (kind == BUSTER_TYPE_KIND_COMPLEX && code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE) || wide_complex || kind == BUSTER_TYPE_KIND_VECTOR ||
            kind == BUSTER_TYPE_KIND_EXT_VECTOR;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
 // to 64 bits or 128, a _BitInt of any width (past 128 bits an aggregate's value in its C, a frame object of its limbs), an
 // enum, a pointer, nullptr_t, _Float16, __bf16 (their bits on the integer stack, #136), float and double, a long double, a
@@ -5329,7 +5333,7 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
     abi_test_report("assignment", tally);
     return tally.failures == 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The cross-check (--cross-check, contract 4 on #135): random signatures over a world of types, each one's callee and
 // caller written as C and compiled by clang or GCC, and generated as encoder records from the module's locations
@@ -5343,7 +5347,7 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
 // objects. It runs at each target vector width (-march=x86-64, x86-64-v3 and x86-64-v4), with clang (every type) and with
 // GCC (the types GCC passes as clang does), the compiled worlds' runs and the extension runs (abi_test_cross_extension)
 // beside them, at once, a child process each (abi_test_cross_check).
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 #define BUSTER_ABI_TEST_SLOT 64
 #define BUSTER_ABI_TEST_FILL_ITEMS 4096
 #define BUSTER_ABI_TEST_PATH_BYTES 4096
@@ -7046,7 +7050,8 @@ struct AbiTestCrossRun
     int output;
     int errors;
 };
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // `arguments`, a compile of the C side's one source into `object`, through the oracle cache (oracle_cache.c, #542),
 // its standard output and errors into `output_path` and `error_path` as type_test_run writes them, for up to
 // BUSTER_TYPE_TEST_RUN_SECONDS: its exit status, or -1 if it didn't run, ran too long, or its output couldn't be
@@ -7468,7 +7473,8 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // The extension runs (#475's review): plain char with each signedness (TypeTable.char_unsigned, -funsigned-char), enums
 // of a fixed underlying char and signed char, the other character types, short, unsigned short and bool, passed and
 // returned between clang's code and ours, both ways, at values with bits set past the type's. Records check the
@@ -8298,3 +8304,4 @@ static int run_calling_convention_tests(int argc, char** argv)
     oracle_epoch_end(epoch);
     return result;
 }
+#endif

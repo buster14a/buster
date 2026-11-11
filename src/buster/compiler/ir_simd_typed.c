@@ -91,6 +91,16 @@ struct IrSimdTypedOperation
     // A row of no operand whose vector is zeros (#1840, ir_simd_typed_zero): an undefined vector's, which the IR's zero
     // constant is.
     bool zero;
+    // A width change (#1840, ir_simd_typed_width): its IR intrinsic (BUSTER_IR_INTRINSIC_EXTRACT, _WIDEN or _INSERT) plus
+    // one, 0 for any other row, and its part; and whether its result merges into its second operand under its third, the
+    // writemask (a masked extract's), at `lane`'s width.
+    uint8_t width_change;
+    uint8_t part;
+    bool merge_mask;
+    // A permute (#1840, ir_simd_typed_permute): its IR intrinsic (BUSTER_IR_INTRINSIC_PERMUTE to _SHUFFLE_LANES) plus one, 0
+    // for any other row, and its immediate, the IR's flags.
+    uint8_t permute;
+    uint8_t immediate;
 };
 
 typedef struct IrSimdTypedForm IrSimdTypedForm;
@@ -929,6 +939,190 @@ static IrSimdTypedStatus ir_simd_typed_compare_mask(const Tier0Operation* source
     return status;
 }
 
+// The width changes (#1840): a row of no record of one vector operand (or two of one width, the second kept for its
+// effects alone), whose result is the operand's register (c_check_program_vector_builtins.c's shuffles that move no
+// element, the intrinsics' casts), of 16, 32 or 64 bytes but the operand's: the operand's low bytes where the result is
+// narrower (extract, part 0), and the operand and zeros past it where it is wider (widen, Tier 0's and Tier 1's
+// placements zero-extend an operand into its role's register); an insertion's row (BINARY_IMMEDIATE's vinsert forms),
+// one record of its form, VECTOR(0) its destination and first source and VECTOR(1), of the form's narrower width, its
+// second, its immediate the part (insert); and a lane's masked extraction (EXTRACT_LANE's vextract forms), its first
+// record of its form from VECTOR(0) into VECTOR(1), of the form's narrower width, under MASK(2), its immediate the part,
+// and its second VECTOR(1) moved whole into VECTOR(0) (extract, merged under the mask into the second operand at the
+// form's elements' lanes, which Tier 1 selects as a vselect, or not where the typed stream's writemask has every lane).
+// Each register-direct with no other field. Its features are the forms Tier 1 selects for it: AVX512F's and VL's
+// vextracti32x4, vextracti64x4, vinserti32x4, vinserti64x4 and moves of each width, the row's own forms' and, merged, the
+// mask's moves' (DQ for a byte's); otherwise, and for any other form, it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_width(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    // The inserts' and the extracts' forms, by their elements: 4-byte ones', then 8-byte ones'.
+    static const uint16_t inserts[] = {
+        X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8, X86_FORM_VINSERTF32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTF32X4_Z_Z_XM128_IMM8,
+        X86_FORM_VINSERTI32X8_Z_Z_YM256_IMM8, X86_FORM_VINSERTF32X8_Z_Z_YM256_IMM8, X86_FORM_VINSERTI64X2_Y_Y_XM128_IMM8, X86_FORM_VINSERTI64X2_Z_Z_XM128_IMM8,
+        X86_FORM_VINSERTF64X2_Y_Y_XM128_IMM8, X86_FORM_VINSERTF64X2_Z_Z_XM128_IMM8, X86_FORM_VINSERTI64X4_Z_Z_YM256_IMM8, X86_FORM_VINSERTF64X4_Z_Z_YM256_IMM8,
+    };
+    static const uint16_t extracts[2][6] = {
+        { X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8, X86_FORM_VEXTRACTF32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTF32X4_XM128_Z_IMM8,
+          X86_FORM_VEXTRACTI32X8_YM256_Z_IMM8, X86_FORM_VEXTRACTF32X8_YM256_Z_IMM8 },
+        { X86_FORM_VEXTRACTI64X2_XM128_Y_IMM8, X86_FORM_VEXTRACTI64X2_XM128_Z_IMM8, X86_FORM_VEXTRACTF64X2_XM128_Y_IMM8, X86_FORM_VEXTRACTF64X2_XM128_Z_IMM8,
+          X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8, X86_FORM_VEXTRACTF64X4_YM256_Z_IMM8 },
+    };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t first = source->operand_bytes[0];
+    const bool vector = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->operand_count != 0 &&
+                        source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && (first == 16 || first == 32 || first == 64);
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    uint64_t forms = 0;
+    if (vector && source->record_count == 0 && first != bytes &&
+        (source->operand_count == 1 || (source->operand_count == 2 && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == first)))
+    {
+        candidate.width_change = (uint8_t)(bytes < first ? BUSTER_IR_INTRINSIC_EXTRACT + 1 : BUSTER_IR_INTRINSIC_WIDEN + 1);
+    }
+    const X86Instruction* record = &source->records[0];
+    for (uint32_t form = 0; vector && source->record_count == 1 && source->operand_count == 2 && form < BUSTER_ARRAY_LENGTH(inserts); form += 1)
+    {
+        const uint32_t narrow = source->operand_bytes[1];
+        const X86Instruction expected = { .form = inserts[form], .reg = v0, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = record->immediate };
+        const X86FormDescription* description = x86_form_description(inserts[form]);
+        const uint32_t wide = 16u << description->vector_length;
+        if (memcmp(record, &expected, sizeof(expected)) == 0 && first == bytes && wide == bytes && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
+            (narrow == 16 || narrow == 32) && narrow < bytes && record->immediate >= 0 && (uint32_t)record->immediate < bytes / narrow &&
+            (narrow == 32) == (form == 4 || form == 5 || form == 10 || form == 11))
+        {
+            candidate.width_change = BUSTER_IR_INTRINSIC_INSERT + 1;
+            candidate.part = (uint8_t)record->immediate;
+            forms = x86_target_requirement(record->form);
+        }
+    }
+    for (uint32_t size = 0; vector && source->record_count == 2 && source->operand_count == 3 && size < 2; size += 1)
+    {
+        for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(extracts[size]); form += 1)
+        {
+            const uint32_t narrow = form >= 4 ? 32 : 16;
+            const uint32_t wide = form >= 4 || (form & 1) != 0 ? 64 : 32;
+            const uint32_t lanes = narrow / (size == 0 ? 4 : 8);
+            const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+            const X86Instruction expected = {
+                .form = extracts[size][form],
+                .reg = v0,
+                .rm = v1,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = BUSTER_TIER0_DECORATION_MASK(2),
+                .immediate = record->immediate,
+            };
+            const X86Instruction moved = {
+                .form = narrow == 16 ? X86_FORM_VMOVDQU64_X_XM128 : X86_FORM_VMOVDQU64_Y_YM256,
+                .reg = v0,
+                .rm = v1,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            if (memcmp(record, &expected, sizeof(expected)) == 0 && memcmp(&source->records[1], &moved, sizeof(moved)) == 0 && first == wide && bytes == narrow &&
+                source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == narrow && source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK &&
+                source->operand_bytes[2] == mask_bytes && record->immediate >= 0 && (uint32_t)record->immediate < wide / narrow)
+            {
+                candidate.width_change = BUSTER_IR_INTRINSIC_EXTRACT + 1;
+                candidate.part = (uint8_t)record->immediate;
+                candidate.merge_mask = true;
+                candidate.lane = size == 0 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
+                forms = x86_target_requirement(record->form) | x86_target_requirement(moved.form) | (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
+            }
+        }
+    }
+    candidate.required_features = ir_typed_vector_moves(bytes, target_features) | ir_typed_vector_moves(first, target_features) | BUSTER_X86_FEATURE(AVX512F) |
+                                  BUSTER_X86_FEATURE(AVX512VL) | (forms & ~BUSTER_X86_TARGET_KNOWN);
+    const IrSimdTypedStatus status = candidate.width_change != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
+                                                                                                                                                    IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2));
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
+// The permutes (#1840): a row of two vectors of the result's width (16, 32 or 64 bytes) and one record of a permute's form
+// at that width, register-direct with no decoration: vpermb, vpermw, vpermd and vpermq of VECTOR(1)'s indices (vvvv) into
+// VECTOR(0)'s lanes (rm), the variable permutes' builtins as the front end swaps them (permute of VECTOR(0) by VECTOR(1),
+// its flags its lanes' bytes' log2); vpshufb of VECTOR(0) (vvvv) by VECTOR(1) (rm) (shuffle); and valignd, valignq,
+// vshufi32x4 and vshufi64x2 of VECTOR(0) (vvvv) and VECTOR(1) (rm) by the record's immediate (align, of its lanes' size
+// and the immediate's count, its bits below the lanes, which the instruction reads; shuffle_lanes of the immediate, its
+// low 2 bits at 32 bytes, whose 32x4 and 64x2 forms move the same 16-byte lanes). The destination is VECTOR(0)'s register (reg). Its features are the form's and its vectors' moves
+// (AVX512F, VL below 64 bytes): Tier 1 selects the form at the same width, vshufi64x2 for both shuffles of lanes;
+// otherwise, and for any other form or field, it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_permute(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    typedef struct IrSimdTypedPermuteForm IrSimdTypedPermuteForm;
+    struct IrSimdTypedPermuteForm
+    {
+        uint16_t forms[3];
+        uint8_t kind;
+        uint8_t flags;
+        bool indices_first;
+    };
+    static const IrSimdTypedPermuteForm forms[] = {
+        { { X86_FORM_VPERMB_X_X_XM128, X86_FORM_VPERMB_Y_Y_YM256, X86_FORM_VPERMB_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 0, true },
+        { { X86_FORM_VPERMW_X_X_XM128, X86_FORM_VPERMW_Y_Y_YM256, X86_FORM_VPERMW_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 1, true },
+        { { X86_FORM_NONE, X86_FORM_VPERMD_Y_Y_YM256_EVEX, X86_FORM_VPERMD_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 2, true },
+        { { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_VPERMQ_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 3, true },
+        { { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_SHUFFLE, 0, false },
+        { { X86_FORM_VALIGND_X_X_XM128_IMM8, X86_FORM_VALIGND_Y_Y_YM256_IMM8, X86_FORM_VALIGND_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_ALIGN, 0x20, false },
+        { { X86_FORM_VALIGNQ_X_X_XM128_IMM8, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, X86_FORM_VALIGNQ_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_ALIGN, 0x30, false },
+        { { X86_FORM_NONE, X86_FORM_VSHUFI32X4_Y_Y_YM256_IMM8, X86_FORM_VSHUFI32X4_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_SHUFFLE_LANES, 0, false },
+        { { X86_FORM_NONE, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, X86_FORM_VSHUFI64X2_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_SHUFFLE_LANES, 0, false },
+    };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
+                          source->operand_count == 2 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == bytes &&
+                          source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == bytes;
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t form = 0; admitted && form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        const IrSimdTypedPermuteForm* entry = &forms[form];
+        const bool immediate = entry->kind == BUSTER_IR_INTRINSIC_ALIGN || entry->kind == BUSTER_IR_INTRINSIC_SHUFFLE_LANES;
+        const X86Instruction expected = {
+            .form = entry->forms[width],
+            .reg = v0,
+            .vvvv = entry->indices_first ? v1 : v0,
+            .rm = entry->indices_first ? v0 : v1,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = immediate ? record->immediate : 0,
+        };
+        // The bits of the immediate the instruction reads: an align's count below its lanes, a 32-byte shuffle of lanes' low 2.
+        const uint32_t lanes = bytes >> (entry->flags >> 4);
+        const uint32_t flags = entry->kind == BUSTER_IR_INTRINSIC_ALIGN                 ? entry->flags | ((uint32_t)record->immediate & (lanes - 1)) :
+                               entry->kind == BUSTER_IR_INTRINSIC_SHUFFLE_LANES && width == 1 ? (uint32_t)record->immediate & 3 :
+                               immediate                                                ? (uint32_t)record->immediate :
+                                                                                          entry->flags;
+        const bool fits = record->immediate >= 0 && record->immediate <= 255 && ir_permute_flags_valid(entry->kind, (uint32_t)(IR_V4I32 + width), flags);
+        if (expected.form != X86_FORM_NONE && fits && memcmp(record, &expected, sizeof(expected)) == 0)
+        {
+            candidate.permute = (uint8_t)(entry->kind + 1);
+            candidate.immediate = (uint8_t)flags;
+            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                          (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.permute != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
+                                                                                                                                              IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 2;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A masked move's select (#1840): the SELECT rule's row as the opmask conversion leaves it (c_check_program_x86.c's
 // CHECK_X86_LOWER_SELECT, `_mm512_mask_mov_epi8`, `_mm512_mask_blend_epi32` and the rest at each width): a mask and two
 // vectors of one width (16, 32 or 64 bytes) in, VECTOR(2)'s register moved whole into VECTOR(0)'s (vmovdqu64), then
@@ -1020,9 +1214,10 @@ static IrSimdTypedStatus ir_simd_typed_zero(const Tier0Operation* source, uint64
 }
 
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
-// comparisons into a mask alone, masked moves' selects and undefined vectors (#1840), then exact scalar splats; other
-// admitted forms stay machine rows. A semantic match whose target lacks a required feature stays refused, but a
-// comparison into a mask alone, a select or an undefined vector, whose machine row a target may still run, stays one.
+// comparisons into a mask alone, masked moves' selects, undefined vectors, width changes and permutes (#1840), then exact
+// scalar splats; other admitted forms stay machine rows. A semantic match whose target lacks a required feature stays
+// refused, but a comparison into a mask alone, a select, an undefined vector, a width change or a permute, whose machine
+// row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
@@ -1050,6 +1245,14 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_zero(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_width(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_permute(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {

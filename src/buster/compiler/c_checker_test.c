@@ -5,6 +5,9 @@
 // schedulers field by field. Floating padding is never compared. The generated actions exercise target arithmetic,
 // deferred faults, protected tails and legal batch partitions; source fixtures additionally test the parser adapter.
 // Include after c_checker.c and c_check_input.c in the compiler's test unit.
+// The checker unit owns the fixtures and their nested includes. Other units read only the value/stream comparisons
+// that the corpus shares, and the builtin tests also read the type setup and action helpers. Keep these helpers in
+// place so their definitions, attributes and optimization scope stay in the same order as the checker's fixtures.
 
 #include <errno.h>
 #include <inttypes.h>
@@ -14,6 +17,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #define BUSTER_CHECK_TEST_BATCH 257u
 
 typedef struct CheckTest CheckTest;
@@ -83,7 +87,9 @@ static bool check_test_shared(void)
     check_test_part.shared += 1;
     return check_test_part.index == 0;
 }
+#endif
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 typedef struct CheckTestTypes CheckTestTypes;
 struct CheckTestTypes
 {
@@ -115,7 +121,9 @@ static __attribute__((noinline)) void check_test_types_close(CheckTestTypes* typ
     arena_release(&types->index);
     arena_release(&types->arena);
 }
+#endif
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 static __attribute__((noinline)) void check_test_expect(CheckTest* test, bool condition, const char* description)
 {
     test->checks += 1;
@@ -134,7 +142,9 @@ static uint32_t check_test_random(CheckTest* test)
     test->random = test->random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
     return (uint32_t)(test->random >> 32);
 }
+#endif
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 static CheckValue check_test_integer(TypeId type, unsigned __int128 bits)
 {
     const CheckValue result = {
@@ -147,17 +157,23 @@ static CheckValue check_test_integer(TypeId type, unsigned __int128 bits)
     return result;
 }
 
+// A floating constant of `type`: a __float128's of `value`'s bits exactly, with its mirror (c_check_quad.c).
 static CheckValue check_test_float(TypeId type, long double value)
 {
-    const CheckValue result = {
+    CheckValue result = {
         .type = type,
         .category = CHECK_RVALUE,
         .flags = BUSTER_CHECK_FLOAT_LITERAL,
         .constant_kind = CHECK_CONSTANT_FLOATING,
         .floating = value,
     };
+    if (type_unqualified(type) == BUSTER_TYPE_FLOAT128)
+    {
+        check_quad_set(&result, check_quad_widen(value, false));
+    }
     return result;
 }
+#endif
 
 static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 {
@@ -172,13 +188,16 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 }
 
 // Whether two graphs' leaves of VALUE node `node` are the same value, whichever form each graph holds its leaves in.
+#if BUSTER_SOURCE_CONSUMER
 static __attribute__((unused)) bool check_test_leaf_equal(const CheckGraph* x, const CheckGraph* y, uint32_t node)
 {
     const CheckValue a = check_graph_leaf_value(x, node);
     const CheckValue b = check_graph_leaf_value(y, node);
     return check_test_value_equal(&a, &b);
 }
+#endif
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 static bool check_test_action_equal(const CheckActionResult* a, const CheckActionResult* b)
 {
     bool equal = check_test_value_equal(&a->value, &b->value) && a->diagnostic == b->diagnostic && a->warnings == b->warnings &&
@@ -190,7 +209,9 @@ static bool check_test_action_equal(const CheckActionResult* a, const CheckActio
     }
     return equal;
 }
+#endif
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 static CheckActionResult check_test_action(CheckTest* test, TypeTable* table, CheckAction action)
 {
     CheckActionResult scalar;
@@ -1603,6 +1624,9 @@ static __attribute__((noinline)) void check_test_actions_batch(CheckTest* test, 
     }
 }
 
+#endif
+
+#if BUSTER_SOURCE_CONSUMER
 static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, uint32_t arguments)
 {
     bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count && a->effect_count == b->effect_count &&
@@ -1646,7 +1670,9 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
     }
     return equal;
 }
+#endif
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 // `graph` cut to its first `count` nodes, with the leaves of the VALUE nodes among them.
 static __attribute__((unused)) void check_test_graph_cut(CheckGraph* graph, uint32_t count)
 {
@@ -3689,12 +3715,12 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // A name with linkage declared before: its types would bind before the deduction.
+            // A name with linkage declared before: the deduced type redeclares it, as clang's (#2021).
             "__auto_type: a linked name declared before",
             "extern int e;\n"
             "__auto_type e = 1;\n",
-            true,
-            true
+            false,
+            false
         },
         {
             // _Alignas against the deduced type, not int, which stands for it until the initializer (#840's review): below
@@ -7107,3 +7133,4 @@ static int run_checker_tests(int argc, char** argv)
     oracle_epoch_end(epoch);
     return returned;
 }
+#endif

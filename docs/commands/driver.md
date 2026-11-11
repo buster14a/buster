@@ -72,7 +72,10 @@ requirements. [Command index](README.md).
   `lane_session_run`, `check_driver_run`): started once, after the options and
   before any source is read, as many as the command may take (one per core of
   its CPUs, or `--lanes N`, at most `--worker-budget N`), none for one source
-  without code to emit (`-fsyntax-only`), lane 1 counting the cores in sysfs
+  without code to emit (`-fsyntax-only`), and by default for one source with
+  code only once it is preprocessed, if it has the tokens to pay for a second
+  lane (#1444, `BUSTER_LANE_SESSION_ON_DEMAND`, `check_driver_start_lanes`), so
+  that a small file's `-c` creates no thread; lane 1 counting the cores in sysfs
   (`BUSTER_LANE_SESSION_PER_CORE`, `lane_core_count`) and creating the others
   while lane 0 starts the command (`BUSTER_LANE_SESSION_LAZY`; lane 0 learns
   how many it asks for at its first wide part, `lane_session_asked`, and how
@@ -84,6 +87,13 @@ requirements. [Command index](README.md).
   It rejects malformed lists, unavailable CPUs, nested sessions, reduced capacity, and failed pin or thread start.
   Pinned sessions start eagerly, unlike the default lazy path. With `--time-stages`, each lane prints `lane-pin` with its
   index, expected CPU and observed CPU; those diagnostic system calls and output are not uninstrumented timing samples.
+  A source command whose lanes created no thread leaves its address space's teardown to a helper as it exits (#1444,
+  `lane_exit_helper_start`, called last in `main_source_command`): its streams flushed and every descriptor closed, it
+  starts a process that shares its address space and nothing else (`clone3`'s `CLONE_VM`), which ends as it does
+  (`PR_SET_PDEATHSIG`), so that its parent's wait returns before `exit_mmap` runs. By default only where PID 1 reaps
+  orphans (`lane_exit_reaped`: it blocks, ignores or catches `SIGCHLD`), since one that never does would keep each
+  helper as a zombie; `BUSTER_EXIT_HELPER=1` starts it wherever it can, `=0` never, and a sanitizer build never does.
+  The exit status, the output's bytes and the exit handlers are as without it.
   The checker reads
   a unit in source order; `--deferred-bodies` reads its function bodies apart on
   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
@@ -176,6 +186,49 @@ with the preprocessor. The [CC driver guide](../../docs/cc-driver.md) records
 the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
+
+## Option matching (#1444)
+
+The loops that read a compile's arguments compare option IDs, not strings:
+`main_information` and `main_preprocessing` (`main.c`'s routing),
+`check_driver_command` and `check_request_scan` (the checker's driver),
+`pp_parse_options` with `predefines_option` and `pp_take_family`, and
+`pp_option_takes_value`. `c_option_table.c` lists each spelling they match whole,
+or through an argument's first `=` (`-march=`, `-std=`), in `BUSTER_C_OPTIONS`,
+sorted as `strcmp` orders them, each with a canonical ID, `C_OPTION_<name>`: the
+spelling in capitals without its leading dashes, `-` as `_` and `=` as `EQ`
+(`-fPIC`'s and `-fpic`'s say `BIG` and `SMALL`, `-L`'s and `-l`'s `DIRECTORY` and
+`LIBRARY`, `-` is `STANDARD_INPUT` and `--` `END_OF_OPTIONS`). The spellings are
+one contiguous struct of char arrays, whose offsets `offsetof` gives at compile
+time, shared from the front end's unit like `x86_target_forms.c`'s data.
+`c_option_find` looks an argument up once per loop, by binary search, and
+returns its `COptionMatch`: the ID of its whole spelling (`exact`) and of its
+spelling through its first `=` (`joined`). `exact == C_OPTION_X` holds exactly
+where `strcmp(argument, "x") == 0` did, and `joined == C_OPTION_X_EQ` where
+`strncmp(argument, "x=", strlen("x=")) == 0` did, since `x` has no `=`, so each
+loop keeps its order of tests and its behaviour. Prefixes without a `=` at their
+end (`-I`, `-MF`, `-Wl,`, `-fno-builtin-`, `-fptrauth`) stay character tests or
+`c_option_starts`. A new option adds its spelling to the table in order;
+`test-checker --requests` fails on one out of order.
+
+The target's resolution names the predefined features by index
+(`PredefinesFeatureIndex`, generated with the feature table: the preprocessor
+guide's "The predefined macros"), where it looked fixed names up by binary search.
+On the 9700X, against main at four code placements, the two take a compile's
+user instructions down by 70,000 to 78,000 (12.8% of an empty `-fsyntax-only`,
+12.3% of a one-line `-c`) and its user cycles by 4 to 8%, and by 260,000 to
+270,000 with `-march=native`, whose host detection looked up each feature it
+lists (−33% of its instructions, −9 to −12% of its wall time); `sqlite3.c` is
+unchanged. In a one-line `-c` Callgrind counts 951 `strcmp`, 189 `strncmp` and
+about 970 `memcmp` calls of option parsing and target resolution on main, and 2,
+0 and 0 with them. The record: buster-performance's
+`docs/measurements/option-ids-1444-2026-11-11`.
+`test-checker --requests` checks the table (`c_option_table_test.c`): its order,
+offsets and lengths, `c_option_find` against a linear scan on every spelling and
+its neighbours, and every option form through the driver's routing as `main`'s,
+in a child: joined and separate values, missing values, `--`, a value spelled as
+an option, the forwarded `-W` forms, aliases, last-wins families, the predefined
+macros that options set, the information probes and the refusals' messages.
 
 ## Warning option names
 

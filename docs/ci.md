@@ -1,17 +1,22 @@
 # Hosted correctness, native vector correctness and Zen 5 benchmarks
 
-Every merge and direct push to `main` triggers the full hosted correctness
-suite against that push's exact `github.sha`, including documentation-only
-changes (#1271). It runs both host architectures, every sanitizer configuration
-and shard, the O1 address-sanitizer rows, and all three fuzz campaigns.
-The pre-merge PR matrix, Measurement storage, a no-code exemption and a later
-nightly run do not replace that post-merge coverage.
+Every merge and direct push to `main` triggers hosted correctness against
+that push's exact `github.sha`, including documentation-only changes (#1271).
+In the nightly mode it runs the plain rows: both host architectures, plain
+O3, four shards each (#2057, the owner's choice on 2026-11-10). The sanitizer
+rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
+until the merge queue (#1430) runs the complete suite before each merge and
+pushes to main run no checks at all. Before the nightly mode, which has no
+snapshot to cover them, a push runs all four O3 build modes (plain and three
+sanitizer configurations) across each row's shards, and all three fuzz campaigns.
+The pre-merge PR matrix, Measurement storage and a no-code exemption do not
+replace a push's own hosted rows.
 
 Main pushes have separate run-id concurrency groups: a later merge cannot
 replace an earlier pending main run. PRs keep their per-PR superseded-run
-cancellation. Hardware jobs still take the shared host lock. Hardware admission
-and the nightly measurement window do not reduce main's hosted suite:
-push evidence always reports `scope=full`, `hosted=run` and no hosted source.
+cancellation. Hardware jobs still take the shared host lock. Push evidence
+always reports `hosted=run` and no hosted source, with `scope=plain` in the
+nightly mode and `scope=full` before it.
 The selector's main-policy mutants and the nightly glue fixtures pin this
 contract. A push reuses no PR native evidence (#1272). In the nightly mode it
 runs no 9700X job at all (the owner's choice on 2026-11-05): its native
@@ -23,10 +28,17 @@ pre-merge PRs can use the no-code exemption.
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
-with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`. Both use the current
+with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`; on a pull request,
+the second row is the vector row, `BUSTER_HOST_ARCH=vector` (see "The vector
+row", #2033). Both use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
-LLVM object/DWARF tools and lld. The installer runs only on disposable hosted
-runners. GCC remains the `cc` oracle for fixtures that require GNU C extensions.
+LLVM object/DWARF tools and lld. Each row also builds the clang server that
+the semantic driver's checks send the oracle clang's runs to (#2071), from the
+release's static clang and LLVM archives: an `x86-64` row's build job, once for
+its shards (see "Shared row products"), and each shard of a `native` row. The
+native plain row's `--differential` compares every served run with a child's.
+The installer runs only on disposable hosted runners. GCC remains the `cc`
+oracle for fixtures that require GNU C extensions.
 
 The build pins `-fno-stack-protector` (#916). A distribution's Clang can
 default to `-fstack-protector-strong` while the official release does not, so
@@ -45,15 +57,23 @@ build. Generated-code ISA and ABI remain controlled by the existing target
 options. Both hosted variants log their CPU, target features and selected path.
 The baseline leg must report `scalar`; the native leg uses vector kernels when
 the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
-CPU without AVX-512 therefore still runs the complete correctness suite.
+CPU without AVX-512 therefore still runs the complete correctness suite. The
+vector row must report `vector`, on CPUs its probe qualified.
 
-Each matrix row runs its inventory as 4 shards (`matrix.shard`), a runner each,
-dealt by `parallel --shard K/4 --costs tools/ci/correctness.costs`: the runner
-deals the commands to the shards by their costs on a hosted runner, the
-costliest first, the same deal on every shard's runner, so that a row's shards
-run every command once (docs/commands/parallel.md). Unsharded, a plain row's
-test step took 14.6 minutes of its 18-minute job on one 4-CPU runner, and the
-MSan rows took up to 98 minutes. Each shard builds the compiler itself, since a
+Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
+runs the row's inventory as the row's own number of shards (`matrix.shard`, its
+`shards` input), a runner each, dealt by `parallel --shard K/N --costs
+tools/ci/costs/ROW.costs`: the runner deals the commands to the shards by the
+row's own costs on a hosted runner, the costliest first, each to the shard that
+would end the earliest with it, the same deal on every shard's runner, so that
+a row's shards run every command once (docs/commands/parallel.md). The plain
+rows run as 4 shards, the `x86-64` TSan and MSan rows as 6, the `native` MSan
+row as 5 and the others as 4 (#2031; [Shard costs](commands/ci.md#shard-costs)
+has the tables and the plans). Unsharded, a plain row's test step took 14.6
+minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
+98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
+own, and its shards run that verified product (see "Shared row products"
+below). A `native` row's shards each build the compiler themselves, since a
 native build must run on the CPU model it was built for, which hosted runners
 don't share. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
@@ -61,25 +81,27 @@ readers and the TSan/MSan `main.c` compiles) run in its shard 1, and each
 shard's sanitizer reports are an artifact of its own.
 
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
-feature set. Required vector coverage comes from the real Ryzen 7 9700X, after
+feature set. A pull request's vector row draws runners until one whose CPU
+qualifies runs each of its shards (see "The vector row"), with no emulation.
+Required native vector coverage of the measured `znver5` build comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
 asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
-the complete suite before any benchmarks, except on a pull request (#1272, the
-owner's choice on 2026-11-04): its job measures without the native suite, which
-its hosted rows cover, so that a pull request holds the shared host for its
-measurements alone. Native correctness then runs after the merge, on main's
-push of the landed commit and on the daily and nightly runs. Hosted and hardware jobs read one
+the complete suite before any benchmarks. A pull request never runs it (#2055,
+the owner's choice on 2026-11-10, after #1272 had dropped its native suite on
+2026-11-04): its hosted rows qualify it, and native correctness and
+measurements run on its merged first-parent state in the nightly window, and
+on dispatched runs. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
-external cross-checks. There is no vector emulation or randomized runner pool.
+external cross-checks. There is no vector emulation.
 Hosted runners are virtual machines, so the compiler runs there with
 transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
 9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
-`BUSTER_SANITIZER=address|undefined|thread|memory`, for both host architectures.
+`BUSTER_SANITIZER=address|thread|memory`, for both host architectures.
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
-are full suites, a row's 4 shards together; the TSan and MSan rows are not
+are full suites, a row's shards together; the TSan and MSan rows are not
 reduced module lists.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
@@ -122,9 +144,8 @@ rows only, and no fuzzing (see "Nightly main measurements"). The hardware job ch
 7 9700X identity and vector eligibility, and retains the existing host lock,
 CPU placements and benchmark selection. Native tests use eight CPUs under the
 lock, and benchmarks reuse that tested executable. A native test failure stops
-the job before measurements. A pull request's benchmarks still check their
-paths against their scalar twins, so a vector-path defect they reach fails
-them there.
+the job before measurements. The benchmarks still check their paths against
+their scalar twins, so a vector-path defect they reach fails them there.
 
 The job stages the current official stable Clang 23.1.4 release and matching
 Clang API, linker and object/DWARF tools in the runner's private cache, verifying
@@ -144,6 +165,8 @@ on every use, published atomically, and replaced when stale or corrupt:
 - **c-testsuite:** a bare mirror holding the pinned commit
   (`tools/ci/fetch-c-testsuite.sh`). The checkout fetches it through Git's pack
   protocol, which checks every object's hash.
+- **SQLite's tree (#146):** a bare mirror holding SQLite 3.53.2's commit, in
+  the same way (`tools/ci/fetch-sqlite.sh`), for `test-sqlite`'s CLI tests.
 
 The pragma oracle is not cached. Its 2.3 s build finishes while the compiler
 build's longest unit (35 s) still runs, so a cached oracle would save no time.
@@ -174,10 +197,13 @@ corruption and changed input.
 The hosted `qualification` job retains the ruleset's existing required context,
 `Build and execute on Ryzen 7 9700X`. It requires the `evidence` job's success,
 successful hosted tests and fuzzing, and the hardware job: on a push to main
-and on the daily and dispatched runs, native correctness and the measurements;
-on a ready pull request, the measurements alone, and the context's message
-says that native correctness was not run (#1272). A skipped hardware job after
-a hosted failure therefore cannot satisfy the merge gate. Documentation-only
+before the nightly mode and on the daily and dispatched runs, native
+correctness and the measurements. A pull request, draft or ready, never runs
+the hardware job (#2055, the owner's choice on 2026-11-10): the context passes
+on its hosted plain rows with fuzzing and the hardware job skipped, and its
+message says that native correctness and measurements run on the merged
+first-parent state in the nightly window. A skipped hardware job after a hosted
+failure therefore cannot satisfy the merge gate. Documentation-only
 changes keep their explicit no-code path. A nightly dispatch reports through
 its coverage record and has no such context, and neither does a scheduled run
 the nightly mode retired.
@@ -189,14 +215,13 @@ runs none in the daytime, and has no `Build and execute on Ryzen 7 9700X`
 context: its state's nightly run qualifies it on the 9700X, recorded in the
 ledger.
 
-Draft PRs still run hosted correctness, but do not queue the 9700X. Both
-`ready_for_review` and `converted_to_draft` trigger the workflow, using the
-same per-PR concurrency group: marking ready qualifies the current revision,
-and returning to draft cancels the superseded ready run. A code-changing draft
-has a **failing required qualification**, with an explicit withheld-hardware
-message, not a green skipped native job. The selector-confirmed no-code path
-is still allowed, including on drafts; it reports an exemption, not vector
-coverage. Performance-document/harness exceptions remain selector-controlled.
+Draft and ready PRs alike run hosted correctness and never queue the 9700X
+(#2055). Both `ready_for_review` and `converted_to_draft` still trigger the
+workflow, using the same per-PR concurrency group: marking ready qualifies the
+current revision, and returning to draft cancels the superseded ready run. A
+code-changing draft qualifies on its hosted rows as a ready one does; GitHub
+doesn't merge drafts. The selector-confirmed no-code path is still allowed; it
+reports an exemption, not vector coverage. Performance-document/harness exceptions remain selector-controlled.
 
 `tools/ci/qualification.c` is the aggregate's fail-closed predicate. It checks
 selector/event consistency as well as every required result; missing, invalid,
@@ -209,8 +234,7 @@ selector's own policy mutants pin the draft guard and ready/draft triggers.
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
 fast, and its tests wait for the agent-guide size and DCO hook checks, which finish
-within the `changes` job's time, and don't start when either fails, so the
-9700X job never runs for a pull request whose qualification can't pass. Pushes
+within the `changes` job's time, and don't start when either fails. Pushes
 to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
@@ -225,6 +249,237 @@ To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
 `BUSTER_HOST_ARCH=x86-64` for `build.sh`; keep Zen 5 performance measurements on
 Benchpress.
+
+## Shared row products
+
+A portable row (`x86-64`: plain, ASan, TSan and MSan) builds its compiler once
+for its shards (#2032). The test job calls
+`.github/workflows/hosted-correctness.yml` for each row. In a portable row, that
+workflow's `compiler` job sets its runner up as a shard does: the verified
+hosted inputs, `setup-hosted.sh`, the sanitizer host report, the fatal policy
+and detector proofs, and the baseline runtime for the plain row. The build's
+settings are the workflow's environment, the same for the build and the
+shards. The job then builds and packs the product in four steps, three of them
+`tools/ci/hosted-product.sh`'s:
+
+- `build`: the pragma oracle, the clang server and
+  `./build.sh --config Release --jobs "$(nproc)"`, with the build step's checks
+  of `build/compiler`. A native row's shards run this same command. The
+  server's build exits 77 where a toolchain can't give it one copy of LLVM (a
+  distribution's shared LLVM without clang's archives). With another clang that
+  is a notice and no server, and the driver's checks run the oracle clang as
+  children. With the hosted installation, the clang that `toolchain_root()`
+  finds, it is an error: that tree holds the archives, so 77 means a regression
+  in its tar list or the release's layout, which would otherwise leave the row
+  green, its driver commands 251 s slower in the plain row (#2071). The check
+  sits here, the one step that knows its toolchain, rather than in the
+  inventory, which the 9700X and local runs share.
+- `ownership`: the inventory's unity fixture ownership heading. It is the one
+  heading that reads the build's tree (Ninja's dependency records) rather than
+  the executable, so it runs here, on that tree, through the built executable's
+  runner.
+- the sanitizer report audit (sanitizer rows): the post-link step and the
+  ownership heading run the instrumented executable.
+- `pack`: the compiler, the pragma oracle, the clang server, the
+  build's compile commands, the product's identity and provenance, and the
+  SHA-256 of every file, as a reproducible `product.tar.zst`. Zstandard's
+  third level packs the plain row's 48 MB compiler into 15 MB; the static clang
+  server (#2073), about 203 MB, should add some 60 MB, estimated from LLVM's
+  shared libraries' ratio.
+
+It publishes the archive as this run's artifact
+`compiler-ARCH-SANITIZER-OOPT-ATTEMPT`, kept 7 days, and its outputs give the
+artifact's name and the archive's SHA-256.
+
+The product's identity is what the build and every shard compute with the same
+function and compare byte for byte:
+
+- the repository, the run, the commit and its tree, with the tracked files
+  unmodified;
+- the row;
+- the digest of the whole hosted toolchain installation, 2.0 GB (clang, its
+  resource directory with the sanitizer runtimes, lld, mold, wild,
+  libclang-cpp, LLVM's and clang's archives, CMake and Ninja), which the
+  install step reports the time of;
+- the baseline runtime's tree, in the plain row;
+- build.sh's own configuration record, the toolchain identity, the tools on
+  PATH and every setting, which `./build.sh configure` writes;
+- `print-compile-flags`, `print-sanitizer-flags` and `print-sources`;
+- the target's predefined macros with `host_isa.h` (`BUSTER_HOST_VECTOR` 0);
+- `ldd`'s resolution of each executable.
+
+Its provenance is reported but not compared: the runner, its CPU and kernel;
+its image, glibc and the versions of the system packages the build reads; and
+the ownership check's result. Runner images can differ between a row's jobs, as
+they could between its shards when each built its own compiler, so a shard
+reports where the image, glibc or packages differ from its own.
+
+A portable row's shards need its `compiler` job and start once it ends. Their
+first step fails unless the build succeeded: no shard builds the compiler or
+fetches it elsewhere. After the usual setup, sanitizer probes and host report,
+they download the artifact by the build's output name, and
+`hosted-product.sh install` checks it:
+
+1. the archive's SHA-256 against the build's output;
+2. that it holds only directories and regular files under `product/`;
+3. exactly the files it lists, each with its hash;
+4. the identity, which a difference fails, printed;
+5. the build's image, glibc and packages, whose differences are a notice;
+6. each executable, the clang server among them, run once.
+
+Only then does it install them where `build` puts them:
+`build/compiler`, in the checkout's `build/` where the compiler finds its
+headers, `build/compile_commands.json`, and the pragma oracle and clang server
+in `RUNNER_TEMP`. It exports the same variables as `build`, and
+`BUSTER_PRODUCT`. On such a shard the inventory's ownership heading checks that
+the product records its pass and exits 77 (skipped); every other command runs
+as before. `check-call-graph`'s `./build.sh` call configures the tree and
+builds the IR it checks, which no product replaces.
+
+Products stay in their run. No cache holds one. A shard downloads only
+from its own run (no `run-id` or token), by the name and SHA-256 that its
+run's build job gave, and the identity binds the product to the repository,
+run, commit and tree. A pull request's run builds and tests its own products, a
+push or dispatch on main builds its own, and no run can use another's. The
+selector's row policy (`changes_row_policy`) pins this with counterexamples.
+
+A failed build fails its row's shards at their first step, and a cancelled one
+cancels them. Rerunning the failed jobs reruns the build first, under a new
+attempt's name and SHA-256. A shard always reads the product that its run's
+build job last published, by that job's outputs, so a shard rerun without the
+build reads the attempt that succeeded, as the hosted inputs' handoff does. A
+missing (expired), truncated or altered archive, a partial extraction or a
+mismatched configuration fails the shard and says why. Rerun the build job, or
+the workflow: nothing rebuilds or refetches by itself, so one bad product can't
+start four builds. `bash tests/ci/hosted-product.sh`, which the build job runs
+before building, checks each of these refusals, a product without its server,
+the clang server's status 77 (failing the build on the hosted toolchain and a
+notice with another clang) and the inventory's skip on a fake checkout,
+toolchain and build. `bash tests/ci/hosted-tools.sh` checks the same 77 failure
+against the tree that `install-hosted-tools.sh` installs.
+
+Native rows keep their per-shard builds: each hosted CPU selects its own path.
+The vector row's explicit target makes its 4 builds one configuration, so it
+can share one product next (see "The vector row"). Reuse across revisions
+(a change to fixture data alone) is a separate extension (#2032's discussion).
+
+## The vector row
+
+Hosted `native` rows ran the vector path at random: 62 of 105 sampled jobs did
+(59%; 41% in the busiest hours). The others drew a Zen 3 EPYC 7763, or an EPYC
+9V74 VM with AVX-512 masked, and ran scalar, so a defect only the vector path
+has failed some runs and not others (#2033's review). The owner's decision D3
+(2026-11-10) replaces that row with a deterministic vector row, with **no
+emulation**: the workflow starts hosted jobs until enough of them draw a CPU
+that runs the vector path.
+
+**Pilot scope.** A pull request's plain row (its second row, in place of
+`native`): 4 items, its shards. The `x86-64` row is unchanged, and pushes to
+main, nightly dispatches and the daily runs keep their `native` rows, whose
+names `tools/ci/nightly.c` counts. The sanitizer configurations
+(vector × address, thread, memory: 16 items) are the next step.
+
+**The target.** `BUSTER_HOST_ARCH=vector` builds `-march=x86-64-v4 -maes
+-mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg
+-mavx512vnni`, exactly `host_isa.h`'s predicate, never `native` or `znver5`;
+configuring fails unless it selects `BUSTER_HOST_VECTOR=1`
+(`cmake/BusterSettings.cmake`). `./build.sh print-host-flags` prints the host
+target, which the inventory's commands that compile for the build's host
+(`tools/ci/correctness.tests`) and the row's predefines and parser smoke test
+pass to clang and to the compiler, for every row. The row tests the vector
+path compiled for x86-64-v4 with generic tuning, not `znver5`'s code
+generation: the 9700X still runs native correctness of the measured `znver5`
+build in the nightly window.
+
+**Draws** (`.github/workflows/hosted-correctness.yml`, `draw-1` to `draw-4`, and
+`tools/ci/vector-draw.sh`). A hosted VM belongs to the job it runs, so the
+candidate that probes is the one that works. Each draw starts generic
+candidates, which run the shards' own steps (`*row-steps`), each step gated on
+the shard the candidate holds:
+
+1. **Probe**, before the checkout: a C probe, built by the image's `cc` with
+   the target's flags, whose `#if` is the predicate itself, asks
+   `__builtin_cpu_supports` for `x86-64-v4` and each predicate feature. It
+   reads what the OS enables too, so a VM that masks AVX-512 fails it, whatever
+   its model. A probe that stops (a CPU without AVX2 may meet an instruction
+   the flags let it use) doesn't qualify either. Its record: the level, the
+   candidate, the runner, the CPU model, the verdict and the missing features.
+2. **Publish**: every candidate uploads its record as
+   `vector-SANITIZER-OOPT-ATTEMPT-probe-LEVEL-CANDIDATE-yes|no`.
+3. **Take or redraw**: a qualifying candidate waits for its draw's assignment
+   and takes the item it names as its shard (`BUSTER_SHARD`). It builds the
+   compiler and runs the shard as any shard does, after the confirmation below.
+   A candidate without an item ends within seconds, successfully, as a redraw,
+   so that rerunning the failed jobs reruns only real failures. Every candidate
+   uploads its record with its decision (`-draw-LEVEL-CANDIDATE`).
+
+**The claim is a rendezvous by rank**, the design's fallback. Its first
+candidate was artifact-name uniqueness: GitHub refuses an upload under a name
+the run already has, and the candidates would have claimed an item by
+uploading its name. The race fixture (below) disproved it on 2026-11-11 (run
+42993863311): when 16 jobs uploaded one name within the same second, all 16
+uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
+name. So no candidate claims anything. Each draw's **collector**
+(`collect-1` to `collect-3`, and the verdict's reading after the last) starts
+with its draw and polls the run every 5 s, through the artifacts and jobs APIs
+(`actions: read`). It waits until as many candidates qualified as items are
+missing, or every candidate has published its verdict or ended, at most 25
+minutes. Then it assigns: the qualifying candidates, by their numbers, get the
+missing items, the costliest first (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1
+also runs the row's once-only steps, and the costs deal the rest evenly). One
+job decides, and it uploads the decision once, as an artifact whose name holds
+it: `-assign-LEVEL-ITEMxCANDIDATE...`. Nothing can take an item twice. It never
+waits for an item's tests. The next draw starts candidates for the items still
+missing alone: 3 per item in the first draw (12), then 4, 5 and 5 per missing
+item. With draws independent, as #2033's 24 runs measured, a binomial model
+gives:
+
+| Rate of qualifying CPUs | Runs needing a 2nd draw | a 3rd | a 4th | Still short after 4 |
+| --- | ---: | ---: | ---: | ---: |
+| 41% (busiest hours) | 20.5% | 2.3% | 0.16% | 0.011% |
+| 59% (sampled mean) | 1.8% | 0.045% | 0.0005% | ~0 |
+
+**Evidence and verdict.** Before its suite, an item's candidate confirms that
+the build's target selects `BUSTER_HOST_VECTOR=1` and runs `benchmark-lexer`
+on `x86_64_encoder.c`, which a scalar build refuses: the vector lexer lexes
+all 592 KB on this CPU, no part needing the scalar lexer, and the tokens must
+match the scalar twin's. Once every step passed, it uploads its evidence
+(`-evidence-ITEM`): the probe's verdict and CPU, its decision, the target,
+`BUSTER_HOST_VECTOR=1`, the kernels' run and the suite's pass. The `verdict`
+job (`vector-draw.sh verdict`) requires exactly one passing qualified
+execution of each item by the candidate its assignment names. Its summary
+lists every candidate's CPU and decision and every item's runner. An item no
+candidate held fails it as **incomplete: no qualifying CPU drawn**, which is
+not a test failure; an item whose run failed fails as such (its candidate's job
+failed too).
+
+**Attempts and reruns.** Every record carries the run attempt. Rerunning all
+jobs draws and assigns every item afresh. Rerunning the failed jobs reruns no
+collector, so the earlier attempt's assignments stand: an item's candidate
+reruns it on a new runner, and if that runner doesn't qualify, the job fails,
+saying that no test failed and to rerun the failed jobs again. After an
+incomplete verdict the draws all passed: re-run all jobs to draw again.
+
+**Permissions and the race fixture.** Nothing needs write access: every record
+is the run's own artifact, which a fork's pull request can upload too.
+`.github/workflows/vector-claim-race.yml`, on pull requests that change the
+draws (the row workflow, `tools/ci/vector-draw.sh`) or the fixture and on
+dispatch, runs 16 racers, each on its own runner, as one draw's candidates at
+one instant, through the same script: about half qualify (by a hash of the
+racer and the run), the collector assigns the 4 items, and the judge requires
+each assigned item taken by exactly the racer its assignment names, only by a
+qualifying racer, no racer taking two, and min(4, qualifying racers) items
+assigned. Its control round uploads one name from every racer at once and
+reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
+collector, candidates (reruns among them) and verdict against a fake `gh`;
+the PR's `evidence` job runs it.
+
+**Sharing the product next (#2032).** The explicit target makes the row's 4
+builds one configuration. The build runs the executable (the baked tables), so
+it needs a qualifying CPU too: the next step makes the build an item that the
+first draw's collector assigns first, and the shards' candidates install its
+product with `tools/ci/hosted-product.sh` once their own probes qualified,
+with the probe's verdict in the product's checks in place of `portable`'s.
 
 ## CI latency baseline
 
@@ -294,14 +549,14 @@ Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
 whose first-parent change is documentation alone needs no targeted measurements,
-and the ledger says so; its main push still runs full hosted correctness.
+and the ledger says so; its main push still runs its own hosted rows.
 The cycle's snapshot also needs **full** coverage, which adds every benchmark,
 the isolated samples and the oracle-cache audit. Plain coverage, every plain
 run as pushes measured before the nightly mode, satisfies neither.
 
 A state is measured behind its own plain hosted rows (both architectures,
-every shard), the gate a pull request needs before the 9700X. Its sanitizer and
-fuzz results come from its pushes and the snapshot's daily run. They are
+every shard), the gate a pull request needs. Its sanitizer and fuzz results
+come from the snapshot's daily run and, before the nightly mode, its pushes. They are
 reported, but they don't block measurement, which was the owner's choice on
 2026-11-03.
 
@@ -309,15 +564,17 @@ reported, but they don't block measurement, which was the owner's choice on
 
 Every `9700x.yml` run has an `evidence` job, which must succeed:
 
-- **Pull request:** its draft state alone.
+- **Pull request:** never admitted, draft or ready (`hardware=skip`, reason
+  `pull-request`, #2055): its hosted plain rows qualify it.
 - **Push:** in the nightly mode, deferred (`hardware=skip`, reason
-  `deferred`, outcome `deferred`): the push runs its full hosted rows, and
+  `deferred`, outcome `deferred`): the push runs its plain hosted rows
+  (`scope=plain`, #2057), and
   the window runs its native correctness and targeted measurements as its
   state's backlog run. Its plain hosted rows are the state's, so the state
   is ready without a preparation. Before the nightly mode, admitted: its 9700X
   job runs native correctness and the measurements on the landed commit.
-  Since #1272 a pull request's 9700X job
-  skips native correctness, so a push reuses nothing from it; records from
+  Since #1272 a pull request's run has no native correctness, and since
+  #2055 no 9700X job, so a push reuses nothing from it; records from
   before then that say a push reused its pull request's run
   (`native-reused`, outcome `pending`) are still read by the harvest.
 
@@ -578,12 +835,11 @@ existing fixed-address link. `build.sh print-compile-flags` and
 `print-sanitizer-flags` expose the actual arguments as NUL-delimited arrays.
 Instrumentation is applied to every build unit and the final link; it cannot
 be combined with the private baseline runtime used for QEMU smoke tests.
-`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit optimization level.
-The full hosted sanitizer matrix runs at `-O3`; additional combined ASan/UBSan
-rows run the entire suite at `-O1` on both host architectures. These rows and the
-fuzz campaigns run on pushes to main and on the daily and dispatched runs, not on
-pull requests, whose hosted jobs are the plain builds of both architectures. This retains
-diagnostic-friendly coverage without substituting it for production optimization.
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicitly selected
+diagnostic builds. The hosted matrix runs at `-O3` throughout, without separate
+`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on pushes
+to main and on the daily and dispatched runs, not on pull requests, whose
+hosted jobs are the plain builds of both architectures.
 The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
 the driver's in-process checks run the whole compiler per fixture and take tens
 of minutes each with a detector, while the plain rows have a 120-minute job
@@ -593,13 +849,18 @@ limit and 600-second command limit.
 | --- | --- |
 | `none` (default) | Ordinary optimized build |
 | `address` | ASan, UBSan, bounds, leaks, stack use after scope and return |
-| `undefined` | Independent UBSan and bounds run |
+| `undefined` (manual only) | Standalone UBSan and bounds for targeted investigations |
 | `thread` | TSan across the correctness inventory, but the compiler's own `main.c` checking comparison |
 | `memory` | MSan with level-two origin tracking across the correctness inventory, but the compiler's own `main.c` checking comparison |
 
-ASan, UBSan and leak checking share a process. TSan and MSan have separate
-builds because their runtimes cannot be combined with ASan. The independent
-UBSan run also avoids ASan's allocation layout and its earlier failure points.
+The `address` mode combines ASan, UBSan, bounds and leak checking in one build
+and run; its detector probes verify each kind of failure before the full suite.
+TSan and MSan retain separate builds because their runtimes cannot be combined
+with ASan. Removing the standalone UBSan CI rows saves eight builds and suite
+runs (two architectures, each row's shards) but removes an independent instrumented
+execution: standalone UBSan has a different allocation layout and can continue
+past failures that would stop ASan. `BUSTER_SANITIZER=undefined` remains
+available for targeted investigation.
 The checks cover the host compiler implementation. Generated machine code and
 external reference tools retain their own execution and validation contracts;
 bootstrap instrumentation does not instrument Buster's generated instructions.
@@ -639,16 +900,17 @@ several threads, so under it `test-lanes`' child forked from a session's lane 0
 (#905) runs a group of one.
 
 The TSan and MSan rows leave out the checking comparison of the compiler's own
-`main.c` (#129, `tools/ci/correctness.tests`). The unit's 6,323,682
-preprocessed tokens make the comparison's two paths hold 7.5 GiB resident
+`main.c` (#129, `tools/ci/correctness.tests`), with `-DBUSTER_COMPLETE_DRIVER=1`
+for the whole compiler: 4,864,411 preprocessed tokens on 2026-11-10. At
+6,323,682 tokens the comparison's two paths held 7.5 GiB resident
 unsanitized (measured with an `-O3` UBSan build on the 7940HS), and TSan's
 shadow took the same check past 20 GiB before it was stopped; that cannot share
 a 16 GiB hosted runner with any other command. The `-c` commands peak at
 10 GiB under TSan and 6.6 GiB under MSan (`-O3`, `--lanes 1`), so those rows
 run them in the workflow's separate "Compile main.c alone under TSan or MSan"
-step after the suite, where the runner is otherwise idle; the plain, ASan and
-UBSan rows, both host architectures, and the 9700X run them in the suite. The
-plain, ASan and UBSan rows and the 9700X also run the checking comparison, so
+step after the suite, where the runner is otherwise idle; the plain and ASan
+rows of both host architectures, plus the 9700X, run them in the suite. The
+plain and ASan rows and the 9700X also run the checking comparison, so
 the self-check remains required wherever the runner has the memory. Every other
 command runs in every row.
 
@@ -663,6 +925,16 @@ suppression file is used, and the only command a row leaves out is the `main.c`
 checking comparison above, for its measured memory; `parallel` reports it as
 skipped and counts it apart. Reports, detector proofs and compile commands are
 retained as workflow artifacts.
+
+Every sanitizer row and fuzz campaign first runs `tools/ci/sanitizers.sh host`,
+after `tools/ci/setup-hosted.sh` and before the build, so that a report caused
+by the runner can be traced to its host (#2060). It logs `uname -r`, one CPU's
+model name and `flags` line, the `Seccomp:`, `Seccomp_filters:` and
+`NoNewPrivs:` lines of `/proc/self/status`, `kernel.yama.ptrace_scope`, and the
+container and VM that `systemd-detect-virt` reports, with the container marker
+files and PID 1's `container=` variable. A missing file or tool prints
+`unavailable`; the command always exits 0 and the step continues on error. It
+changes no option and no audit: every non-empty report still fails the job.
 
 For example, on a supported Linux host:
 
@@ -688,6 +960,12 @@ runtime. `--fuzz` hands control to `LLVMFuzzerRunDriver` before ordinary command
 dispatch, preserving engine options, coverage, mutation, crash artifacts,
 minimization and replay. Other compiler commands continue to work in that
 executable. A missing runtime or incompatible TSan configuration is an error.
+Where LeakSanitizer is linked, `--fuzz` first runs one recoverable leak scan,
+before the engine arms its `-timeout` alarm. LeakSanitizer's one-time ptrace
+probe forks and waits without retrying `EINTR`, and libFuzzer's `SIGALRM` has
+no `SA_RESTART`, so an alarm during that wait printed a false "ptrace appears
+to be blocked" report that failed the audit (#2060). A leak the early scan
+finds is still reported and still fails the job.
 
 The default original callback in `src/buster/compiler/fuzz.c` accepts inputs up
 to 64 KiB. It compares scalar/native lexer output and exercises preprocessing,

@@ -1538,6 +1538,12 @@ static bool asm_register(String8 spelling, X86Operand* operand)
         *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .width = 0, .reg = 0};
         found = true;
     }
+    if (name.length == 3 && name.pointer[0] == 'm' && name.pointer[1] == 'm' && name.pointer[2] >= '0' && name.pointer[2] <= '7')
+    {
+        // MMX's mm0 to mm7 (#1846), 8 bytes each.
+        *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_MMX, .width = 8, .reg = (uint8_t)(name.pointer[2] - '0')};
+        found = true;
+    }
     if (name.length == 2 && name.pointer[1] == 'h' && name.pointer[0] >= 'a' && name.pointer[0] <= 'd')
     {
         const uint8_t high[] = {X86_REGISTER_AH, X86_REGISTER_BH, X86_REGISTER_CH, X86_REGISTER_DH};
@@ -2557,8 +2563,8 @@ static int32_t asm_compare_predicate(String8* name)
     return result;
 }
 
-// Whether an AT&T instruction's operands (its tokens to `end`) name an XMM register: then movq is SSE2's, as GNU as
-// reads it, not mov's 64-bit form.
+// Whether an AT&T instruction's operands (its tokens to `end`) name an XMM or an MMX register: then movq is SSE2's or
+// MMX's (#1846), as GNU as reads it, not mov's 64-bit form.
 static bool asm_vector_operands(const AsmParser* parser, uint32_t end)
 {
     bool found = false;
@@ -2566,7 +2572,7 @@ static bool asm_vector_operands(const AsmParser* parser, uint32_t end)
     {
         X86Operand operand;
         found = parser->tokens[i].kind == '%' && parser->tokens[i + 1].kind == BUSTER_ASM_WORD && asm_token_register(parser, i + 1, &operand) &&
-                operand.class == BUSTER_X86_CLASS_XMM;
+                (operand.class == BUSTER_X86_CLASS_XMM || operand.class == BUSTER_X86_CLASS_MMX);
     }
     return found;
 }
@@ -5463,7 +5469,8 @@ struct AsmCode
     uint32_t reference_count;
     uint32_t label_count;
     uint32_t location;
-    // The source used a directive besides the syntax switches, which needs a whole assembled unit (asm_assemble).
+    // The source used a directive besides the syntax switches, or a numeric label as data or a loop's or jrcxz's branch,
+    // which need a whole assembled unit (asm_assemble).
     bool directive;
 };
 
@@ -5473,7 +5480,9 @@ struct AsmCode
 // refuses every other directive. A jmp or jcc to a label of its own, without an addend, is a branch that branch sizing
 // sizes. Every other symbolic field refers to a symbol by name, which the caller resolves: one of the source's named
 // labels (as data, a call's target, or with an addend), a label another source defines (a `.L` one among them), or any
-// other symbol. Its numeric labels and `.` are only its own jmp's and jcc's targets. Matching is asm_assemble's, by
+// other symbol. Its numeric labels and `.` are only its own jmp's and jcc's targets: another use of one, and a loop's or
+// a jrcxz's branch to a label, fail with `directive` set, for the caller to assemble the source whole. Matching is
+// asm_assemble's, by
 // options.vectorized's path; the parser's tables come from `scratch`, which is as it was after, and the result from
 // `output`, which a failure leaves as it was too.
 static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* output, Arena* scratch)
@@ -5564,9 +5573,11 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
             }
             else
             {
-                // loop, loope, loopne and jrcxz have no rel32 form for a reference, and branch sizing sizes only jmp and jcc.
+                // loop, loope, loopne and jrcxz have no rel32 form for a reference, and branch sizing sizes only jmp and jcc:
+                // the caller assembles the source whole instead (`directive`, asm_assemble), as a template of directives.
                 asm_fail(&parser, instruction->location, form->relative_bytes == 1 && !sized ? "loop, loope, loopne and jrcxz in inline assembly" :
                                                                                                 "a branch to inline assembly's own numeric label must be jmp or jcc, without an addend");
+                parser.directive = true;
             }
         }
         for (uint32_t field = X86_FIXUP_DISPLACEMENT; referred && field <= X86_FIXUP_IMMEDIATE && parser.result.error == 0; field += 1)
@@ -5618,7 +5629,10 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 char* name = !symbol->internal && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
                 if (symbol->internal && symbol->defined)
                 {
+                    // A numeric label or `.` as data, an address or a call's target is no name to refer to: the caller
+                    // assembles the source whole instead (`directive`, asm_assemble), whose own fixups take it.
                     asm_fail(&parser, instruction->location, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
+                    parser.directive = true;
                 }
                 else if (symbol->internal)
                 {

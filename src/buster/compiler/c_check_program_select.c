@@ -445,6 +445,27 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
     return ordered;
 }
 
+// Where clang emits a static object's data, and so its references: with its body's function (at its end where that is
+// eager, else at the unit's end, BUSTER_CHECK_NONE), or at its own declaration where it must emit it (an external
+// definition, or a used one's), else at the unit's end.
+static uint32_t check_program_data_point(const CheckProgram* program, const CheckDataObject* object)
+{
+    const CheckInput* input = program->input;
+    const uint32_t body = check_program_token_body(program, object->token);
+    uint32_t point = BUSTER_CHECK_NONE;
+    if (body != 0)
+    {
+        point = program->body_eager == NULL || program->body_eager[body - 1] ? program->parser->tree.parents[program->bodies[body - 1].opening] + 1 : BUSTER_CHECK_NONE;
+    }
+    else if (object->token < input->token_count)
+    {
+        const bool eager = check_input_linkage(input->declaration_bits, object->token) == 2 ||
+                           check_program_attribute_eager(check_input_attributes_at(input, object->token));
+        point = eager ? object->token : BUSTER_CHECK_NONE;
+    }
+    return point;
+}
+
 // The first emitted reference of each renamed object, for the rare unit with a source-time rename after a parsed use.
 // A selected body's compact references are candidates; the shared emission walk excludes dead statements. Deferred bodies are
 // emitted at the unit's end; an eager body's references appear when its complete definition is handed to codegen,
@@ -474,22 +495,11 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
                 }
             }
         }
-        valid = check_program_symbol_bodies(program, first, scratch);
+        CheckProgramUses uses = { .first = first };
+        valid = check_program_symbol_bodies(program, &uses, scratch);
         for (uint32_t d = 0; valid && d < data->count; d += 1)
         {
-            const CheckDataObject* object = data->objects + d;
-            const uint32_t body = check_program_token_body(program, object->token);
-            uint32_t point = BUSTER_CHECK_NONE;
-            if (body != 0)
-            {
-                point = program->body_eager[body - 1] ? program->parser->tree.parents[program->bodies[body - 1].opening] + 1 : BUSTER_CHECK_NONE;
-            }
-            else if (object->token < input->token_count)
-            {
-                const bool eager = check_input_linkage(input->declaration_bits, object->token) == 2 ||
-                                   check_program_attribute_eager(check_input_attributes_at(input, object->token));
-                point = eager ? object->token : BUSTER_CHECK_NONE;
-            }
+            const uint32_t point = check_program_data_point(program, data->objects + d);
             for (uint32_t r = 0; r < data->reference_counts[d]; r += 1)
             {
                 const uint32_t target = data->references[data->reference_offsets[d] + r];
@@ -505,6 +515,120 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
                 program->symbol_pragma_originals[i] = object != 0 && object < program->object_count && first[object] != 0 && first[object] <= record->token;
             }
         }
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
+// GNU's weak attribute and `#pragma weak` after a use (#1849): which of the objects with late weak declarations
+// (CheckProgram.weak_late_keys) keep a weak symbol, as clang's code generation binds each. A definition (a body, an
+// initializer, or an alias or ifunc) has its declarations' weak attributes, all before it (the reader drops later ones). An object that the
+// unit only defines tentatively has its last tentative definition's (VarDecl::getActingDefinition): weak where a weak
+// declaration comes no later. Another object's symbol is made where clang first emits a reference to it, with the
+// binding of the declaration the reference names (the latest before it; static data names the latest where clang emits
+// it): the earliest eager reference's (check_program_symbol_bodies' walk of the bodies, and the data's points); without
+// one, the deferred references', which clang emits at the unit's end in the order it first reaches them. Where some of
+// those see a weak declaration and others don't, that order decides, which the selection doesn't model: the binding is
+// refused by name, at the object's first late weak declaration (CheckProgram.weak_refused). The objects that end up
+// global are CheckProgram.weak_globals, in `output`. Returns false without room.
+static bool check_program_weak_bindings(CheckProgram* program, const CheckDataPrepared* data, Arena* output, Arena* scratch)
+{
+    const uint64_t temporary = scratch->length;
+    const CheckInput* input = program->input;
+    const uint64_t* keys = program->weak_late_keys;
+    const uint32_t count = program->weak_late_count;
+    uint32_t* first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->object_count);
+    uint32_t* use = first != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->object_count) : NULL;
+    uint8_t* deferred = use != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : NULL;
+    uint32_t* globals = deferred != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    bool valid = globals != NULL;
+    uint32_t global_count = 0;
+    uint32_t watched = 0;
+    if (valid)
+    {
+        memset(first, 0, (uint64_t)program->object_count * sizeof(uint32_t));
+        memset(deferred, 0, program->object_count);
+    }
+    for (uint32_t i = 0; valid && i < count;)
+    {
+        const uint32_t object = (uint32_t)(keys[i] >> 32);
+        uint32_t end = i;
+        while (end < count && (uint32_t)(keys[end] >> 32) == object)
+        {
+            end += 1;
+        }
+        // The object's declarations, in the data's keys (by object, then token).
+        uint32_t low = 0;
+        uint32_t high = data->declaration_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = (uint32_t)(data->declaration_keys[middle] >> 32) < object;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        // An alias or ifunc defines its object too (its symbol has its declarations' binding, a weakref's excepted).
+        const uint32_t aliased = program->alias_count != 0 ? check_program_alias_of(program->aliases, program->alias_count, object) : 0;
+        bool defined = aliased != 0 && program->aliases[aliased - 1].kind != CHECK_PROGRAM_WEAKREF;
+        uint32_t tentative = BUSTER_CHECK_NONE;
+        for (uint32_t d = low; d < data->declaration_count && (uint32_t)(data->declaration_keys[d] >> 32) == object; d += 1)
+        {
+            const uint32_t token = (uint32_t)data->declaration_keys[d];
+            defined |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+            tentative = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) ? token : tentative;
+        }
+        if (!defined && tentative != BUSTER_CHECK_NONE)
+        {
+            bool weak = false;
+            for (uint32_t k = i; k < end; k += 1)
+            {
+                weak |= (uint32_t)keys[k] <= tentative;
+            }
+            globals[global_count] = object;
+            global_count += weak ? 0 : 1;
+        }
+        else if (!defined && object < program->object_count)
+        {
+            first[object] = BUSTER_CHECK_NONE;
+            use[object] = BUSTER_CHECK_NONE;
+            watched += 1;
+        }
+        i = end;
+    }
+    CheckProgramUses uses = { .first = first, .use = use, .deferred = deferred };
+    valid = valid && (watched == 0 || check_program_symbol_bodies(program, &uses, scratch));
+    for (uint32_t d = 0; valid && watched != 0 && d < data->count; d += 1)
+    {
+        const uint32_t point = check_program_data_point(program, data->objects + d);
+        for (uint32_t r = 0; r < data->reference_counts[d]; r += 1)
+        {
+            check_program_symbol_reference(program, &uses, data->references[data->reference_offsets[d] + r], point, point);
+        }
+    }
+    program->weak_refused = 0;
+    for (uint32_t i = 0; valid && watched != 0 && i < count; i += 1)
+    {
+        const uint32_t object = (uint32_t)(keys[i] >> 32);
+        const bool leading = i == 0 || (uint32_t)(keys[i - 1] >> 32) != object;
+        if (leading && object < program->object_count && first[object] != 0)
+        {
+            const bool eager = first[object] != BUSTER_CHECK_NONE;
+            const bool weak = eager ? check_program_weak_named(program, object, use[object], first[object]) : deferred[object] != 2;
+            program->weak_refused = !eager && deferred[object] == 3 && program->weak_refused == 0 ? (uint32_t)keys[i] + 1 : program->weak_refused;
+            globals[global_count] = object;
+            global_count += weak ? 0 : 1;
+        }
+    }
+    program->weak_globals = valid && global_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, global_count) : NULL;
+    valid = valid && (global_count == 0 || program->weak_globals != NULL);
+    if (valid)
+    {
+        if (global_count != 0)
+        {
+            memcpy(program->weak_globals, globals, (uint64_t)global_count * sizeof(uint32_t));
+        }
+        program->weak_global_count = global_count;
+        program->weak_decided = true;
     }
     arena_pop_to(scratch, temporary);
     return valid;
@@ -528,8 +652,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                  check_program_bodies_ordered(full);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
     // Code generation reads CheckProgram.body_eager for target features, an x86 builtin's call (#148), a lock-free
-    // query whose answer is its function's emission's (CheckBuiltinAtomicEffect.late_completion), and a symbol pragma
-    // after an earlier use. Other units make none. check_program_body_eager reads each selected body's declarations
+    // query whose answer is its function's emission's (CheckBuiltinAtomicEffect.late_completion), a symbol pragma
+    // after an earlier use, and a late weak declaration (#1849). Other units make none. check_program_body_eager reads each selected body's declarations
     // up to its definition, rather than the definitions' flags, which hold the unit's final ones.
     bool late = false;
     for (uint32_t i = 0; full->stream != 0 && i < full->stream->atomic_count; i += 1)
@@ -541,7 +665,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     {
         symbol_pragmas = input->symbol_pragmas->records[i].after_use;
     }
-    const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late || symbol_pragmas;
+    const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late || symbol_pragmas ||
+                              full->weak_late_count != 0;
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
@@ -859,9 +984,14 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 }
                 else
                 {
-                    data_selected[raw - full->body_count] = 1;
-                    candidate.selected_objects += 1;
-                    data_references += data->reference_counts[raw - full->body_count];
+                    // An alias variable's tentative definitions after the alias (#1849) define no storage of its own:
+                    // clang takes them as the alias's declarations, whose symbol is at its aliasee's definition.
+                    const uint32_t object = definition_objects[definition];
+                    const uint32_t entry = full->alias_count != 0 ? check_program_alias_of(full->aliases, full->alias_count, object) : 0;
+                    const bool aliased = entry != 0 && full->aliases[entry - 1].kind == CHECK_PROGRAM_ALIAS;
+                    data_selected[raw - full->body_count] = aliased ? 0 : 1;
+                    candidate.selected_objects += aliased ? 0 : 1;
+                    data_references += aliased ? 0 : data->reference_counts[raw - full->body_count];
                 }
             }
         }
@@ -977,11 +1107,24 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t raw = definition != 0 ? (uint32_t)order[definition - 1] : 0;
             const bool emitted = definition != 0 && (raw < full->body_count ? body_selected[raw] : data_selected[raw - full->body_count]);
             candidate.program.alias_states[k] = alias->kind != CHECK_PROGRAM_WEAKREF && alias->base != 0 && !emitted ? BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED : 0;
+            // An alias whose thread-local storage isn't its definition's (#1849): whether the selection's code refers to it.
+            bool referenced = false;
+            for (uint32_t r = 0; alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL && !referenced && r < candidate.program.reference_count; r += 1)
+            {
+                referenced = candidate.program.references[r] == alias->object;
+            }
+            for (uint32_t r = 0; alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL && !referenced && r < candidate.data.reference_count; r += 1)
+            {
+                referenced = candidate.data.references[r] == alias->object;
+            }
+            candidate.program.alias_states[k] |= referenced ? BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED : 0;
             needed[alias->object] |= alias->kind != CHECK_PROGRAM_WEAKREF;
         }
         valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, BUSTER_SCALAR_PATH(scalar), output);
         valid = valid && (!symbol_pragmas || check_program_symbol_pragmas(&candidate.program, &candidate.data, output, scratch));
     }
+    // Late weak declarations' bindings (#1849), of the selection that stands.
+    valid = valid && (full->weak_late_count == 0 || check_program_weak_bindings(&candidate.program, &candidate.data, output, scratch));
     if (valid)
     {
         candidate.defined_functions = full->body_count;

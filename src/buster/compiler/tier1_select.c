@@ -28,8 +28,9 @@
 // The most integer or pointer arguments a call passes, and parameters a function takes (#141): those past the registers
 // in the stack's 8-byte slots, the outgoing area's at a call and the incoming area's at the entry. Their values needn't
 // be in registers there: the CFG consumer stores each argument from wherever it is and loads each parameter into its
-// first fragment's place (tier1_emit_cfg.c).
-#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 16
+// first fragment's place (tier1_emit_cfg.c). 64 since #1847, from 16: _mm512_set_epi8's parameters (and the scalar
+// host's emulation's arguments) and printf's calls of the compiler's own tests, 16 of main_unit_backend.c's 25 refusals.
+#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 64
 
 typedef enum Tier1SelectError
 {
@@ -211,6 +212,16 @@ typedef enum Tier1SelectRule
     // IrFunction.rows; its operands are the call's arguments, the node's effective uses, each in a register
     // (tier1_select_row_supported). Only the CFG consumer takes it.
     TIER1_RULE_ROW,
+    // An asm body (#1839), an IR body call's (IrCall.body): an asm statement's records, which the CFG consumer writes in
+    // the node's place (tier1_emit_cfg_asm) with no call, its operand block's base (BUSTER_TIER0_ASM_BLOCK) the frame's base
+    // register and its displacement the block's frame object's past it, the block being the IR_STACK_ADDR the call's one
+    // argument is, which no register holds: the node has no operand and no result. Its own branches are the function's,
+    // to its records or its end. The general registers it touches are its fixed registers (tier1_select_node_fixed): the
+    // values that live past it there are saved in their call-save rows around it, a callee-saved register's too, as a
+    // fixed rule's are, and so are the floating values in the xmm registers it touches, in their rows, as a call's are;
+    // the prologue saves the callee-saved ones it touches. `immediate` is the body's index in IrFunction.asm_bodies (tier1_select_asm_supported).
+    // Only the CFG consumer takes it.
+    TIER1_RULE_ASM,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -264,6 +275,13 @@ typedef enum Tier1SelectRule
 #define BUSTER_TIER1_VECTOR_COMPARE 7
 #define BUSTER_TIER1_VECTOR_SELECT 8
 #define BUSTER_TIER1_VECTOR_SCALAR_SPLAT 9
+// A width change (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTRACT (0 extract, 1 widen, 2 insert),
+// `source_width` the other vector's bytes (an extract's or a widen's operand's, an insert's inserted values[1]'s),
+// `immediate` its part (tier1_select_width_change).
+#define BUSTER_TIER1_VECTOR_WIDTH_CHANGE 10
+// A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
+// shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
+#define BUSTER_TIER1_VECTOR_PERMUTE 11
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1155,6 +1173,93 @@ static void tier1_select_overflow(Tier1SelectRecords* result, const Tier1SelectH
 // A scalar splat (#1450): EVEX broadcasts directly from a general register or a floating scalar's xmm register.
 // The baseline sequence copies bits through xmm registers only: movd/movq, low unpacks for bytes/words, pshufd and,
 // for AVX's 32-byte result, vinsertf128. It never interprets a NaN or a signed zero as arithmetic.
+// A width change's records (#1840), EVEX's (the decoder admits one at a target with AVX512F and VL alone, and the
+// emission's allow-list refuses these forms elsewhere): an extract of part 0 the narrower width's move from the source's
+// register, which the destination's holds already where they are the same; a widen the narrower width's EVEX move
+// (vmovdqa64), which zeroes the wider register past it, even into its own register (legacy SSE's movaps would keep the
+// bytes past 16 of a register that held the wide value); an extract of another part vextracti32x4 (16 bytes of 32 or
+// 64) or vextracti64x4 (32 of 64); and an insert vinserti32x4 or vinserti64x4 of values[1] into a copy of values[0].
+static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t kind = (uint32_t)holes->operation;
+    const uint8_t x = holes->destination & 15;
+    const uint8_t left = holes->left & 15;
+    const uint8_t right = holes->right & 15;
+    const uint32_t width = holes->width;
+    const uint32_t other = holes->source_width;
+    const uint32_t part = (uint32_t)holes->immediate;
+    if (kind == 2)
+    {
+        const uint16_t form = other == 32 ? X86_FORM_VINSERTI64X4_Z_Z_YM256_IMM8 : width == 64 ? X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8 : X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8;
+        tier1_select_append(result, (X86Instruction){ .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
+    }
+    else if (kind == 0 && part != 0)
+    {
+        const uint16_t form = width == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : other == 64 ? X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8;
+        tier1_select_append(result, (X86Instruction){ .form = form, .reg = left, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
+    }
+    else if (kind == 1)
+    {
+        // EVEX's move of the narrower width, never legacy SSE's movaps, which keeps the register's bytes past 16.
+        tier1_select_append(result, tier1_select_register_record(tier1_select_vector_forms(other, BUSTER_TIER1_ENCODING_EVEX)->move, x, left));
+    }
+    else if (x != left)
+    {
+        tier1_select_append(result, tier1_select_class_move(x, left, width, false));
+    }
+}
+
+// A permute's EVEX form at `width` bytes (#1840), by its kind past BUSTER_IR_INTRINSIC_PERMUTE and the IR's flags, or
+// X86_FORM_NONE where it has none (a doubleword's or a quadword's variable permute of 16 bytes, a quadword's of 32, a
+// shuffle of 16-byte lanes of 16 bytes), which leaves its node no candidate: vpermb to vpermq by the lanes' size, vpshufb,
+// valignd or valignq by the lanes' size, and vshufi64x2.
+static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_t width)
+{
+    static const uint16_t permutes[4][3] = {
+        { X86_FORM_VPERMB_X_X_XM128, X86_FORM_VPERMB_Y_Y_YM256, X86_FORM_VPERMB_Z_Z_ZM512 },
+        { X86_FORM_VPERMW_X_X_XM128, X86_FORM_VPERMW_Y_Y_YM256, X86_FORM_VPERMW_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_VPERMD_Y_Y_YM256_EVEX, X86_FORM_VPERMD_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_VPERMQ_Z_Z_ZM512 },
+    };
+    static const uint16_t shuffles[3] = { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 };
+    static const uint16_t aligns[2][3] = {
+        { X86_FORM_VALIGND_X_X_XM128_IMM8, X86_FORM_VALIGND_Y_Y_YM256_IMM8, X86_FORM_VALIGND_Z_Z_ZM512_IMM8 },
+        { X86_FORM_VALIGNQ_X_X_XM128_IMM8, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, X86_FORM_VALIGNQ_Z_Z_ZM512_IMM8 },
+    };
+    static const uint16_t lanes[3] = { X86_FORM_NONE, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, X86_FORM_VSHUFI64X2_Z_Z_ZM512_IMM8 };
+    const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+    uint16_t form = X86_FORM_NONE;
+    if (index < 3)
+    {
+        form = kind == 0 && flags <= 3                         ? permutes[flags][index] :
+               kind == 1                                       ? shuffles[index] :
+               kind == 2 && (flags >> 4 == 2 || flags >> 4 == 3) ? aligns[(flags >> 4) - 2][index] :
+               kind == 3                                       ? lanes[index] :
+                                                                 X86_FORM_NONE;
+    }
+    return form;
+}
+
+// A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
+// indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
+// and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits).
+static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t kind = (uint32_t)holes->operation;
+    const uint32_t flags = (uint32_t)holes->immediate;
+    const uint8_t left = holes->left & 15;
+    const uint8_t right = holes->right & 15;
+    const X86Instruction record = {
+        .form = tier1_select_permute_form(kind, flags, holes->width),
+        .reg = holes->destination & 15,
+        .vvvv = kind == 0 ? right : left,
+        .rm = kind == 0 ? left : right,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .immediate = kind == 2 ? (int32_t)(flags & 15) : kind == 3 ? (int32_t)flags : 0,
+    };
+    tier1_select_append(result, record);
+}
+
 static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t type = holes->source_width;
@@ -1722,6 +1827,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_scalar_splat(&result, holes);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_WIDTH_CHANGE)
+        {
+            tier1_select_width_change(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_PERMUTE)
+        {
+            tier1_select_permute(&result, holes);
+        }
         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
             tier1_select_sse_vector(&result, holes, destination);
@@ -1791,6 +1904,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const bool real = ir_simd_lane_floating((IrSimdLane)lane);
             const uint32_t condition = holes->condition < (real ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) ? holes->condition : IR_EQ;
             const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : 2;
+            // A masked comparison's writemask (#1847), its third value's opmask register: none, k0's encoding, without one.
             const X86Instruction record = {
                 .form = tier1_select_lane_compares[lane][!real && condition >= IR_ULT][index],
                 .reg = (uint8_t)(destination & 7),
@@ -1798,6 +1912,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .rm = right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .immediate = real ? floating[condition] : predicates[condition],
+                .decorations = (uint8_t)(holes->third & BUSTER_X86_DECORATION_MASK),
             };
             tier1_select_append(&result, record);
         }
@@ -2283,6 +2398,14 @@ struct Tier1SelectPattern
     // An ordinary I32 ALU operation writes its wrapping result first, then establishes signed 64-bit storage once.
     bool sign_result;
 };
+
+// The fixed registers of a node's pattern (#1839): an asm body's general registers it touches (TIER1_RULE_ASM), or its
+// rule's (tier1_select_fixed_registers).
+static uint32_t tier1_select_node_fixed(const IrFunction* function, const Tier1SelectPattern* pattern)
+{
+    const bool body = pattern->rule == TIER1_RULE_ASM && pattern->immediate < function->asm_body_count;
+    return body ? function->asm_bodies[pattern->immediate].touched & 0xffffu : tier1_select_fixed_registers(pattern->rule);
+}
 
 typedef struct Tier1SelectPlan Tier1SelectPlan;
 struct Tier1SelectPlan
@@ -3100,11 +3223,16 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // The most parts a result has (#1624): a vector's split across xmm0 to xmm3.
 #define BUSTER_TIER1_SELECT_RESULT_PARTS 4u
+// The red zone's 8-byte slots, its 128 bytes below rsp, where a function's own result parts wait on the way out
+// (tier1_emit_cfg_aggregate_result, #1847): a split vector's four 32-byte parts or two 64-byte ones take all 16.
+#define BUSTER_TIER1_SELECT_RED_ZONE_SLOTS 16u
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
 // (#141), or a vector's wider than the target's registers (#1624, tier0_vector_result_parts' shape, #1193): split
-// across the first two or four vector registers, 16 or 32 bytes each (xmm's without AVX, ymm's with it), part k at byte
-// k * part_bytes of its object. None for any other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
+// across the first two or four vector registers, 16, 32 or 64 bytes each (xmm's without AVX, ymm's with it, zmm's with
+// AVX512F: a 128-byte vector's), part k at byte k * part_bytes of its object, as long as the parts fit the red zone's
+// slots, where the function's own return stages them (#1847: a 256-byte vector's four zmm parts don't). None for any
+// other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
 static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
 {
     uint32_t vectors = 0;
@@ -3118,7 +3246,8 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
         rest = rest && result.registers[k] == BUSTER_ABI_REGISTER_NONE;
     }
     const bool split = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && (vectors == 2 || vectors == 4) && rest &&
-                       (result.part_bytes == 16 || result.part_bytes == 32) && size == vectors * result.part_bytes;
+                       (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64) && size == vectors * result.part_bytes &&
+                       vectors * tier1_select_part_slots(result.part_bytes) <= BUSTER_TIER1_SELECT_RED_ZONE_SLOTS;
     const bool registers = !split && result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
     uint32_t count = registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
     for (uint32_t k = 0; split && k < vectors; k += 1)
@@ -3130,7 +3259,8 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
 }
 
 // The first red-zone staging slot of result part k (#1624): the slots of the parts before it, each a whole vector
-// register's bytes' or an eightbyte's one (tier1_select_part_slots).
+// register's bytes' or an eightbyte's one (tier1_select_part_slots). Of k = the part count, the slots they all take,
+// which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds (tier1_select_result_staged).
 static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t k)
 {
     uint32_t slot = 0;
@@ -3139,6 +3269,14 @@ static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t 
         slot += tier1_select_part_slots(parts[j].bytes);
     }
     return slot;
+}
+
+// Whether a function's own result parts, `count` of them, fit the red zone's slots, as its return stages them all at
+// once (#1847, the #1645 review's bound): tier1_select_result_parts admits no other, and its consumer and the code's
+// certificate refuse one.
+static bool tier1_select_result_staged(const Tier1SelectPart* parts, uint32_t count)
+{
+    return count <= BUSTER_TIER1_SELECT_RESULT_PARTS && tier1_select_result_slot(parts, count) <= BUSTER_TIER1_SELECT_RED_ZONE_SLOTS;
 }
 
 // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
@@ -3279,11 +3417,31 @@ static uint32_t tier1_select_call_staging_slots(const IrFunction* function, cons
 
 // Whether `node` calls a function (#141): an IR_CALL of a symbol or an IR_CALL_INDIRECT, which the consumers' calls take
 // (saves around it, argument moves, the outgoing area), not an IR row call (IrCall.row), which runs a machine row in
-// place of a callee (TIER1_RULE_ROW) and saves nothing around it.
+// place of a callee (TIER1_RULE_ROW) and saves nothing around it, nor a body call (IrCall.body, #1839), which runs an
+// asm body there (TIER1_RULE_ASM).
 static bool tier1_select_function_call(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
-    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0);
+    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0);
+}
+
+// Whether `node` is a body call (#1839, IrCall.body), whose asm body the CFG consumer writes in its place.
+static bool tier1_select_body_call(const IrFunction* function, uint32_t node)
+{
+    return node < function->instruction_count && function->op[node] == IR_CALL && function->calls[function->b[node]].body != 0;
+}
+
+// Whether the CFG consumer writes a body call's asm body (#1839, TIER1_RULE_ASM): its block, where it has one, an
+// IR_STACK_ADDR of a frame object, whose place in the frame its records' block base becomes, and none of the registers
+// that hold the frame (rsp, rbp, r15) among those it touches, as the producer has them (tier0_asm_bodies_check).
+static bool tier1_select_asm_supported(const IrFunction* function, uint32_t node)
+{
+    const IrCall* call = tier1_select_body_call(function, node) ? &function->calls[function->b[node]] : 0;
+    const IrAsmBody* body = call != 0 && call->body <= function->asm_body_count ? &function->asm_bodies[call->body - 1] : 0;
+    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    const uint32_t frame = (1u << X86_REGISTER_RSP) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R15);
+    return body != 0 && call->argument_count <= 1 && (call->argument_count == 0 || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR)) &&
+           (body->touched & frame) == 0;
 }
 
 // Which of a machine row's operands its records write (#141, a bit per operand), through a field that names the operand's
@@ -3516,7 +3674,8 @@ static bool tier1_select_row_supported(const IrFunction* function, uint32_t node
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
     // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
-    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT) && function->calls[function->b[node]].row == 0;
+    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT) && function->calls[function->b[node]].row == 0 &&
+                     function->calls[function->b[node]].body == 0;
     if (supported)
     {
         const IrCall call = function->calls[function->b[node]];
@@ -3968,6 +4127,17 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
     return address;
 }
 
+// Whether `value`, an operand of `node`'s AND of masks, is a comparison into a mask that the AND's pattern takes as its
+// own under the other operand as its writemask (#1847): a vector comparison of the AND's mask type (the lanes' mask) and
+// one of its predicates, which only the AND reads, in its block.
+static bool tier1_select_masked_compare(const Tier1SelectForest* forest, uint32_t node, uint32_t value)
+{
+    const IrFunction* function = forest->function;
+    const bool compare = value < function->instruction_count && function->op[value] == IR_VCMP && function->type[value] == function->type[node] &&
+                         function->c[value] < IR_PREDICATE_COUNT && function->a[value] < function->instruction_count;
+    return compare && tier1_select_vector_width(function->type[function->a[value]]) != 0 && tier1_select_tree_child(forest, node, value);
+}
+
 // The memory operand of `node`'s access through `pointer`, in values[first] and values[first + 1] (its base and index),
 // with its scale and displacement. Returns whether the walk took anything.
 static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
@@ -4027,7 +4197,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SPLAT))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4063,6 +4233,40 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_INSERT)
+        {
+            // A width change (#1840): the other vector's width, and the part in the IR's flags.
+            const uint32_t other = c == BUSTER_IR_INTRINSIC_INSERT ? b : a;
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_WIDTH_CHANGE;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTRACT);
+            base.source_width = other < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[other]) : 0;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            if (c == BUSTER_IR_INTRINSIC_INSERT)
+            {
+                base.values[1] = b;
+            }
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+        {
+            // A permute (#1840): its immediate in the IR's flags; no candidate where its width has no form.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_PERMUTE;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_PERMUTE);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
         }
         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
         {
@@ -4147,6 +4351,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A comparison into a mask ANDed with another mask (#1847: the IR's form of a masked comparison's row,
+        // ir_simd_typed_compare_mask, whose writemask isn't every lane, ir_typed_unmasked): the comparison under that mask
+        // as its writemask, `{k}`, which leaves 0 in the lanes the writemask doesn't have, one vpcmp or vcmpps as the
+        // row's was. The comparison is the AND's tree child, either operand, the left one first.
+        const uint32_t compared = op != IR_AND ? BUSTER_IR_NONE : tier1_select_masked_compare(forest, node, a) ? a : tier1_select_masked_compare(forest, node, b) ? b : BUSTER_IR_NONE;
+        if (compared != BUSTER_IR_NONE)
+        {
+            Tier1SelectPattern masked = base;
+            masked.rule = TIER1_RULE_VECTOR;
+            masked.width = (uint8_t)tier1_select_vector_width(function->type[function->a[compared]]);
+            masked.scale = BUSTER_TIER1_VECTOR_COMPARE;
+            masked.condition = (uint8_t)function->c[compared];
+            masked.source_width = function->flags[compared];
+            masked.values[0] = function->a[compared];
+            masked.values[1] = function->b[compared];
+            masked.values[2] = compared == a ? b : a;
+            tier1_select_fold(forest, node, compared, &masked);
+            tier1_select_add_candidate(forest, node, &candidates, masked);
+        }
     }
     else if (mask_width != 0 && op == IR_NOT)
     {
@@ -5114,6 +5337,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
+    else if (op == IR_CALL && function->calls[b].body != 0 && tier1_select_asm_supported(function, node))
+    {
+        // An asm body (#1839): its records in the node's place, its operand block the frame object its argument addresses.
+        base.rule = TIER1_RULE_ASM;
+        base.immediate = function->calls[b].body - 1;
+        base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_CALL && function->calls[b].row != 0 && tier1_select_row_supported(function, node))
     {
         // A machine row (#141): its records, its operands' moves and its result's.
@@ -5496,7 +5727,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     {
         const uint32_t op = function->op[node];
         const bool row_call = op == IR_CALL && function->calls[function->b[node]].row != 0;
-        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !(row_call ? tier1_select_row_supported(function, node) : tier1_select_call_supported(function, node))))
+        const bool body_call = tier1_select_body_call(function, node);
+        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) &&
+                                !(row_call ? tier1_select_row_supported(function, node) : body_call ? tier1_select_asm_supported(function, node) : tier1_select_call_supported(function, node))))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }

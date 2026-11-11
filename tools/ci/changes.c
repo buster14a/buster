@@ -20,15 +20,18 @@
 //   change to such a step;
 // - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`.
 //
-// A push sets code alone and measure to all: its pull request's run measured what it changes. A push given its first-parent
-// change (the nightly mode's, docs/ci.md) is targeted instead: it decides as a pull request on that change, but code is
-// always true: every main revision needs full hosted correctness, including documentation-only changes (#1271), and
+// A push sets code alone and measure to all. A push given its first-parent change (the nightly mode's, docs/ci.md) is
+// targeted instead: it decides as a pull request on that change, but code is always true: every main revision runs its
+// own hosted rows, including documentation-only changes (#1271; plain alone in the nightly mode, #2057), and
 // a push of several commits can bring code that its head's own change doesn't show. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
-// main's trigger and full hosted scope (changes_main_policy), and the hosted test job's shards, its list and N alike
-// (changes_shard_policy). The selector is CI tooling outside the compile path and has no vector path: it reads a few
-// hundred lines and files.
+// main's trigger and the hosted scope the evidence job decides (changes_main_policy), the hosted rows' workflow
+// (.github/workflows/hosted-correctness.yml, which the test job calls for each row: changes_row_policy) and its shards,
+// their list, their N and the counts the test job gives each row alike (changes_shard_policy), and the vector row's probe, target and claims against host_isa.h's
+// predicate and the build's flags (changes_vector_policy, #2033). The row workflow's steps are not the selector's: a
+// change to that file runs the steps it gates on an output (the performance readers' qualification). The selector is CI
+// tooling outside the compile path and has no vector path: it reads a few hundred lines and files.
 //
 // Layout: Text and Arena; reading files; ChangesTables (changes_modules, changes_benchmarks); the workflow's steps
 // (changes_split_steps); a unit's include closure (changes_includes); changes_decide; changes_print; the self-test;
@@ -50,6 +53,14 @@
 #define BUSTER_CHANGES_ARENA_BYTES (UINT64_C(1) << 32)
 #define BUSTER_CHANGES_PATH_BYTES 4096
 #define BUSTER_CHANGES_WORKFLOW ".github/workflows/9700x.yml"
+// The hosted correctness row that 9700x.yml's test job calls: its shards, and the build of a portable row's compiler.
+#define BUSTER_CHANGES_ROW_WORKFLOW ".github/workflows/hosted-correctness.yml"
+#define BUSTER_CHANGES_ROW_WORKFLOW_USES "./" BUSTER_CHANGES_ROW_WORKFLOW
+// The test job's rows: both host architectures, the vector row in place of `native` on pull requests (#2033).
+#define BUSTER_CHANGES_HOST_ARCHES "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\", \"vector\"]' || '[\"x86-64\", \"native\"]') }}"
+// The host predicate, the build's explicit vector target and the vector row's probe of it (changes_vector_policy).
+#define BUSTER_CHANGES_HOST_ISA "src/buster/compiler/host_isa.h"
+#define BUSTER_CHANGES_SETTINGS "cmake/BusterSettings.cmake"
 
 typedef struct Text Text;
 struct Text
@@ -304,7 +315,7 @@ static const ChangesModule changes_modules[] = {
     },
     {
         .name = "parser_bindings",
-        .sources = "c_parser|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
+        .sources = "c_parser(_impl)?|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
     },
     {
         .name = "environments",
@@ -374,7 +385,7 @@ static const ChangesModule changes_modules[] = {
     {
         .name = "compile_time",
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
-                   "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
+                   "compile_measure|baked|c_check_input|c_checker|c_parser(_impl)?|lane|c_check_program",
     },
     // #138's and #1189's programs, speedtest1 and Lua's scripts, by both tiers, clang -O0 and -O2 and tcc
     // (measure-tier1-programs): where Tier 1's input or pipeline changes what --tier1 compiles them to (the checker's
@@ -426,7 +437,7 @@ struct ChangesBenchmark
 static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "assembler",
-        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
+        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor(_history)?(_impl)?|c_refine|lane|link|"
                    "object_writer|x86_64_encoder|x86_match|x86_semantics|x86_target[a-z0-9_]*",
     },
     {
@@ -485,21 +496,21 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "checker-bindings",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-deferred",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
@@ -538,8 +549,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "gnu",
-        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser|c_parser_binding_trace|"
-                   "c_predefines|c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
+        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser(_impl)?|c_parser_binding_trace|"
+                   "c_predefines|c_preprocessor(_history)?(_impl)?|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "import",
@@ -613,7 +624,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "parser-bindings",
         .sources = "c_bindings[a-z0-9_]*|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines|"
-                   "c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
+                   "c_preprocessor(_history)?(_impl)?|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "preprocessor",
@@ -638,7 +649,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "streaming",
-        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
+        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable(_impl)?|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
                    "c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
@@ -1288,8 +1299,10 @@ static ChangesResult changes_decide(const ChangesInput* input)
         result.fixed[CHANGES_FOREIGN] = changes_files_match("src/buster/compiler/", "foreign_benchmark", "\\.c", files);
         result.fixed[CHANGES_BRANCH_SIZING] = changes_files_match("src/buster/compiler/", "x86_64_encoder|branch_sizing(_benchmark|_generate)?", "\\.c", files);
         // The qualification's inputs: the readers and tools, the schema, and the pages the publisher reads at the
-        // pull request's commit (tools/performance/publish.c).
-        result.fixed[CHANGES_PERFORMANCE] = changes_files_match("", "tools/performance|docs/performance|web/perf", "/.*", files);
+        // pull request's commit (tools/performance/publish.c); and its steps and harnesses' pin, which are the hosted
+        // row workflow's, whose steps the selector doesn't read: any change to that file runs them.
+        result.fixed[CHANGES_PERFORMANCE] = changes_files_match("", "tools/performance|docs/performance|web/perf", "/.*", files) ||
+                                            list_contains(files, text_c(BUSTER_CHANGES_ROW_WORKFLOW));
         // benchmark-preprocessor's `clang -E` (--clang): clang's times, which only its harness changes.
         result.fixed[CHANGES_PREPROCESSOR_CLANG] = changes_files_match("src/buster/compiler/", "c_preprocessor_benchmark", "\\.c", files);
         TextList measured = { 0 };
@@ -1597,6 +1610,12 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_false = "checker",
     },
     {
+        .name = "the hosted row workflow holds the readers' qualification steps and their harnesses' pin",
+        .files = BUSTER_CHANGES_ROW_WORKFLOW,
+        .outputs_true = "code performance",
+        .outputs_false = "checker baselines foreign",
+    },
+    {
         .name = "Tier 1's program measurement: its harness, its timing and Tier 1's input and pipeline",
         .files = "src/buster/compiler/tier1_programs_measure.c src/buster/compiler/profile.c src/buster/compiler/c_check_program_lower.c "
                  "src/buster/compiler/tier1_select.c src/buster/compiler/ir_lower.c",
@@ -1708,6 +1727,15 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "parser-bindings",
     },
     {
+        .name = "the parser implementation keeps the parser, binding and compile campaigns",
+        .files = "src/buster/compiler/c_parser_impl.c",
+        .outputs_true = "code parser_bindings compile_time",
+        .outputs_false = "checker checker_bindings checker_binding_modes preprocessor_clang",
+        .measured = "parser parser-bindings gnu checker-source checker-bindings checker-deferred backend-source "
+                    "check-debug check-lanes ir-source lowering-source",
+        .unmeasured = "lexer preprocessor x86-encoder",
+    },
+    {
         .name = "a digit in a module's name",
         .files = "src/buster/compiler/x86_zen5.c",
         .outputs_true = "zen5",
@@ -1733,6 +1761,29 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/c_preprocessor.c",
         .outputs_false = "preprocessor_clang",
         .measured = "preprocessor",
+    },
+    {
+        .name = "the preprocessor implementation keeps its runtime consumers",
+        .files = "src/buster/compiler/c_preprocessor_impl.c",
+        .outputs_true = "code",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor parser parser-bindings gnu assembler checker-source backend-source",
+        .unmeasured = "lexer x86-encoder",
+    },
+    {
+        .name = "the history implementation keeps diagnostics and source consumers",
+        .files = "src/buster/compiler/c_preprocessor_history_impl.c",
+        .outputs_true = "code",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor parser parser-bindings gnu assembler checker-source backend-source",
+        .unmeasured = "lexer x86-encoder",
+    },
+    {
+        .name = "the executable implementation keeps writer and transitive consumer measurements",
+        .files = "src/buster/compiler/executable_impl.c",
+        .outputs_true = "code",
+        .measured = "executable snapshot link streaming foreign-strings checker-source checker-bindings checker-deferred",
+        .unmeasured = "lexer preprocessor parser",
     },
     {
         .name = "the preprocessor benchmark's harness, which times clang -E",
@@ -2099,7 +2150,7 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
     changes_expect(test, strcmp(changes_measure(&result), "all") == 0, "the host ISA header measures all", (Text){ 0 });
 
     ChangesInput added = {
-        .files = changes_words(BUSTER_CHANGES_WORKFLOW),
+        .files = changes_words(BUSTER_CHANGES_WORKFLOW " " BUSTER_CHANGES_ROW_WORKFLOW),
         .base_workflow = { .data = "", .length = 0 },
         .head_workflow = workflow,
         .root = root,
@@ -2545,14 +2596,18 @@ static void changes_test_split(ChangesTest* test)
 // dispatch may skip its hosted rows only where that job found its commit's own earlier run had passed them (`reused`);
 // and skip fuzzing only in the plain scope, as a pull request does. A pull request's 9700X job skips the native
 // correctness step (#1272); every other run's runs it before the measurements. Nightly backlog runs reuse the oracle cache, as
-// pull requests do; the snapshot's comprehensive run checks it, as the daily run did.
+// pull requests do; the snapshot's comprehensive run checks it, as the daily run did. The hosted rows are the row
+// workflow's jobs (`row`), which the test job calls for both host architectures: its shards check the oracle cache, and
+// they and the build of a shared compiler check out the triggering revision.
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
-static bool changes_oracle_policy(Text workflow)
+static bool changes_oracle_policy(Text workflow, Text row)
 {
     uint32_t job = 0;
     bool hosted_check = false;
     bool hosted_variants = false;
-    bool hosted_revision = false;
+    bool hosted_calls = false;
+    bool build_revision = false;
+    bool shard_revision = false;
     bool native_needs = false;
     bool native_success = false;
     bool native_modes = false;
@@ -2576,9 +2631,8 @@ static bool changes_oracle_policy(Text workflow)
         {
             job = 0;
         }
-        hosted_check |= job == 1 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
-        hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
-        hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        hosted_variants |= job == 1 && text_equal_c(line, BUSTER_CHANGES_HOST_ARCHES);
+        hosted_calls |= job == 1 && text_equal_c(line, "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES);
         native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, evidence, test, fuzz]");
         native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}");
         native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}");
@@ -2587,12 +2641,47 @@ static bool changes_oracle_policy(Text workflow)
         native_step |= job == 2 && after_native_id && text_equal_c(line, "        if: github.event_name != 'pull_request'");
         after_native_id = job == 2 && (text_equal_c(line, "        id: native") || (after_native_id && comment));
     }
-    return hosted_check && hosted_variants && hosted_revision && native_needs && native_success && native_modes && native_revision && native_step;
+    offset = 0;
+    job = 0;
+    while (text_next_line(row, &offset, &line))
+    {
+        if (line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
+        {
+            job = text_equal_c(line, "  compiler:") ? 1 : text_equal_c(line, "  shards:") ? 2 : 0;
+        }
+        else if (line.length > 0 && line.data[0] != ' ' && line.data[0] != '#')
+        {
+            job = 0;
+        }
+        hosted_check |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
+        build_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        shard_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
+    }
+    return hosted_check && hosted_variants && hosted_calls && build_revision && shard_revision && native_needs && native_success && native_modes && native_revision && native_step;
 }
 
-static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
+// The text with its first `before` from `from` on replaced by `after`, and whether there was one: a mutant for the
+// policies' counterexamples.
+static Text changes_mutant(Text text, const char* from, const char* before, const char* after, bool* found)
 {
-    changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
+    const char* original = text_terminated(text);
+    const char* section = from != NULL ? strstr(original, from) : original;
+    const char* at = section != NULL ? strstr(section, before) : NULL;
+    Text changed = text;
+    *found = at != NULL;
+    if (at != NULL)
+    {
+        const size_t prefix = (size_t)(at - original);
+        const size_t suffix = prefix + strlen(before);
+        changed = text_concat(text_concat((Text){ .data = text.data, .length = prefix }, text_c(after)),
+                              (Text){ .data = text.data + suffix, .length = text.length - suffix });
+    }
+    return changed;
+}
+
+static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text row)
+{
+    changes_expect(test, changes_oracle_policy(workflow, row), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
     const char* source = text_terminated(workflow);
     changes_expect(test, strstr(source, "    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]") != NULL, "draft transitions trigger a fresh current-revision run", (Text){ 0 });
     changes_expect(test, strstr(source, "tools/ci/qualification.c") != NULL && strstr(source, "PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}") != NULL, "aggregate qualification uses the tested draft-aware policy", (Text){ 0 });
@@ -2600,10 +2689,27 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
     {
         const char* before;
         const char* after;
-    } mutants[] = {
+    } row_mutants[] = {
         { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
-        { "        host_arch: [x86-64, native]", "        host_arch: [native]" },
-        { "        host_arch: [x86-64, native]", "        host_arch: [x86-64]" },
+        { "\n  shards:\n", "\n  tests:\n" },
+    };
+    for (uint32_t i = 0; i < sizeof(row_mutants) / sizeof(row_mutants[0]); i += 1)
+    {
+        bool found = false;
+        Text changed = changes_mutant(row, NULL, row_mutants[i].before, row_mutants[i].after, &found);
+        changes_expect(test, found && !changes_oracle_policy(workflow, changed), "oracle policy rejects a weakened hosted row", text_c(row_mutants[i].before));
+    }
+    static const struct
+    {
+        const char* before;
+        const char* after;
+    } mutants[] = {
+        { "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES, "    uses: ./.github/workflows/absent.yml" },
+        { "'[\"x86-64\", \"native\"]'", "'[\"native\"]'" },
+        { "'[\"x86-64\", \"native\"]'", "'[\"x86-64\"]'" },
+        { "'[\"x86-64\", \"vector\"]'", "'[\"vector\"]'" },
+        { "'[\"x86-64\", \"vector\"]'", "'[\"x86-64\"]'" },
+        { "github.event_name == 'pull_request' && '[\"x86-64\", \"vector\"]'", "github.event_name != 'push' && '[\"x86-64\", \"vector\"]'" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: changes" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: [changes, evidence, test]" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: [changes, test, fuzz]" },
@@ -2642,29 +2748,32 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
             changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
                                   (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
         }
-        changes_expect(test, found != NULL && !changes_oracle_policy(changed), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
+        changes_expect(test, found != NULL && !changes_oracle_policy(changed, row), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
     }
-    const char* jobs[] = { "\n  test:\n", "\n  benchmarks:\n" };
-    const char* revision = "          ref: ${{ github.sha }}";
+    // Each job's first checkout, until the next job: the row's build and shards, and the 9700X job.
+    static const struct
+    {
+        bool row;
+        const char* job;
+    } jobs[] = {
+        { true, "\n  compiler:\n" },
+        { true, "\n  shards:\n" },
+        { false, "\n  benchmarks:\n" },
+    };
     for (uint32_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); i += 1)
     {
-        const char* job = strstr(original, jobs[i]);
-        const char* found = job != NULL ? strstr(job, revision) : NULL;
-        Text changed = workflow;
-        if (found != NULL)
-        {
-            const size_t prefix = (size_t)(found - original);
-            const size_t suffix = prefix + strlen(revision);
-            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c("          ref: main")),
-                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
-        }
-        changes_expect(test, found != NULL && !changes_oracle_policy(changed), "oracle policy rejects a different tested revision", text_c(jobs[i]));
+        bool found = false;
+        Text changed = changes_mutant(jobs[i].row ? row : workflow, jobs[i].job, "          ref: ${{ github.sha }}", "          ref: main", &found);
+        const bool valid = jobs[i].row ? changes_oracle_policy(workflow, changed) : changes_oracle_policy(changed, row);
+        changes_expect(test, found && !valid, "oracle policy rejects a different tested revision", text_c(jobs[i].job));
     }
 }
 
-// Every main push, including documentation alone, runs the full hosted scope (#1271). Keep its unfiltered trigger
-// and per-run concurrency separate from a PR's replaceable queue. The evidence glue tests pin scope=full/hosted=run
-// for pushes; here the workflow must consume those decisions without reducing the matrix or suppressing fuzzing.
+// Every main push, including documentation alone, runs its own hosted rows (#1271): every row before the nightly mode,
+// the plain rows in it (#2057, until the merge queue carries the full suite; the nightly snapshot runs the sanitizer
+// rows and fuzzing). Keep its unfiltered trigger and per-run concurrency separate from a PR's replaceable queue. The
+// evidence glue tests pin scope and hosted=run for pushes; here the workflow must consume those decisions without
+// reducing the matrix or suppressing fuzzing for a full scope.
 // This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
 static bool changes_main_policy(Text workflow)
 {
@@ -2679,13 +2788,13 @@ static bool changes_main_policy(Text workflow)
         { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
         { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
         { 1, "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]" },
-        { 1, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
+        { 1, "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES },
+        { 1, "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
         { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
         { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
-        { 1, "        host_arch: [x86-64, native]" },
-        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}" },
-        { 1, "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}" },
-        { 1, "          ref: ${{ github.sha }}" },
+        { 1, BUSTER_CHANGES_HOST_ARCHES },
+        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
+        { 1, "        optimization: [3]" },
         { 2, "    needs: [changes, evidence, prepare-hosted-tools]" },
         { 2, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
         { 2, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}" },
@@ -2773,11 +2882,15 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  test:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "tests accept skipped preparation" },
         { "  test:", "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]", "    needs: [changes, evidence, agent-guide-size, dco-hooks]", "tests omit preparation dependency" },
         { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
-        { "  test:", "        host_arch: [x86-64, native]", "        host_arch: [native]", "missing baseline architecture" },
-        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\"]') }}", "missing memory sanitizer" },
-        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
-        { "  test:", "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}", "          ${{ fromJSON('[]') }}", "missing O1 sanitizer rows" },
-        { "  test:", "          ref: ${{ github.sha }}", "          ref: main", "moving hosted revision" },
+        { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"native\"]'", "missing baseline architecture" },
+        { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"x86-64\", \"vector\"]'", "main's native row replaced before its qualification" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"thread\", \"memory\"]') }}", "missing address sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"memory\"]') }}", "missing thread sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\"]') }}", "missing memory sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
+        { "  test:", "        optimization: [3]", "        optimization: [1]", "missing O3 optimization" },
+        { "  test:", "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES, "    uses: ./.github/workflows/absent.yml", "missing hosted row workflow" },
+        { "  test:", "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}", "      hosted-tools: ''", "rows without the verified preparation" },
         { "  fuzz:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "native reuse suppresses fuzzing" },
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success' && ", "", "fuzzing bypasses preparation failure" },
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "fuzzing accepts skipped preparation" },
@@ -2805,89 +2918,468 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
     }
 }
 
-// The hosted test job's shards (docs/ci.md): its matrix's `shard: [1, ..., N]`, consecutive from 1, and the same N in the
-// job's name (`shard ${{ matrix.shard }} of N)`), in the run step's `--shard "${{ matrix.shard }}/N"`, and in the O1
-// rows' include entries, shards 1 to N of each architecture. `parallel --shard K/N` deals the inventory to N shards, so a
-// list and an N that disagree would leave a shard's commands unrun (or run some twice) with every job green.
-static bool changes_shard_policy(Text workflow)
+// The hosted rows' workflow, which the test job calls for each row (#2032; docs/ci.md, "Shared row products"). Both its
+// jobs take the row's settings from the workflow's environment and check out the triggering commit with the verified
+// hosted inputs. A portable row's (x86-64, never native) compiler is built once, by `hosted-product.sh build`, after the
+// ownership check on its tree, packed with its identity and published under the attempt's name and the archive's
+// SHA-256. Its shards require that build's success, check the archive against its SHA-256 and install it with
+// `hosted-product.sh install`, and a native row's shards build their own. Nothing comes from a cache or another run.
+// This pins the repository's YAML spelling, as the other policies do; it is not a general YAML evaluator.
+static bool changes_row_policy(Text row)
 {
-    const char* text = text_terminated(workflow);
-    const char* job = strstr(text, "\n  test:\n");
-    const char* next = job != NULL ? strstr(job + 1, "\n  fuzz:\n") : NULL;
-    const size_t length = next != NULL ? (size_t)(next - job) : 0;
-    static const char list[] = "\n        shard: [";
-    const char* found = length != 0 ? memmem(job, length, list, sizeof(list) - 1) : NULL;
-    uint32_t shards = 0;
-    bool valid = found != NULL;
-    const char* at = valid ? found + sizeof(list) - 1 : NULL;
-    // The list's numbers, each the next from 1, separated by ", " and closed by "]".
-    while (valid && *at != ']')
-    {
-        char* end = NULL;
-        const unsigned long value = *at >= '0' && *at <= '9' ? strtoul(at, &end, 10) : 0;
-        valid = value == (unsigned long)shards + 1 && end != NULL && (*end == ']' || (end[0] == ',' && end[1] == ' '));
-        shards += valid;
-        at = valid ? (*end == ']' ? end : end + 2) : at;
-    }
-    valid = valid && shards != 0 && at[1] == '\n';
-    char pattern[160];
-    snprintf(pattern, sizeof(pattern), "shard ${{ matrix.shard }} of %u)", shards);
-    valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
-    snprintf(pattern, sizeof(pattern), "--shard \"${{ matrix.shard }}/%u\"", shards);
-    valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
-    // The O1 rows: each architecture's shards 1 to N, and no other O1 entry.
-    static const char* const architectures[] = { "x86-64", "native" };
-    for (uint32_t a = 0; valid && a < sizeof(architectures) / sizeof(architectures[0]); a += 1)
-    {
-        for (uint32_t k = 1; valid && k <= shards; k += 1)
-        {
-            snprintf(pattern, sizeof(pattern), "{\"host_arch\": \"%s\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": %u}", architectures[a], k);
-            valid = memmem(job, length, pattern, strlen(pattern)) != NULL;
-        }
-    }
-    static const char entry[] = "\"optimization\": 1, \"shard\": ";
-    uint32_t entries = 0;
-    for (const char* e = valid ? memmem(job, length, entry, sizeof(entry) - 1) : NULL; e != NULL;
-         e = memmem(e + 1, length - (size_t)(e + 1 - job), entry, sizeof(entry) - 1))
-    {
-        entries += 1;
-    }
-    return valid && entries == shards * (uint32_t)(sizeof(architectures) / sizeof(architectures[0]));
-}
-
-static void changes_test_shard_policy(ChangesTest* test, Text workflow)
-{
-    changes_expect(test, changes_shard_policy(workflow), "shard policy: the test job's shard list, its N and the O1 rows' shards agree", (Text){ 0 });
     static const struct
     {
+        uint32_t job;
+        const char* line;
+    } required[] = {
+        { 0, "  workflow_call:" },
+        { 0, "  BUSTER_HOST_ARCH: ${{ inputs.host_arch }}" },
+        { 0, "  BUSTER_SANITIZER: ${{ inputs.sanitizer }}" },
+        { 0, "  BUSTER_SANITIZER_OPTIMIZATION: ${{ inputs.optimization }}" },
+        { 1, "    if: inputs.host_arch == 'x86-64'" },
+        { 1, "      artifact: ${{ steps.name.outputs.artifact }}" },
+        { 1, "      digest: ${{ steps.pack.outputs.digest }}" },
+        { 1, "          ref: ${{ github.sha }}" },
+        { 1, "          artifact-name: ${{ inputs.hosted-tools }}" },
+        { 1, "        run: bash tools/ci/hosted-product.sh build" },
+        { 1, "        run: bash tools/ci/hosted-product.sh ownership" },
+        { 1, "        run: bash tools/ci/hosted-product.sh pack \"$RUNNER_TEMP/compiler-product\"" },
+        { 1, "          name: ${{ steps.name.outputs.artifact }}" },
+        { 2, "    needs: compiler" },
+        { 2, "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}" },
+        { 2, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
+        { 2, "          ref: ${{ github.sha }}" },
+        { 2, "          artifact-name: ${{ inputs.hosted-tools }}" },
+        { 2, "          BUILD: ${{ needs.compiler.result }}" },
+        { 2, "          if [ \"$BUILD\" != success ]; then" },
+        { 2, "          name: ${{ needs.compiler.outputs.artifact }}" },
+        { 2, "          DIGEST: ${{ needs.compiler.outputs.digest }}" },
+        { 2, "        run: bash tools/ci/hosted-product.sh install \"$RUNNER_TEMP/compiler-product-download\" \"$DIGEST\"" },
+        { 2, "        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'" },
+        { 2, "        run: bash tools/ci/hosted-product.sh build" },
+    };
+    bool seen[sizeof(required) / sizeof(required[0])] = { false };
+    // 0 outside `jobs:`; in it, 1 the compiler job, 2 the shards, 3 any other.
+    bool jobs = false;
+    uint32_t job = 0;
+    size_t offset = 0;
+    Text line;
+    while (text_next_line(row, &offset, &line))
+    {
+        if (line.length > 0 && line.data[0] != ' ' && line.data[0] != '#')
+        {
+            jobs = text_equal_c(line, "jobs:");
+            job = 0;
+        }
+        else if (jobs && line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
+        {
+            job = text_equal_c(line, "  compiler:") ? 1 : text_equal_c(line, "  shards:") ? 2 : 3;
+        }
+        for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+        {
+            seen[i] |= job == required[i].job && text_equal_c(line, required[i].line);
+        }
+    }
+    bool valid = true;
+    for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+    {
+        valid = valid && seen[i];
+    }
+    // Products stay in their run: no cache, and no download of another run's artifacts.
+    const char* text = text_terminated(row);
+    return valid && strstr(text, "actions/cache") == NULL && strstr(text, "run-id:") == NULL && strstr(text, "github-token:") == NULL;
+}
+
+static void changes_test_row_policy(ChangesTest* test, Text row)
+{
+    changes_expect(test, changes_row_policy(row), "row policy: a portable row's compiler built once, verified by its shards, from this run alone", (Text){ 0 });
+    static const struct
+    {
+        const char* section;
+        const char* before;
+        const char* after;
+        const char* name;
+    } mutants[] = {
+        { "  compiler:", "    if: inputs.host_arch == 'x86-64'", "    if: inputs.host_arch != 'none'", "a native row's product shared" },
+        { "  compiler:", "          ref: ${{ github.sha }}", "          ref: main", "a build of another revision" },
+        { "  compiler:", "          artifact-name: ${{ inputs.hosted-tools }}", "          artifact-name: ''", "a build without the verified preparation" },
+        { "  compiler:", "        run: bash tools/ci/hosted-product.sh ownership", "        run: 'true'", "no ownership check on the build's tree" },
+        { "  compiler:", "      digest: ${{ steps.pack.outputs.digest }}", "      digest: ''", "no digest for the shards" },
+        { "  compiler:", "          name: ${{ steps.name.outputs.artifact }}", "          name: compiler", "a name without the attempt" },
+        { "  shards:", "    needs: compiler", "    needs: []", "shards that don't wait for the build" },
+        { "  shards:", "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}", "    if: ${{ always() && inputs.host_arch != 'vector' }}", "shards after a cancellation" },
+        { "  shards:", "          ref: ${{ github.sha }}", "          ref: main", "shards of another revision" },
+        { "  shards:", "          if [ \"$BUILD\" != success ]; then", "          if [ \"$BUILD\" = failure ]; then", "a skipped build passes" },
+        { "  shards:", "          DIGEST: ${{ needs.compiler.outputs.digest }}", "          DIGEST: ''", "an unchecked digest" },
+        { "  shards:", "\"$RUNNER_TEMP/compiler-product-download\" \"$DIGEST\"", "\"$RUNNER_TEMP/compiler-product-download\" \"$(cat \"$RUNNER_TEMP\"/compiler-product-download/*.sha256)\"", "a digest from the download" },
+        { "  shards:", "          name: ${{ needs.compiler.outputs.artifact }}", "          name: ${{ needs.compiler.outputs.artifact }}\n          run-id: 1", "another run's product" },
+        { "  shards:", "        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'", "        if: false", "native rows unbuilt" },
+        { "env:", "  BUSTER_SANITIZER: ${{ inputs.sanitizer }}", "  BUSTER_SANITIZER: none", "a row's settings not the workflow's" },
+        { "jobs:", "  compiler:", "  compiler:\n    steps:\n      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4", "a cached product" },
+    };
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        bool found = false;
+        Text changed = changes_mutant(row, mutants[i].section, mutants[i].before, mutants[i].after, &found);
+        changes_expect(test, found && !changes_row_policy(changed), "row policy rejects a weakened shared product", text_c(mutants[i].name));
+    }
+}
+
+// The hosted rows' shards (docs/ci.md, #2031): each row runs as many shards as its caller's `shards` input says. The row
+// workflow declares the input (a number, required); its shards job's matrix takes the list 1 to N from a lookup,
+// `shard: ${{ fromJSON('[[], [1], [1, 2], ...]')[inputs.shards] }}`, whose element k must be exactly 1 to k; the job's
+// name (`shard ${{ matrix.shard }} of ${{ inputs.shards }})`) takes the same N, and so does the run step, which the
+// vector row's draws share: `--shard "$BUSTER_SHARD/$shards"`, `shards` the input, or in the vector row its items'
+// count. The shard is the matrix's (`BUSTER_SHARD: ${{ matrix.shard }}`) or, in the vector row's draws, the item its
+// collector assigned a candidate. The test job in 9700x.yml must pass `shards:` an expression whose every number
+// (outside its quoted strings) is one the lookup has. `parallel --shard K/N` deals the inventory to N shards, so
+// disagreeing values would leave commands unrun (or run some twice) with every job green. The vector row's items
+// (BUSTER_VECTOR_ITEMS, #2033) are its N shards, each once, and its first draw starts 3 candidates per item.
+static bool changes_vector_items(const char* text, uint32_t shards)
+{
+    static const char items[] = "\n  BUSTER_VECTOR_ITEMS: '";
+    const char* found = strstr(text, items);
+    bool seen[64] = { false };
+    uint32_t count = 0;
+    bool valid = found != NULL && shards < sizeof(seen) / sizeof(seen[0]);
+    const char* at = valid ? found + sizeof(items) - 1 : NULL;
+    // Each item a shard from 1 to N, once, separated by single spaces and closed by "'".
+    while (valid && *at != '\'')
+    {
+        char* end = NULL;
+        const unsigned long value = *at >= '1' && *at <= '9' ? strtoul(at, &end, 10) : 0;
+        valid = value >= 1 && value <= shards && !seen[value] && end != NULL && (*end == '\'' || (end[0] == ' ' && end[1] != '\''));
+        if (valid)
+        {
+            seen[value] = true;
+            count += 1;
+            at = *end == '\'' ? end : end + 1;
+        }
+    }
+    valid = valid && count == shards && at[1] == '\n';
+    // The first draw's candidates: 1 to 3N.
+    char list[1024] = "\n        candidate: [";
+    size_t length = strlen(list);
+    for (uint32_t candidate = 1; valid && candidate <= 3 * shards && length < sizeof(list) - 16; candidate += 1)
+    {
+        length += (size_t)snprintf(list + length, sizeof(list) - length, candidate == 1 ? "%u" : ", %u", candidate);
+    }
+    snprintf(list + length, sizeof(list) - length, "]\n");
+    const char* draw = strstr(text, "\n  draw-1:\n");
+    const char* next = draw != NULL ? strstr(draw + 1, "\n  collect-1:\n") : NULL;
+    const char* candidates = draw != NULL ? strstr(draw, list) : NULL;
+    return valid && candidates != NULL && next != NULL && candidates < next;
+}
+
+// How many items the vector row's BUSTER_VECTOR_ITEMS names: its words, 0 without the line.
+static uint32_t changes_vector_count(const char* text)
+{
+    static const char items[] = "\n  BUSTER_VECTOR_ITEMS: '";
+    const char* found = strstr(text, items);
+    const char* at = found != NULL ? found + sizeof(items) - 1 : NULL;
+    uint32_t count = 0;
+    while (at != NULL && *at != '\'' && *at != '\n' && *at != 0)
+    {
+        count += *at != ' ' && (at[1] == ' ' || at[1] == '\'');
+        at += 1;
+    }
+    return count;
+}
+
+static bool changes_shard_policy(Text workflow, Text row)
+{
+    const char* text = text_terminated(row);
+    static const char declared[] = "\n      shards:\n        description: ";
+    static const char typed[] = "\n        type: number\n        required: true\n";
+    const char* input = strstr(text, declared);
+    const char* input_end = input != NULL ? strchr(input + sizeof(declared) - 1, '\n') : NULL;
+    bool valid = input_end != NULL && strncmp(input_end, typed, sizeof(typed) - 1) == 0;
+    const char* job = strstr(text, "\n  shards:\n");
+    static const char lookup[] = "\n        shard: ${{ fromJSON('[";
+    const char* found = valid && job != NULL ? strstr(job, lookup) : NULL;
+    const char* at = found != NULL ? found + sizeof(lookup) - 1 : NULL;
+    // The lookup's elements: the first empty, each next one more, `[1, ..., k]`, separated by ", " and closed by "]".
+    uint32_t elements = 0;
+    valid = at != NULL && strncmp(at, "[]", 2) == 0;
+    at = valid ? at + 2 : at;
+    while (valid && strncmp(at, ", [", 3) == 0)
+    {
+        at += 3;
+        elements += 1;
+        for (uint32_t k = 1; valid && k <= elements; k += 1)
+        {
+            char* end = NULL;
+            const unsigned long value = *at >= '0' && *at <= '9' ? strtoul(at, &end, 10) : 0;
+            const char* separator = k < elements ? ", " : "]";
+            valid = value == k && end != NULL && strncmp(end, separator, strlen(separator)) == 0;
+            at = valid ? end + strlen(separator) : at;
+        }
+    }
+    static const char indexed[] = "]')[inputs.shards] }}\n";
+    valid = valid && elements != 0 && strncmp(at, indexed, sizeof(indexed) - 1) == 0;
+    const size_t length = job != NULL ? strlen(job) : 0;
+    static const char name[] = "shard ${{ matrix.shard }} of ${{ inputs.shards }})";
+    static const char count[] = "\n          shards=${{ inputs.shards }}\n"
+                                "          if [ \"$BUSTER_HOST_ARCH\" = vector ]; then\n"
+                                "              read -r -a items <<< \"$BUSTER_VECTOR_ITEMS\"\n"
+                                "              shards=${#items[@]}\n"
+                                "          fi\n";
+    static const char command[] = "--shard \"$BUSTER_SHARD/$shards\"";
+    static const char shard[] = "\n      BUSTER_SHARD: ${{ matrix.shard }}\n";
+    valid = valid && memmem(job, length, name, sizeof(name) - 1) != NULL && memmem(job, length, count, sizeof(count) - 1) != NULL;
+    valid = valid && memmem(job, length, command, sizeof(command) - 1) != NULL && memmem(job, length, shard, sizeof(shard) - 1) != NULL;
+    // The vector row's items: 1 to its count, which the lookup must have too.
+    const uint32_t items = changes_vector_count(text);
+    valid = valid && items >= 1 && items <= elements && changes_vector_items(text, items);
+    // The caller's `shards:`, in the `with:` of the job that uses the row workflow: each number one the lookup has.
+    const char* caller = strstr(text_terminated(workflow), "\n    uses: ./.github/workflows/hosted-correctness.yml\n    with:\n");
+    const char* with_end = caller != NULL ? strstr(caller + 1, "\n\n") : NULL;
+    static const char passed[] = "\n      shards: ${{ ";
+    const char* given = caller != NULL ? strstr(caller, passed) : NULL;
+    valid = valid && given != NULL && (with_end == NULL || given < with_end);
+    const char* value = valid ? given + sizeof(passed) - 1 : NULL;
+    uint32_t numbers = 0;
+    bool quoted = false;
+    while (valid && *value != '\n' && *value != 0)
+    {
+        quoted = *value == '\'' ? !quoted : quoted;
+        char* end = NULL;
+        const unsigned long number = !quoted && *value >= '0' && *value <= '9' ? strtoul(value, &end, 10) : 0;
+        valid = end == NULL || (number >= 1 && number <= elements);
+        numbers += end != NULL;
+        value = end != NULL ? end : value + 1;
+    }
+    return valid && numbers != 0 && !quoted;
+}
+
+static void changes_test_shard_policy(ChangesTest* test, Text workflow, Text row)
+{
+    changes_expect(test, changes_shard_policy(workflow, row), "shard policy: the row's shard lookup, job name, command, vector items and its caller's counts agree", (Text){ 0 });
+    static const struct
+    {
+        bool caller;
         const char* before;
         const char* after;
     } mutants[] = {
-        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3]" },
-        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3, 4, 5]" },
-        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 4, 3]" },
-        { "        shard: [1, 2, 3, 4]", "        shard: [0, 1, 2, 3]" },
-        { "--shard \"${{ matrix.shard }}/4\"", "--shard \"${{ matrix.shard }}/5\"" },
-        { "--shard \"${{ matrix.shard }}/4\"", "--shard \"${{ matrix.shard }}/3\"" },
-        { "shard ${{ matrix.shard }} of 4)", "shard ${{ matrix.shard }} of 5)" },
-        { ", {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}", "" },
-        { "{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}",
-          "{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}" },
-        { "\"optimization\": 1, \"shard\": 4}]", "\"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 5}]" },
+        { false, "[1, 2, 3, 4], ", "[1, 2, 4, 3], " },
+        { false, "[1, 2, 3, 4], ", "[1, 2, 3], " },
+        { false, "[1, 2, 3], ", "" },
+        { false, "fromJSON('[[], [1], ", "fromJSON('[[1], [1], " },
+        { false, "fromJSON('[[], [1], ", "fromJSON('[[], [0], " },
+        { false, "[1, 2, 3, 4, 5, 6, 7, 8]]')", "[1, 2, 3, 4, 5, 6, 7, 8, 8]]')" },
+        { false, "]')[inputs.shards] }}", "]')[inputs.optimization] }}" },
+        { false, "of ${{ inputs.shards }})", "of 4)" },
+        { false, "--shard \"$BUSTER_SHARD/$shards\"", "--shard \"$BUSTER_SHARD/4\"" },
+        { false, "          shards=${{ inputs.shards }}\n", "          shards=4\n" },
+        { false, "              shards=${#items[@]}\n", "              shards=4\n" },
+        { false, "        type: number\n        required: true\n      hosted-tools:", "        type: number\n        required: false\n      hosted-tools:" },
+        { false, "\n      shards:\n        description: ", "\n      shard-count:\n        description: " },
+        { false, "      BUSTER_SHARD: ${{ matrix.shard }}", "      BUSTER_SHARD: 1" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 3'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 4 5'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '0 1 2 3'" },
+        { false, "  BUSTER_VECTOR_ITEMS: '1 2 3 4'", "  BUSTER_VECTOR_ITEMS: '1 2 3 4 5 6 7 8 9'" },
+        { false, "        candidate: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]", "        candidate: [1, 2, 3, 4, 5, 6, 7, 8]" },
+        { true, "      shards: ${{ ", "      shards: ${{ 0 && 1 || " },
+        { true, "      shards: ${{ ", "      shards: ${{ 9 && 1 || " },
+        { true, "      shards: ${{ ", "      shard_count: ${{ " },
     };
-    const char* original = text_terminated(workflow);
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
-        const char* found = strstr(original, mutants[i].before);
-        Text changed = workflow;
-        if (found != NULL)
+        bool found = false;
+        const Text changed = changes_mutant(mutants[i].caller ? workflow : row, NULL, mutants[i].before, mutants[i].after, &found);
+        const bool rejected = mutants[i].caller ? !changes_shard_policy(changed, row) : !changes_shard_policy(workflow, changed);
+        changes_expect(test, found && rejected, "shard policy rejects a shard lookup, N, vector items or caller's count that disagree", text_c(mutants[i].after));
+    }
+}
+
+// The `defined(MACRO)` names of the first `#if` whose line starts with `prefix`, through its continuation lines (a
+// trailing backslash), in order: host_isa.h's predicate, and the vector row's probe's copy of it.
+static TextList changes_predicate_macros(Text text, const char* prefix)
+{
+    TextList macros = { 0 };
+    size_t offset = 0;
+    bool inside = false;
+    bool done = false;
+    Text line;
+    while (!done && text_next_line(text, &offset, &line))
+    {
+        inside = inside || text_starts_with(line, prefix);
+        if (inside)
         {
-            const size_t prefix = (size_t)(found - original);
-            const size_t suffix = prefix + strlen(mutants[i].before);
-            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
-                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+            const char* at = line.data;
+            const char* end = line.data + line.length;
+            bool more = true;
+            while (more)
+            {
+                const char* found = memmem(at, (size_t)(end - at), "defined(", 8);
+                const char* close = found != NULL ? memchr(found + 8, ')', (size_t)(end - found - 8)) : NULL;
+                more = close != NULL;
+                if (more)
+                {
+                    list_append(&macros, (Text){ .data = found + 8, .length = (size_t)(close - found - 8) });
+                    at = close;
+                }
+            }
+            done = line.length == 0 || line.data[line.length - 1] != '\\';
         }
-        changes_expect(test, found != NULL && !changes_shard_policy(changed), "shard policy rejects a shard list and N that disagree", text_c(mutants[i].after));
+    }
+    return macros;
+}
+
+// The name __builtin_cpu_supports gives a predicate macro's feature: the macro without its underscores around it,
+// lowercase, with `.` for its inner `_` (__SSE4_1__ is sse4.1); an empty text for a macro not so spelled.
+static Text changes_feature_name(Text macro)
+{
+    Text name = { 0 };
+    const bool spelled = macro.length > 4 && memcmp(macro.data, "__", 2) == 0 && memcmp(macro.data + macro.length - 2, "__", 2) == 0;
+    if (spelled)
+    {
+        char* data = arena_push(macro.length - 4 + 1);
+        for (size_t i = 0; i < macro.length - 4; i += 1)
+        {
+            const char c = macro.data[i + 2];
+            data[i] = c == '_' ? '.' : (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+        }
+        data[macro.length - 4] = 0;
+        name = (Text){ .data = data, .length = macro.length - 4 };
+    }
+    return name;
+}
+
+// The vector row (#2033; docs/ci.md, "The vector row"). Its probe and the build's explicit vector target must be
+// host_isa.h's predicate: the probe's #if names the predicate's macros, in its order; it asks __builtin_cpu_supports for
+// x86-64-v4 and then each macro's feature, in that order, each on a line that prints the name it asks for; and it is
+// built with the flags that cmake/BusterSettings.cmake gives BUSTER_HOST_ARCH=vector, character for character. A
+// feature added to the predicate without the probe, or flags changed in one place alone, fail here, before a runner
+// could pass a CPU the build's code doesn't run on. The draws' records are this run attempt's (the prefix's
+// GITHUB_RUN_ATTEMPT) and never overwrite one another; candidates take only what their draw's collector assigns
+// (tools/ci/vector-draw.sh take), which one job publishes once (assign); the draws run the shards' own steps
+// (`*row-steps`) and the collectors theirs; and the verdict waits for every draw and collector, even after a failure,
+// and reads every attempt's records. This pins the repository's spelling, as the other policies do;
+// tests/ci/vector-draw.sh tests the script.
+static bool changes_vector_policy(Text row, Text host_isa, Text settings)
+{
+    const TextList predicate = changes_predicate_macros(host_isa, "#if ");
+    const TextList probe = changes_predicate_macros(row, "          #if !(");
+    bool valid = predicate.count != 0 && predicate.count == probe.count;
+    for (uint32_t i = 0; valid && i < predicate.count; i += 1)
+    {
+        valid = text_equal(predicate.items[i], probe.items[i]);
+    }
+    // The probe's questions, in order: x86-64-v4, then the predicate's features.
+    const char* text = text_terminated(row);
+    static const char ask[] = "__builtin_cpu_supports(\"";
+    const char* at = strstr(text, ask);
+    uint32_t asked = 0;
+    while (valid && at != NULL)
+    {
+        const char* name = at + sizeof(ask) - 1;
+        const char* close = strchr(name, '"');
+        const Text feature = close != NULL ? (Text){ .data = name, .length = (size_t)(close - name) } : (Text){ 0 };
+        const Text expected = asked == 0 ? text_c("x86-64-v4") : asked <= predicate.count ? changes_feature_name(predicate.items[asked - 1]) : (Text){ 0 };
+        char line[256];
+        snprintf(line, sizeof(line), "\n              qualified &= probe_feature(\"%.*s\", __builtin_cpu_supports(\"%.*s\"));\n",
+                 (int)feature.length, feature.data, (int)feature.length, feature.data);
+        valid = close != NULL && expected.length != 0 && text_equal(feature, expected) && strstr(text, line) != NULL;
+        asked += 1;
+        at = strstr(name, ask);
+    }
+    valid = valid && asked == predicate.count + 1;
+    // The build's vector flags, on the line after its `vector` test, and the probe's build with the same.
+    static const char test[] = "\n    if(arch STREQUAL \"vector\")\n        set(host_flags ";
+    const char* settings_text = text_terminated(settings);
+    const char* flags = strstr(settings_text, test);
+    const char* end = flags != NULL ? strstr(flags + sizeof(test) - 1, ")\n") : NULL;
+    const char* newline = flags != NULL ? strchr(flags + sizeof(test) - 1, '\n') : NULL;
+    valid = valid && end != NULL && end < newline && strncmp(flags + sizeof(test) - 1, "-march=x86-64-v4 ", 17) == 0;
+    if (valid)
+    {
+        const int length = (int)(end - (flags + sizeof(test) - 1));
+        char build[1024];
+        snprintf(build, sizeof(build), "\n          cc -std=c17 -O2 -Wall -Wextra -Werror %.*s \"$draw/probe.c\" -o \"$draw/probe\"\n",
+                 length, flags + sizeof(test) - 1);
+        valid = strstr(text, build) != NULL;
+    }
+    static const char* const required[] = {
+        "\n          printf 'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
+        "\n          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
+        "\n          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
+        "\n          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*\n",
+        "\n    steps: &row-steps\n",
+        "\n    steps: &collect-steps\n",
+        "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]\n    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n",
+        "\n          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then\n",
+    };
+    for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+    {
+        valid = valid && strstr(text, required[i]) != NULL;
+    }
+    // Each draw runs the shards' steps, and each collector the first's; every vector record refuses to overwrite one.
+    uint32_t draws = 0;
+    for (const char* step = strstr(text, "\n    steps: *row-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *row-steps\n"))
+    {
+        draws += 1;
+    }
+    uint32_t collectors = 0;
+    for (const char* step = strstr(text, "\n    steps: *collect-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *collect-steps\n"))
+    {
+        collectors += 1;
+    }
+    uint32_t records = 0;
+    for (const char* record = strstr(text, "outputs.prefix }}-"); valid && record != NULL; record = strstr(record + 1, "outputs.prefix }}-"))
+    {
+        const char* next = strstr(record, "\n      - ");
+        const char* overwrite = strstr(record, "\n          overwrite: false\n");
+        valid = overwrite != NULL && (next == NULL || overwrite < next);
+        records += 1;
+    }
+    return valid && draws == 4 && collectors == 2 && records == 3;
+}
+
+static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_isa, Text settings)
+{
+    changes_expect(test, changes_vector_policy(row, host_isa, settings), "vector policy: the probe and the build's vector target are host_isa.h's predicate; items assigned per attempt", (Text){ 0 });
+    static const struct
+    {
+        uint32_t file;
+        const char* before;
+        const char* after;
+        const char* name;
+    } mutants[] = {
+        { 1, "defined(__AVX512VNNI__) && ", "defined(__AVX512VNNI__) && defined(__AVX512IFMA__) && ", "a predicate feature the probe lacks" },
+        { 1, "defined(__XSAVE__)", "defined(__XSAVE__) && defined(__SHA__)", "a predicate feature at the end the probe lacks" },
+        { 0, "defined(__GFNI__) && ", "", "a probe #if without a predicate feature" },
+        { 0, "              qualified &= probe_feature(\"gfni\", __builtin_cpu_supports(\"gfni\"));\n", "", "a probe that doesn't ask for a feature" },
+        { 0, "              qualified &= probe_feature(\"x86-64-v4\", __builtin_cpu_supports(\"x86-64-v4\"));\n", "", "a probe that doesn't ask for x86-64-v4" },
+        { 0, "probe_feature(\"vaes\", __builtin_cpu_supports(\"vaes\"))", "probe_feature(\"vaes\", __builtin_cpu_supports(\"aes\"))", "a probe that asks for another feature than it prints" },
+        { 0, "probe_feature(\"sse4.1\", __builtin_cpu_supports(\"sse4.1\"))", "probe_feature(\"sse4.2\", __builtin_cpu_supports(\"sse4.2\"))", "a probe that asks for a feature the predicate doesn't name" },
+        { 2, "-mavx512bitalg -mavx512vnni)", "-mavx512bitalg -mavx512vnni -mavx512ifma)", "build flags the probe isn't built with" },
+        { 0, "-mavx512bitalg -mavx512vnni \"$draw/probe.c\"", "-mavx512bitalg \"$draw/probe.c\"", "a probe built without a flag of the build's" },
+        { 2, "set(host_flags -march=x86-64-v4 ", "set(host_flags -march=znver5 ", "a vector target of one CPU model" },
+        { 0, "'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=vector-%s-O%s-%s\\n' \"$BUSTER_SANITIZER\" \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "records shared between attempts" },
+        { 0, "-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}", "-yes", "a verdict published as qualified whatever the probe found" },
+        { 0, "          bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "          true ", "candidates that take an item without an assignment" },
+        { 0, "          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false", "          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: true", "an assignment that overwrites another" },
+        { 0, "-evidence-${{ env.BUSTER_SHARD }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false", "-evidence-${{ env.BUSTER_SHARD }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: true", "evidence that overwrites another" },
+        { 0, "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: *row-steps\n", "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: []\n", "a draw without the shards' steps" },
+        { 0, "      BUSTER_DRAW_NEXT: '5'\n    steps: *collect-steps\n", "      BUSTER_DRAW_NEXT: '5'\n    steps: []\n", "a collector without the first's steps" },
+        { 0, "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]", "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3]", "a verdict before the last draw" },
+        { 0, "    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "    if: inputs.host_arch == 'vector'\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "a verdict skipped after a failure" },
+        { 0, "          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*", "          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-*", "a verdict blind to the attempt a rerun keeps" },
+        { 0, "          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then", "          if false; then", "a scalar vector row" },
+    };
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        bool found = false;
+        const Text original = mutants[i].file == 0 ? row : mutants[i].file == 1 ? host_isa : settings;
+        const Text changed = changes_mutant(original, NULL, mutants[i].before, mutants[i].after, &found);
+        const bool valid = changes_vector_policy(mutants[i].file == 0 ? changed : row, mutants[i].file == 1 ? changed : host_isa, mutants[i].file == 2 ? changed : settings);
+        changes_expect(test, found && !valid, "vector policy rejects a probe, target or assignment out of step", text_c(mutants[i].name));
     }
 }
 
@@ -2895,19 +3387,33 @@ static int changes_self_test(const char* root)
 {
     ChangesTest test = { 0 };
     Text workflow;
+    Text row;
     bool readable = read_file(path_join(root, text_c(BUSTER_CHANGES_WORKFLOW)), &workflow);
     changes_expect(&test, readable, "the workflow", text_c(BUSTER_CHANGES_WORKFLOW));
+    bool row_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_ROW_WORKFLOW)), &row);
+    changes_expect(&test, row_readable, "the hosted row workflow", text_c(BUSTER_CHANGES_ROW_WORKFLOW));
+    Text host_isa;
+    Text settings;
+    bool isa_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_HOST_ISA)), &host_isa);
+    changes_expect(&test, isa_readable, "the host predicate", text_c(BUSTER_CHANGES_HOST_ISA));
+    bool settings_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_SETTINGS)), &settings);
+    changes_expect(&test, settings_readable, "the build's settings", text_c(BUSTER_CHANGES_SETTINGS));
     changes_test_split(&test);
-    if (readable)
+    if (readable && row_readable)
     {
         changes_test_fixtures(&test, workflow, root);
         changes_test_events(&test, workflow, root);
         changes_test_workflow(&test, workflow, root);
         changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
-        changes_test_oracle_policy(&test, workflow);
+        changes_test_oracle_policy(&test, workflow, row);
         changes_test_main_policy(&test, workflow);
-        changes_test_shard_policy(&test, workflow);
+        changes_test_row_policy(&test, row);
+        changes_test_shard_policy(&test, workflow, row);
+    }
+    if (row_readable && isa_readable && settings_readable)
+    {
+        changes_test_vector_policy(&test, row, host_isa, settings);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
     return test.failures != 0 ? 1 : 0;

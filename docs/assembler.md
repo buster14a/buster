@@ -154,12 +154,16 @@ families (`x86_match_supported`): a form is admitted when
   (#147), at most four of them;
 - every operand descriptor is one the parser reads: general registers of 8 to 64
   bits, XMM, YMM and ZMM registers, opmasks, the x87's stack registers
-  (`%st` and `%st(i)`, Intel's `st` and `st(i)`, #147), memory addressed by
-  general registers, and a gather's or scatter's vector-indexed (VSIB) memory
-  (#1115: `vpgatherqd 32(%rdx,%ymm7), %xmm8 {%k1}`, Intel's `[rdx+4*ymm7]`,
-  whose vector register is the index wherever it is written); not MMX, bound,
-  control, debug, segment or tile registers, register pairs or a default flags
-  value. A VSIB operand matches only a VSIB form of its index's class, and
+  (`%st` and `%st(i)`, Intel's `st` and `st(i)`, #147), MMX's `%mm0` to `%mm7`
+  (#1846), memory addressed by general registers, and a gather's or scatter's
+  vector-indexed (VSIB) memory (#1115: `vpgatherqd 32(%rdx,%ymm7), %xmm8
+  {%k1}`, Intel's `[rdx+4*ymm7]`, whose vector register is the index wherever
+  it is written); not bound, control, debug, segment or tile registers,
+  register pairs or a default flags value. The target table classifies MMX's
+  `movd` and `movq` forms (#1846: `movq %mm0, %rax`, `movq (%rdi), %mm2`, 0F 6F
+  and 0F 7F between memory and an MMX register and from one to another, as GNU
+  as picks them), `emms`, and `pxor`, `paddd`, `psubd` and `pcmpeqd`; its other
+  MMX forms stay out. A VSIB operand matches only a VSIB form of its index's class, and
   memory of a general index only the others. The mask, index and destination
   registers must be distinct, which GNU as only warns of (the instruction
   faults);
@@ -291,7 +295,7 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
@@ -303,8 +307,14 @@ Each section is identified by its name and group, and keeps its own properties,
 alignment, layout and atom, including
 `.text.*`, `.data.*`, `.rodata.*`, `.bss.*` and mergeable string sections.
 Redeclarations must preserve its properties; zero-fill sections accept only zero
-fill. Subsections, strings of characters wider than 4 bytes and
-additional ELF section types are diagnosed. Strings of 2- and 4-byte characters
+fill. A section without a type takes the one its name gives it, as GNU as and
+LLVM's assembler give it: `.note*` a note's, `.init_array*` and `.fini_array*`
+the arrays' (#1848). An array of constructors or destructors is an atom of its
+class (`BUSTER_LINK_CLASS_INIT_ARRAY`, `_FINI_ARRAY`) whatever its name, so that
+the direct path runs its entries; a note is data of its flags' class, which
+the object writer writes `SHT_NOTE`. Subsections, strings of characters wider
+than 4 bytes and other ELF section types (`@preinit_array` among them) are
+diagnosed. Strings of 2- and 4-byte characters
 (GCC's wide literals, `.rodata.str4.4,"aMS",@progbits,4`) are read-only data
 atoms, as the importer classes them, whose sections keep their merge flags and
 entry sizes (#1115). Exported absolute symbols and forward constants are
@@ -540,7 +550,9 @@ It takes instructions, labels and the syntax directives, and refuses:
   whole instead, `asm_assemble`'s unit, c-inline-assembly.md's "Templates that take directives"), and so does a
   `data16` or `rex64` statement, which is a byte of its own (#1115);
 - its numeric labels and `.` but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to its labels;
+  addend, and `loop` and `jrcxz` to its labels, whose failure sets
+  `AsmCode.directive` as a directive's does, for the caller to assemble the
+  source whole (#1845);
 - undefined numeric labels.
 
 Lexing, parsing and matching are `asm_assemble`'s, by `AsmOptions.vectorized`'s
