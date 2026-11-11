@@ -430,9 +430,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   Its candidates are the conversion walk's (`check_common_enum_cast_candidate`: an enumeration's target, from a source
   that may be one), and a brace initializer's plan is read for it where a value part's target is an enumeration
   (`CheckInitializer.enum_values`). They are tested only in a unit that names a named enumeration's enumerator or
-  variable (`CheckInput.enum_names`, set where the identifiers' leaves are made): a conversion whose source enumeration
-  is only a member's, a call's result or a cast's isn't looked for without one. A selection whose selected arm is a
-  constant (`_Generic(c, int: B)`) folds to its value, whose enumerator isn't looked for.
+  variable or defines a named enumeration (`CheckInput.enum_names`, set where the identifiers' leaves are made and by
+  `check_input_enum_records`), so that a source enumeration that is only a member's, a call's result or a cast's is
+  looked for too. A selection whose selected arm is an enumerator (`_Generic(c, int: B)`) converts that enumerator's
+  enumeration, as clang's fold of it keeps its type (`check_common_enum_cast_source`).
   `c_check_enum_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and with
   `-c`, with a generated matrix of the C23 underlying types' pairs.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
