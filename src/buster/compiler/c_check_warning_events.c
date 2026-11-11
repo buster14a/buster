@@ -199,6 +199,9 @@ enum
     // An unparenthesized `+` or `-` as a shift's operand (#2264, clang's DiagnoseAdditionInShift): -Wshift-op-parentheses,
     // on by default, under -Wparentheses.
     CHECK_WARNING_ID_SHIFT_OP_PARENTHESES = 141,
+    // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
+    // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 142,
     CHECK_WARNING_ID_COUNT,
 };
 
