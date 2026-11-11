@@ -169,6 +169,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST] = { "-Wvoid-pointer-to-int-cast", "-Wpointer-to-int-cast", "cast to smaller integer type" },
     [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = { "-Wpointer-to-enum-cast", NULL, "cast to smaller integer type" },
     [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = { "-Wvoid-pointer-to-enum-cast", "-Wpointer-to-enum-cast", "cast to smaller integer type" },
+    [CHECK_WARNING_ID_TENTATIVE_ARRAY] = { "-Wtentative-definition-array", NULL, "tentative array definition assumed to have one element" },
     [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE] = { "-Wdefault-const-init-var-unsafe", "-Wdefault-const-init-unsafe",
                                                          "default initialization of an object of const type leaves the object uninitialized" },
     [CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE] = { "-Wdefault-const-init-field-unsafe", "-Wdefault-const-init-unsafe",
@@ -374,6 +375,7 @@ static void check_input_warning_policy(CheckInput* input, const PPOptions* optio
     input->odr_severity = (uint8_t)odr.mapped;
     input->odr_quiet = odr.quiet;
     input->odr_system = odr.system_headers;
+    input->pedantic_escapes = check_warning_command_line(options, CHECK_WARNING_ID_NONSTANDARD_ESCAPE, true, false).severity != CHECK_WARNING_IGNORE;
 }
 
 _Static_assert(CHECK_WARNING_WARNING == BUSTER_CHECK_ODR_WARNING && CHECK_WARNING_ERROR == BUSTER_CHECK_ODR_ERROR, "the reader reads -Wodr's severity by value");

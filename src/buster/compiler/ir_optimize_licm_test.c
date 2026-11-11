@@ -532,6 +532,73 @@ static void ir_licm_test_widths(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// A permute of two tables (#1840), whose third operand is in the extra array: an invariant one twice in a loop, which GVN
+// gives one value, and LICM then hoists with the sum of the two, beside a loop-carried one that stays; each result the
+// interpreter's, on both paths.
+static void ir_licm_test_permute2(IrOptimizeTest* test)
+{
+    static const char text[] = "function (i32) -> m16 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = intrinsic.v4i32 %0 splat\n"
+                               "  %2 = const.i32 0x00000000000000000000000000000000\n"
+                               "  %3 = const.i32 0x00000000000000000000000000000001\n"
+                               "  %4 = const.i32 0x00000000000000000000000000000004\n"
+                               "  %5 = add.v4i32 %1, %1\n"
+                               "  %6 = br.void b1\n"
+                               "b1:\n"
+                               "  %7 = phi.i32 [%2, b0], [%12, b1]\n"
+                               "  %8 = phi.v4i32 [%1, b0], [%13, b1]\n"
+                               "  %9 = intrinsic.v4i32 %1, %5, %1 permute2 2\n"
+                               "  %10 = intrinsic.v4i32 %1, %5, %1 permute2 2\n"
+                               "  %11 = add.v4i32 %9, %10\n"
+                               "  %12 = add.i32 %7, %3\n"
+                               "  %13 = intrinsic.v4i32 %8, %11, %5 permute2 2\n"
+                               "  %14 = icmp.i1 %12, %4 lt\n"
+                               "  %15 = cbr.void %14, b1, b2\n"
+                               "b2:\n"
+                               "  %16 = vcmp.m16 %13, %1 ugt lanes=i8\n"
+                               "  %17 = ret.void %16\n"
+                               "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena vector = arena_reserve(UINT64_C(16) << 20);
+    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+    const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+    ir_optimize_test_expect(test, fixture, "the permute2 loop fixture parses");
+    IrLicmResult results[2] = { 0 };
+    for (uint32_t path = 0; fixture && path < 2; path += 1)
+    {
+        Arena* output = path != 0 ? &scalar : &vector;
+        IrGvnOptions numbering = ir_gvn_options();
+        numbering.scalar = path != 0;
+        IrGvnResult numbered = { 0 };
+        const IrCheck gvn = ir_optimize_gvn(&f, output, &scratch, numbering, &numbered);
+        ir_optimize_test_expect(test, gvn.error == IR_OK && numbered.removed == 1, "GVN gives the two equal permute2s one value");
+        if (gvn.error == IR_OK)
+        {
+            ir_optimize_test_simd_semantics(test, &f, &numbered.function, &scratch);
+            IrLicmOptions options = ir_licm_options();
+            options.scalar = path != 0;
+            const IrCheck check = ir_optimize_licm(&numbered.function, output, &scratch, options, results + path);
+            ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 2, "LICM hoists the invariant permute2 and its sum");
+            if (check.error == IR_OK)
+            {
+                ir_optimize_test_simd_semantics(test, &f, &results[path].function, &scratch);
+            }
+        }
+    }
+    ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
+                            ir_optimize_test_equal(&results[0].function, &results[1].function), "GVN and LICM's paths treat permute2 alike");
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&scalar);
+    arena_release(&scratch);
+}
+
 static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -558,6 +625,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_progress(&test);
         ir_licm_test_simd(&test);
         ir_licm_test_widths(&test);
+        ir_licm_test_permute2(&test);
         printf("ir-licm: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

@@ -1453,7 +1453,10 @@ and copied back, its value kept in a temporary across the copy. A complex
 lvalue's part (`__real__ *p`, `__imag__ *p`) has lost its object's space, as a
 vector's element has, and takes the complex object's override on its read, store
 and update (`check_lower_element_segment`), as clang's code does. A narrow
-`_BitInt`'s read, store and update take it as an integer's do.
+`_BitInt`'s read, store and update take it as an integer's do. A bit of a vector of bool, which no address
+reaches, is read, and written by a read and a store of the byte that holds it,
+through the vector's override (`check_lower_transport_bit_read`,
+`check_lower_transport_bit_store`), as clang loads and stores the vector.
 
 An `_Atomic` lvalue's read, store and update go through its plan
 (`check_lower_atomic_prepare`), whose direct accesses take the object's override
@@ -1467,8 +1470,7 @@ is, as clang's does: the segment's offset, which is the object's own only in
 The rest the lowering refuses by name, rather than compile it as a plain access:
 an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
-`__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
-which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches
+`__sync_lock_release`, one of 16 bytes); and an atomic builtin's object in one, which its pointer argument reaches
 (`check_lower_segment_access`). An asm statement's register output in one is
 refused too (`check_lower_asm_segment`), since its value is stored through the
 output's address; a memory operand's address goes to the template without the

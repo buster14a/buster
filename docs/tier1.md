@@ -417,6 +417,16 @@ and zeros, a C comparison's expansion and a mask to a vector, is `vpmovm2b` to
 `vpmovq2m` (#1840, its "Masks to vectors and back"). The integer lanes' minima, maxima and
 saturating sums and differences are its `lane_op`, one EVEX instruction of
 `BUSTER_TIER1_VECTOR_LANE_OP` (#1840, its "Lane operations").
+The permutes of two tables are its `permute2`, whose third operand is in the
+extra array (#1840, its "Permutes of two tables"), `BUSTER_TIER1_VECTOR_PERMUTE2`:
+`vpermt2*` into the first table's register, `vpermi2*` into the indices', or a
+move of the first table first.
+The bitwise functions of three vectors are its `ternlog` (#1840, its "Bitwise
+functions of three vectors"), `BUSTER_TIER1_VECTOR_TERNLOG`: `vpternlogd` with
+the operand the destination's register holds first, its table permuted.
+The compresses and expands are its `compress` and `expand` (#1840, its
+"Compresses and expands"), `BUSTER_TIER1_VECTOR_COMPRESS`: the form merged under
+the mask into the destination, which takes the passthrough first.
 
 ### Inlining (#1282)
 

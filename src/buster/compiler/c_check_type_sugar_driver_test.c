@@ -969,6 +969,147 @@ static const CheckDriverDefaultWarningFixture check_driver_const_assignment_fixt
     },
 };
 
+// A failed static assertion's details (#2171, check_semantic_assert): clang's "expression evaluates to" note, the failing
+// conjunct of an `&&`, and its requirement's number literals as clang's StmtPrinter prints them.
+static const CheckDriverDefaultWarningFixture check_driver_static_assert_fixtures[] =
+{
+    {
+        // A failed assertion of a binary operator but `||` notes its sides' values at the operator (clang's
+        // DiagnoseStaticAssertDetails), where a side isn't a literal: casts, sizeof, arithmetic, enumeration constants.
+        .name = "comparisons' sides evaluated",
+        .source = "_Static_assert(1 == 2, \"a\");\n"
+                  "_Static_assert((unsigned)1 == 2, \"x\");\n"
+                  "_Static_assert((long unsigned)sizeof(int) == 3, \"y\");\n"
+                  "_Static_assert(sizeof(int) == 3, \"z\");\n"
+                  "_Static_assert(1 + 1 == 3, \"w\");\n"
+                  "_Static_assert((char)1 < 0, \"v\");\n"
+                  "enum { K = 2 };\n"
+                  "_Static_assert(K == 3, \"u\");\n"
+                  "_Static_assert((int)K == 3, \"t\");\n",
+        .errors = 8,
+        .notes = 7,
+    },
+    {
+        // An `&&`'s first failing conjunct is the requirement, at it (findFailedBooleanCondition); integer literals print
+        // by value and suffix (StmtPrinter's `1U`, `9223372036854775807LL`); a negative side, a char, a bool.
+        .name = "failing conjuncts and literal spellings",
+        .source = "enum { K = 2, Z = 0 };\n"
+                  "_Static_assert(K - 2, \"a\");\n"
+                  "_Static_assert(K && Z, \"b\");\n"
+                  "_Static_assert(Z || Z, \"c\");\n"
+                  "_Static_assert(K == -3, \"d\");\n"
+                  "_Static_assert(-K == 3, \"e\");\n"
+                  "_Static_assert(1.5 == K, \"f\");\n"
+                  "_Static_assert((_Bool)K == 0, \"g\");\n"
+                  "_Static_assert((K) == (3), \"h\");\n"
+                  "_Static_assert(K & 1, \"i\");\n"
+                  "_Static_assert('a' == K, \"j\");\n"
+                  "_Static_assert((signed char)-1 == K, \"k\");\n"
+                  "_Static_assert(K == 3 && 1, \"l\");\n"
+                  "_Static_assert(!K, \"m\");\n"
+                  "_Static_assert(K < 1u, \"n\");\n"
+                  "_Static_assert(0x7fffffffffffffffLL == K, \"o\");\n"
+                  "_Static_assert((unsigned char)200 == K, \"p\");\n"
+                  "_Static_assert((char)'\\n' == K, \"q\");\n",
+        .errors = 17,
+        .notes = 14,
+    },
+    {
+        // A plain char's value as a character literal with its code unit and value (escapes, `<U+0000>`, `<0xFF>`), a
+        // bool's `false`, an unsigned long long's and an __int128's values.
+        .name = "character and integer values",
+        .source = "enum { K = 2 };\n"
+                  "_Static_assert((char)-1 == K, \"\");\n"
+                  "_Static_assert((char)'a' == K, \"\");\n"
+                  "_Static_assert((char)' ' == K, \"\");\n"
+                  "_Static_assert((char)'\\'' == K, \"\");\n"
+                  "_Static_assert((char)'\\\\' == K, \"\");\n"
+                  "_Static_assert((char)127 == K, \"\");\n"
+                  "_Static_assert((char)'\\t' == K, \"\");\n"
+                  "_Static_assert((char)'\"' == K, \"\");\n"
+                  "_Static_assert((char)0 == K, \"\");\n"
+                  "_Static_assert((_Bool)0 == K, \"\");\n"
+                  "_Static_assert((unsigned long long)-1 == K, \"\");\n"
+                  "_Static_assert(K == (__int128)3, \"\");\n"
+                  "_Static_assert((char)200 == K, \"\");\n",
+        .errors = 13,
+        .notes = 13,
+    },
+    {
+        // The same with -funsigned-char: a char past 0x7F is positive.
+        .name = "character values of unsigned char",
+        .source = "enum { K = 2 };\n"
+                  "_Static_assert((char)-1 == K, \"\");\n"
+                  "_Static_assert((char)'a' == K, \"\");\n"
+                  "_Static_assert((char)' ' == K, \"\");\n"
+                  "_Static_assert((char)'\\'' == K, \"\");\n"
+                  "_Static_assert((char)'\\\\' == K, \"\");\n"
+                  "_Static_assert((char)127 == K, \"\");\n"
+                  "_Static_assert((char)'\\t' == K, \"\");\n"
+                  "_Static_assert((char)'\"' == K, \"\");\n"
+                  "_Static_assert((char)0 == K, \"\");\n"
+                  "_Static_assert((_Bool)0 == K, \"\");\n"
+                  "_Static_assert((unsigned long long)-1 == K, \"\");\n"
+                  "_Static_assert(K == (__int128)3, \"\");\n"
+                  "_Static_assert((char)200 == K, \"\");\n",
+        .options = { "-funsigned-char" },
+        .errors = 13,
+        .notes = 13,
+    },
+    {
+        // Floating sides and literals as llvm's APFloat::toString spells them: `100`, `0.5`, `0.10000000000000001`,
+        // `1.0E+10`; a literal's trailing `.` and its `F` (`2.`, `1.5F`).
+        .name = "floating values and literals",
+        .source = "enum{K=2};\n"
+                  "_Static_assert(2.0 == K+1, \"\");\n"
+                  "_Static_assert(0.5 == K, \"\");\n"
+                  "_Static_assert(100.0 == K, \"\");\n"
+                  "_Static_assert(1e10 == K, \"\");\n"
+                  "_Static_assert(0.1 == K, \"\");\n"
+                  "_Static_assert(1.0/3 == K, \"\");\n"
+                  "_Static_assert(1.5f == K, \"\");\n"
+                  "_Static_assert(1234567.0 == K, \"\");\n"
+                  "_Static_assert(-0.25 == K, \"\");\n"
+                  "_Static_assert(1e-5 == K, \"\");\n"
+                  "_Static_assert(1000.0 == K, \"\");\n"
+                  "_Static_assert(10000.0 == K, \"\");\n",
+        .errors = 12,
+        .notes = 12,
+    },
+    {
+        // C23's static_assert without a message, `nullptr`, and no note for a boolean value compared with `true` or
+        // `false` (isKnownToHaveBooleanValue); `(bool)` casts.
+        .name = "C23 assertions and boolean literals",
+        .source = "enum { K = 2 };\n"
+                  "static_assert(K == 3);\n"
+                  "static_assert(true == (K == 3));\n"
+                  "static_assert((K == 3) == true);\n"
+                  "static_assert((K == 2) && (K == 3) && 1, \"x\");\n"
+                  "static_assert(((K == 2) && (1 && K > 5)), \"y\");\n"
+                  "static_assert(nullptr != nullptr, \"z\");\n"
+                  "static_assert(K + 0u == 3, \"w\");\n"
+                  "static_assert((K == 2) && !K, \"v\");\n"
+                  "static_assert(sizeof(long double) == 4);\n"
+                  "static_assert(1 ? K == 3 : 0);\n",
+        .errors = 10,
+        .notes = 5,
+        .c23 = true,
+    },
+    {
+        // A boolean literal beside a value that isn't known to be boolean is noted.
+        .name = "C23 boolean literal sides",
+        .source = "enum { K = 2 };\n"
+                  "static_assert(true == K);\n"
+                  "static_assert(K == false + 3);\n"
+                  "static_assert(false == (K + 1));\n"
+                  "static_assert((_Bool)K == false);\n"
+                  "static_assert(false != 0);\n",
+        .errors = 5,
+        .notes = 3,
+        .c23 = true,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
@@ -977,4 +1118,6 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_convention_sugar_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_convention_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vla_bound_fixtures, BUSTER_ARRAY_LENGTH(check_driver_vla_bound_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
 }

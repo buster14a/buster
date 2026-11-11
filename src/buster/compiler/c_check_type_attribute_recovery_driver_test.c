@@ -139,7 +139,11 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         // parser takes as the function declarator's suffix, each declarator's "cannot be applied to a function parameter".
         "void kr(a) _Alignas(3) int a; {}\nvoid kr2(a, b) _Alignas(8) int a, b; { (void)a; (void)b; }\n"
         "void kr3(a, b) int a; _Alignas(3) _Alignas(8) int b; { (void)a; }\nint kr4(a) _Alignas(8) register int a; { return a; }\n"
-        "int n;\nvoid kr5(a) _Alignas(n) int a; { (void)a; }\n",
+        "int n;\nvoid kr5(a) _Alignas(n) int a; { (void)a; }\n"
+        // An invalid K&R definition, and a K&R declaration list's declarator errors (#1447): the definition's body is still
+        // checked, the function invalid; a listed parameter's error recovers, the parameter an invalid stand-in.
+        "int kf(a)[3] int a; { return 0; }\nint kg(b) int b[-1]; { int *q = b; (void)q; return 0; }\n"
+        "int kh(c, d) int c; int (d)(void)[2]; { return c; }\nint kc = kf(1) + kg(2) + kh(3, 0);\nint kx = undeclared;\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // The K&R definitions, the last fixture, are gnu17's alone.

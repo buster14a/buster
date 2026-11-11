@@ -228,7 +228,9 @@ comma; #1867) is resumed the same way: clang's balanced tracker skips to the
 marks [comma, `]`) for the view to drop (`ParseDiagnostic.resume_delete`). The
 vector path's checks take the comma there as an error by the group's mode
 (`PARSE_CHECK_ARRAY`, for `PARSE_GROUP_ARRAY` and `PARSE_GROUP_DESIGNATOR`).
-Without a `]` before the `;` nothing is resumed, where clang reads on.
+Without a `]` before the `;` nothing is resumed, where clang reads on. A GNU
+attribute list's item that isn't a name is resumed the same way: clang's
+ParseGNUAttributes skips to the list's `)` (`parse_scalar_resume_at_closer`).
 `test-parser` checks every diagnostic's place and mark on both paths
 (`parse_test_check_resumed`). It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without
@@ -319,10 +321,10 @@ keeps is one the scalar parser accepts with the same tree. Each token gets:
   designators don't take, ...);
 - a **mode**: its group's type (a file, a block, a struct or enum body, a
   parameter list, a call's arguments, a declarator in parentheses, a
-  subscript, an array declarator, an initializer, `for`'s clauses, an
-  attribute, a builtin's arguments, 27 in all) and its part of its item (its
-  start, a declaration's specifiers and declarators, an initializer, a
-  bit-field's width, a statement): 49 modes.
+  subscript, an array declarator, an array designator, an initializer, `for`'s
+  clauses, an attribute, a builtin's arguments, 28 in all) and its part of its
+  item (its start, a declaration's specifiers and declarators, an initializer, a
+  bit-field's width, a statement): 50 modes.
 
 K6 also records the group each opener opens and each closer closes
 (`ParseKernels.check_groups`). K2's rules can't tell a declarator's parameter

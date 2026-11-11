@@ -163,15 +163,18 @@ enum
     CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
     CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
     CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
+    // An object whose tentative definitions leave it an array of unknown bound at the unit's end (#2238, clang's
+    // ActOnEndOfTranslationUnit): -Wtentative-definition-array, on by default.
+    CHECK_WARNING_ID_TENTATIVE_ARRAY = 129,
     // A const object, or a struct with a const member, without an initializer (#2168, clang's -Wdefault-const-init-*): its
     // automatic storage's, default on, and its static storage's, off by default.
-    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE = 129,
-    CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE = 130,
-    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR = 131,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE = 130,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE = 131,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR = 132,
     // -Wc++-compat's own policy, which no event gives: clang's fake diagnostic in that group
     // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
     // is incompatible with C++" (#2168).
-    CHECK_WARNING_ID_CXX_COMPAT = 132,
+    CHECK_WARNING_ID_CXX_COMPAT = 133,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -454,6 +457,9 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
+    // definition assumed to have one element", at its name.
+    CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
     // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
@@ -470,6 +476,10 @@ typedef enum CheckWarningEventKind
     // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
     // -Wunused-comparison's, with a CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT at an equality's.
     CHECK_WARNING_EVENT_UNUSED_RESULT,
+    // GNU's escape sequence (\e, \E, \(, \{, \[ or \%) in an evaluated literal (#1447, -pedantic's -Wpedantic): "use of
+    // non-standard escape character '\c'" at its backslash, payload.name the character and payload.data the backslash's
+    // offset in the token.
+    CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -547,8 +557,6 @@ typedef enum CheckWarningUnitEnd
     CHECK_WARNING_UNIT_END_PACK,
     CHECK_WARNING_UNIT_END_WEAK,
     CHECK_WARNING_UNIT_END_UNDEFINED,
-    // A tentative definition's default-initialized const object (#2168, -Wdefault-const-init-var).
-    CHECK_WARNING_UNIT_END_TENTATIVE,
 } CheckWarningUnitEnd;
 
 // Per-event source policy is independent of the ID: GNU array-bound folds warn by default, whereas an accepted
