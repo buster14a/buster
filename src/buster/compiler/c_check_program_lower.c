@@ -1528,6 +1528,13 @@ static __attribute__((noinline)) CheckLowerLimbRoom check_lower_limb_room(const 
         room.calls += complex ? 24 : 0;
         room.arguments += complex ? 128 : 0;
     }
+    // A case of a switch on a _BitInt past 128 bits (#2220): up to 32 entries a limb, a GNU range's two compares
+    // (check_lower_case_limbs), whatever its value's own node's type.
+    for (uint32_t i = 0; count != 0 && i < program->case_count; i += 1)
+    {
+        const CheckProgramCase* item = program->cases + i;
+        room.entries += item->wide_lower != NULL ? 32 * (uint64_t)check_lower_limb_type(types, item->type).count : 0;
+    }
     return room;
 }
 
@@ -12310,6 +12317,62 @@ static void check_lower_reduce_in_order(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// __builtin_elementwise_pdep, _pext and _clmul of an integer scalar `element` of `width` bits, up to 64 (#2410): its
+// operands converted to an unsigned int (an unsigned long long's 64 bits past 32) and masked to its width, so that a
+// signed or a _BitInt operand is its bits zero-extended, then BMI2's PDEP or PEXT, or PCLMULQDQ's product of them moved
+// into xmm registers and back (VEX's forms with AVX, else SSE's), whose low bits are the result; converted back to the
+// element, which truncates the product to its width. The operands are evaluated first to last.
+static void check_lower_scalar_lanes(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, TypeId element, uint32_t width)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    const bool wide = width > 32;
+    const uint8_t computed = wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+    const TypeId computed_type = wide ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_UINT;
+    const uint64_t kept = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
+    {
+        const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+        const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+        const bool avx = (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0;
+        const uint32_t into = wide ? (avx ? X86_FORM_VMOVQ_X_RM64 : X86_FORM_MOVQ_X_RM64) : (avx ? X86_FORM_VMOVD_X_RM32 : X86_FORM_MOVD_X_RM32);
+        const uint32_t from = wide ? (avx ? X86_FORM_VMOVQ_RM64_X : X86_FORM_MOVQ_RM64_X) : (avx ? X86_FORM_VMOVD_RM32_X : X86_FORM_MOVD_RM32_X);
+        row.records[0] = check_vector_lower_record(into, v0, 0, BUSTER_TIER0_ROLE_INTEGER(0));
+        row.records[1] = check_vector_lower_record(into, v1, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+        row.records[2] = avx ? check_vector_lower_record(X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8, v0, v0, v1) : check_vector_lower_record(X86_FORM_PCLMULQDQ_X_XM128_IMM8, v0, 0, v1);
+        row.records[3] = check_vector_lower_record(from, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+        row.record_count = 4;
+    }
+    else
+    {
+        const bool deposit = builtin == CBUILTIN_ELEMENTWISE_PDEP;
+        row.records[0] = check_vector_lower_record(deposit ? (wide ? X86_FORM_PDEP_R64_R64_RM64 : X86_FORM_PDEP_R32_R32_RM32) :
+                                                             (wide ? X86_FORM_PEXT_R64_R64_RM64 : X86_FORM_PEXT_R32_R32_RM32),
+                                                   BUSTER_TIER0_ROLE_INTEGER_RESULT, BUSTER_TIER0_ROLE_INTEGER(0), BUSTER_TIER0_ROLE_INTEGER(1));
+        row.record_count = 1;
+    }
+    row.operand_count = 2;
+    row.operand_classes[0] = computed;
+    row.operand_classes[1] = computed;
+    row.result_class = computed;
+    const uint32_t operation = check_lower_operation_index(writer, &row);
+    // Pushed last first: the conversion of the result, the row, then each operand's value, converted and masked.
+    check_lower_convert(writer, computed_type, element);
+    check_lower_instruction(writer, BUSTER_TYPED_X86, computed, operation);
+    for (uint32_t a = 2; a-- > 0;)
+    {
+        const TypeId type = stream->argument_conversions[first + a].type;
+        check_lower_instruction(writer, BUSTER_TYPED_AND, computed, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, computed, kept);
+        check_lower_convert(writer, type, computed_type);
+        check_lower_operand(writer, node, a + 3, false, type);
+    }
+    writer->vectors = true;
+}
+
 // __builtin_elementwise_pdep and _pext of vectors of integers, element by element: each element's BMI2 PDEP or PEXT (no
 // vector instruction deposits or extracts bits), of its zero extension to 32 bits for 8- and 16-bit elements (the mask's
 // extension has no bits past theirs, so neither has the result), the elements read from frame objects the vectors are
@@ -12327,9 +12390,26 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
     const uint32_t first = program->input->graph.argument_offsets[node];
     const CheckVectorShape shape = check_vector_builtin_shape(program->types, result);
     const uint8_t kind = check_action_kind(program->types, result);
-    if (kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR)
+    const bool scalar = kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR;
+    const TypeId element = scalar ? type_unqualified(type_strip_aligned(program->types, result)) : 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = scalar && element != BUSTER_TYPE_BOOL && check_action_integer_type(program->types, element, &width, &is_signed) && width != 0 && width <= 64;
+    if (scalar && !integer)
     {
-        check_lower_unsupported(writer, "elementwise builtins of scalars");
+        check_lower_unsupported(writer, "elementwise builtins of scalars of more than 64 bits");
+    }
+    else if (scalar && builtin != CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
+    {
+        check_lower_unsupported(writer, "bit deposits and extractions without BMI2");
+    }
+    else if (scalar && builtin == CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(PCLMUL)) == 0)
+    {
+        check_lower_unsupported(writer, "carry-less multiplication without PCLMUL");
+    }
+    else if (scalar)
+    {
+        check_lower_scalar_lanes(writer, node, builtin, element, width);
     }
     else if (!shape.integer || shape.element == 0)
     {
@@ -14828,14 +14908,90 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
     }
 }
 
+// Whether the _BitInt past 128 bits `limbs` whose address temporary `local` holds is below the constant `constant` (its
+// limbs, the bits past the width zero), or with `above` the constant below it, as an I32: check_lower_limb_compare's
+// order from the least significant limb up, against the constant's limbs, its top one extended as the value's is.
+static void check_lower_case_limb_less(CheckLowerWriter* writer, CheckLowerLimbs limbs, uint32_t local, const uint64_t* constant, bool above)
+{
+    const uint32_t shift = 64 * limbs.count - limbs.width;
+    for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+    {
+        const bool top = limb + 1 == limbs.count;
+        const uint8_t class = limbs.sign && top ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64;
+        uint64_t bits = constant[limb];
+        if (top && limbs.sign && shift != 0)
+        {
+            bits = (uint64_t)((int64_t)(bits << shift) >> shift);
+        }
+        if (limb != 0)
+        {
+            check_lower_limb_load(writer, limbs, local, limb, class, true);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, class, bits);
+            check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        check_lower_limb_load(writer, limbs, local, limb, class, true);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, class, bits);
+        check_lower_emit(writer, above ? BUSTER_TYPED_GT : BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0);
+        if (limb != 0)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
+        }
+    }
+}
+
+// A case of a switch on a _BitInt past 128 bits (#2220), whose limbs' address temporary `local` holds: a branch to its
+// label where the value is its constant's, its limbs' XORs with the constant's ORed together against 0, or for a GNU range
+// where it is neither below the low value nor above the high one (check_lower_case_limb_less).
+static void check_lower_case_limbs(CheckLowerWriter* writer, const CheckProgramCase* item, CheckLowerLimbs limbs, uint32_t local)
+{
+    const bool range = item->wide_upper != item->wide_lower && memcmp(item->wide_lower, item->wide_upper, 8 * (uint64_t)limbs.count) != 0;
+    if (range)
+    {
+        const uint32_t skip = check_lower_label(writer);
+        check_lower_case_limb_less(writer, limbs, local, item->wide_lower, false);
+        check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, skip);
+        check_lower_case_limb_less(writer, limbs, local, item->wide_upper, true);
+        check_lower_emit(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, item->target);
+        check_lower_place(writer, skip);
+    }
+    else
+    {
+        const uint32_t shift = 64 * limbs.count - limbs.width;
+        for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+        {
+            uint64_t bits = item->wide_lower[limb];
+            if (limb + 1 == limbs.count && limbs.sign && shift != 0)
+            {
+                bits = (uint64_t)((int64_t)(bits << shift) >> shift);
+            }
+            check_lower_limb_load(writer, limbs, local, limb, BUSTER_TYPED_CLASS_U64, true);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, bits);
+            check_lower_emit(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            if (limb != 0)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+            }
+        }
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, item->target);
+    }
+}
+
 static void check_lower_case(CheckLowerWriter* writer, const CheckProgramCase* item)
 {
     const uint32_t local = writer->switch_locals[item->owner];
-    const uint8_t own = check_lower_class(writer, item->type);
+    const CheckLowerLimbs limbs = item->wide_lower != NULL ? check_lower_limbs(writer, item->type) : (CheckLowerLimbs){ 0 };
+    const uint8_t own = limbs.count != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, item->type);
     // A narrow _BitInt's switch keeps its value in its computing class (check_lower_computed), which the cases' constants
     // are converted to.
     const uint8_t class = check_lower_computed(own);
-    if (class == UINT8_MAX)
+    if (limbs.count != 0 && local != BUSTER_CHECK_NONE && item->wide_upper != NULL)
+    {
+        check_lower_case_limbs(writer, item, limbs, local);
+    }
+    else if (class == UINT8_MAX)
     {
         check_lower_unsupported(writer, check_lower_type_feature(writer->program->types, item->type));
     }
@@ -15006,7 +15162,19 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
 // of the checked program's, with its controls). Returns false when an arena has no room.
 static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
 {
-    const uint32_t capacity = program->case_count / 4;
+    // A table per switch of four cases or more, of each body: a target_clones copy's again (#2247, CheckProgram.body_options),
+    // of at most a fifth of its controls (its SWITCH and four CASEs each).
+    uint32_t capacity = program->case_count / 4;
+    if (capacity != 0 && program->body_options != 0)
+    {
+        uint64_t copied = 0;
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            copied += program->body_options[b] != 0 ? program->bodies[b].count : 0;
+        }
+        const uint64_t total = (uint64_t)capacity + copied / 5;
+        capacity = total < UINT32_MAX ? (uint32_t)total : UINT32_MAX;
+    }
     bool valid = true;
     if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
     {
@@ -15018,6 +15186,11 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
         for (uint32_t b = 0; valid && b < program->body_count; b += 1)
         {
             const CheckProgramBody* body = program->bodies + b;
+            // (A target_clones copy is its body again, right after it, #2247: its switches' tables are its own.)
+            while (s != 0 && program->switches[s - 1] >= body->first)
+            {
+                s -= 1;
+            }
             while (s < program->switch_count && program->switches[s] < body->first)
             {
                 s += 1;
@@ -15033,20 +15206,21 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
     return valid;
 }
 
-// The jump table of the SWITCH control at `control`, an index in the program's controls, or BUSTER_CHECK_NONE: a search
-// of the `count` tables, which check_lower_switch_tables made in the controls' order.
-static uint32_t check_lower_table_of(const CheckLowerTable* tables, uint32_t count, uint32_t control)
+// The jump table of function `function`'s SWITCH control at `control`, an index in the program's controls, or
+// BUSTER_CHECK_NONE: a search of the `count` tables, which check_lower_switch_tables made in the functions' order and
+// each function's in its controls' order (a target_clones copy shares its body's controls, but not its tables, #2247).
+static uint32_t check_lower_table_of(const CheckLowerTable* tables, uint32_t count, uint32_t function, uint32_t control)
 {
     uint32_t first = 0;
     uint32_t end = count;
     while (first < end)
     {
         const uint32_t middle = first + (end - first) / 2;
-        const bool before = tables[middle].control < control;
+        const bool before = tables[middle].function < function || (tables[middle].function == function && tables[middle].control < control);
         first = before ? middle + 1 : first;
         end = before ? end : middle;
     }
-    return first < count && tables[first].control == control ? first : BUSTER_CHECK_NONE;
+    return first < count && tables[first].function == function && tables[first].control == control ? first : BUSTER_CHECK_NONE;
 }
 
 // The index of a jump table's entry: the switch's value (in `local`, of `class`) less the table's lowest, unsigned.
@@ -16109,9 +16283,12 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_SWITCH)
     {
         // A narrow _BitInt's value is kept in its computing class, which its cases compare in (check_lower_computed).
+        // A _BitInt's past 128 bits (#2220) is its limbs' address, which its cases read (check_lower_case_limbs) before
+        // any of its statements runs.
         const TypeId type = check_stream_type(program->stream, control.node);
-        const uint8_t own = check_lower_class(writer, type);
-        const uint8_t class = check_lower_computed(own);
+        const bool limbs = check_lower_limb_value(writer, type);
+        const uint8_t own = limbs ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
+        const uint8_t class = limbs ? own : check_lower_computed(own);
         const uint32_t local = check_lower_temporary(writer, class);
         writer->switch_locals[control.token] = local;
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
@@ -16123,7 +16300,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         // Its CASE controls come next: through its jump table (check_lower_switch_tables decided it), its first one
         // writes the dispatch, and none compares.
         writer->table_switch = control.token;
-        writer->table_current = check_lower_table_of(writer->tables, writer->table_count, writer->body->first + index);
+        writer->table_current = check_lower_table_of(writer->tables, writer->table_count, (uint32_t)(writer->body - writer->program->bodies), writer->body->first + index);
         writer->table_pending = writer->table_current != BUSTER_CHECK_NONE;
     }
     else if (control.kind == CHECK_CONTROL_CASE)
@@ -16599,7 +16776,8 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
         // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834); and so the saturating
         // builtins' of 32- and 64-bit elements (check_lower_integer_elements, #2216), and a scalar's one element of an
-        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type.
+        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type, and its pdep,
+        // pext or clmul (check_lower_scalar_lanes, #2410).
         const bool vector = check_lower_transport_is_vector(types, type);
         const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
                           member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
@@ -16610,7 +16788,8 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
             counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
             counts->transport_locals += room != 0 ? 0 : 12;
         }
-        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic) && !vector)
+        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic || member == CBUILTIN_ELEMENTWISE_PDEP || member == CBUILTIN_ELEMENTWISE_PEXT ||
+                                                   member == CBUILTIN_ELEMENTWISE_CLMUL) && !vector)
         {
             counts->transport_entries += 144;
             counts->transport_locals += 12;

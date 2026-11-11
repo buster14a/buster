@@ -761,8 +761,8 @@ static CheckProgramTargetOption* check_program_target_options(const CheckProgram
 }
 
 // Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): one with inline assembly,
-// whose plans are a body's own (check_program_asm), or a switch, whose jump tables are (check_lower_switch_tables).
-// (A label whose address it takes has a symbol of each copy's own, check_program_target_number, #2247.)
+// whose plans are a body's own (check_program_asm). (A switch's jump tables are each copy's own,
+// check_lower_switch_tables, and so are its labels' symbols, check_program_target_number, #2247.)
 static bool check_program_target_copy_refused(const CheckProgram* program, uint32_t b)
 {
     const Parser* parser = program->parser;
@@ -772,7 +772,7 @@ static bool check_program_target_copy_refused(const CheckProgram* program, uint3
     for (uint32_t token = body->opening; !refused && token < closing; token += 1)
     {
         const uint8_t kind = parser->tokens.kinds[token];
-        refused = kind == PARSE_KIND_ASM || kind == PARSE_KIND_SWITCH;
+        refused = kind == PARSE_KIND_ASM;
     }
     return refused;
 }
