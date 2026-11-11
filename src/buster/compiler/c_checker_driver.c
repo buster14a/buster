@@ -3721,7 +3721,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else
                         {
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
+                            // A file-scope declarator's queue keeps the order clang builds its expressions in, the shift
+                            // before a comma that holds it (#1943, check_common_report_comma_left): by its node's end.
+                            if (phase == PP_DIAGNOSTIC_RUNTIME && node < input->graph.count && input->graph.source_positions != NULL)
+                            {
+                                pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[node] + 1);
+                            }
                         }
                     }
                 }

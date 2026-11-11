@@ -808,6 +808,25 @@ static void check_common_report_unused(const Parser* parser, Preprocessor* pp, c
                                   message, notes, note_count, scratch);
 }
 
+// A comma's left operand's "has no effect", check_common_report_unused's. In a file-scope initializer clang's
+// DiagRuntimeBehavior queues it to the declarator's end, as it does a folded shift count's, in the order they are built
+// (#1943, check_driver_file_initializer_end): both are published there, ordered by their nodes' ends (`comma`'s), so
+// that a shift its operands hold comes first.
+static void check_common_report_comma_left(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t comma,
+                                           Arena* scratch)
+{
+    const uint32_t boundary = check_common_function_boundary(parser, token);
+    const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                  declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_UNUSED_VALUE, false,
+                                  "left operand of comma operator has no effect", NULL, 0, scratch);
+    if (declarator != BUSTER_CHECK_NONE && comma < input->graph.count && input->graph.source_positions != NULL)
+    {
+        pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[comma] + 1);
+    }
+}
+
 // The deferred publication an expression warning gets inside a function: every unused-result, bounds,
 // conversion, division, shift count and sign diagnostic lands at the body's end and keeps the order it was emitted in.
 static void check_common_report_deferred(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
@@ -2919,15 +2938,13 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                 }
                 else
                 {
-                    check_common_report_unused(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                               "left operand of comma operator has no effect", NULL, 0, scratch);
+                    check_common_report_comma_left(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, node, scratch);
                 }
             }
         }
         else
         {
-            check_common_report_unused(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                       "left operand of comma operator has no effect", NULL, 0, scratch);
+            check_common_report_comma_left(parser, pp, input, report, node, scratch);
         }
     }
 }
@@ -5288,7 +5305,7 @@ static uint32_t check_common_next_unevaluated(const uint8_t* evaluated, uint32_t
 }
 
 // One brace initializer's literal conversions (check_common_initializer_roots' plan `index`), its parts in reverse
-// initializer order, each part's target conversion, then its nested ones, then the part's own root walk.
+// initializer order, each part's target conversion, then its nested ones; then the parts' own root walks, in order.
 static void check_common_initializer_conversions(CheckCommonEmission* emission, const CheckProgram* program, uint32_t index)
 {
     const Parser* parser = emission->parser;
@@ -5351,10 +5368,19 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // the conversion visit bit prevents the later parent walk from reporting them again.
             check_common_emit_push(emission, root, BUSTER_CHECK_EMIT_CONVERSIONS);
             check_common_emit_run(emission);
-            if (emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_TREE) == 0)
-            {
-                check_common_emit_root(emission, root);
-            }
+        }
+    }
+    // The parts' own root walks, in initializer order (#1943): clang queues their runtime warnings (a comma's left operand,
+    // a shift count) as it parses each value, before the list's checks.
+    for (uint32_t p = 0; p < plan->count && !pp->fatal; p += 1)
+    {
+        const CheckInitPart* part = plan->parts + p;
+        const uint32_t root = part->node;
+        if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+            (evaluated == NULL || evaluated[root] != 0 || (emission->emitted[root] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+            emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_TREE) == 0)
+        {
+            check_common_emit_root(emission, root);
         }
     }
     emission->at_once = BUSTER_CHECK_NONE;
