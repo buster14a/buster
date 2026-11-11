@@ -404,6 +404,34 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "f=bf(fs[j]);h=fold(h,fb(__scoped_atomic_fetch_fminimum(&f,(float)-n,__ATOMIC_SEQ_CST,2)));h=fold(h,fb(f));}"
             "return (int)h;}",
         },
+        {
+            // Of a _Float16 and a __bf16 (#1843), as clang's code computes them for the target: the pairs of 13 values each,
+            // their NaNs quieted as its conversions back quiet them, constants of other types converted, and the scoped
+            // forms. A __bf16 object holding a signaling NaN or a denormal isn't an old value: clang's code, which compares
+            // its float's conversion back rather than the bits it loaded, loops forever on one (on a denormal where its
+            // VCVTNEPS2BF16 flushes it), which the leaves don't copy.
+            "ieee-half-atomics",
+            "static _Float16 hf;static __bf16 bh;"
+            "static unsigned short hb(_Float16 x){union{_Float16 f;unsigned short u;}v={x};return v.u;}"
+            "static _Float16 bhf(unsigned short u){union{unsigned short u;_Float16 f;}v={u};return v.f;}"
+            "static unsigned short bb(__bf16 x){union{__bf16 f;unsigned short u;}v={x};return v.u;}"
+            "static __bf16 bbf(unsigned short u){union{unsigned short u;__bf16 f;}v={u};return v.f;}\n"
+            "int tested(int n){static const unsigned short hs[]={0x0000,0x8000,0x3c00,0xbc00,0x7c00,0xfc00,0x7e00,0xfe00,0x7e23,0x7c01,0xfd23,0x0001,0x8001};"
+            "static const unsigned short bs[]={0x0000,0x8000,0x3f80,0xbf80,0x7f80,0xff80,0x7fc0,0xffc0,0x7fc3,0x7f81,0xffa3,0x4020,0xc020};"
+            "unsigned h=2166136261u;const unsigned count=sizeof hs/sizeof hs[0];const unsigned i=(unsigned)n%count;"
+            "const int hang=(bs[i]&0x7f80)==0x7f80&&(bs[i]&0x7f)!=0&&!(bs[i]&0x40);for(unsigned j=0;j<count;j+=1){"
+            "hf=bhf(hs[i]);h=fold(h,hb(__atomic_fetch_fmaximum(&hf,bhf(hs[j]),__ATOMIC_SEQ_CST)));h=fold(h,hb(hf));"
+            "hf=bhf(hs[i]);h=fold(h,hb(__atomic_fetch_fminimum(&hf,bhf(hs[j]),__ATOMIC_RELAXED)));h=fold(h,hb(hf));"
+            "hf=bhf(hs[i]);h=fold(h,hb(__atomic_fetch_fmaximum_num(&hf,bhf(hs[j]),__ATOMIC_ACQUIRE)));h=fold(h,hb(hf));"
+            "hf=bhf(hs[i]);h=fold(h,hb(__scoped_atomic_fetch_fminimum_num(&hf,bhf(hs[j]),__ATOMIC_SEQ_CST,__MEMORY_SCOPE_DEVICE)));h=fold(h,hb(hf));"
+            "if(!hang){bh=bbf(bs[i]);h=fold(h,bb(__atomic_fetch_fmaximum(&bh,bbf(bs[j]),__ATOMIC_SEQ_CST)));h=fold(h,bb(bh));"
+            "bh=bbf(bs[i]);h=fold(h,bb(__atomic_fetch_fminimum(&bh,bbf(bs[j]),__ATOMIC_ACQ_REL)));h=fold(h,bb(bh));"
+            "bh=bbf(bs[i]);h=fold(h,bb(__scoped_atomic_fetch_fmaximum_num(&bh,bbf(bs[j]),__ATOMIC_SEQ_CST,0)));h=fold(h,bb(bh));"
+            "bh=bbf(bs[i]);h=fold(h,bb(__atomic_fetch_fminimum_num(&bh,bbf(bs[j]),__ATOMIC_RELEASE)));h=fold(h,bb(bh));}"
+            "hf=bhf(hs[j]);h=fold(h,hb(__atomic_fetch_fmaximum(&hf,(double)n*0.5,__ATOMIC_SEQ_CST)));h=fold(h,hb(hf));"
+            "if(!((bs[j]&0x7f80)==0x7f80&&(bs[j]&0x7f)!=0&&!(bs[j]&0x40))){bh=bbf(bs[j]);h=fold(h,bb(__atomic_fetch_fminimum(&bh,-n,__ATOMIC_SEQ_CST)));h=fold(h,bb(bh));}}"
+            "return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {

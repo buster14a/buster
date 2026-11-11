@@ -2271,9 +2271,14 @@ static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckI
     uint32_t spelling = 0;
     for (uint32_t steps = 0; spelling == 0 && node < graph->count && steps < graph->count; steps += 1)
     {
-        spelling = check_input_operand_type_spelling(input, parser, node);
         const CheckOp op = graph->ops[node];
-        uint32_t next = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        // A member's own declarator's specifiers (#1837): its typedef or typeof (`&s.m` of a `typeof(long) m`).
+        const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, node) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+        spelling = !member ? check_input_operand_type_spelling(input, parser, node) :
+                   declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : 0;
+        uint32_t next = !member && (op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) ? graph->operand0[node] : BUSTER_CHECK_NONE;
         if (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
         {
             const uint32_t first = graph->operand0[node];
@@ -2884,7 +2889,12 @@ static bool check_driver_conversion_site(const Parser* parser, const CheckStream
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const bool condition = parent_role == PARSE_ROLE_CLOSE_CONDITION || parent_role == PARSE_ROLE_CLOSE_FOR;
     const bool known = source < stream->count && target != 0 && token < count && !condition && check_driver_in_body(parser, token);
-    const uint32_t first = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    const uint32_t operand = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    // An array compound literal's node is its body's `}` (its decay's too), so its own first token is its type name's `(`:
+    // a cast before the `}` would break the view's reading and lose the body's warnings (`char *b = (int[2]){ 1, 2 };`).
+    const uint8_t operand_role = operand < count ? parser->tree.roles[operand] : PARSE_ROLE_NONE;
+    const bool compound = operand_role == PARSE_ROLE_CLOSE_COMPOUND_BODY || operand_role == PARSE_ROLE_CLOSE_COMPOUND;
+    const uint32_t first = compound ? check_warning_graph_start(parser, operand) : operand;
     const uint32_t end = known ? graph->source_positions[source] : 0;
     const bool valid = first < end && end <= count;
     *site = (CheckDriverConversionSite){
@@ -3170,6 +3180,12 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t left = graph->operand0[node];
         const TypeId lvalue = left < stream->count ? check_stream_type(stream, left) : 0;
         target = left < stream->count ? check_input_object_spelling(types, input, parser, graph->tokens[left], 0, lvalue, &target_spelling) : 0;
+        // A member's own declarator's specifiers (#1837): `s.lp = m` of a member `LP lp` assigns to 'LP'.
+        const bool member = left < stream->count && (graph->ops[left] == CHECK_OP_MEMBER || graph->ops[left] == CHECK_OP_ARROW);
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, left) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+        target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
+        target = member ? lvalue : target;
     }
     else if (applies && returning)
     {
@@ -7178,6 +7194,19 @@ static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
+// Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
+// temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
+// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them.
+static bool check_driver_code_temporary(const Link* link, uint32_t s)
+{
+    const NameId name = link->symbols.name[s];
+    const AtomId atom = link->symbols.atom[s];
+    return (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL &&
+           (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION && atom != 0 && atom < link->atoms.count &&
+           link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && name != 0 && link->names.length[name] >= 2 && link->names.bytes[name][0] == '.' &&
+           link->names.bytes[name][1] == 'L';
+}
+
 // The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
 // atom, or null), as -c writes it: its link checked, its temporaries (the jump tables' symbols and their labels', the
 // unit's own) left out, as clang's .L labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error
@@ -7192,8 +7221,17 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
     // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
     // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
     // entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones.
+    // And every local `.L` label in code (#1845): the labels of asm templates assembled by their own statements and of
+    // naked functions and the address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's
+    // code, which an assembler never keeps.
     const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
-    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0;
+    const Link* link = &code->link;
+    bool coded = false;
+    for (uint32_t s = 1; valid && !coded && s < link->symbols.count; s += 1)
+    {
+        coded = check_driver_code_temporary(link, s);
+    }
+    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
     uint8_t* temporary = valid && temporaries ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
     valid = valid && (!temporaries || temporary != 0);
     if (temporary != 0)
@@ -7204,6 +7242,10 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
         for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
         {
             temporary[code->unit_temporary[s]] = 1;
+        }
+        for (uint32_t s = 1; coded && s < link->symbols.count; s += 1)
+        {
+            temporary[s] |= check_driver_code_temporary(link, s);
         }
     }
     Object result = { .error = OBJECT_ERROR_FULL };
