@@ -1043,6 +1043,58 @@ static void check_warning_graph_void_dereferences(CheckInputReader* reader, cons
     }
 }
 
+// A C-style cast from a pointer (an array or a function decayed to one too) to an integer type narrower than it, not
+// _Bool (#1943, clang's CheckCStyleCast: C 6.3.2.3p6 makes the result undefined where it can't be represented): at the
+// cast's `(` as soon as it is read, in an unevaluated operand too: -Wpointer-to-int-cast, or -Wpointer-to-enum-cast to an
+// enumeration, each a pointer to void's -Wvoid- form.
+static void check_warning_graph_pointer_cast(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t operand = graph->operand0[node];
+    const uint32_t close = graph->tokens[node];
+    const TypeId written = operand < graph->count ? type_unqualified(check_stream_type(stream, operand)) : 0;
+    const TypeId plain = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const uint8_t from = plain != 0 ? type_kind(types, plain) : BUSTER_TYPE_KIND_NONE;
+    const bool array = from == BUSTER_TYPE_KIND_ARRAY || from == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || from == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+    const TypeId target = check_stream_type(stream, node);
+    const TypeId integer = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+    const uint8_t kind = integer != 0 ? type_kind(types, integer) : BUSTER_TYPE_KIND_NONE;
+    // (A pointer is 8 bytes; an array or a function decays to one.)
+    const bool from_pointer = from == BUSTER_TYPE_KIND_POINTER || array || from == BUSTER_TYPE_KIND_FUNCTION;
+    const bool narrower = from_pointer && integer != BUSTER_TYPE_BOOL &&
+                          (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_BIT_INT) && type_size(types, integer) < 8;
+    const uint32_t open = narrower && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
+                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    // (The operand as the cast reads it, which clang prints: an array's or a function's after its decay, without sugar.)
+    const TypeId source = open >= parser->tokens.count ? 0 : array ? type_pointer(types, type_element(types, plain)) :
+                          from == BUSTER_TYPE_KIND_FUNCTION ? type_pointer(types, written) : written;
+    reader->output->resource |= open < parser->tokens.count && source == 0;
+    const TypeId pointer = source != 0 ? type_unqualified(type_strip_aligned(types, source)) : 0;
+    if (pointer != 0)
+    {
+        const bool to_void = type_kind(types, type_unqualified(type_strip_aligned(types, type_element(types, pointer)))) == BUSTER_TYPE_KIND_VOID;
+        const bool to_enum = kind == BUSTER_TYPE_KIND_ENUM;
+        const uint32_t id = to_enum ? (to_void ? CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST : CHECK_WARNING_ID_POINTER_TO_ENUM_CAST) :
+                                      (to_void ? CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST : CHECK_WARNING_ID_POINTER_TO_INT_CAST);
+        const uint32_t completion = graph->source_positions[node];
+        const CheckWarningEvent event =
+        {
+            .id = id,
+            .kind = CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
+            .token = open,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion > open ? completion : close + 1,
+            .payload = { .first_type = source, .second_type = target, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                         .name = source == written ? check_input_operand_spelling(reader, operand) : 0,
+                         .data = check_input_operand_spelling(reader, node) },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // -Wunevaluated-expression (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr): the expression
 // operand of a sizeof or an alignof (of no variable array type) and a _Generic's controlling expression are unevaluated,
 // and one with a side effect, as Expr::HasSideEffects finds it without the possible ones, warns at its expression's
@@ -1375,7 +1427,8 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE)) |
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF));
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CAST));
         }
         for (; valid && selected != 0; selected &= selected - 1)
         {
@@ -1440,6 +1493,10 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
                 {
                     check_warning_graph_operand(&reader, stream, node);
+                }
+                else if (op == CHECK_OP_CAST)
+                {
+                    check_warning_graph_pointer_cast(&reader, stream, node);
                 }
                 else if (op == CHECK_OP_CALL)
                 {

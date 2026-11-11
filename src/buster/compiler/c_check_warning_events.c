@@ -147,6 +147,13 @@ enum
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
     CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
+    // A C-style cast from a pointer to a narrower integer type (#1943, clang's CheckCStyleCast), on by default:
+    // -Wpointer-to-int-cast's, with -Wvoid-pointer-to-int-cast's from a pointer to void under it, and to an enumeration
+    // -Wpointer-to-enum-cast's, with -Wvoid-pointer-to-enum-cast's under it.
+    CHECK_WARNING_ID_POINTER_TO_INT_CAST = 122,
+    CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 123,
+    CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 124,
+    CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 125,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -425,6 +432,10 @@ typedef enum CheckWarningEventKind
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
+    // A cast from a pointer to a narrower integer type (#1943, check_warning_graph_pointer_cast), at the cast's `(`: "cast
+    // to smaller integer type T from P", payload.first_type the operand's type after decay and payload.name its typedef's
+    // spelling, payload.second_type the cast's type and payload.data its.
+    CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

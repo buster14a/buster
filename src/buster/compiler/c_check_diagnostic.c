@@ -162,6 +162,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
+    [CHECK_WARNING_ID_POINTER_TO_INT_CAST] = { "-Wpointer-to-int-cast", NULL, "cast to smaller integer type" },
+    [CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST] = { "-Wvoid-pointer-to-int-cast", "-Wpointer-to-int-cast", "cast to smaller integer type" },
+    [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = { "-Wpointer-to-enum-cast", NULL, "cast to smaller integer type" },
+    [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = { "-Wvoid-pointer-to-enum-cast", "-Wpointer-to-enum-cast", "cast to smaller integer type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
