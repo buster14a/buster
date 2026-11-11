@@ -9670,7 +9670,8 @@ enables, which this checker doesn't all give.
   target and the null pointer warning's target do too, with a member's
   `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
-  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  `desugarForDiagnostic` stops there. It doesn't look inside an `_Atomic`
+  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`). A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
   the specifiers write again beside a qualified typedef prints over its name
   (`const CI twice[1]`'s `'const CI[1]' (aka 'const int[1]')`): the operand's
@@ -9716,6 +9717,12 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
+  - A typedef written in a function type's parameters prints canonically:
+    clang prints `void (*fp)(I)` as `'void (*)(I)' (aka 'void (*)(int)')`,
+    this `'void (*)(int)'`. The warning renderer takes one typedef, by type;
+    the `__builtin_dump_struct` printer's places (`check_lower_dump_places`,
+    `TypeNames.alias_order`) spell each parameter's own and would serve here
+    once they read the parser and input rather than a `CheckProgram`.
   - An initializer subobject's null pointer warning (`{ .lp = 1-1 }`) prints
     its target canonically: the initializer walk that gives it keeps neither
     the declaration nor its subobject's member.

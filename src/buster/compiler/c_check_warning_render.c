@@ -855,6 +855,23 @@ static uint32_t check_driver_vla_bounds(const Parser* parser, Preprocessor* pp, 
     return count;
 }
 
+// Whether `alias` is the value type of one of `type`'s _Atomic levels, through pointers, arrays and functions' results.
+static bool check_driver_atomic_value(const TypeTable* types, TypeId type, TypeId alias)
+{
+    const TypeId wanted = type_unqualified(type_strip_aligned(types, alias));
+    bool found = false;
+    TypeId level = type;
+    for (uint32_t depth = 0; !found && depth < 64 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        const TypeId base = types->types.base[type_index(bare)];
+        found = kind == BUSTER_TYPE_KIND_ATOMIC && type_unqualified(type_strip_aligned(types, base)) == wanted;
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? base : 0;
+    }
+    return found;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
@@ -1007,6 +1024,12 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
+                // clang's desugarForDiagnostic doesn't look inside an _Atomic (#1447): a typedef that is an atomic's value
+                // type stays in the a.k.a. (`_Atomic(I) *` has none).
+                const bool atomic_value = vector_name == 0 && alias_type != 0 && !typeof_spelling && check_driver_atomic_value(types, type, alias_type);
+                expand.alias_count = atomic_value ? 1 : expand.alias_count;
+                expand.alias_types = atomic_value ? &alias_type : expand.alias_types;
+                expand.alias_names = atomic_value ? &alias_name : expand.alias_names;
                 expand.parenthesis_count = 0;
                 // desugarForDiagnostic strips a macro's name too: the a.k.a. spells the space out.
                 expand.space_macro_count = 0;
