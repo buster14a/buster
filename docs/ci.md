@@ -258,17 +258,25 @@ settings are the workflow's environment, the same for the build and the
 shards. The job then builds and packs the product in four steps, three of them
 `tools/ci/hosted-product.sh`'s:
 
-- `build`: the pragma oracle, the clang server (status 77 still means none for
-  this toolchain) and `./build.sh --config Release --jobs "$(nproc)"`, with the
-  build step's checks of `build/compiler`. A native row's shards run this same
-  command.
+- `build`: the pragma oracle, the clang server and
+  `./build.sh --config Release --jobs "$(nproc)"`, with the build step's checks
+  of `build/compiler`. A native row's shards run this same command. The
+  server's build exits 77 where a toolchain can't give it one copy of LLVM (a
+  distribution's shared LLVM without clang's archives). With another clang that
+  is a notice and no server, and the driver's checks run the oracle clang as
+  children. With the hosted installation, the clang that `toolchain_root()`
+  finds, it is an error: that tree holds the archives, so 77 means a regression
+  in its tar list or the release's layout, which would otherwise leave the row
+  green, its driver commands 251 s slower in the plain row (#2071). The check
+  sits here, the one step that knows its toolchain, rather than in the
+  inventory, which the 9700X and local runs share.
 - `ownership`: the inventory's unity fixture ownership heading. It is the one
   heading that reads the build's tree (Ninja's dependency records) rather than
   the executable, so it runs here, on that tree, through the built executable's
   runner.
 - the sanitizer report audit (sanitizer rows): the post-link step and the
   ownership heading run the instrumented executable.
-- `pack`: the compiler, the pragma oracle, the clang server when built, the
+- `pack`: the compiler, the pragma oracle, the clang server, the
   build's compile commands, the product's identity and provenance, and the
   SHA-256 of every file, as a reproducible `product.tar.zst`. Zstandard's
   third level packs the plain row's 48 MB compiler into 15 MB; the static clang
@@ -313,7 +321,7 @@ they download the artifact by the build's output name, and
 3. exactly the files it lists, each with its hash;
 4. the identity, which a difference fails, printed;
 5. the build's image, glibc and packages, whose differences are a notice;
-6. each executable, run once.
+6. each executable, the clang server among them, run once.
 
 Only then does it install them where `build` puts them:
 `build/compiler`, in the checkout's `build/` where the compiler finds its
@@ -340,8 +348,11 @@ missing (expired), truncated or altered archive, a partial extraction or a
 mismatched configuration fails the shard and says why. Rerun the build job, or
 the workflow: nothing rebuilds or refetches by itself, so one bad product can't
 start four builds. `bash tests/ci/hosted-product.sh`, which the build job runs
-before building, checks each of these refusals, the clang server's status 77
-and the inventory's skip on a fake checkout, toolchain and build.
+before building, checks each of these refusals, a product without its server,
+the clang server's status 77 (failing the build on the hosted toolchain and a
+notice with another clang) and the inventory's skip on a fake checkout,
+toolchain and build. `bash tests/ci/hosted-tools.sh` checks the same 77 failure
+against the tree that `install-hosted-tools.sh` installs.
 
 Native rows keep their per-shard builds: each hosted CPU selects its own path.
 The vector row's explicit target makes its 4 builds one configuration, so it

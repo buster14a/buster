@@ -177,8 +177,8 @@ jobs:
     env:
       BUSTER_ORACLE_CACHE: check
       # The native plain row, and the vector row that replaces it on pull requests (#2033), also run each of the semantic
-      # driver's in-process and served runs as a child and fail on a difference (test-checker-driver --differential,
-      # #2071); the other rows run them in-process and served alone.
+      # driver's in-process and served runs, and the parser's and the preprocessor's served clang oracle runs, as a child
+      # and fail on a difference (--differential, #2071); the other rows run them in-process and served alone.
       BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.host_arch != 'x86-64' && inputs.sanitizer == 'none' && '1' || '' }}
       # The shard every step below runs. The vector row's draws have none until a candidate claims one (its first steps).
       BUSTER_SHARD: ${{ matrix.shard }}
