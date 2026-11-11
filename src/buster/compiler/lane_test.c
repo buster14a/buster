@@ -13,10 +13,11 @@
 //     alignments; a push that fills the arena exactly, and one more byte, which fails and leaves the arena as it was;
 //     sizes and counts whose arithmetic overflows; pop_to; arenas that couldn't be reserved; a 64 GB reservation of which
 //     only the touched page is committed (mincore); and the page sizes asked for, read back from /proc/self/smaps: base
-//     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there. An arena
-//     of tables (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a
-//     pool for the same tables alone; for random tables, a layout that maps no more than their own arenas; and tables
-//     refused for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations.
+//     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there, the same
+//     where 2 MB or more of base pages are mapped MAP_STACK as where they are advised (#1444). An arena of tables
+//     (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a pool for
+//     the same tables alone; for random tables, a layout that maps no more than their own arenas; and tables refused
+//     for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations.
 //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
 //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
 //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
@@ -503,9 +504,91 @@ static bool lane_test_resident(const uint8_t* address)
     return mincore((void*)address, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 && (vector & 1) != 0;
 }
 
+// The reservations that keep 2 MB or more in base pages (#1444), mapped VM_NOHUGEPAGE (arena_stack_base_pages:
+// MAP_STACK) where the kernel maps MAP_STACK so, and advised MADV_NOHUGEPAGE by a call of their own elsewhere: the same
+// pages either way. An arena with 8 MB of base pages, before its first commit and as it commits past them; a busy host's
+// arena (arena_pages_busy); and an arena of tables, a table of base pages throughout beside one with huge pages past
+// its first 2 MB. MAP_STACK splits no mapping: before its first commit, the wide arena's base pages are one mapping with
+// the rest of its reservation, where the advice split them off. And the kernel releases arena_page_policy reads.
+static void lane_test_stack_base_pages(LaneTestTally* tally)
+{
+    static const struct
+    {
+        const char* release;
+        bool maps;
+    } releases[] = {
+        { "6.18.50-2-lts", true }, { "6.7.0", true }, { "6.7", true }, { "6.07.1", true }, { "7.0.0", true }, { "10.1", true },
+        { "6.6.69", false },       { "5.15.0-91-generic", false }, { "6", false }, { "6.", false }, { "6.x", false },
+        { "", false },             { "abc", false }, { "16000000000.1", false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(releases); i += 1)
+    {
+        lane_test_expect(tally, arena_kernel_maps_stack_base_pages(releases[i].release) == releases[i].maps, "a kernel's release was misread");
+    }
+    struct utsname kernel;
+    const bool supported = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
+    const bool was_stack = arena_stack_base_pages;
+    const bool was_busy = arena_pages_busy;
+    for (uint32_t mode = 0; mode < (supported ? 2u : 1u); mode += 1)
+    {
+        arena_stack_base_pages = mode == 1;
+        bool found = false;
+        uint64_t first = 0;
+        uint64_t last = 0;
+        const uint64_t wide_small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, wide_small);
+        if (wide.base != 0)
+        {
+            const bool head = lane_test_vm_flag_in((uintptr_t)wide.base, "nh", &found, &first, &last) && found;
+            const bool whole = last > (uintptr_t)wide.base + wide_small;
+            lane_test_expect(tally, head && whole == arena_stack_base_pages, "an arena's 8 MB of base pages weren't mapped or advised as asked");
+            const bool pushed = arena_push(&wide, wide_small, 1) == wide.base;
+            const bool base_pages = lane_test_vm_flag((uintptr_t)wide.base + wide_small - 1, "nh", &found) && found &&
+                                    !(lane_test_huge_capable((uintptr_t)wide.base + wide_small / 2, &found) || !found);
+            const bool past = arena_push(&wide, 1, 1) != 0 && lane_test_vm_flag((uintptr_t)wide.base + wide_small, "hg", &found) && found &&
+                              lane_test_vm_flag((uintptr_t)wide.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "hg", &found) && found;
+            const bool kept = lane_test_vm_flag((uintptr_t)wide.base, "nh", &found) && found;
+            lane_test_expect(tally, pushed && base_pages && past && kept && wide.huge, "an arena with 8 MB of base pages took other pages than it asked for");
+        }
+        lane_test_expect(tally, wide.base != 0, "an arena with 8 MB of base pages couldn't be reserved");
+        arena_release(&wide);
+        arena_pages_busy = true;
+        Arena busy = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const bool busy_pushed = busy.base != 0 && arena_push(&busy, 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, 1) == busy.base;
+        const bool busy_base = busy_pushed && lane_test_vm_flag((uintptr_t)busy.base, "nh", &found) && found &&
+                               lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found) && found &&
+                               lane_test_vm_flag((uintptr_t)busy.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "nh", &found) && found &&
+                               !(lane_test_huge_capable((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found) && !busy.huge;
+        lane_test_expect(tally, busy_base, "a busy host's arena may take huge pages");
+        arena_release(&busy);
+        arena_pages_busy = was_busy;
+        ArenaTable tables[] = {
+            { .bytes = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + 5, .small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES },
+            { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES },
+        };
+        Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
+        if (held.base != 0)
+        {
+            const uintptr_t plain = (uintptr_t)tables[0].base;
+            const uintptr_t split = (uintptr_t)tables[1].base;
+            const bool plain_base = lane_test_vm_flag(plain, "nh", &found) && found && lane_test_vm_flag(plain + tables[0].bytes - 1, "nh", &found) && found &&
+                                    !(lane_test_huge_capable(plain + BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found);
+            const bool split_head = lane_test_vm_flag(split, "nh", &found) && found && !(lane_test_huge_capable(split, &found) || !found);
+            const bool split_tail = (split + BUSTER_ARENA_HUGE_PAGE_BYTES) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0 &&
+                                    lane_test_vm_flag(split + BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found) && found &&
+                                    lane_test_huge_capable(split + BUSTER_ARENA_HUGE_PAGE_BYTES, &found) && found;
+            lane_test_expect(tally, plain_base && split_head && split_tail, "an arena of tables' pages aren't each table's own arena's");
+        }
+        lane_test_expect(tally, held.base != 0, "an arena of tables couldn't be reserved");
+        arena_release(&held);
+    }
+    arena_stack_base_pages = was_stack;
+}
+
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
+    lane_test_stack_base_pages(&tally);
 
     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
     static const struct
