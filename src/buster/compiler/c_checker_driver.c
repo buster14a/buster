@@ -66,9 +66,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
-        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
+        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
         // words, check_input_constant_failure_report.)
         case CHECK_INPUT_CONSTANT_EXPRESSION: result = "invalid constant expression"; break;
@@ -2339,8 +2339,80 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// Whether `token` is inside a function's body, between its braces: a definition's head is under its body's `}` in the
+// tree too, so the body's `{` decides. Only a recovered report's scope asks it (check_driver_error_scoped).
+static bool check_driver_in_body(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t ancestor = token;
+    uint32_t steps = 0;
+    while (ancestor < count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BODY && steps < count)
+    {
+        ancestor = parser->tree.parents[ancestor];
+        steps += 1;
+    }
+    const bool closed = ancestor < count && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BODY;
+    uint32_t open = closed ? ancestor : 0;
+    while (open > 0 && !(parser->tree.roles[open] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[open] == ancestor))
+    {
+        open -= 1;
+    }
+    return closed && open < token;
+}
+
+// Whether a recovered report is one whose declaration stays valid (#1835): a dropped attribute's
+// (check_input_attribute_recoverable) or a dropped specifier's (check_input_specifiers_recover). A rejected unit's rounds
+// read past it (check_driver_rejected_common).
+static bool check_driver_report_keeps_valid(const CheckInputReport* report)
+{
+    const CheckInputMessage message = report->message;
+    const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
+                           message == CHECK_INPUT_SPECIFIER_COMPLEX;
+    return report->recovered && (specifier || check_input_attribute_recoverable(report));
+}
+
+// Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is a
+// parameter list's, before a `;` or a brace. That `(` is one the parser marks so, or one right after a name that declares
+// itself (the vector parser marks a definition's whose first parameter starts with an attribute as a call's, #1968).
+static bool check_driver_in_parameters(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t depth = 0;
+    bool inside = false;
+    bool scanning = token < parser->tokens.count;
+    for (uint32_t at = token; scanning && at > 0;)
+    {
+        at -= 1;
+        const uint8_t kind = parser->tokens.kinds[at];
+        const bool open = kind == PARSE_KIND_L_PAREN && depth == 0;
+        const bool declared = at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER && input->declarations != NULL && at - 1 < input->token_count &&
+                              input->declarations[at - 1] == at - 1;
+        inside = open && (parser->tree.roles[at] == PARSE_ROLE_OPEN_FUNCTION || declared);
+        depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
+        depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
+        scanning = !inside && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+    }
+    return inside;
+}
+
+// Whether a reader's report counts in the scopes around it (check_driver_rejected_warnings). Clang opens a definition's
+// body's scope before it handles the definition's declarator (ActOnStartOfFunctionDef: its own attributes, its
+// redeclaration), whose errors then keep the body's unused variables quiet; but what it gives as it parses, before that
+// (#1835), doesn't count: a specifier's (DeclSpec::Finish), a parameter's attributes' (ActOnParamDeclarator), and an
+// attribute's argument that must be a string literal (the parser's err_expected_string_literal).
+static bool check_driver_error_scoped(const Parser* parser, const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputMessage message = report->message;
+    const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
+                           message == CHECK_INPUT_SPECIFIER_COMPLEX;
+    const bool attribute = check_input_attribute_recoverable(report);
+    const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
+                        (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
+    const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, input, report->token))));
+    return !early || check_driver_in_body(parser, report->token);
+}
+
 // The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
-// driver's own. NULL without any, or without room.
+// driver's own, but a recovered report outside every body (check_driver_error_scoped). NULL without any, or without room.
 static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInput* input, const CheckStream* stream, const CheckDriverDiagnostic* extra,
                                            uint32_t extra_count, Arena* scratch)
 {
@@ -2353,7 +2425,8 @@ static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInpu
         // (An invalid declaration's quiet use is no error of its scope's, #1447: clang warns of its unused variables.)
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
-            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += input->reports[i].message != CHECK_INPUT_INVALID_USE;
+            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] +=
+                check_driver_error_scoped(parser, input, input->reports + i) && input->reports[i].message != CHECK_INPUT_INVALID_USE ? 1u : 0u;
         }
         for (uint32_t i = 0; i < stream->report_count; i += 1)
         {
@@ -4734,10 +4807,70 @@ struct CheckDriverEditor
     uint32_t log_capacity;
 };
 
+// Whether the tag definition whose `{` is `open`, inside [begin, last], declares no name used outside that region: its
+// tag's, and an enumeration's enumerators', which the reading after leaving it out would read as another declaration's
+// (an outer one's) without an error. Any identifier of the same spelling outside counts, in any name space.
+static bool check_driver_tag_local(const Parser* parser, uint32_t open, uint32_t begin, uint32_t last)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool enumeration = parser->tree.roles[open] == PARSE_ROLE_OPEN_ENUM;
+    const uint8_t close_role = enumeration ? PARSE_ROLE_CLOSE_ENUM : PARSE_ROLE_CLOSE_STRUCT;
+    // The definition's `}`: the first closer of its kind at its depth.
+    uint32_t close = open + 1;
+    for (uint32_t depth = 0; close <= last && !(depth == 0 && parser->tree.roles[close] == close_role); close += 1)
+    {
+        depth += parser->tree.roles[close] == PARSE_ROLE_OPEN_STRUCT || parser->tree.roles[close] == PARSE_ROLE_OPEN_ENUM;
+        depth -= (parser->tree.roles[close] == PARSE_ROLE_CLOSE_STRUCT || parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM) && depth != 0;
+    }
+    // Its tag is the identifier right after its keyword (`struct` stands for `union` too), or it has none; anything else between them (a C23 enumeration's
+    // `: type`, an attribute) makes it not local, as its tag isn't found.
+    const uint8_t keyword = open > 0 ? parser->tokens.kinds[open - 1] : PARSE_KIND_COUNT;
+    const uint8_t before_tag = open > 1 ? parser->tokens.kinds[open - 2] : PARSE_KIND_COUNT;
+    const bool anonymous = keyword == PARSE_KIND_STRUCT || keyword == PARSE_KIND_ENUM;
+    const bool tagged = keyword == PARSE_KIND_IDENTIFIER && (before_tag == PARSE_KIND_STRUCT || before_tag == PARSE_KIND_ENUM);
+    bool local = close <= last && (anonymous || tagged);
+    // Its names: the tag before the `{`, and an enumeration's enumerators, each after its `{` or a `,` (an argument after
+    // a value's `,` too, which only makes it less often local).
+    for (uint32_t at = open > 0 ? open - 1 : open; local && at < close; at += 1)
+    {
+        const uint8_t before = at > 0 ? parser->tokens.kinds[at - 1] : PARSE_KIND_COUNT;
+        const bool tag = at + 1 == open && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER;
+        const bool enumerator = enumeration && at > open && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER &&
+                                (before == PARSE_KIND_L_BRACE || before == PARSE_KIND_COMMA);
+        const uint32_t name = parser->tokens.names[at];
+        for (uint32_t use = 0; (tag || enumerator) && local && use < count; use += 1)
+        {
+            local = (use >= begin && use <= last) || parser->tokens.kinds[use] != PARSE_KIND_IDENTIFIER || parser->tokens.names[use] != name;
+        }
+    }
+    return local;
+}
+
 // Leave out the region [begin, last], `first` its first token's fate (DROP, or its run's replacement). A region already
 // left out whole is left so. A run with a replacement is left out whole or not at all: the region may hold it, or be
 // held by it, but not cross it; one without a replacement may also be crossed by one without. The region may hold no
-// label, case, goto, label address or tag definition, which the reading after it needs. False where it can't be left out.
+// case label, which its switch's checks need, nor a tag definition that declares a name used outside it
+// (check_driver_tag_local), nor a goto inside a loop, whose jump `-Wfor-loop-analysis` looks for. It may hold a label,
+// another goto, a label address or a local label's declaration (#1447): a label left out that a kept goto names leaves
+// the reading an error, whose view isn't taken, and a goto left out of no loop changes no warning a flushed body gives
+// (while buster gives no -Wunused-label: one would then warn of a kept label the goto named). False where it can't be
+// left out.
+// Whether `token` is inside a loop's statement in its body: a `for`'s, a `do`'s or a `while`'s.
+static bool check_driver_in_loop(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    bool loop = false;
+    uint32_t at = token < count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; !loop && at < count && parser->tree.roles[at] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const uint32_t open = role == PARSE_ROLE_CLOSE_CONDITION ? check_driver_child_before(parser, at, PARSE_ROLE_OPEN_CONDITION, 0, at) : BUSTER_CHECK_NONE;
+        loop = role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || (open != BUSTER_CHECK_NONE && open > 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_WHILE);
+        at = parser->tree.parents[at];
+    }
+    return loop;
+}
+
 static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, uint32_t last, uint8_t first)
 {
     const Parser* parser = editor->parser;
@@ -4750,9 +4883,9 @@ static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, u
         covered &= edits[at] != CHECK_DRIVER_EDIT_KEEP;
         const uint8_t role = parser->tree.roles[at];
         const uint8_t kind = parser->tokens.kinds[at];
-        valid = role != PARSE_ROLE_LABEL && role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && role != PARSE_ROLE_OPEN_STRUCT &&
-                role != PARSE_ROLE_OPEN_ENUM && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
-                !(kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX);
+        const bool tag = role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM;
+        valid = role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
+                (!tag || check_driver_tag_local(parser, at, begin, last)) && (kind != PARSE_KIND_GOTO || !check_driver_in_loop(parser, at));
     }
     if (valid && !covered)
     {
@@ -5200,6 +5333,37 @@ typedef enum CheckDriverRound
     CHECK_DRIVER_ROUND_FAILED,
 } CheckDriverRound;
 
+// Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
+// #1835): no other error is there. Only a rejected unit's rounds call it.
+static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token)
+{
+    bool recovered = false;
+    bool stopped = false;
+    for (uint32_t i = 0; i < input->report_count; i += 1)
+    {
+        const bool at = input->reports[i].token == token;
+        const bool keeps = check_driver_report_keeps_valid(input->reports + i);
+        recovered |= at && keeps;
+        stopped |= at && !keeps;
+    }
+    return recovered && !stopped;
+}
+
+// Whether the first reading's errors at `token` count in the scopes around it (check_driver_error_scoped): one does, or
+// none is a report's (a graph's or a control's, which count).
+static bool check_driver_rejected_scoped(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    bool reported = false;
+    bool scoped = false;
+    for (uint32_t i = 0; i < input->report_count; i += 1)
+    {
+        const bool at = input->reports[i].token == token;
+        reported |= at;
+        scoped |= at && check_driver_error_scoped(parser, input, input->reports + i);
+    }
+    return scoped || !reported;
+}
+
 // The scope of the block-scope declaration whose declarator `token` names, else BUSTER_CHECK_NONE: the `}` of the block
 // or body it is in, or its for statement's `)` for a clause's. A declarator's name is the first ordinary identifier of
 // its segment of the declaration's list (check_driver_edit_uses'), so a prototype's parameters and a record's members
@@ -5284,7 +5448,8 @@ static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_c
 // may be the view's own (a statement expression's value left void); the unit's, with bodies alone left out, publishes those
 // not among `errors`, in clang's words, and puts their tokens in `found` (room for `found_capacity`), for the next round
 // to leave out too.
-static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input,
+                                                   const uint32_t* errors, uint32_t error_count,
                                                    const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits,
                                                    bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
                                                    const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
@@ -5333,7 +5498,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             // declaration's at file scope, and not in the definition that follows it.
             const bool dropped = edited && errors[e] < count && edits[errors[e]] != 0;
             // (An invalid declaration's quiet use, 1 in `quiet`, is no error of its scope's, #1447, check_driver_error_counts.)
-            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += quiet == NULL || errors[e] >= count || quiet[errors[e]] != 1;
+            // A recovered error clang gives before a body's scope opens counts in none (check_driver_error_scoped, #1835).
+            const bool scoped = errors[e] >= count || check_driver_rejected_scoped(unit, first_input, errors[e]);
+            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += scoped && (quiet == NULL || errors[e] >= count || quiet[errors[e]] != 1) ? 1u : 0u;
         }
         for (uint32_t t = 1; t < view_count + 2; t += 1)
         {
@@ -5353,9 +5520,11 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     TypeTable types = { 0 };
     valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
     CheckInput input = { 0 };
-    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's.)
+    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's. One whose only
+    // reports are recovered ones, a recovered error the round left in (#1835), reads on as a valid one, as the unit's first
+    // reading does: CheckInput.recovered_valid.)
     const bool selected = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask);
-    valid = valid && (selected || (input.report_count != 0 && !input.recovered_valid)) && !input.resource;
+    valid = valid && (selected || input.report_count != 0) && !input.resource;
     const CheckOptions check_options = { .scalar = scalar };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
@@ -5722,9 +5891,6 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         bool ready = true;
         for (uint32_t e = 0; ready && e < known_count; e += 1)
         {
-            const bool kept = known[e] < count && (check_driver_rejected_edit(&editor, known[e]) ||
-                                                   check_driver_rejected_declaration(parser, first_input, ranges, body_count, known[e], quiet, edits, mask));
-            edited |= kept;
             // The body whose tokens hold the error: the last one to begin at or before it.
             const uint32_t token = known[e];
             uint32_t low = 0;
@@ -5737,7 +5903,16 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 high = before ? high : middle;
             }
             const bool bodied = low != 0 && token < ranges[low - 1].end;
-            ready = kept || bodied;
+            // A recovered error outside every body (#1447, CheckInputReport.recovered: a definition's parameter's, #1835)
+            // needs no part left out: the reading recovers it again, its declaration valid, as clang keeps it. It still
+            // counts in its scope (error_counts).
+            // (Such an error leaves nothing out: a prototype's dropped declaration would leave out the bodies that name its
+            // parameters' names too.)
+            const bool recovered = !bodied && check_driver_rejected_recovered(first_input, token);
+            const bool kept = !recovered && token < count && (check_driver_rejected_edit(&editor, token) ||
+                                                              check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, quiet, edits, mask));
+            edited |= kept;
+            ready = kept || bodied || recovered;
             bodied_all &= bodied;
             if (bodied)
             {
@@ -5774,14 +5949,14 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         uint32_t added = 0;
         uint32_t* fresh = known + known_count;
         const uint32_t fresh_capacity = (uint32_t)(known_capacity - known_count);
-        round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
+        round = ready && edited ? check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
                                                              return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added,
                                                              quiet, arena, scratch) :
                                   CHECK_DRIVER_ROUND_FAILED;
         uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
+            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
                                                return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added, quiet,
                                                arena, scratch);
         }
@@ -7982,7 +8157,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .noreturn_warnings = !quiet,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
-                        .asm_helpers = lanes != NULL && lanes->tier1,
+                        // Tier 1's IR takes asm bodies (#1839), not a statement's row.
+                        .asm_bodies = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
