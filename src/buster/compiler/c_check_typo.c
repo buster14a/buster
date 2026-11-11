@@ -15,8 +15,9 @@
 // Clang also offers keywords, and the first name in parentheses or a cast's operand may be a typedef's name
 // (check_typo_place). Within an expression, a keyword or a type name taken is suggested and the name stays undeclared,
 // as clang's expression is then rejected. At a statement's start clang parses the statement again with a keyword or a
-// type it takes (`whil;` gives "expected '(' after 'while'"), which the bindings pass cannot follow: there a keyword or
-// a typedef's name as near as the best value leaves the name undeclared, without a suggestion (docs/c-checker.md).
+// type it takes (`whil;` gives "expected '(' after 'while'"), which the bindings pass cannot follow: the name's report
+// says so (CHECK_TYPO_STATEMENT), and the driver reads the unit again with the correction in its tokens
+// (check_driver_typo_edits, docs/c-checker.md).
 //
 // Only a unit with an undeclared name pays: the search replays the binding stream's scope stack once (CheckTypoScope),
 // with no per-typo walk of the stream. The vector path prefilters the visible names by length in AVX-512 and finds each
@@ -27,6 +28,9 @@
 // An undeclared function's call that made no search (CheckInput.implicit_function_corrections): one clang warns of, or
 // a library function's, or a C89 unit's.
 #define BUSTER_CHECK_TYPO_UNSEARCHED (UINT32_MAX - 1)
+// In an undeclared name's report's detail beside its keyword's index + 1 (check_typo_suggestion): the name starts a
+// statement, whose suggestion clang's parser takes and reads the statement again with (check_driver_typo_edits).
+#define CHECK_TYPO_STATEMENT 0x100u
 
 typedef enum CheckTypoMode
 {
@@ -91,6 +95,8 @@ struct CheckTypo
     uint32_t suggested_token;
     uint32_t suggested_keyword;
     uint32_t suggested_type;
+    // Whether that name starts a statement, which clang's parser reads again with the suggestion (CHECK_TYPO_STATEMENT).
+    bool suggested_statement;
     // The walk's own values' searches (check_typo_walk_value), in its order, and how many of them the answers' have passed.
     uint32_t walk_value_tokens[BUSTER_CHECK_TYPO_LIMIT];
     uint32_t walk_value_count;
@@ -363,9 +369,8 @@ struct CheckTypoPlace
     bool values;
     bool types;
     // A statement's start (StatementFilterCCC), where clang parses the statement again with a keyword or a type it
-    // takes: neither is suggested here, but either as near as the nearest value leaves the name uncorrected.
+    // takes: the name stays undeclared here, and the driver reads the statement again with it (check_driver_typo_edits).
     bool statement;
-    bool rival_types;
 };
 
 // The loops and switches around `token`, and whether it is in a function's body (CHECK_TYPO_KEYWORD_*): the parse
@@ -397,7 +402,12 @@ static uint32_t check_typo_scopes(const CheckInputReader* reader, uint32_t token
 static CheckTypoPlace check_typo_place(const CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
-    const uint8_t next = token + 1 < parser->tokens.count ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
+    // The token after the name as clang's parser sees it: past a `;` a recovery view put in before it (check_prefix_resume,
+    // which gives it its next token's source), as after `retrn x` (ParseDiagnostic.probe).
+    const uint32_t count = parser->tokens.count;
+    const bool synthetic = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_SEMI && parser->tokens.names[token + 1] == 0 &&
+                           parser->tokens.sources[token + 1] == parser->tokens.sources[token + 2];
+    const uint8_t next = token + 1 < count ? parser->tokens.kinds[token + 1 + (synthetic ? 1u : 0u)] : PARSE_KIND_END;
     const uint8_t before = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_COUNT;
     const bool statement = check_typo_statement_start(parser, token);
     const bool member = next == PARSE_KIND_ARROW || next == PARSE_KIND_PERIOD;
@@ -405,7 +415,11 @@ static CheckTypoPlace check_typo_place(const CheckInputReader* reader, uint32_t 
     const bool parenthesized = before == PARSE_ROLE_OPEN_GROUP || before == PARSE_ROLE_OPEN_SIZEOF;
     // A statement's start: StatementFilterCCC's keywords by the next token. Within an expression, CastExpressionIdValidator's,
     // with a statement's keywords only where no `)` follows (the parser's WantRemainingKeywords).
-    const bool type_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_IDENTIFIER : cast || parenthesized;
+    // (A statement's start also takes a type before a `*` or a `&`, as clang reads `myint * p` and `myint & 1` as
+    // declarations.)
+    const bool type_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_IDENTIFIER ||
+                                           next == PARSE_KIND_STAR || next == PARSE_KIND_AMP :
+                                           cast || parenthesized;
     const bool expression_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_IDENTIFIER || member : true;
     const bool remaining_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_SEMI || next == PARSE_KIND_IDENTIFIER || next == PARSE_KIND_L_BRACE :
                                     next != PARSE_KIND_R_PAREN;
@@ -417,9 +431,8 @@ static CheckTypoPlace check_typo_place(const CheckInputReader* reader, uint32_t 
                  !statement && (next == PARSE_KIND_EQUAL || member) ? CHECK_TYPO_TAKES_NO_FUNCTION : CHECK_TYPO_TAKES_VALUES,
         .keywords = wanted & scoped,
         .values = !cast,
-        .types = !statement && (cast || parenthesized),
+        .types = type_keywords,
         .statement = statement,
-        .rival_types = statement && type_keywords,
     };
 }
 
@@ -485,7 +498,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             const uint32_t distance = typo->distances[k];
             const bool type = mode == CHECK_TYPO_VALUE && kind == C_BINDING_TYPEDEF;
             const bool taken = (type && place.types) || (!type && place.values && check_typo_accepted(kind, mode, place.takes));
-            const bool near = !shadowed && distance != 0 && (taken || (type && place.rival_types));
+            const bool near = !shadowed && distance != 0 && taken;
             ties = near && distance == best ? ties + 1 : near && distance < best ? 1 : ties;
             best_at = near && distance < best ? at : best_at;
             best_taken = near && distance < best ? taken : best_taken;
@@ -504,7 +517,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
                 ties = near && distance == best ? ties + 1 : near && distance < best ? 1 : ties;
                 best_keyword = near && distance < best ? w + 1 : near && distance == best ? best_keyword : best_keyword;
                 best_at = near && distance < best ? BUSTER_CHECK_NONE : best_at;
-                best_taken = near && distance < best ? !place.statement : best_taken;
+                best_taken = near && distance < best ? true : best_taken;
                 best = near && distance < best ? distance : best;
             }
         }
@@ -515,6 +528,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
         typo->suggested_token = token;
         typo->suggested_keyword = keyword ? best_keyword : 0;
         typo->suggested_type = type ? bindings->declaration[scope->events[best_at]] : BUSTER_CHECK_NONE;
+        typo->suggested_statement = place.statement;
     }
     return result;
 }
@@ -621,7 +635,8 @@ static uint32_t check_typo_value(CheckInputReader* reader, uint32_t token, uint3
 static void check_typo_suggestion(const CheckInputReader* reader, uint32_t token, uint32_t* keyword, uint32_t* type)
 {
     const bool searched = reader->typo != NULL && reader->typo->suggested_token == token;
-    *keyword = searched ? reader->typo->suggested_keyword : 0;
+    const bool suggested = searched && (reader->typo->suggested_keyword != 0 || reader->typo->suggested_type != BUSTER_CHECK_NONE);
+    *keyword = (searched ? reader->typo->suggested_keyword : 0) | (suggested && reader->typo->suggested_statement ? CHECK_TYPO_STATEMENT : 0u);
     *type = searched ? reader->typo->suggested_type : BUSTER_CHECK_NONE;
 }
 

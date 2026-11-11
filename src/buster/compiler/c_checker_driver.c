@@ -4931,15 +4931,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const CheckInputReport* report = input->reports + index;
                             const uint32_t name = parser->tokens.names[located];
                             const uint32_t meant = report->subject != 0 ? report->subject - 1 : BUSTER_CHECK_NONE;
-                            const uint32_t keyword = report->detail != 0 && report->detail <= BUSTER_ARRAY_LENGTH(check_typo_keywords) ? report->detail - 1 : 0;
+                            const uint32_t index_of = report->detail & (CHECK_TYPO_STATEMENT - 1);
+                            const uint32_t keyword = index_of != 0 && index_of <= BUSTER_ARRAY_LENGTH(check_typo_keywords) ? index_of - 1 : 0;
+                            // A statement's typedef is clang's parser's "unknown type name" (check_driver_typo_edits).
+                            const bool unknown_type = meant < count && (report->detail & CHECK_TYPO_STATEMENT) != 0;
                             const char* other = meant < count ? (const char*)intern_bytes(pp->table, parser->tokens.names[meant]) : check_typo_keywords[keyword];
                             const int other_length = meant < count ? (int)intern_length(pp->table, parser->tokens.names[meant]) : (int)strlen(other);
                             char declared[512];
                             snprintf(declared, sizeof(declared), "'%.*s' declared here", other_length, other);
                             const PPOutputDiagnosticNote note = { .token = meant < count ? parser->tokens.sources[meant] : 0, .message = declared };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, meant < count ? 1u : 0u,
-                                                        "use of undeclared identifier '%.*s'; did you mean '%.*s'?", (int)intern_length(pp->table, name),
-                                                        intern_bytes(pp->table, name), other_length, other);
+                                                        "%s '%.*s'; did you mean '%.*s'?", unknown_type ? "unknown type name" : "use of undeclared identifier",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
                         }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {
@@ -9181,6 +9184,280 @@ static void check_driver_deferred_give_back(void* context)
     deferred->return_failed |= !worker_budget_release(&deferred->lease);
 }
 
+// A typo correction that clang's parser takes at a statement's start (#1447, c_check_typo.c's CHECK_TYPO_STATEMENT):
+// ClassifyName corrects the name to a keyword or a type name and the parser reads the statement again with it
+// (`retrn x;` is a `return`, `myin x;` a declaration of a `myint`). The checker's view can't parse again, so the driver
+// does: each pass's reports say which names the next view reads as what (CheckPrefixEdit), and the next view is the
+// original's tokens with them, recovered and checked again. An expression statement whose missing `;` follows its first
+// name (ParseDiagnostic.probe) and whose name stays undeclared is clang's invalid expression, skipped to its `;`: the
+// next view leaves out its rest, and its error with it. At most this many passes: each finds what the one before read.
+#define BUSTER_CHECK_DRIVER_TYPO_PASSES 4
+#define BUSTER_CHECK_DRIVER_TYPO_EDITS (2 * BUSTER_CHECK_TYPO_LIMIT)
+
+typedef struct CheckDriverTypoEdits CheckDriverTypoEdits;
+struct CheckDriverTypoEdits
+{
+    CheckPrefixEdit edits[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    // Beside each replacement, the keyword it takes (its index in check_typo_keywords + 1) or the typedef's declaration
+    // token (the original's), for its error; BUSTER_CHECK_NONE for a left-out tail.
+    uint32_t keywords[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    uint32_t types[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    // The names whose tails (check_driver_typo_tail) a reading didn't confirm, at the original's tokens, which no later
+    // view leaves out again.
+    uint32_t rejected[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    const InternTable* table;
+    uint32_t count;
+    uint32_t rejected_count;
+};
+
+// The original token whose source a view's `token` has (each original token's is its own), or BUSTER_CHECK_NONE.
+static uint32_t check_driver_original_token(const Parser* original, const Parser* view, uint32_t token)
+{
+    const uint32_t count = original->tokens.count;
+    const uint32_t source = token < view->tokens.count ? view->tokens.sources[token] : UINT32_MAX;
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = original->tokens.sources[middle] < source;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < count && original->tokens.sources[low] == source ? low : BUSTER_CHECK_NONE;
+}
+
+// Inserts an edit in token order, unless one is at its token or overlaps it. Whether it was added.
+static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit edit, uint32_t keyword, uint32_t type)
+{
+    uint32_t at = 0;
+    while (at < edits->count && edits->edits[at].token < edit.token)
+    {
+        at += 1;
+    }
+    const uint32_t last = edit.end != 0 ? edit.end : edit.token + 1;
+    const bool before_free = at == 0 || (edits->edits[at - 1].end != 0 ? edits->edits[at - 1].end : edits->edits[at - 1].token + 1) <= edit.token;
+    const bool after_free = at == edits->count || edits->edits[at].token >= last;
+    const bool added = edits->count < BUSTER_CHECK_DRIVER_TYPO_EDITS && before_free && after_free;
+    for (uint32_t k = edits->count; added && k > at; k -= 1)
+    {
+        edits->edits[k] = edits->edits[k - 1];
+        edits->keywords[k] = edits->keywords[k - 1];
+        edits->types[k] = edits->types[k - 1];
+    }
+    if (added)
+    {
+        edits->edits[at] = edit;
+        edits->keywords[at] = keyword;
+        edits->types[at] = type;
+        edits->count += 1;
+    }
+    return added;
+}
+
+static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token);
+
+// A parse error just after a name within an expression, before an operand's first token, where the name may be a typo of
+// an expression's keyword or a statement's (`sizeo a`, `retrn 5`): clang's correction there takes the keyword
+// (DiagnoseEmptyLookup's keyword replacement), and the expression is invalid, its rest skipped to the `,`, `;` or closer
+// that ends it, with no error of the parser's. A recovery view leaves out that tail of each such name near one of those
+// keywords as clang's search measures it (CheckPrefixTails), tentatively: the reading confirms it where the name's search
+// suggests a keyword, and otherwise the next pass's view keeps it, with its error (check_driver_typo_edits). The token
+// that ends the tail, or 0.
+static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origin, const ParseDiagnostic* diagnostic, const void* context)
+{
+    const CheckDriverTypoEdits* edits = context;
+    const InternTable* table = edits->table;
+    const uint32_t count = view->tokens.count;
+    const uint32_t at = diagnostic->token;
+    const uint8_t kind = at < count ? view->tokens.kinds[at] : PARSE_KIND_END;
+    const bool operand = kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING;
+    const uint32_t name = !diagnostic->probe && operand && at >= 2 && view->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER ? at - 1 : BUSTER_CHECK_NONE;
+    const uint8_t before = name < count ? view->tokens.kinds[name - 1] : PARSE_KIND_END;
+    bool near = name < count && before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW;
+    const uint32_t named = near && origin != NULL ? origin[name] : name;
+    for (uint32_t r = 0; near && r < edits->rejected_count; r += 1)
+    {
+        near = edits->rejected[r] != named;
+    }
+    const uint32_t length = near ? intern_length(table, view->tokens.names[name]) : 0;
+    const uint8_t* spelling = near ? (const uint8_t*)intern_bytes(table, view->tokens.names[name]) : NULL;
+    bool keyword = false;
+    uint32_t row[65];
+    for (uint32_t w = 0; near && length >= 3 && length <= 64 && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
+    {
+        const char* other = check_typo_keywords[w];
+        const uint32_t other_length = (uint32_t)strlen(other);
+        const bool listed = (check_typo_keyword_kinds[w] & (CHECK_TYPO_KEYWORD_EXPRESSION | CHECK_TYPO_KEYWORD_REMAINING)) != 0 &&
+                            check_typo_keyword_offered(other, view->language.standard, view->language.gnu);
+        const uint32_t difference = other_length > length ? other_length - length : length - other_length;
+        const uint32_t distance = listed && 3 * difference <= length ? check_typo_distance_table((const uint8_t*)other, other_length, spelling, length, row) : 0;
+        keyword |= distance != 0 && distance <= (length + 2) / 3 && length / distance >= 3;
+    }
+    const uint32_t end = keyword ? check_driver_skip_end(view, at) : BUSTER_CHECK_NONE;
+    // (The tail ends at a `,` outside its groups too, an initializer's or an argument's end.)
+    uint32_t stop = end;
+    uint32_t depth = 0;
+    for (uint32_t t = at; keyword && end < count && t < end; t += 1)
+    {
+        const uint8_t k = view->tokens.kinds[t];
+        depth += k == PARSE_KIND_L_PAREN || k == PARSE_KIND_L_SQUARE || k == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= depth != 0 && (k == PARSE_KIND_R_PAREN || k == PARSE_KIND_R_SQUARE || k == PARSE_KIND_R_BRACE) ? 1u : 0u;
+        stop = k == PARSE_KIND_COMMA && depth == 0 && t < stop ? t : stop;
+    }
+    return keyword && stop < count && stop > at ? stop : 0;
+}
+
+// The token where clang's SkipUntil(r_brace, StopAtSemi | StopBeforeMatch) stops from `token` on: a `;` or a `}` outside
+// the groups it opens, which it skips whole; or BUSTER_CHECK_NONE where the unit ends first.
+static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t depth = 0;
+    uint32_t at = token;
+    bool going = at < count;
+    while (going)
+    {
+        const uint8_t kind = parser->tokens.kinds[at];
+        const bool stop = depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE);
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= !stop && depth != 0 && (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) ? 1u : 0u;
+        at += stop ? 0u : 1u;
+        going = !stop && at < count;
+    }
+    return at < count ? at : BUSTER_CHECK_NONE;
+}
+
+// The edits a pass's reports ask for (CheckDriverTypoEdits): `checking` the view checked, `input` its reading, and
+// `diagnostics` its parse's, at the original's tokens. Whether any edit is new.
+static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* original, const Parser* checking, const CheckInput* input,
+                                    const ParseDiagnostic* diagnostics, uint32_t diagnostic_count, const InternTable* table)
+{
+    static const ParseKeywordKind kinds[] =
+    {
+#define BUSTER_CHECK_DRIVER_KEYWORD_KIND(name, kind) { C_NAME_##name, PARSE_KIND_##kind },
+        BUSTER_PARSE_KEYWORD_KINDS(BUSTER_CHECK_DRIVER_KEYWORD_KIND)
+#undef BUSTER_CHECK_DRIVER_KEYWORD_KIND
+    };
+    const uint32_t count = original->tokens.count;
+    bool added = false;
+    // The tails left out (ParseDiagnostic.tail): where the name's search suggested no keyword, the next view keeps it.
+    for (uint32_t d = 0; d < diagnostic_count; d += 1)
+    {
+        const uint32_t name = diagnostics[d].tail && diagnostics[d].token != 0 ? diagnostics[d].token - 1 : BUSTER_CHECK_NONE;
+        bool confirmed = false;
+        for (uint32_t r = 0; name < count && r < input->report_count; r += 1)
+        {
+            const CheckInputReport* report = input->reports + r;
+            const uint32_t keyword = report->detail & (CHECK_TYPO_STATEMENT - 1);
+            confirmed |= report->message == CHECK_INPUT_UNDECLARED && keyword != 0 && (report->detail & CHECK_TYPO_STATEMENT) == 0 &&
+                         check_driver_original_token(original, checking, report->token) == name;
+        }
+        if (name < count && !confirmed && edits->rejected_count < BUSTER_CHECK_DRIVER_TYPO_EDITS)
+        {
+            edits->rejected[edits->rejected_count] = name;
+            edits->rejected_count += 1;
+            added = true;
+        }
+    }
+    for (uint32_t r = 0; r < input->report_count; r += 1)
+    {
+        const CheckInputReport* report = input->reports + r;
+        const bool statement = report->message == CHECK_INPUT_UNDECLARED && (report->detail & CHECK_TYPO_STATEMENT) != 0;
+        const uint32_t token = statement ? check_driver_original_token(original, checking, report->token) : BUSTER_CHECK_NONE;
+        const uint32_t keyword = report->detail & (CHECK_TYPO_STATEMENT - 1);
+        const uint32_t type = statement && report->subject != 0 ? check_driver_original_token(original, checking, report->subject - 1) : BUSTER_CHECK_NONE;
+        uint32_t name = 0;
+        uint8_t kind = PARSE_KIND_IDENTIFIER;
+        if (keyword != 0 && keyword <= BUSTER_ARRAY_LENGTH(check_typo_keywords))
+        {
+            const char* spelling = check_typo_keywords[keyword - 1];
+            name = intern_find(table, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
+            kind = PARSE_KIND_UNKNOWN;
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+            {
+                kind = kinds[k].name == name ? kinds[k].kind : kind;
+            }
+        }
+        else
+        {
+            name = type < count ? original->tokens.names[type] : 0;
+        }
+        if (token < count && name != 0 && kind != PARSE_KIND_UNKNOWN && original->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+        {
+            const CheckPrefixEdit edit = { .token = token, .end = 0, .name = name, .kind = kind };
+            added |= check_driver_typo_add(edits, edit, keyword, keyword != 0 ? BUSTER_CHECK_NONE : type);
+        }
+    }
+    // A probe's statement whose expression has an undeclared name that no correction took: its rest is left out.
+    for (uint32_t d = 0; d < diagnostic_count; d += 1)
+    {
+        const ParseDiagnostic* diagnostic = diagnostics + d;
+        const uint32_t at = diagnostic->token;
+        uint32_t first = diagnostic->probe && at != 0 && at < count ? at - 1 : BUSTER_CHECK_NONE;
+        // (The name's call's `(`: the name before the group, matched backwards.)
+        uint32_t depth = 0;
+        while (first < count && first != 0 && (depth != 0 || original->tokens.kinds[first] == PARSE_KIND_R_PAREN))
+        {
+            const uint8_t kind = original->tokens.kinds[first];
+            depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
+            depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
+            first -= 1;
+        }
+        // (Not where the name is corrected: the statement is read again.)
+        for (uint32_t e = 0; first < count && e < edits->count; e += 1)
+        {
+            first = edits->edits[e].token == first && edits->edits[e].end == 0 ? BUSTER_CHECK_NONE : first;
+        }
+        bool undeclared = false;
+        for (uint32_t r = 0; first < count && r < input->report_count; r += 1)
+        {
+            const CheckInputReport* report = input->reports + r;
+            const bool corrected = (report->detail & CHECK_TYPO_STATEMENT) != 0;
+            const uint32_t token = report->message == CHECK_INPUT_UNDECLARED && !corrected ? check_driver_original_token(original, checking, report->token) :
+                                   BUSTER_CHECK_NONE;
+            undeclared |= token >= first && token < at;
+        }
+        const uint32_t end = undeclared ? check_driver_skip_end(original, at) : BUSTER_CHECK_NONE;
+        if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && end > at)
+        {
+            const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };
+            added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE);
+        }
+    }
+    return added;
+}
+
+// Each statement start's correction's error (CheckDriverTypoEdits): clang's diagnoseTypo of ClassifyName's, "use of
+// undeclared identifier" with a keyword, or "unknown type name" with a typedef and its note.
+static void check_driver_typo_errors(const CheckDriverTypoEdits* edits, const Parser* original, Preprocessor* pp)
+{
+    if (edits->count != 0)
+    {
+        pp_history_ensure(pp);
+    }
+    for (uint32_t e = 0; e < edits->count; e += 1)
+    {
+        const CheckPrefixEdit* edit = edits->edits + e;
+        const uint32_t keyword = edits->keywords[e];
+        const uint32_t type = edits->types[e];
+        if (edit->end == 0 && edit->token < original->tokens.count)
+        {
+            const uint32_t name = original->tokens.names[edit->token];
+            const uint32_t source = original->tokens.sources[edit->token];
+            const bool typedef_name = keyword == 0 && type < original->tokens.count;
+            const char* other = typedef_name ? (const char*)intern_bytes(pp->table, original->tokens.names[type]) : check_typo_keywords[keyword - 1];
+            const int other_length = typedef_name ? (int)intern_length(pp->table, original->tokens.names[type]) : (int)strlen(other);
+            char declared[512];
+            snprintf(declared, sizeof(declared), "'%.*s' declared here", other_length, other);
+            const PPOutputDiagnosticNote note = { .token = typedef_name ? original->tokens.sources[type] : 0, .message = declared };
+            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, source, &note, typedef_name ? 1u : 0u, "%s '%.*s'; did you mean '%.*s'?",
+                                        typedef_name ? "unknown type name" : "use of undeclared identifier", (int)intern_length(pp->table, name),
+                                        intern_bytes(pp->table, name), other_length, other);
+        }
+    }
+}
+
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
 // `errors`; then, as the command says, its object written, its executable linked or, with `kept` (#152: one of several
@@ -9266,6 +9543,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         CheckInput original_pragmas = { 0 };
         bool original_pragmas_ready = false;
         bool original_pragmas_printed = false;
+        // A statement start's typo corrections (check_driver_typo_edits), and whether the parse's warnings were printed
+        // before a correction failed the unit.
+        CheckDriverTypoEdits typo_edits = { .count = 0, .table = pp->table };
+        const CheckPrefixTails typo_tails = { .end = check_driver_typo_tail, .context = &typo_edits };
+        bool parse_printed = false;
         check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
         pp->options.collect_diagnostics = true;
         pp_driver_verbose(options, path);
@@ -9299,10 +9581,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             if (ready)
             {
                 parse_print_diagnostics(parser, pp);
+                parse_printed = true;
             }
             else
             {
-                recovered = check_prefix_resume(&resumed, parser, arena, scratch) == CHECK_PREFIX_READY ? &resumed.parser : parser;
+                // (With the tails an expression's keyword typo would skip, tentatively: check_driver_typo_tail.)
+                recovered = check_prefix_resume(&resumed, parser, NULL, 0, &typo_tails, arena, scratch) == CHECK_PREFIX_READY ? &resumed.parser : parser;
                 if (recovered != parser && recovered->errors == 0)
                 {
                     // Every missing `;` read past as clang's recovery reads it: the whole view, checked as a prefix is.
@@ -9342,10 +9626,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
         }
         check_clock_mark(stage_clock, CHECK_STAGE_PARSE);
-        const uint32_t tokens = checking->tokens.count;
+        uint32_t tokens = checking->tokens.count;
         // A complete declaration prefix ends before the original parser's lookahead, not at the whole PP EOF.
         // Repairs retain their synthetic/end boundary; completed original bodies are handled independently.
-        const uint32_t publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
+        uint32_t publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
         const TypeCapacity capacity = {
             .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
             .parameters = tokens,
@@ -9411,6 +9695,79 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                   repairing ? repair.original_end : checking->tokens.count, selected);
+            }
+            // A statement start's typo correction that clang's parser reads the statement again with (#1447,
+            // check_driver_typo_edits): the original's tokens with the corrections, recovered and read again.
+            for (uint32_t pass = 1; pass < BUSTER_CHECK_DRIVER_TYPO_PASSES && ready && !input.resource && (input.report_count != 0 || parse_failed) &&
+                                    check_driver_typo_edits(&typo_edits, parser, checking, &input, recovered != parser ? resumed.diagnostics : parser->diagnostics,
+                                                            recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count, pp->table);
+                 pass += 1)
+            {
+                CheckResumed edited = { 0 };
+                const bool viewed = check_prefix_resume(&edited, parser, typo_edits.edits, typo_edits.count, &typo_tails, arena, scratch) == CHECK_PREFIX_READY;
+                if (viewed)
+                {
+                    resumed = edited;
+                    recovered = &resumed.parser;
+                    parse_failed = true;
+                    prefix_only = true;
+                    repairing = false;
+                    checking_pp = pp;
+                    if (recovered->errors == 0)
+                    {
+                        checking = recovered;
+                    }
+                    else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
+                    {
+                        checking = &repair.parser;
+                        checking_pp = repair.preprocessor;
+                        repairing = true;
+                    }
+                    else if (check_prefix_make(&prefix, recovered, arena, scratch) == CHECK_PREFIX_READY)
+                    {
+                        checking = &prefix.parser;
+                    }
+                    else
+                    {
+                        ready = false;
+                    }
+                }
+                if (viewed && ready)
+                {
+                    original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, recovered, pp, check_diagnostic_parse_end(recovered), arena,
+                                                                               scratch);
+                    tokens = checking->tokens.count;
+                    publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
+                    const TypeCapacity again = {
+                        .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
+                        .parameters = tokens,
+                        .tags = tokens,
+                        .members = tokens,
+                    };
+                    arena_release(&type_arena);
+                    arena_release(&index_arena);
+                    const uint64_t type_bytes = type_capacity_bytes(again);
+                    const uint64_t index_bytes = type_index_capacity_bytes(again);
+                    type_arena = arena_reserve_small(type_bytes, type_bytes);
+                    index_arena = arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES);
+                    types = (TypeTable){ 0 };
+                    ready = original_pragmas_ready && again.types != 0 && type_initialize(&types, &type_arena, &index_arena, again);
+                    if (!ready)
+                    {
+                        fprintf(errors, "fatal error: can't reserve type table\n");
+                        driver_fatal = true;
+                    }
+                    else
+                    {
+                        input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, false,
+                                                          repairing ? repair.original_end : checking->tokens.count, NULL);
+                    }
+                }
+            }
+            // (Their errors come first at their tokens, as clang's classification gives them before the statement's.)
+            if (!pp->fatal)
+            {
+                check_driver_typo_errors(&typo_edits, parser, pp);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
@@ -10130,6 +10487,26 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 Parser printed = *parser;
                 printed.diagnostics = recovered != parser ? resumed.diagnostics : parser->diagnostics;
                 printed.diagnostic_count = recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count;
+                // (A unit that only a typo's correction failed printed its parse's warnings already.)
+                uint32_t kept_count = 0;
+                // (Nor does a typo's tail left out, check_driver_typo_tail, give its error.)
+                for (uint32_t d = 0; recovered != parser && d < printed.diagnostic_count; d += 1)
+                {
+                    resumed.diagnostics[kept_count] = resumed.diagnostics[d];
+                    kept_count += (resumed.diagnostics[d].error || !parse_printed) && !resumed.diagnostics[d].tail ? 1u : 0u;
+                }
+                printed.diagnostic_count = recovered != parser ? kept_count : printed.diagnostic_count;
+                // (An error that names a corrected token spells the correction: "expected '(' after 'while'".)
+                uint32_t* respelled = typo_edits.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser->tokens.count + 1) : NULL;
+                for (uint32_t e = 0; respelled != NULL && e < typo_edits.count; e += 1)
+                {
+                    if (e == 0)
+                    {
+                        memset(respelled, 0, ((uint64_t)parser->tokens.count + 1) * sizeof(uint32_t));
+                    }
+                    respelled[typo_edits.edits[e].token] = typo_edits.edits[e].end == 0 ? typo_edits.edits[e].name : 0;
+                }
+                printed.respelled = respelled;
                 parse_print_diagnostics(&printed, pp);
             }
             result = 1;
