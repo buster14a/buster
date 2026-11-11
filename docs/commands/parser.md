@@ -62,9 +62,32 @@ K5, and K6 (flags and classes, also with every second and every third block
 left to the twin); and the twins together with the fallback, whose tree must be
 the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
-an array, or through a 32-bit index that wrapped below 0, faults. On:
+an array, or through a 32-bit index that wrapped below 0, faults.
 
-- snippets: 404 of valid and invalid code, each with the first error clang gives
+The generated inputs, the files and the mutations take that check unit after
+unit (`parse_test_check_unit`), with state kept from one unit to the next
+(#2078):
+
+- **Intern table:** one, reset to its predefined names before each unit
+  (`intern_reset`), so that each name gets a fresh table's id.
+- **Parsers:** the vector path's and the scalar parser's, full and tree-only,
+  each parsing unit after unit. Each one's scratch is zeroed to its peak
+  before a unit (`arena_poison`), as a fresh parser's is: the vector path reads
+  temporaries a unit didn't write (#2086).
+- **Arenas:** an arena pool (`arena_pool`), as a units lane has, takes the
+  arenas each unit's preprocessor and the parsers' columns release.
+- **Preprocessor:** each unit's own. The alignments and the streams
+  preprocess their text from memory (`pp_run_source`), under the name a file
+  of theirs would have, rather than from a file written for each.
+
+Against fresh state for every unit, a per-unit digest matched on all 36,634
+generated units. It covered the tokens with their intern ids, both trees,
+postorders and columns, the diagnostics, the statistics and the kernel tallies.
+The setup and release this saves were most of the command's time: the 34,624
+alignments took 73 s, and now take 15 s, on a 4-CPU Xeon container. #2078 has
+the 9700X's and the hosted runners' numbers. On:
+
+- snippets: 541 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
   same message; `--clang` checks each expectation against clang too, which
   must be a parse issue but for the snippets marked as the errors clang's
@@ -84,7 +107,7 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   siblings, the value's tree its own), through the fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
-  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
+  `;`, at every block alignment (34,624 units), and nine kinds of nesting 100,000 levels deep
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
