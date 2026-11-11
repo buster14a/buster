@@ -2996,7 +2996,8 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // register variables) on system calls whose results don't vary, the x87's fsqrt on `+t` and fprem's loop with the
 // status word in %ax, flag outputs, a template's own loop (`1: decl; jnz 1b`), a bswap and an lfence (Tier 0's rows,
 // asm bodies under --tier1), callee-saved clobbers inside a loop of live values across a call, xmm clobbers beside live
-// floating values, rsp's alignment at the template, and rsp's explicit register variable read and moved back (#1846).
+// floating values, rsp's alignment at the template, rsp's explicit register variable read and moved back, and 16-byte
+// vectors through their addresses, in an explicit register variable's XMM register and as a matching input (#1846).
 // Clang -O0's build is its oracle.
 static const char check_test_tier1_asm_source[] =
     "int printf(const char* format, ...);\n"
@@ -3119,6 +3120,16 @@ static const char check_test_tier1_asm_source[] =
     "    __asm__(\"mov %1, %0\" : \"=r\"(r) : \"r\"(sp));\n"
     "    return sp == before && r == before && (sp & 7) == 0;\n"
     "}\n"
+    "typedef float tier1_v4sf __attribute__((vector_size(16)));\n"
+    "static float tier1_packed(float x)\n"
+    "{\n"
+    "    tier1_v4sf a = {x, 1.0f, 2.0f, 3.0f};\n"
+    "    register tier1_v4sf r __asm__(\"xmm9\") = a;\n"
+    "    __asm__(\"addps %0, %0\" : \"+x\"(r));\n"
+    "    tier1_v4sf b;\n"
+    "    __asm__(\"mulps %1, %0\" : \"=x\"(b) : \"x\"(r), \"0\"(a + a));\n"
+    "    return b[0] + b[3] * 10.0f;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    printf(\"cpuid %u\\n\", tier1_cpuid(7, 1, 2, 3, 4, 5, 6, 7));\n"
@@ -3128,7 +3139,7 @@ static const char check_test_tier1_asm_source[] =
     "    printf(\"count %d swap %u\\n\", tier1_count(10), tier1_swap(0x01020304u, 5));\n"
     "    printf(\"saved %ld\\n\", tier1_callee_saved(9));\n"
     "    printf(\"vectors %.3f aligned %d\\n\", tier1_vectors(1.25, 4), tier1_aligned());\n"
-    "    printf(\"stack %d\\n\", tier1_stack());\n"
+    "    printf(\"stack %d packed %.2f\\n\", tier1_stack(), (double)tier1_packed(1.25f));\n"
     "    return 0;\n"
     "}\n";
 
@@ -3166,7 +3177,7 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             char message[256];
             snprintf(message, sizeof(message), "the asm bodies' fixture's code is certified but the long doubles' functions' (%" PRIu64 " certified, %" PRIu64 " not)", build.code_certified,
                      build.code_uncertified);
-            check_test_expect(test, compiled && build.code_certified == 11 && build.code_uncertified == 4, message);
+            check_test_expect(test, compiled && build.code_certified == 12 && build.code_uncertified == 4, message);
             char actual[4096] = { 0 };
             check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                               "Tier 1's asm bodies print clang -O0's build's output");

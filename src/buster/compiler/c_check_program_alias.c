@@ -777,6 +777,13 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
     check_program_cpu_needed(program, needed);
     // Multiversioning by target strings' groups (#1838): their reference objects and bodies' own symbols' objects.
     check_program_target_needed(program, needed);
+    // A global register variable (#1846) is its register's, of no symbol: its uses read and write the register.
+    for (uint32_t object = 1; program->input->global_register_count != 0 && object < program->object_count && object <= program->input->token_count; object += 1)
+    {
+        const bool global_register = check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER) &&
+                                     check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
+        needed[object] = global_register ? 0 : needed[object];
+    }
     program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));
     program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
     const bool valid = program->symbol_count == 0 || program->symbol_objects != 0;

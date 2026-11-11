@@ -103,10 +103,11 @@ static void ir_licm_classify(IrLicmWork* work)
         // its third operand's place past it) are pure and total.
         const __m512i kind_bits = _mm512_and_si512(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
         const __mmask16 ternary = _mm512_cmpge_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
-                                  _mm512_cmplt_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT));
+                                  _mm512_cmplt_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
         const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(4)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
                                                                           (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
-                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))) | ternary);
+                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))) | ternary |
+                                                                           _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_AES)));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }

@@ -170,7 +170,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = { "-Wpointer-to-enum-cast", NULL, "cast to smaller integer type" },
     [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = { "-Wvoid-pointer-to-enum-cast", "-Wpointer-to-enum-cast", "cast to smaller integer type" },
     [CHECK_WARNING_ID_TENTATIVE_ARRAY] = { "-Wtentative-definition-array", NULL, "tentative array definition assumed to have one element" },
-    // (#1953: its ID past -Wtentative-definition-array's, 129.)
+    // (#1447: its ID assigned past the ones other pull requests take, which their rows fill.)
+    [CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE] = { "-Wswift-name-attribute", NULL, "'swift_name' attribute has invalid identifier for the base name" },
+    // (#1953: its ID past -Wswift-name-attribute's, 130.)
     [CHECK_WARNING_ID_UNSEQUENCED] = { "-Wunsequenced", "-Wsequence-point", "multiple unsequenced modifications" },
 };
 

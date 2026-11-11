@@ -7711,6 +7711,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
 #include "c_check_asm_constraint_driver_test.c"
+#include "c_check_register_variable_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_tier0_inline_driver_test.c"
 #include "c_check_tier1_if_convert_test.c"
@@ -8154,6 +8155,9 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_type_safety_driver_test.c"
 #include "c_check_objc_bridge_driver_test.c"
 #include "c_check_swift_attribute_driver_test.c"
+#include "c_check_swift_name_driver_test.c"
+#include "c_check_cfi_salt_driver_test.c"
+#include "c_check_objc_c23_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_pointer_cast_driver_test.c"
 #include "c_check_unsequenced_driver_test.c"
@@ -9226,6 +9230,18 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_swift_names(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_cfi_salt(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_objc_c23(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_patchable(&test, clang, executable, directory);
                 check_test_driver_cpu_dispatch(&test, clang, executable, directory);
                 check_test_driver_target_versions(&test, clang, executable, directory);
@@ -9248,6 +9264,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_constraints(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_register_variables(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

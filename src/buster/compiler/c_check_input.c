@@ -296,6 +296,15 @@ typedef enum CheckInputMessage
     // check_asm_clang_valid), at its string: `value` its bytes' address in the reader's arena, `detail` their length and
     // BUSTER_CHECK_ASM_OUTPUT for an output's.
     CHECK_INPUT_ASM_CONSTRAINT,
+    // A global register variable (#1846): `register` at file scope without an asm label, clang's "illegal storage class on
+    // file-scoped variable", at its name; an explicit register variable's label (a local's too) that names no register
+    // clang knows, a global's of a register clang's backend can't keep one in, or of another size than its type
+    // (CHECK_INPUT_REGISTER_NAME at the label's string: `value` the name's bytes' address in the reader's arena, `detail`
+    // their length and BUSTER_CHECK_REGISTER_NAME_UNSUITABLE or _SIZE); and a global's type that is neither an integer nor
+    // a pointer, at its type specifier.
+    CHECK_INPUT_FILE_REGISTER,
+    CHECK_INPUT_REGISTER_NAME,
+    CHECK_INPUT_REGISTER_TYPE,
     // A function's redeclaration with another explicit calling convention (#1447, check_input_report_redeclaration): the
     // new and the first declaration's conventions in the detail's low bytes, and in its bit 16 whether the first's is explicit.
     CHECK_INPUT_CONVENTION_CHANGE,
@@ -529,6 +538,9 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_INTERRUPT_HANDLER] = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
     [CHECK_INPUT_INTERRUPT_CALLED] = "interrupt service routine cannot be called directly",
     [CHECK_INPUT_ASM_CONSTRAINT] = "invalid constraint in asm",
+    [CHECK_INPUT_FILE_REGISTER] = "illegal storage class on file-scoped variable",
+    [CHECK_INPUT_REGISTER_NAME] = "unknown register name in asm",
+    [CHECK_INPUT_REGISTER_TYPE] = "unsupported type for named register variable",
     [CHECK_INPUT_CONVENTION_CHANGE] = "function declared here was previously declared with another calling convention",
     [CHECK_INPUT_DIAGNOSE_IF_ERROR] = "diagnose_if attribute error",
     [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
@@ -1079,6 +1091,9 @@ struct CheckInput
     uint32_t interrupt_range_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
+    // The unit's global register variables' declarations (#1846, check_input_register_label): their objects have no
+    // symbol (check_program_alias's selection leaves them out).
+    uint32_t global_register_count;
     uint32_t asm_capacity;
     // Zero-default token IDs; null when the parsed unit has no asm statement groups. Read through check_input_asm_id.
     uint32_t* asm_ids;
@@ -1228,6 +1243,11 @@ static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint3
 }
 
 #define BUSTER_CHECK_INTERRUPT_KEEP 0x80000000u
+// CHECK_INPUT_REGISTER_NAME's detail bits above the name's length (#1846): a register unsuitable for a global register
+// variable, and one of another size than the variable's.
+#define BUSTER_CHECK_REGISTER_NAME_UNSUITABLE 0x40000000u
+#define BUSTER_CHECK_REGISTER_NAME_SIZE 0x80000000u
+
 // CHECK_INPUT_ASM_CONSTRAINT's detail bit of an output's constraint, above its length (#1973).
 #define BUSTER_CHECK_ASM_OUTPUT 0x80000000u
 
@@ -2187,6 +2207,11 @@ struct CheckInputReader
     // Whether an argument_with_type_tag, pointer_with_type_tag or type_tag_for_datatype attribute was read, for its
     // handler's checks and its declarations' rules and tags (#1447, c_check_type_safety_input.c).
     bool type_tag_attributes;
+    // The struct clang's Sema takes for CFError (#1447, swift_error's error parameter: check_input_swift_cf_error): the
+    // first one bridged to NSError that a swift_error's check met, which it then tests alone; 0 before.
+    TypeId cf_error;
+    // Whether a cfi_salt attribute was read, for the function types its declarators make (#1447, check_input_attribute_salt).
+    bool salt_attributes;
     // While a function's declaration's attributes are checked (check_input_attribute_subjects): its declarator's first
     // named parameter's token plus one (its parameters linked by parameter_next), which callback's names index; else 0.
     uint32_t attribute_parameters;
@@ -3735,10 +3760,11 @@ static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttri
     return result;
 }
 
-// Whether a generic attribute is a function type's (#147): ns_returns_retained, cfi_unchecked_callee and the function effects'.
+// Whether a generic attribute is a function type's (#147): ns_returns_retained, cfi_unchecked_callee, the function effects'
+// and cfi_salt (#1447).
 static bool check_input_function_type_name(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    static const char* const names[] = { "ns_returns_retained", "cfi_unchecked_callee", "allocating", "blocking", "nonallocating", "nonblocking" };
+    static const char* const names[] = { "ns_returns_retained", "cfi_unchecked_callee", "allocating", "blocking", "nonallocating", "nonblocking", "cfi_salt" };
     const String8 name = check_input_attribute_name(reader, attribute->name);
     bool result = false;
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(names); i += 1)
@@ -3811,6 +3837,83 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
     }
 }
 
+// A declarator's type with its list's cfi_salt (#1447, clang's handleCFISaltAttr: the last of the list's kept ones, a string
+// whose text is the salt, an empty one none) on the first function inside its pointers, arrays and aligned or qualified
+// wrappers, made again with them: the salt is part of the function type's identity (BUSTER_TYPE_FUNCTION_SALT_SHIFT, the
+// text's interned id). A function without a prototype is clang's error at the attribute ("only applies to non-K&R-style
+// functions"); a salt's id past the type's bits is refused by name; and a list's attribute on no function is its
+// subjects' warning (check_input_attribute_function_type_warning). Cold: only a unit with a cfi_salt asks.
+static TypeId check_input_attribute_salt(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+{
+    TypeTable* types = reader->types;
+    const Parser* parser = reader->parser;
+    CheckInputAttribute* salt = NULL;
+    for (uint32_t i = 0; attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
+    {
+        CheckInputAttribute* attribute = attributes->records + i;
+        const bool kept = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored && !attribute->subject_ignored &&
+                          attribute->count_check == BUSTER_CHECK_COUNT_NONE && attribute->argument_count == 1 &&
+                          parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING;
+        salt = kept && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_salt") ? attribute : salt;
+    }
+    TypeId function = type;
+    uint32_t depth = 0;
+    bool wrapped = salt != NULL;
+    while (wrapped)
+    {
+        const uint8_t kind = type_kind(types, function);
+        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED;
+        function = wrapped ? types->types.base[type_index(function)] : function;
+        depth += wrapped ? 1u : 0u;
+    }
+    const bool is_function = salt != NULL && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool prototyped = is_function && (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    const String8 text = prototyped ? check_input_checks_string(reader, salt->argument_first, salt->argument_end) : (String8){ "", 0 };
+    const uint32_t id = text.length != 0 ? intern_find_or_add(reader->pp->table, (const uint8_t*)text.pointer, (uint32_t)text.length) : 0;
+    TypeId result = type;
+    if (is_function && !prototyped)
+    {
+        check_input_attribute_argument_error(reader, attributes, salt, salt->first, CHECK_ARGUMENT_NON_KR, 0);
+        result = 0;
+    }
+    else if (prototyped && (id >= BUSTER_TYPE_FUNCTION_SALT_LIMIT || (text.length != 0 && id == 0)))
+    {
+        check_input_attribute_error(reader, attributes, salt->name_token, salt->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+        result = 0;
+    }
+    else if (prototyped && id != type_function_salt(types, function))
+    {
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, function, &count);
+        const uint32_t abi = (uint32_t)type_function_abi_kind(types, function) | id << BUSTER_TYPE_FUNCTION_SALT_SHIFT;
+        // (An empty salt removes the model's: no parameter ABIs then, which a salt and a Swift convention seldom meet.)
+        result = id != 0 ? type_function_like(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY,
+                                              (TypeFunctionABI)abi, function) :
+                           type_function_abi(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY,
+                                             (TypeFunctionABI)abi);
+        result = check_input_type_result(reader, result);
+        // The wrappers again, outermost last, with their qualifiers.
+        for (uint32_t level = depth; result != 0 && level != 0; level -= 1)
+        {
+            TypeId wrapper = type;
+            for (uint32_t i = 1; i < level; i += 1)
+            {
+                wrapper = types->types.base[type_index(wrapper)];
+            }
+            const uint32_t index = type_index(wrapper);
+            const uint8_t kind = types->types.kind[index];
+            const uint64_t extent = types->types.extent[index];
+            result = kind == BUSTER_TYPE_KIND_POINTER ? type_pointer(types, result) : kind == BUSTER_TYPE_KIND_ARRAY ? type_array(types, result, extent) :
+                     kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? type_incomplete_array(types, result) :
+                     kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(types, result, (uint32_t)extent) :
+                     kind == BUSTER_TYPE_KIND_QUALIFIED ? type_extend(types, result, (uint32_t)extent) : type_aligned(types, result, (uint32_t)extent);
+            result = check_input_type_result(reader, result);
+            result = result != 0 ? type_qualify(types, result, type_qualifiers(wrapper)) : 0;
+        }
+    }
+    return result;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
 // Without attributes it gives back the type and the origin (#1671): no list requests an ABI
@@ -3840,6 +3943,8 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(C
             *origin = check_input_attribute_abi_origin(reader, attributes, *origin);
         }
         result = check_input_attribute_abi_with_override(reader, attributes, type, replace_wrapped_abi);
+        // A function type's cfi_salt (#1447), where the unit has one.
+        result = reader->salt_attributes && result != 0 ? check_input_attribute_salt(reader, attributes, result) : result;
     }
     return result;
 }
@@ -7638,10 +7743,27 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                 // An argument after the first that names nothing is clang's parser's error first (check_input_thread_names).
                 const bool named = kind != 0 && check_input_objc_undeclared(reader, attribute) == BUSTER_CHECK_NONE;
                 const bool considered = named && !attribute->ignored && !(pass == 0 && attribute->objc_moved);
-                // Where it starts: the specifiers', a chunk's (its pointer's step), or after the declarator.
+                // Where it starts: the specifiers', a chunk's (its pointer's step), or after the declarator. A C23 one (#1447)
+                // where a declaration's attributes are starts as GNU's after the declarator; elsewhere it is its place's type's
+                // alone, which it doesn't leave: after the specifiers their type, after a `*` its pointer, after a function's
+                // or an array's suffix that one.
+                const bool fixed = attribute->standard && !attribute->objc_declaration;
+                const bool declared = attribute->standard ? attribute->objc_declaration : pass == 1 && attribute->first >= split;
                 uint32_t start = 0;
                 bool trailing = false;
-                if (considered && pass == 1 && attribute->first < split)
+                if (considered && fixed && pass == 1)
+                {
+                    for (uint32_t s = 1; s < steps; s += 1)
+                    {
+                        start = step_kinds[s] != BUSTER_TYPE_KIND_NONE && step_tokens[s] < attribute->first &&
+                                (start == 0 || step_tokens[s] > step_tokens[start]) ? s : start;
+                    }
+                }
+                else if (considered && fixed)
+                {
+                    start = 0;
+                }
+                else if (considered && !declared && pass == 1 && attribute->first < split)
                 {
                     // A pointer's chunk (after its `*`), or a group's (after its `(`, before any `*` in it), whose type is
                     // the pointers' before the group and the suffixes' after it.
@@ -7663,7 +7785,7 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                         start = before && step_kinds[s] != BUSTER_TYPE_KIND_NONE ? s : start;
                     }
                 }
-                else if (considered && pass == 1)
+                else if (considered && declared)
                 {
                     // After the declarator: the innermost pointer outside its outermost function, the specifiers' type first
                     // where it has no function.
@@ -7684,7 +7806,7 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                 // Moving outward from where it starts, to the step where it is handled or stays.
                 uint32_t at = start;
                 bool taken = considered && !trailing && check_input_objc_takes(types, kind, step_types[at]);
-                bool moving = considered && !trailing && !taken;
+                bool moving = considered && !trailing && !taken && !fixed;
                 while (moving)
                 {
                     uint32_t next = at + 1;
@@ -7711,7 +7833,9 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                     const bool quiet = strong || check_input_checks_spelled(reader, word, "autoreleasing");
                     const TypeId here = trailing ? type : step_types[at];
                     const uint32_t spelling = here == base && name < parser->tokens.count ? check_input_typedef_spelling(reader->output, parser, name) : 0;
-                    const CheckWarningEventKind warned = kind == 1 ? CHECK_WARNING_EVENT_OBJC_POINTER_TYPE : weak ? CHECK_WARNING_EVENT_OBJC_WEAK_TYPE :
+                    // (weak's is named '__weak' on a pointer alone: clang's first test names the attribute, #1447.)
+                    const bool pointer = here != 0 && type_kind(types, type_strip_aligned(types, here)) == BUSTER_TYPE_KIND_POINTER;
+                    const CheckWarningEventKind warned = kind == 1 ? CHECK_WARNING_EVENT_OBJC_POINTER_TYPE : weak && pointer ? CHECK_WARNING_EVENT_OBJC_WEAK_TYPE :
                                                                                                                  CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE;
                     const CheckWarningEvent event =
                     {
@@ -7762,12 +7886,36 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                     {
                         CheckWarningEvent unsupported = event;
                         unsupported.kind = CHECK_WARNING_EVENT_OBJC_UNSUPPORTED;
-                        unsupported.payload = (CheckWarningPayload){ .name = attribute->name, .token = first };
+                        // (A C23 one named with its scope, #1447.)
+                        const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+                        unsupported.payload = (CheckWarningPayload){ .name = attribute->name, .token = first,
+                                                                     .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) };
                         check_input_warning_event(reader, &unsupported, NULL, 0);
                     }
                     else if (none || weak)
                     {
                         check_input_warning_event(reader, &event, NULL, 0);
+                    }
+                    // A C23 objc_gc after a declarator's name, which slides to the declaration's type with -Wdeprecated-
+                    // attributes' warning once its handler took it (#1447, CheckInputAttribute.neon_deprecated).
+                    // After a typedef's name it is clang's "cannot be applied to a declaration" instead (neon_typedef).
+                    if (valid && attribute->neon_typedef)
+                    {
+                        check_input_attribute_argument_error(reader, list, attribute, attribute->first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
+                        attribute->neon_deprecated = false;
+                        valid = false;
+                    }
+                    else if (valid && attribute->neon_deprecated)
+                    {
+                        // (Completing where the type's warnings do, after them.)
+                        CheckWarningEvent deprecated = event;
+                        deprecated.id = CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES;
+                        deprecated.kind = CHECK_WARNING_EVENT_TYPE_ON_DECLARATION;
+                        const uint32_t scope_name = attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+                        deprecated.payload = (CheckWarningPayload){ .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                                                    .data = scope_name | BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE };
+                        check_input_warning_event(reader, &deprecated, NULL, 0);
+                        attribute->neon_deprecated = false;
                     }
                 }
             }
@@ -8966,6 +9114,172 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
 #include "c_check_counted_by_input.c"
 #include "c_check_thread_safety_input.c"
 #include "c_check_condition.c"
+
+// Whether `name` is a register's name clang's x86-64 target knows (TargetInfo::isValidGCCRegisterName, #1846): past one
+// '%' or '#', a name of GCCRegNames or AddlRegNames (but none of sil, dil, spl and bpl, or the segment registers), or
+// an index into GCCRegNames' 181 names, as getAsInteger reads it (0x, 0b and 0 prefixes).
+static bool check_input_register_name_valid(String8 name)
+{
+    static const char* const names[] = {
+        "ax", "dx", "cx", "bx", "si", "di", "bp", "sp", "st", "argp", "flags", "fpcr", "fpsr", "dirflag", "frame",
+        "al", "ah", "eax", "rax", "bl", "bh", "ebx", "rbx", "cl", "ch", "ecx", "rcx", "dl", "dh", "edx", "rdx",
+        "esi", "rsi", "edi", "rdi", "esp", "rsp", "ebp", "rbp", "cr0", "cr2", "cr3", "cr4", "cr8",
+        "dr0", "dr1", "dr2", "dr3", "dr6", "dr7",
+    };
+    if (name.length != 0 && (name.pointer[0] == '%' || name.pointer[0] == '#'))
+    {
+        name.pointer += 1;
+        name.length -= 1;
+    }
+    bool valid = false;
+    for (uint32_t i = 0; !valid && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        valid = name.length == strlen(names[i]) && memcmp(name.pointer, names[i], name.length) == 0;
+    }
+    valid |= name.length == 5 && memcmp(name.pointer, "st(", 3) == 0 && name.pointer[3] >= '1' && name.pointer[3] <= '7' && name.pointer[4] == ')';
+    // A prefix and a number of no leading zero up to its limit: r8 to r31 (with a d, w or b suffix), xmm, ymm and zmm 0 to
+    // 31, mm, k and tmm 0 to 7, and bnd 0 to 3.
+    static const struct
+    {
+        const char* prefix;
+        uint32_t minimum;
+        uint32_t limit;
+        bool suffix;
+    } numbered[] = {
+        { "r", 8, 31, true }, { "xmm", 0, 31, false }, { "ymm", 0, 31, false }, { "zmm", 0, 31, false },
+        { "mm", 0, 7, false }, { "k", 0, 7, false }, { "tmm", 0, 7, false }, { "bnd", 0, 3, false },
+    };
+    for (uint32_t p = 0; !valid && p < BUSTER_ARRAY_LENGTH(numbered); p += 1)
+    {
+        const uint64_t prefix = strlen(numbered[p].prefix);
+        uint64_t end = name.length;
+        if (numbered[p].suffix && end > prefix + 1 && (name.pointer[end - 1] == 'd' || name.pointer[end - 1] == 'w' || name.pointer[end - 1] == 'b'))
+        {
+            end -= 1;
+        }
+        bool digits = end > prefix && end - prefix <= 2 && memcmp(name.pointer, numbered[p].prefix, prefix) == 0 && (end - prefix == 1 || name.pointer[prefix] != '0');
+        uint32_t number = 0;
+        for (uint64_t at = prefix; digits && at < end; at += 1)
+        {
+            digits = name.pointer[at] >= '0' && name.pointer[at] <= '9';
+            number = number * 10 + (uint32_t)(name.pointer[at] - '0');
+        }
+        valid = digits && number >= numbered[p].minimum && number <= numbered[p].limit;
+    }
+    // An index, in getAsInteger's radix: 0x hexadecimal, 0b binary, 0 octal, else decimal.
+    if (!valid && name.length != 0 && name.pointer[0] >= '0' && name.pointer[0] <= '9')
+    {
+        const bool prefixed = name.length > 2 && name.pointer[0] == '0' && (name.pointer[1] == 'x' || name.pointer[1] == 'X' || name.pointer[1] == 'b' || name.pointer[1] == 'B');
+        const uint32_t radix = prefixed ? (name.pointer[1] == 'x' || name.pointer[1] == 'X' ? 16 : 2) : name.pointer[0] == '0' && name.length > 1 ? 8 : 10;
+        uint64_t number = 0;
+        bool digits = true;
+        for (uint64_t at = prefixed ? 2 : 0; digits && at < name.length; at += 1)
+        {
+            const char c = name.pointer[at];
+            const uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0') : c >= 'a' && c <= 'f' ? (uint32_t)(c - 'a' + 10) : c >= 'A' && c <= 'F' ? (uint32_t)(c - 'A' + 10) : 99;
+            digits = digit < radix && number <= 181;
+            number = number * radix + digit;
+        }
+        valid = digits && number <= 180;
+    }
+    return valid;
+}
+
+static uint32_t check_input_type_specifier_token(const Parser* parser, uint32_t first, uint32_t name);
+
+// A global register variable's errors (#1846, `file`; its asm label in `attributes`): clang's, each at its place, invalid
+// (`*invalid`) without a label or of a type that isn't an integer or a pointer. A local's label is checked after its body
+// (check_input_asm_labels).
+static void check_input_register_label(CheckInputReader* reader, const CheckInputAttributes* attributes, TypeId type, uint32_t name, uint32_t first, bool file,
+                                       bool* invalid)
+{
+    // A global's errors are clang's to go on past: they don't stop the reader (check_input_recover_reports). A local's label
+    // is check_input_asm_labels', after its body.
+    const uint32_t before_reports = reader->output->report_count;
+    const CheckInputAttribute* label = NULL;
+    for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
+    {
+        label = attributes->records[a].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[a].ignored ? attributes->records + a : label;
+    }
+    if (label == NULL && file)
+    {
+        check_input_report(reader, name, CHECK_INPUT_FILE_REGISTER);
+        *invalid = true;
+    }
+    else if (label != NULL)
+    {
+        const TypeTable* types = reader->types;
+        const String8 text = label->text;
+        const bool known = check_input_register_name_valid(text);
+        const bool wide = text.length == 3 && (memcmp(text.pointer, "rsp", 3) == 0 || memcmp(text.pointer, "rbp", 3) == 0);
+        const bool narrow = text.length == 3 && (memcmp(text.pointer, "esp", 3) == 0 || memcmp(text.pointer, "ebp", 3) == 0);
+        const uint64_t bytes = type_is_complete(types, type) ? type_size(types, type) : 0;
+        const bool mismatch = (wide && bytes != 8) || (narrow && bytes != 4);
+        const uint32_t detail = !known ? 0 : !wide && !narrow ? BUSTER_CHECK_REGISTER_NAME_UNSUITABLE : BUSTER_CHECK_REGISTER_NAME_SIZE;
+        if (file && (!known || detail != BUSTER_CHECK_REGISTER_NAME_SIZE || mismatch) && text.length < BUSTER_CHECK_REGISTER_NAME_UNSUITABLE)
+        {
+            uint8_t* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)text.length + 1);
+            const uint32_t before = reader->output->report_count;
+            if (copy != NULL)
+            {
+                memcpy(copy, text.pointer, text.length);
+                check_input_report(reader, label->argument_first, CHECK_INPUT_REGISTER_NAME);
+            }
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].value = (uint64_t)(uintptr_t)copy;
+                reader->output->reports[before].detail = (uint32_t)text.length | detail;
+            }
+        }
+        reader->output->global_register_count += file ? 1 : 0;
+        const uint8_t kind = type_kind(types, type_unqualified(type_strip_aligned(types, type)));
+        if (file && kind != BUSTER_TYPE_KIND_INTEGER && kind != BUSTER_TYPE_KIND_ENUM && kind != BUSTER_TYPE_KIND_BIT_INT && kind != BUSTER_TYPE_KIND_POINTER)
+        {
+            // After the label's error, as clang gives them, though its place is earlier.
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, check_input_type_specifier_token(reader->parser, first, name), CHECK_INPUT_REGISTER_TYPE);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].sort = label->argument_first + 1;
+            }
+            *invalid = true;
+        }
+    }
+    if (reader->output->report_count > before_reports)
+    {
+        check_input_recover_reports(reader, before_reports);
+    }
+}
+
+// The type specifier of the declaration specifiers from `first` before `name` (clang's TypeLoc begin, #1846): the first
+// token that isn't a storage class or function specifier, a qualifier (_Atomic's too, without its group), the asm or
+// calling convention keywords, or an attribute's or alignment specifier's group.
+static uint32_t check_input_type_specifier_token(const Parser* parser, uint32_t first, uint32_t name)
+{
+    uint32_t result = first;
+    bool found = false;
+    for (uint32_t t = first; !found && t < name && t < parser->tokens.count; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool grouped = (kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS) && t + 1 < parser->tokens.count && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
+        const bool atomic_qualifier = kind == PARSE_KIND_ATOMIC && !(t + 1 < parser->tokens.count && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN);
+        if (grouped)
+        {
+            t = parser->tree.parents[t + 1];
+        }
+        else if (kind == PARSE_KIND_L_SQUARE && t + 1 < parser->tokens.count && parser->tokens.kinds[t + 1] == PARSE_KIND_L_SQUARE)
+        {
+            t = parser->tree.parents[t];
+        }
+        else if (kind != PARSE_KIND_STORAGE && kind != PARSE_KIND_QUALIFIER && kind != PARSE_KIND_TYPEDEF && kind != PARSE_KIND_CALLING_CONVENTION &&
+                 kind != PARSE_KIND_EXTENSION && !atomic_qualifier && kind != PARSE_KIND_ATTRIBUTE)
+        {
+            result = t;
+            found = true;
+        }
+    }
+    return result;
+}
 
 // The first of the function specifier inline's tokens in [first, end), a declaration's specifiers, or BUSTER_CHECK_NONE.
 static uint32_t check_input_inline_token(const Parser* parser, uint32_t first, uint32_t end)
@@ -10899,7 +11213,16 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 valid = false;
             }
             valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
-            valid &= !file || (storage != C_NAME_REGISTER && storage != C_NAME_AUTO);
+            // Explicit register variables' labels, and global register variables (#1846, the owner's decision on #1447), as
+            // clang's Sema::ActOnVariableDeclarator checks them: a local's label must name a register clang knows; a
+            // global's must too, one clang's backend keeps one in (rsp and rbp of 8 bytes, esp and ebp of 4), of the
+            // variable's size, and its type must be an integer or a pointer. Without a label, a global is an error.
+            const bool global_register = valid && file && !is_typedef && !function && storage == C_NAME_REGISTER;
+            if (valid && !is_typedef && !function && storage == C_NAME_REGISTER)
+            {
+                check_input_register_label(reader, attributes, type, name, first, file, &invalid);
+            }
+            valid &= !file || (storage != C_NAME_AUTO && (storage != C_NAME_REGISTER || global_register));
             valid &= !function || (storage != C_NAME_REGISTER && storage != C_NAME_AUTO && (file || !is_static));
             // clang's CheckVariableDeclarationType (#1447): a variable of local storage (a block's, neither static nor
             // extern) whose type, or its array's element, has an address space.
@@ -11189,8 +11512,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                                                    (predefines_gnu_inline(&reader->pp->options.predefines, reader->pp->options.language) ||
                                                     check_input_attribute_gnu_inline(attributes) || check_input_attribute_gnu_inline(previous_attributes));
                 // A loader_uninitialized variable's declaration defines it, without an initializer (#147).
-                const bool defines = ((initialized || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition) ||
-                                     (!is_typedef && !function && !file && is_static) || loader != NULL;
+                // A global register variable (#1846) defines no object, its initializer ignored as clang's is.
+                const bool defines = (((initialized || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition) ||
+                                      (!is_typedef && !function && !file && is_static) || loader != NULL) &&
+                                     !global_register;
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED, defines);
                 // A function's or variable's alias, ifunc or weakref target defines it (#147).
                 const bool alias_definition = !is_typedef && check_input_attribute_alias_definition(attributes);
@@ -11199,7 +11524,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_lane_refuse(reader, reader->lane && alias_definition, "a body's alias changes its linked entity's definition history");
                 reader->definition_origins[name] = check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED) || alias_definition ? name + 1 : 0;
                 // A static variable's alias or weakref is its definition, not a tentative one: it has no storage of its own.
-                check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_TENTATIVE, !is_typedef && !function && file && storage != C_NAME_EXTERN && !initialized && !alias_definition &&
+                check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_TENTATIVE, !is_typedef && !function && file && storage != C_NAME_EXTERN && !global_register && !initialized && !alias_definition &&
                                     loader == NULL);
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_STATIC, !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0));
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
@@ -11457,8 +11782,10 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         {
             uint32_t count = 0;
             const TypeId* parameters = type_parameters(reader->types, type, &count);
+            // (Its cfi_salt kept, #1447.)
+            const TypeFunctionABI salted = (TypeFunctionABI)((uint32_t)abi | type_function_salt(reader->types, type) << BUSTER_TYPE_FUNCTION_SALT_SHIFT);
             reader->declared_types[token] = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, type),
-                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_KEY, abi));
+                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_KEY, salted));
         }
     }
 }
@@ -12185,7 +12512,8 @@ struct CheckC23AutoLevel
     uint32_t alignment_log2;
     uint8_t kind;
     uint8_t function_flags;
-    uint8_t abi;
+    // Its convention with its cfi_salt (#1447, type_function_extended_abi).
+    uint32_t abi;
 };
 
 static CheckC23AutoLevel* check_input_c23_auto_level(CheckInputReader* reader, CheckC23AutoLevel** top, uint8_t kind)
@@ -12332,7 +12660,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
                 level->parameters = declared_parameters;
                 level->parameter_count = declared_count;
                 level->function_flags = (uint8_t)(declared_flags & (BUSTER_TYPE_FLAG_PROTOTYPE | BUSTER_TYPE_FLAG_VARIADIC));
-                level->abi = (uint8_t)type_function_abi_kind(types, declared_level);
+                level->abi = type_function_extended_abi(types, declared_level);
                 level->qualifiers = type_qualifiers(declared_level) & ~BUSTER_TYPE_RESTRICT;
                 declared_level = type_return(types, declared_level);
                 deduced = type_return(types, deduced);

@@ -168,7 +168,7 @@ static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, u
                 const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi32(tail, function->c + first), _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
                 uint32_t ternaries = tail & _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_INTRINSIC)) &
                                      _mm512_cmpge_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
-                                     _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_COUNT));
+                                     _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
                 while (ternaries != 0)
                 {
                     const uint32_t node = first + (uint32_t)__builtin_ctz(ternaries);

@@ -1166,6 +1166,63 @@ static void ir_test_compresses(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 2 * 3 * 4, "compress and expand are admitted at every width and lanes");
 }
 
+// The AES rounds (#1840): both verifiers admit aes of two vectors of the result's type with flags 0 and 1 alone; the
+// model gives FIPS 197's Appendix B round 1 (vaesenc of the state after the first AddRoundKey by round key 1 is the state
+// starting round 2) and the 9700X's vaesenclast of that appendix's round-10 key, in every 16-byte lane of each width.
+static void ir_test_aes(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const uint8_t state[16] = { 0x19, 0x3d, 0xe3, 0xbe, 0xa0, 0xf4, 0xe2, 0x2b, 0x9a, 0xc6, 0x8d, 0x2a, 0xe9, 0xf8, 0x48, 0x08 };
+    static const uint8_t key[16] = { 0xa0, 0xfa, 0xfe, 0x17, 0x88, 0x54, 0x2c, 0xb1, 0x23, 0xa3, 0x39, 0x39, 0x2a, 0x6c, 0x76, 0x05 };
+    static const uint8_t round[16] = { 0xa4, 0x9c, 0x7f, 0xf2, 0x68, 0x9f, 0x35, 0x2b, 0x6b, 0x5b, 0xea, 0x43, 0x02, 0x6a, 0x50, 0x49 };
+    static const uint8_t last_state[16] = { 0xeb, 0x59, 0x8b, 0x1b, 0x40, 0x2e, 0xa1, 0xc3, 0xf2, 0x38, 0x13, 0x42, 0x1e, 0x84, 0xe7, 0xd2 };
+    static const uint8_t last_key[16] = { 0xd0, 0x14, 0xf9, 0xa8, 0xc9, 0xee, 0x25, 0x89, 0xe1, 0x3f, 0x0c, 0xc8, 0xb6, 0x63, 0x0c, 0xa6 };
+    static const uint8_t last[16] = { 0x39, 0x25, 0x84, 0x1d, 0xc0, 0xe9, 0xb1, 0x26, 0x68, 0x60, 0x31, 0xe6, 0xc4, 0xa8, 0x3e, 0x8a };
+    const uint64_t mark = output->length;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        const IrType type = (IrType)(IR_V4I32 + width);
+        for (uint32_t flags = 0; flags < 3; flags += 1)
+        {
+            IrFunction function = {0};
+            const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+            if (ir_create(output, &sizes, &function) != IR_OK)
+            {
+                ir_test_expect(test, false, "aes verifier fixture allocation");
+                continue;
+            }
+            function.result_type = IR_VOID;
+            function.block_offsets[1] = 4;
+            ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_AES);
+            ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.flags[2] = (uint8_t)flags;
+            ir_test_pair(test, &function, scratch, NULL, flags <= 1, "an aes round is admitted with flags 0 and 1 alone");
+            arena_pop_to(output, mark);
+        }
+        for (uint32_t which = 0; which < 2; which += 1)
+        {
+            IrSimdValue values[2] = { 0 };
+            for (uint32_t lane = 0; lane < (1u << width); lane += 1)
+            {
+                memcpy((uint8_t*)values[0].words + lane * 16, which == 0 ? state : last_state, 16);
+                memcpy((uint8_t*)values[1].words + lane * 16, which == 0 ? key : last_key, 16);
+            }
+            const IrSimdValue* operands[3] = { &values[0], &values[1], 0 };
+            const IrSimdShape shape = ir_simd_shape(type);
+            const IrSimdAction action = { .operation = IR_SIMD_AES, .result = shape, .operands = { shape, shape, IR_SIMD_NONE }, .index = (uint8_t)which };
+            IrSimdValue value;
+            memset(&value, 0xa5, sizeof(value));
+            bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+            for (uint32_t lane = 0; exact && lane < (1u << width); lane += 1)
+            {
+                exact = memcmp((const uint8_t*)value.words + lane * 16, which == 0 ? round : last, 16) == 0;
+            }
+            ir_test_expect(test, exact, "the model's aes gives FIPS 197's round and the 9700X's last round in every lane");
+        }
+    }
+}
+
 // The lane operations (#1840): lane_op at every vector width, for every flags byte below 64 and a second operand of the
 // result's type or another width's, admitted by both verifiers exactly where the operation is a minimum or a maximum, or
 // a saturating sum or difference of bytes or words, and the operands are of the result's type; and the model's lanes
@@ -1278,6 +1335,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_permute2s(test, output, scratch);
     ir_test_ternlogs(test, output, scratch);
     ir_test_compresses(test, output, scratch);
+    ir_test_aes(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);
     ir_test_width_changes(test, output, scratch);
