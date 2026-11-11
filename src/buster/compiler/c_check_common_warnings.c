@@ -3527,7 +3527,9 @@ static void check_common_emit_run(CheckCommonEmission* emission)
             }
             case BUSTER_CHECK_EMIT_COMMA_TAIL:
             {
-                if (node < graph->count && check_common_emit_evaluated(emission, node) && (emission->emitted[node] & BUSTER_CHECK_EMITTED_COMMA_MARKER) == 0)
+                // (A cast's comma before it of its type name's bounds, #2321, has no source comma.)
+                if (node < graph->count && check_common_emit_evaluated(emission, node) && (emission->emitted[node] & BUSTER_CHECK_EMITTED_COMMA_MARKER) == 0 &&
+                    !(graph->tokens[node] < emission->parser->tokens.count && emission->parser->tree.roles[graph->tokens[node]] == PARSE_ROLE_CLOSE_CAST))
                 {
                     check_common_comma_marker(emission, node);
                 }
@@ -3886,6 +3888,70 @@ static uint32_t check_common_operand_end(const Parser* parser, uint32_t op)
         end += inside ? 1u : 0u;
     }
     return end;
+}
+
+static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+static bool check_driver_size_sugar(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+
+// The root of a binary operator's (`op`) operand from `token`, one of its tokens, climbing at most `count` parents; or
+// BUSTER_CHECK_NONE. With `strings`, through string literals alone (a concatenation's).
+static uint32_t check_common_operand_root(const Parser* parser, uint32_t op, uint32_t token, bool strings)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < count && parser->tree.parents[at] != op && (!strings || parser->tokens.kinds[at] == PARSE_KIND_STRING) && steps < count; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[at];
+        at = up != at ? up : count;
+    }
+    return at < count && parser->tree.parents[at] == op && (!strings || parser->tokens.kinds[at] == PARSE_KIND_STRING) ? at : BUSTER_CHECK_NONE;
+}
+
+// -Wstring-plus-int (#2190, clang's diagnoseStringPlusInt): a `+` of a string literal, unparenthesized, and an operand of
+// integer, boolean or enumeration type, in either order, "adding 'T' to a string does not append to the string" at the
+// `+`, T the operand's type as written, with its note there; given as clang builds the `+`, after its operands' own. A
+// `+` whose neighbor isn't a string literal is skipped at once.
+static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const uint8_t roles[] = { PARSE_ROLE_ADDITIVE };
+    CheckCommonScan scan = { 0 };
+    const bool enabled = stream != NULL && types != NULL && input->token_nodes != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count; token < count;
+         token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
+    {
+        const bool plus = parser->tokens.kinds[token] == PARSE_KIND_PLUS && token > 0 && token + 1 < count;
+        const uint32_t left_string = plus && parser->tokens.kinds[token - 1] == PARSE_KIND_STRING ? check_common_operand_root(parser, token, token - 1, true) : BUSTER_CHECK_NONE;
+        const uint32_t right_string = plus && left_string == BUSTER_CHECK_NONE && parser->tokens.kinds[token + 1] == PARSE_KIND_STRING ?
+                                      check_common_operand_root(parser, token, token + 1, true) : BUSTER_CHECK_NONE;
+        const bool string = left_string != BUSTER_CHECK_NONE || right_string != BUSTER_CHECK_NONE;
+        const uint32_t index = !string ? BUSTER_CHECK_NONE : left_string != BUSTER_CHECK_NONE ? check_common_operand_root(parser, token, token + 1, false) :
+                               check_common_operand_root(parser, token, token - 1, false);
+        const uint32_t node = index < input->token_count ? input->token_nodes[index] : BUSTER_CHECK_NONE;
+        const TypeId value = node < stream->count ? check_stream_type(stream, node) : 0;
+        const uint8_t value_kind = value != 0 ? type_kind(types, type_unqualified(type_strip_aligned(types, value))) : 0;
+        if (value_kind == BUSTER_TYPE_KIND_INTEGER || value_kind == BUSTER_TYPE_KIND_ENUM || value_kind == BUSTER_TYPE_KIND_BIT_INT)
+        {
+            // Its type as clang names it past its implicit conversions: a typedef's or typeof's spelling, an integer's
+            // __size_t sugar (check_driver_conversion_words' way).
+            const uint64_t mark = scratch->length;
+            const uint32_t walked = check_driver_pointer_spelling(parser, input, stream, types, node);
+            const bool integer = value_kind == BUSTER_TYPE_KIND_INTEGER;
+            const bool sized = integer && check_driver_size_sugar(parser, pp, input, stream, types, node);
+            const uint32_t spelling = sized ? BUSTER_CHECK_NONE : integer && walked == BUSTER_CHECK_NONE ? 0 : walked;
+            const String8 name = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, spelling, check_driver_operand_sugar(input, stream, node));
+            const char* message = name.length != 0 ? check_warning_text(scratch, "adding %.*s to a string does not append to the string", (int)name.length, name.pointer) : NULL;
+            const CheckCommonNote note = { token, "use array indexing to silence this warning" };
+            if (message != NULL)
+            {
+                check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, token), CHECK_WARNING_ID_STRING_PLUS_INT, false, message, &note, 1,
+                                       scratch);
+            }
+            arena_pop_to(scratch, mark);
+        }
+    }
 }
 
 // The root of the operand of a binary operator `op` that holds `token`, climbing at most the token count's parents, or
@@ -10689,6 +10755,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_shift_op_parentheses(parser, pp, input, scratch);
+    check_common_string_plus_int(parser, pp, input, stream, types, &spell, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);

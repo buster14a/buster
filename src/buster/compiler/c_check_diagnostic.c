@@ -186,6 +186,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_GNU_UNION_CAST] = { "-Wgnu-union-cast", "-Wgnu", "cast to union type is a GNU extension" },
     [CHECK_WARNING_ID_GNU_DESIGNATOR] = { "-Wgnu-designator", "-Wgnu", "use of GNU 'missing =' extension in designator" },
     [CHECK_WARNING_ID_GNU_ARRAY_RANGE] = { "-Wgnu-designator", "-Wgnu", "use of GNU array range extension" },
+    [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
     [CHECK_WARNING_ID_SHIFT_OP_PARENTHESES] = { "-Wshift-op-parentheses", "-Wparentheses", "operator has lower precedence than its operand's" },
 };
 
