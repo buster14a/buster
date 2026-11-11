@@ -223,9 +223,9 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
         }
     }
     unlink(path);
+    // An unknown builtin's call is an implicit declaration, as clang's, which check_test_driver_unknown_builtins compares.
     static const char* const ordinary[] = {
         "int f(void){return (missing)(1);}\n",
-        "int f(void){return __builtin_missing(1);}\n",
         "int f(void){return missing;}\n",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(ordinary); c += 1)
@@ -239,7 +239,7 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
             const int status = check_test_driver_spawn(arguments, &actual);
             check_test_expect(test, status == 1 && actual != NULL && strstr(actual, "implicit function") == NULL &&
                                     strstr(actual, "implicit-function-declaration") == NULL,
-                              "non-direct callees, builtin spellings and ordinary identifiers remain hard errors");
+                              "non-direct callees and ordinary identifiers remain hard errors");
             free(actual);
         }
     }
@@ -597,6 +597,66 @@ static void check_test_common_empty_history(CheckTest* test)
             arena_release(&scratch);
         }
     }
+}
+
+// Unknown builtins (#2121): a `__builtin_` name no clang builtin row has in the language mode, __builtin_c23_va_start's
+// before C23 among them, called directly, is clang's implicit declaration with its DefaultError "use of unknown builtin"
+// in every mode before C23 (and its typo correction), and an undeclared identifier in C23. Whole diagnostic lines and
+// the status against clang's, by both paths, under the implicit-function group's options.
+static void check_test_driver_unknown_builtins(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] =
+    {
+        "int __builtin_fox(int);\n"
+        "int a(void) { return __builtin_foo(1) + __builtin_foo(2); }\n"
+        "int b(void) { return __builtin_foo(3); }\n"
+        "int c(void) { int (*p)() = __builtin_bar; return (__builtin_baz)(1); }\n"
+        "void d(void) { __builtin_arm_nop(); int n = sizeof(__builtin_qux(1)); }\n",
+        "void g(int n, ...) { __builtin_va_list ap; __builtin_c23_va_start(ap, 1, 2); }\n"
+        "void h(int n, ...) { __builtin_va_list ap; __builtin_c23_va_start(ap); __builtin_c23_va_start(ap, n); int x = __builtin_c23_va_start; }\n",
+    };
+    static const char* const options[][2] =
+    {
+        { "-std=gnu17", NULL },
+        { "-std=gnu89", NULL },
+        { "-std=gnu23", NULL },
+        { "-std=gnu17", "-Wno-implicit-function-declaration" },
+        { "-std=gnu89", "-Wno-error=implicit-function-declaration" },
+        { "-std=gnu17", "-Werror" },
+        { "-std=gnu89", "-w" },
+    };
+    char path[512];
+    snprintf(path, sizeof(path), "%s/unknown-builtins.c", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(path, sources[s], strlen(sources[s]));
+        check_test_expect(test, written, "unknown builtins: the source is written");
+        for (uint32_t o = 0; written && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+        {
+            char* reference[] = { (char*)clang, (char*)options[o][0], "-fsyntax-only", "-fno-caret-diagnostics", "-fno-color-diagnostics", path,
+                                  (char*)options[o][1], NULL };
+            char* expected = NULL;
+            const int oracle = check_test_driver_spawn(reference, &expected);
+            static char wanted[8192];
+            const bool wanted_fits = check_test_driver_common_output(expected, wanted, sizeof(wanted));
+            free(expected);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* arguments[] = { (char*)executable, (char*)options[o][0], "-fsyntax-only", path, scalar != 0 ? "--scalar" : (char*)options[o][1],
+                                      scalar != 0 ? (char*)options[o][1] : NULL, NULL };
+                char* text = NULL;
+                const int status = check_test_driver_spawn(arguments, &text);
+                static char got[8192];
+                const bool got_fits = check_test_driver_common_output(text, got, sizeof(got));
+                free(text);
+                char description[20480];
+                snprintf(description, sizeof(description), "unknown builtins, source %u, %s %s, by the %s path: clang's\n%sagainst\n%s", s, options[o][0],
+                         options[o][1] != NULL ? options[o][1] : "", scalar != 0 ? "scalar" : "vector", wanted, got);
+                check_test_expect(test, oracle >= 0 && status == oracle && wanted_fits && got_fits && strcmp(wanted, got) == 0, description);
+            }
+        }
+    }
+    unlink(path);
 }
 
 static void check_test_driver_common_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
