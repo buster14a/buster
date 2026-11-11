@@ -297,7 +297,10 @@ every width, and `vpmov`, `vpmovs` and `vpmovus` of every pair at every width. I
 by a scalar count then added 53: `vpsllw` to `vpsraq` by an xmm count (EVEX) and by an
 immediate at every width, each 2 cycles' latency, one macro-op and 2 per cycle
 ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
-buster-performance#388).
+buster-performance#388). Its masks' conversions then added 12: `vpmovb2m` to `vpmovq2m` at every
+width, 3, 4 and 6 cycles' latency at 16, 32 and 64 bytes. Its lane operations then added 72:
+`vpminub` to `vpmaxsq` and `vpaddusb` to `vpsubsw` at every width, each 2 cycles'
+latency, the minima and maxima of bytes to doublewords 4 per cycle and the others 2.
 
 What the rows say, a few families (cycles; derived values in italics):
 

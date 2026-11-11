@@ -1,0 +1,11 @@
+decision	rerun
+jobs	36	stopped	9	setup	5	keep	0
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (x86-64, none, O3) / Build the compiler once for the row's shards
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 4)
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 4 of 4)
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 4)
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 3 of 4)
+job	follows-setup	row-build-setup	failure	Require this row's compiler product	Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)
+job	follows-setup	row-build-setup	failure	Require this row's compiler product	Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 3 of 4)
+job	follows-setup	row-build-setup	failure	Require this row's compiler product	Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)
+job	follows-setup	row-build-setup	failure	Require this row's compiler product	Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)
