@@ -11,7 +11,8 @@
 // bodies on two lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be
 // refused with no object written. The asm and control errors are compared whole too: every one, in clang's words, a
 // duplicate case's with its "previous case defined here" note, after a graph's error and in a unit without one (#1447).
-// A rejected unit's other bodies get their common warnings (check_driver_rejected_common, #1447).
+// A rejected unit's other bodies get their common warnings (check_driver_rejected_common, #1447), and a left-out
+// statement's complete operands theirs (#2120).
 // Include after c_check_semantic_recovery_driver_test.c, whose reader this takes.
 
 static void check_test_driver_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -244,6 +245,18 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void f(int n) { char *b = (int[2]){ 1, 2 }; printf(\"%s\\n\", n); }\n"
         "void g(int n) { int u; char *e = (long[]){ 1, 2, 3 }; long *l = (int[1]){ 0 }; printf(\"%s\\n\", n); }\n"
         "void h(int n) { int w = (struct { int x; }){ 1 }; char *a = (int[2]){ 1, 2 }; if (n < (unsigned){ 4 }) {} }\n",
+        // A left-out statement's complete operands, kept as `(void)(A);` (#2120): the warnings clang gives as it builds them,
+        // before its error or after it, a call's -Wformat, a comma's -Wunused-value and -Wself-assign, and an erroneous
+        // call's arguments'.
+        "int printf(const char *, ...);\nstruct S { int a; } s;\nint k(int, int);\nvoid f(int x, int *p)\n{\n"
+        "    x = printf(\"%s\", x) + s.b;\n    x = s.b + printf(\"%s\", x);\n    k(1, (2, 3), 4);\n    p + (2, 3.0);\n"
+        "    x = (x = x) + s.b;\n}\n",
+        // Through a cast, a call, a subscript and a conditional; not in sizeof; a statement-level comma, a for's body and a
+        // return; and no flow analysis's warning (`u`).
+        "typedef int T;\nint g(int);\nstruct S { int a; } s;\nint f(int x, int *p)\n{\n    int u;\n    x = (T)s.b + (x = x);\n"
+        "    x = g(s.b) + (1, 2);\n    x = p[s.b] + p[(1, 2)];\n    x = x ? (3, 4) : s.b;\n    x = sizeof(s.b + (1, 2));\n"
+        "    x = u + s.b;\n    x = (1, 2), s.b;\n    for (;;) x = s.b + (1, 2);\n    return (1, 2) + s.b;\n}\n"
+        "int h(int x) { x = undeclared + (1, 2); return x << 40; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
