@@ -715,6 +715,36 @@ static uint32_t check_input_vla_cast_bounds(CheckInputReader* reader, uint32_t f
     return result;
 }
 
+// A cast's operands past its first (#2321), at its `)` (`token`): a cast to a variably modified type evaluates its type
+// name's bounds first (clang's EmitVariablyModifiedType before the cast's operand), each captured as an operand before
+// the cast's own (check_input_vla_capture). The cast's operand in *operand, whether it is supported in *supported, and
+// its bounds' sequence (check_input_vla_cast_bounds), or BUSTER_CHECK_NONE. Out of the walk's hot path: casts of one
+// operand never call it.
+static __attribute__((noinline, cold)) uint32_t check_input_vla_cast(CheckInputReader* reader, uint32_t token, uint32_t count, uint32_t* operand,
+                                                                     bool* supported)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    uint32_t at = *operand;
+    uint32_t bounds = 0;
+    while (at != BUSTER_CHECK_NONE && graph->ops[at] == CHECK_OP_VLA_BOUND && reader->value_next[at] != BUSTER_CHECK_NONE)
+    {
+        at = reader->value_next[at];
+        bounds += 1;
+    }
+    const bool bounded = bounds != 0 && bounds + 1 == count && reader->query_types[token] != 0;
+    const uint32_t result = bounded ? check_input_vla_cast_bounds(reader, reader->first_child[token], token, reader->query_types[token]) : BUSTER_CHECK_NONE;
+    *supported = result != BUSTER_CHECK_NONE;
+    *operand = result != BUSTER_CHECK_NONE ? at : *operand;
+    return result;
+}
+
+// The cast `node` after its bounds' sequence (check_input_vla_cast): a comma of them, then the cast, at its `)`.
+static __attribute__((noinline, cold)) uint32_t check_input_vla_cast_sequence(CheckInputReader* reader, uint32_t token, uint32_t bounds, uint32_t node)
+{
+    const uint32_t sequenced = check_input_add(reader, CHECK_OP_COMMA, token, bounds, node, BUSTER_CHECK_NONE);
+    return sequenced != BUSTER_CHECK_NONE ? sequenced : node;
+}
+
 typedef struct CheckVlaSizePart CheckVlaSizePart;
 struct CheckVlaSizePart
 {
