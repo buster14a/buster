@@ -3727,10 +3727,11 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
 // which nothing clears or dirties between them, as a lane's units reuse theirs, each against a parser whose scratch
 // parse_test_units_clear zeroes before each unit, as a fresh parser's: tokens, tree, postorder, diagnostics and
 // statistics alike (parse_test_parse_difference). The units: two random streams (seed 1, streams 20 and 1485), then
-// the `count` streams parse_test_streams checks, in its order. The first stream's brackets don't balance: K2 put its
-// groups on the group stacks below depth 0, where a top-level token's group is read (none, in a fresh scratch). The
-// second's top-level tokens took one of them: K5 settled its statements, and K6 flagged 77 of its tokens, where on a
-// fresh parser K5 sends it whole to the scalar parser.
+// the first `count` streams parse_test_streams checks, in its order (256 of them: all 2,000 took 5% of test-parser's
+// time without files). The first stream's brackets don't balance: K2 put its groups on the group stacks below depth 0,
+// where a top-level token's group is read (none, in a fresh scratch). The second's top-level tokens took one of them:
+// K5 settled its statements, and K6 flagged 77 of its tokens, where on a fresh parser K5 sends it whole to the scalar
+// parser.
 static uint32_t parse_test_reused_scratch(const PPOptions* options, const char* directory, uint64_t count, uint64_t seed)
 {
     static const char* const pair[] = {
@@ -4707,7 +4708,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             plain.include_count = 0;
             failures += parse_test_streams(streams, seed, &plain, directory, keep);
             failures += parse_test_borrowed_scratch(&plain, directory, seed);
-            failures += parse_test_reused_scratch(&plain, directory, streams, seed);
+            failures += parse_test_reused_scratch(&plain, directory, streams < 256 ? streams : 256, seed);
             failures += parse_test_alignments(0, &plain, directory);
             failures += parse_test_nesting(&plain, directory);
             failures += parse_test_driver(directory);

@@ -75,7 +75,11 @@ unit (`parse_test_check_unit`), with state kept from one unit to the next
   lane's parsers do. Until each parse wrote its group stacks' entries below
   depth 0, the vector path read some that an earlier unit left there, so each
   scratch was zeroed before a unit (#2087, `parse_test_units_clear`, which the
-  reused scratch check below keeps for its fresh parser's; #2086).
+  reused scratch check below keeps for its fresh parser's; #2086). Without
+  it, the repository's 33 units ran 200 ms (3%) faster on the 9700X, less
+  system time, at a 1.80 GB peak against 1.43 GB. Its release of scratch over
+  1 MB is gone too: those pages came back zero, as a fresh parser's, which is
+  what hid #2086.
 - **Arenas:** an arena pool (`arena_pool`), as a units lane has, takes the
   arenas each unit's preprocessor and the parsers' columns release.
 - **Preprocessor:** each unit's own. The alignments and the streams
@@ -130,7 +134,8 @@ has those runs and the hosted runners' (#2078). On:
   retain the twins and their whole-unit retry on every host;
 - a reused scratch (#2086), without files: one parser with a scratch of its
   own, which nothing clears or dirties between units, parses two random streams
-  (seed 1, streams 20 and 1485) and then the `--streams` streams in turn. Each
+  (seed 1, streams 20 and 1485) and then the first 256 of the `--streams`
+  streams in turn (all 2,000 took 5% of test-parser's time). Each
   must parse as on a parser whose scratch is zeroed first, as a fresh one's,
   tokens, tree, postorder, diagnostics and statistics alike. The first
   stream's brackets don't balance, and its groups went below depth 0 on K2's
