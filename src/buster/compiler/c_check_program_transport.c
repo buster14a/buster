@@ -1233,10 +1233,19 @@ static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLow
         exponent.lanes = piece.lanes;
         const uint32_t negated = builtin == CBUILTIN_ELEMENTWISE_FMA && shape.bfloat && arguments == 3 ? check_lower_brain_negations(program, first, result) : 0;
         Tier0Operation row;
+        // Qwords' minimum and maximum without SSE4.2: a mask's row and a blend's, each piece's operands loaded for both
+        // (check_vector_baseline_extreme_pair, #1834).
+        Tier0Operation pair_rows[2];
+        const bool pair = arguments == 2 && !ldexp && !floating && check_vector_baseline_extreme_pair(&writer->target, builtin, piece, pair_rows);
         CheckVectorConstants constants = { 0 };
-        const char* reason = ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, &row) :
+        const char* reason = pair ? NULL :
+                             ldexp ? check_vector_ldexp_shape_row(&writer->target, piece, exponent, &row) :
                              floating ? check_vector_floating_shape_row(builtin, piece, &row, &constants) :
                                         check_vector_elementwise_shape_row(&writer->target, builtin, piece, arguments, negated, &row, &constants);
+        if (pair)
+        {
+            row = pair_rows[1];
+        }
         if (reason != NULL)
         {
             check_lower_unsupported(writer, reason);
@@ -1244,6 +1253,7 @@ static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLow
         else
         {
             const uint32_t operation = check_lower_operation_index(writer, &row);
+            const uint32_t mask_operation = pair ? check_lower_operation_index(writer, pair_rows) : BUSTER_CHECK_NONE;
             uint32_t sources[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
             for (uint32_t a = 0; a < arguments; a += 1)
             {
@@ -1255,10 +1265,17 @@ static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLow
                 check_lower_transport_builtin_store(writer, bytes);
                 check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, operation);
                 check_lower_row_constants(writer, &row, &constants, arguments);
-                for (uint32_t a = arguments; a-- > 0;)
+                for (uint32_t pass = pair ? 2 : 1; pass-- > 0;)
                 {
-                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, row.operand_bytes[a]);
-                    check_lower_transport_at(writer, sources[a], (uint64_t)p * lanes * inputs[a].element);
+                    for (uint32_t a = arguments; a-- > 0;)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, pair ? piece.bytes : row.operand_bytes[a]);
+                        check_lower_transport_at(writer, sources[a], (uint64_t)p * lanes * inputs[a].element);
+                    }
+                    if (pass == 1)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, mask_operation);
+                    }
                 }
                 check_lower_element_address(writer, object, p * bytes);
             }

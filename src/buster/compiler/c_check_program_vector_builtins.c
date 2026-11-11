@@ -959,6 +959,43 @@ static const char* check_vector_bitreverse_shape_row(const X86Target* target, Ch
     return reason;
 }
 
+// Whether __builtin_elementwise_min or _max of qwords (`builtin`, of `shape`) is two rows without SSE4.2's PCMPGTQ (#1834),
+// past a row's 8 records, and if so `rows`: the mask of a < b (of b < a for a maximum) from the compare's row
+// (check_vector_baseline_compare_qwords), then of the mask, a and b, b ^ ((a ^ b) & mask). Both rows read a and b, which
+// their callers keep in memory to load twice.
+static bool check_vector_baseline_extreme_pair(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape, Tier0Operation* rows)
+{
+    const bool maximum = builtin == CBUILTIN_ELEMENTWISE_MAX;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    bool pair = (maximum || builtin == CBUILTIN_ELEMENTWISE_MIN) && shape.integer && shape.element == 8 && (shape.bytes == 16 || shape.bytes == 32) &&
+                (target->features & evex) != evex && (target->features & BUSTER_X86_FEATURE(SSE42)) == 0;
+    if (pair)
+    {
+        const CheckVectorElement element = { .bytes = 8, .is_signed = shape.is_signed };
+        pair = check_vector_lower_baseline_element(target, maximum ? CHECK_OP_GREATER : CHECK_OP_LESS, element, shape.bytes, 0, rows) == NULL;
+        Tier0Operation* blend = rows + 1;
+        memset(blend, 0, sizeof(*blend));
+        blend->result_class = BUSTER_TYPED_CLASS_VECTOR;
+        blend->result_bytes = (uint8_t)shape.bytes;
+        blend->operand_count = 3;
+        for (uint32_t j = 0; j < 3; j += 1)
+        {
+            blend->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+            blend->operand_bytes[j] = (uint8_t)shape.bytes;
+        }
+        const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+        const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+        const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+        CheckVectorBaseline context = { blend, shape.bytes, (target->features & BUSTER_X86_FEATURE(AVX)) != 0, true };
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, XORPS), v1, v1, v2);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, ANDPS), v0, v0, v1);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, XORPS), v0, v0, v2);
+        Tier0Operation baseline;
+        pair = pair && context.valid && check_vector_baseline_row(target, blend, &baseline);
+    }
+    return pair;
+}
+
 // The baseline's row of __builtin_elementwise_min, _max or _abs of integers whose EVEX row has no SSE or AVX form (#1834)
 // (check_vector_baseline_extremes, check_vector_baseline_absolute): its operands the EVEX row's, and an unsigned
 // compare's bias of the elements' sign bits its next (`constants`), the records rewritten. NULL or the reason.
