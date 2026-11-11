@@ -3412,7 +3412,16 @@ What the lowering covers past scalars (#145's programs):
     feature's, doubled plus one), highest first. A version's condition is its
     `arch=` (`__builtin_cpu_is`'s test of the vendor, type or subtype; a
     microarchitecture level's bit) and its features' bits. A version of
-    neither is taken unconditionally, and a model none matches is a `ud2`. A
+    neither is taken unconditionally, and a model none matches is a `ud2`.
+    An `arch=X` version is chosen by the CPU model's vendor, family and
+    model alone, as clang's is, with no test of X's features, though its copy
+    is compiled with all of them (the owner's decision, #2355). On a machine
+    whose model is X but which doesn't report some of X's features (a VM that
+    hides AVX-512, as some hosted Zen 4 runners do), the resolver still
+    picks it, and an instruction of a hidden feature traps, as clang's build
+    does. A fixture that executes code on hosted runners chooses such a
+    version by feature (`avx512f`, which the resolver tests by its bit), not
+    by `arch=` (#2346). A
     static group's versions are emitted where its resolver is, as clang emits
     them. A block-scope static in a version is named by the function's name
     where clang emits it (`check_program_target_static_context`). In a
@@ -5808,7 +5817,28 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. A block's declaration with linkage (an `extern` object, any function
+them. `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+const object without an initializer, at its name, with its type as declared.
+- **Automatic storage:**
+  - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
+    array's elements', an `_Atomic`'s, a variable array's too);
+  - `-Wdefault-const-init-field-unsafe` where it is a struct whose first
+    const member, found depth first through its structs and unions
+    (`getConstField`), isn't an array of const elements nor a flexible array
+    member. Its note, "member 'm' declared 'const' here", is at that member's
+    declarator (`check_input_member_declarator`);
+  - both, for a const struct;
+  - none, for a union or an array of structs.
+- **Static storage:** `-Wdefault-const-init-var` alone, off by default (in
+  `-Wdefault-const-init` and `-Wc++-compat`). A file scope's object, a
+  tentative definition, gets it once, at the unit's end, from the tentative
+  definitions' walk (`check_input_tentative_arrays`): at its last tentative
+  definition, with its type completed (`'const int[1]'`), after its tentative
+  array's warning, and none where a later declaration defines it.
+- **The C++ words.** The unsafe ones say "and is incompatible with C++" where
+  `-Wc++-compat` is on there, as clang selects them by that group's fake
+  diagnostic: `CHECK_WARNING_ID_CXX_COMPAT`, a policy no event gives.
+A block's declaration with linkage (an `extern` object, any function
 declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
@@ -10119,6 +10149,24 @@ enables, which this checker doesn't all give.
   declarators; a union's member is the first of the target's type), in
   `-Wimplicit-enum-enum-cast` and in a failed initializer conversion's error:
   `struct S s = { .lp = c }`'s "initializing 'LP' (aka 'long *')".
+  size_t's `__size_t` sugar (#1447 item 10) in a failed conversion's source:
+  - a sizeof's or alignof's value;
+  - a call's value, of a library builtin that returns size_t;
+  - an arithmetic result, as clang's `UsualArithmeticConversions` keeps the
+    sugar of the operand the result takes its type from
+    (`check_driver_size_sugar`). That is the converted-to side's, a shift's
+    left operand's, a unary operator's, a comma's right operand's and a
+    conditional's arms'. Two operands of one type keep only a sugar both
+    have, so `n + sizeof(int)` of an `unsigned long n` is `'unsigned long'`,
+    and `strlen(s) + 1` is `'__size_t' (aka 'unsigned long')`;
+  - an implicitly declared library builtin's designator, or its address, as
+    its prototype (`check_driver_library_designator`,
+    `cbuiltin_library_spell_as`): `'void *(__size_t)' (aka 'void
+    *(unsigned long)')`, `'__size_t (*)(const char *)'`.
+
+  The other warnings' operands keep their spelling as before. A builtin named
+  outside a call before any call declares it gets its implicit declaration's
+  error after the conversion's, where clang gives it first.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
