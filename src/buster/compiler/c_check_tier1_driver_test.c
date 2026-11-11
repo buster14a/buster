@@ -1076,7 +1076,8 @@ static const char check_test_tier1_vectors_header[] =
     "V4 a_v4(V4 a, int k);\n"
     "U8 a_u8(U8 a, U8 b);\n"
     "V16 a_v16(V16 a, long k, V4 c);\n"
-    "unsigned long a_fold(V16 v, U8 u, V4 w);\n";
+    "unsigned long a_fold(V16 v, U8 u, V4 w);\n"
+    "unsigned long a_member(int k);\n";
 
 static const char check_test_tier1_vectors_other_source[] =
     "#include \"tier1-vectors.h\"\n"
@@ -1091,6 +1092,8 @@ static const char check_test_tier1_vectors_source[] =
     "U8 a_u8(U8 a, U8 b) { U8 m = a >= b; return a * b - (a | b) + m; }\n"
     "V16 a_v16(V16 a, long k, V4 c) { V16 s = { 7, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987 }; V16 m = a != s; return a * s + (m & ~a) - (V16){ c[0], c[1], c[2], c[3] }; }\n"
     "unsigned long a_fold(V16 v, U8 u, V4 w) { unsigned long h = 0; for (int i = 0; i < 16; i += 1) h = h * 31 + v[i]; for (int i = 0; i < 8; i += 1) h = h * 37 + u[i]; for (int i = 0; i < 4; i += 1) h = h * 41 + w[i]; return h; }\n"
+    "typedef float F4 __attribute__((vector_size(16)));\n"
+    "unsigned long a_member(int k) { struct { V4 v; F4 f; } x; union { V4 v; F4 f; } u; x.v = (V4){ 1, -2, 3, k }; x.f = (F4){ 1.0f, 4.0f, 9.0f, (float)(k * k) }; u.v = x.v; V4 r[] = { __builtin_elementwise_abs(x.v), x.v }; F4 q[] = { __builtin_elementwise_sqrt(x.f), x.f }; V4 s[] = { __builtin_elementwise_max(u.v, (V4){ 0 }), u.v }; u.f = x.f; F4 t[] = { __builtin_elementwise_floor(u.f), u.f }; unsigned long h = sizeof r + sizeof q + sizeof s + sizeof t; for (int i = 0; i < 4; i += 1) h = h * 43 + (unsigned)r[1][i] + 7u * (unsigned)r[0][i] + 11u * (unsigned)s[1][i] + 13u * (unsigned)s[0][i] + (unsigned)(q[0][i] + q[1][i] + t[0][i] + t[1][i]); return h; }\n"
     "int main(void)\n"
     "{\n"
     "    for (int k = 0; k < 4; k += 1)\n"
@@ -1100,6 +1103,7 @@ static const char check_test_tier1_vectors_source[] =
     "        V16 v = { k, 1, -2, 3, 4, -5, 6, 7, 8, 9, -10, 11, 12, 13, 14, 15 };\n"
     "        printf(\"%lu %lu\\n\", a_fold(a_v16(v, k, w), a_u8(u, b_u8(u, u)), a_v4(w, k)), b_back(k));\n"
     "        printf(\"%lu\\n\", a_fold(b_v16(v, k, w), b_u8(u, u), b_v4(w, k)));\n"
+    "        printf(\"%lu\\n\", a_member(k));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";

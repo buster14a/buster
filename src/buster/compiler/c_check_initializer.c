@@ -1946,6 +1946,37 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 TypeId callee = declared != 0 ? type_strip_aligned(walker->types, declared) : 0;
                 callee = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(walker->types, type_element(walker->types, callee)) : callee;
                 result = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_FUNCTION ? type_return(walker->types, callee) : 0;
+                // A generic vector builtin has no prototype (#2111). An elementwise one's value has its first argument's
+                // type, so the walk goes down that argument: the child of the `)` the token after the `(` is under, or
+                // where that child is a separator (more than one argument), its first child, again; a reduction's is a
+                // scalar. Without this, the caller took the last typed token: `x` in
+                // `__builtin_elementwise_abs(x.v)`, a struct, which made the call no vector.
+                const CBuiltinId builtin = result == 0 && declared == 0 && walker->identifiers != 0
+                                               ? cbuiltin_resolve((const char*)intern_bytes(walker->identifiers, parser->tokens.names[name]),
+                                                                  intern_length(walker->identifiers, parser->tokens.names[name]))
+                                               : CBUILTIN_NONE;
+                const bool elementwise = (builtin >= CBUILTIN_ELEMENTWISE_ABS && builtin <= CBUILTIN_ELEMENTWISE_SUB_SAT) ||
+                                         (builtin >= CBUILTIN_ELEMENTWISE_ACOS && builtin <= CBUILTIN_ELEMENTWISE_PEXT);
+                const bool reduction = (builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR) ||
+                                       (builtin >= CBUILTIN_REDUCE_XOR && builtin <= CBUILTIN_REDUCE_IN_ORDER_FADD);
+                uint32_t argument = open + 1;
+                for (uint32_t climb = 0; elementwise && argument < root && parser->tree.parents[argument] != root && climb < count; climb += 1)
+                {
+                    argument = parser->tree.parents[argument];
+                }
+                const bool child = elementwise && argument > open && argument < root && parser->tree.parents[argument] == root;
+                for (uint32_t climb = 0; child && argument > open && argument < root && parser->tree.roles[argument] == PARSE_ROLE_SEPARATOR &&
+                                         first[argument - begin] != BUSTER_CHECK_NONE && first[argument - begin] < argument && climb < count;
+                     climb += 1)
+                {
+                    argument = first[argument - begin];
+                }
+                result = reduction ? BUSTER_TYPE_INT : result;
+                if (child && argument > open && argument < root)
+                {
+                    root = argument;
+                    descending = true;
+                }
             }
             else if (steps < count && role == PARSE_ROLE_CLOSE_SUBSCRIPT && open != BUSTER_CHECK_NONE && parser->tree.roles[open] == PARSE_ROLE_OPEN_SUBSCRIPT &&
                      first[slot] != BUSTER_CHECK_NONE && first[slot] < open)
