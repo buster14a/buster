@@ -648,9 +648,6 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
         { "segment-struct-store-past-limit", "struct S{char c[1025];};void tested(struct S __seg_gs*p,struct S*q){*p=*q;}",
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
-        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an _Atomic object.
-        { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
     {
@@ -810,6 +807,22 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "*sq=*sq*2;*sq+=n;(*sq)++;r+=(long)*sq;*sd+=1.0i;r+=(long)*sd;"
         "return (int)(r+(long)__real__ tc+(long)(__imag__ gc*4)+(long)tb+(long)gb+(long)(tw%1000)+(long)gw+(long)gq);}",
         "segment-complex-bit-int", clang);
+    // _Atomic lvalues (#1447): their plans' direct accesses take the override (CheckLowerAtomic.segment), as clang's code has
+    // it: a load's mov, a store's xchg, an increment's or an addition's lock xadd, another update's loop of a load and lock
+    // cmpxchg (a double's too), of 1, 2, 4 and 8 bytes; a struct's library calls (__atomic_load, __atomic_store) take its
+    // address as it is, as clang's do, which in %ss (whose base is 0) is the object's.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "struct B{long a,b,c;};static _Thread_local _Atomic int ta=5;static _Thread_local _Atomic long tl=100;static _Thread_local _Atomic double td=1.5;"
+        "static _Atomic short gs_=7;static _Atomic struct B gb;static _Atomic char gc=3;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();{struct B i0={1,2,n};gb=i0;}"
+        "_Atomic int __seg_fs*a=(_Atomic int __seg_fs*)((char*)&ta-tp);_Atomic long __seg_fs*l=(_Atomic long __seg_fs*)((char*)&tl-tp);"
+        "_Atomic double __seg_fs*d=(_Atomic double __seg_fs*)((char*)&td-tp);_Atomic short SS*s=(_Atomic short SS*)&gs_;"
+        "_Atomic struct B SS*b=(_Atomic struct B SS*)&gb;_Atomic char SS*c=(_Atomic char SS*)&gc;"
+        "long r=*a;*a=n;r+=++*a;r+=*a+=3;r+=(*a)--;*l*=3;r+=*l;r+=*l|=5;r+=*l<<=1;*d+=1.25;r+=(long)(*d*4);"
+        "*s-=2;r+=*s;r+=++*s;*c='x';r+=*c;(*c)++;struct B t=*b;r+=t.a+t.c;struct B u={9,8,7};*b=u;"
+        "struct B v=gb;return (int)(r+ta+tl+(long)td+gs_+v.b+gc);}",
+        "segment-atomic-lvalues", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1209,8 +1222,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
-        // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, and with AVX the IEEE maxima and minima,
-        // and the fused multiply-add (b's NaN the result's of two, as clang's VFMADD213SS has b's register its destination),
+        // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, the IEEE maxima and minima (two rows
+        // without AVX, #1834), and the fused multiply-add (b's NaN the result's of two, as clang's VFMADD213SS has b's register its destination),
         // of every pair of NaNs (their payloads), signed zeros, infinities, a denormal and others.
         { "baseline-scalar-builtins",
           "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
@@ -1222,11 +1235,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
           "#define B(x,y) do{__typeof__(x) r_[]={__builtin_elementwise_copysign(x,y),__builtin_elementwise_maxnum(x,y),__builtin_elementwise_minnum(x,y),"
           "__builtin_elementwise_canonicalize(x),__builtin_elementwise_fma(x,y,y)IEEE(x,y)};FOLD(r_);}while(0)\n"
-          "#ifdef __AVX__\n"
           "#define IEEE(x,y) ,__builtin_elementwise_maximum(x,y),__builtin_elementwise_minimum(x,y),__builtin_elementwise_maximumnum(x,y),__builtin_elementwise_minimumnum(x,y)\n"
-          "#else\n"
-          "#define IEEE(x,y)\n"
-          "#endif\n"
           "union{unsigned u;float f;}fu[]={{0x7fc01234u},{0xffc05678u},{0x80000000u},{0},{0x3f800000u},{0xbf800000u},{0x7f800000u},{0xff800000u},{1},{0x40490fdbu}};\n"
           "union{unsigned long long u;double f;}du[]={{0x7ff8000000001234ull},{0xfff8000000005678ull},{0x8000000000000000ull},{0},{0x3ff0000000000000ull},"
           "{0xbff0000000000000ull},{0x7ff0000000000000ull},{0xfff0000000000000ull},{1},{0x400921fb54442d18ull}};\n"
