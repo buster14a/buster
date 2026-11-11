@@ -448,7 +448,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "backend-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
@@ -468,7 +468,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-debug",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|branch_sizing|calling_convention(_builtins)?|debug|foreign_test|lane|link|object_writer|"
+                   "c_types_transparent|c_types_sugar|branch_sizing|calling_convention(_builtins)?|debug|foreign_test|lane|link|object_writer|"
                    "object_writer_test|tier0|unwind[a-z0-9_]*|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|bind|import|runtime",
     },
@@ -476,7 +476,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-lanes",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -484,7 +484,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-units",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime|profile",
     },
@@ -496,21 +496,21 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "checker-bindings",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-deferred",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
@@ -579,7 +579,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "ir-source",
         .sources = "ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|ir_optimize[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|"
                    "c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|"
-                   "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|"
+                   "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|"
                    "tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|"
                    "x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
@@ -603,7 +603,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "lowering-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "c_types|c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -660,7 +660,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .sources = "tier1_certificate[a-z0-9_]*|tier1_cfg[a-z0-9_]*|tier1_allocate|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|"
                    "ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
                    "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
                    "bind|import|runtime",
     },
@@ -673,7 +673,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "tier1_rematerialize|tier1_liveness|tier1_cfg[a-z0-9_]*|tier1_allocate|ir_optimize[a-z0-9_]*|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|"
                    "ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|"
                    "c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "c_types_transparent|c_types_sugar|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
                    "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
                    "bind|import|runtime",
     },
