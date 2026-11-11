@@ -1072,6 +1072,14 @@ has the commands, the logs and the default path's numbers against main.
   clang's too: its `.L` and numeric labels are the assembler's temporary
   symbols, its undefined `.globl` declaration and `.set` absolute are left out,
   and its `.hidden` label has its visibility as clang's object gives it.
+  Every local `.L` label in code is a temporary of `-c`'s object too
+  (#1845, `check_driver_code_temporary`): the labels of templates assembled
+  by their own statements and of naked functions and `&&label`'s
+  `.Lbuster_label_N` (clang's `.Ltmp`), whose relocations then name their
+  section, as clang's assembler leaves its `.L` labels out. The helpers' own
+  function symbols (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's
+  code has none of, stay: `test-x86-intrinsics` finds their calls by them; `test-checker-driver
+  --asm-definitions-only` checks that on both paths and runs the object.
 - `test-checker-driver` reads a placed statement's instructions from its
   function's own records in `-c`'s object, with no call, by both paths and with
   `--tier1` (its asm bodies, #1839, the function not refused);
