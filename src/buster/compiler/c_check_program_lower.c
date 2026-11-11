@@ -1528,6 +1528,13 @@ static __attribute__((noinline)) CheckLowerLimbRoom check_lower_limb_room(const 
         room.calls += complex ? 24 : 0;
         room.arguments += complex ? 128 : 0;
     }
+    // A case of a switch on a _BitInt past 128 bits (#2220): up to 32 entries a limb, a GNU range's two compares
+    // (check_lower_case_limbs), whatever its value's own node's type.
+    for (uint32_t i = 0; count != 0 && i < program->case_count; i += 1)
+    {
+        const CheckProgramCase* item = program->cases + i;
+        room.entries += item->wide_lower != NULL ? 32 * (uint64_t)check_lower_limb_type(types, item->type).count : 0;
+    }
     return room;
 }
 
@@ -14796,14 +14803,90 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
     }
 }
 
+// Whether the _BitInt past 128 bits `limbs` whose address temporary `local` holds is below the constant `constant` (its
+// limbs, the bits past the width zero), or with `above` the constant below it, as an I32: check_lower_limb_compare's
+// order from the least significant limb up, against the constant's limbs, its top one extended as the value's is.
+static void check_lower_case_limb_less(CheckLowerWriter* writer, CheckLowerLimbs limbs, uint32_t local, const uint64_t* constant, bool above)
+{
+    const uint32_t shift = 64 * limbs.count - limbs.width;
+    for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+    {
+        const bool top = limb + 1 == limbs.count;
+        const uint8_t class = limbs.sign && top ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64;
+        uint64_t bits = constant[limb];
+        if (top && limbs.sign && shift != 0)
+        {
+            bits = (uint64_t)((int64_t)(bits << shift) >> shift);
+        }
+        if (limb != 0)
+        {
+            check_lower_limb_load(writer, limbs, local, limb, class, true);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, class, bits);
+            check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        check_lower_limb_load(writer, limbs, local, limb, class, true);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, class, bits);
+        check_lower_emit(writer, above ? BUSTER_TYPED_GT : BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0);
+        if (limb != 0)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
+        }
+    }
+}
+
+// A case of a switch on a _BitInt past 128 bits (#2220), whose limbs' address temporary `local` holds: a branch to its
+// label where the value is its constant's, its limbs' XORs with the constant's ORed together against 0, or for a GNU range
+// where it is neither below the low value nor above the high one (check_lower_case_limb_less).
+static void check_lower_case_limbs(CheckLowerWriter* writer, const CheckProgramCase* item, CheckLowerLimbs limbs, uint32_t local)
+{
+    const bool range = item->wide_upper != item->wide_lower && memcmp(item->wide_lower, item->wide_upper, 8 * (uint64_t)limbs.count) != 0;
+    if (range)
+    {
+        const uint32_t skip = check_lower_label(writer);
+        check_lower_case_limb_less(writer, limbs, local, item->wide_lower, false);
+        check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, skip);
+        check_lower_case_limb_less(writer, limbs, local, item->wide_upper, true);
+        check_lower_emit(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, item->target);
+        check_lower_place(writer, skip);
+    }
+    else
+    {
+        const uint32_t shift = 64 * limbs.count - limbs.width;
+        for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+        {
+            uint64_t bits = item->wide_lower[limb];
+            if (limb + 1 == limbs.count && limbs.sign && shift != 0)
+            {
+                bits = (uint64_t)((int64_t)(bits << shift) >> shift);
+            }
+            check_lower_limb_load(writer, limbs, local, limb, BUSTER_TYPED_CLASS_U64, true);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, bits);
+            check_lower_emit(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            if (limb != 0)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+            }
+        }
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, item->target);
+    }
+}
+
 static void check_lower_case(CheckLowerWriter* writer, const CheckProgramCase* item)
 {
     const uint32_t local = writer->switch_locals[item->owner];
-    const uint8_t own = check_lower_class(writer, item->type);
+    const CheckLowerLimbs limbs = item->wide_lower != NULL ? check_lower_limbs(writer, item->type) : (CheckLowerLimbs){ 0 };
+    const uint8_t own = limbs.count != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, item->type);
     // A narrow _BitInt's switch keeps its value in its computing class (check_lower_computed), which the cases' constants
     // are converted to.
     const uint8_t class = check_lower_computed(own);
-    if (class == UINT8_MAX)
+    if (limbs.count != 0 && local != BUSTER_CHECK_NONE && item->wide_upper != NULL)
+    {
+        check_lower_case_limbs(writer, item, limbs, local);
+    }
+    else if (class == UINT8_MAX)
     {
         check_lower_unsupported(writer, check_lower_type_feature(writer->program->types, item->type));
     }
@@ -16095,9 +16178,12 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_SWITCH)
     {
         // A narrow _BitInt's value is kept in its computing class, which its cases compare in (check_lower_computed).
+        // A _BitInt's past 128 bits (#2220) is its limbs' address, which its cases read (check_lower_case_limbs) before
+        // any of its statements runs.
         const TypeId type = check_stream_type(program->stream, control.node);
-        const uint8_t own = check_lower_class(writer, type);
-        const uint8_t class = check_lower_computed(own);
+        const bool limbs = check_lower_limb_value(writer, type);
+        const uint8_t own = limbs ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
+        const uint8_t class = limbs ? own : check_lower_computed(own);
         const uint32_t local = check_lower_temporary(writer, class);
         writer->switch_locals[control.token] = local;
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);

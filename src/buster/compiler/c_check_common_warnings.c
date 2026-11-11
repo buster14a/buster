@@ -8352,10 +8352,9 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
             const uint32_t condition = program->input->token_nodes[item->owner];
             CheckProgramCase selected = { .type = item->type };
             const bool known = condition != BUSTER_CHECK_NONE &&
-                               check_program_case_value(program, condition, item->type, &selected.lower);
-            const unsigned __int128 ordered = known ? check_program_case_order(program, &selected, false) : 0;
-            const bool taken = known && ordered >= check_program_case_order(program, item, false) &&
-                                       ordered <= check_program_case_order(program, item, true);
+                               check_program_case_value(program, condition, item->type, &selected.lower, &selected.wide_lower);
+            const bool taken = known && check_program_case_compare(program, &selected, false, item, false) >= 0 &&
+                               check_program_case_compare(program, &selected, false, item, true) <= 0;
             targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
             next = !known || !taken;
         }
