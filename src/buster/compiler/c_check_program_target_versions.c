@@ -186,11 +186,12 @@ static uint32_t check_program_target_feature_priority(String8 feature)
     return row >= 0 ? check_target_version_features[row].priority << 1 : 0;
 }
 
-// The resolver's condition and priority of `option`, as clang 23 gives them; whether `option` names what it can (the
-// checker took only processors' arch=). An arch= processor whose key feature has no priority (c_check_target_versions.inc's
-// -1: knm, the one Sema takes) has none in clang's getFMVPriority either, where its getFeaturePriority is unreachable:
-// clang 23's build sorts it above every other version, as the highest priority here. An arch= that __builtin_cpu_is
-// doesn't name (corei7-avx, skx: aliases of -march's) is EmitX86CpuIs's default, a test of the model's vendor against 0.
+// The resolver's condition and priority of `option`, as clang 23 gives them; whether they are defined. An arch= that
+// __builtin_cpu_is doesn't name (corei7-avx, skx: aliases of -march's) is EmitX86CpuIs's default, a test of the model's
+// vendor against 0. An arch= processor whose key feature has no priority (c_check_target_versions.inc's -1: knm, the one
+// Sema takes) has none in clang's getFMVPriority either, where its getFeaturePriority is unreachable: undefined
+// behavior, whose order differs between clang's builds (23.1.4 sorts knm below sse4.2, 23.1.6 above every version), so
+// it is refused by name.
 static bool check_program_target_condition(CheckProgramTargetOption* option)
 {
     bool valid = true;
@@ -211,8 +212,8 @@ static bool check_program_target_condition(CheckProgramTargetOption* option)
     if (option->arch.length != 0)
     {
         const int32_t key = check_program_target_arch_priority(option->arch);
-        valid &= key >= -1;
-        const uint32_t priority = key >= 0 ? ((uint32_t)key << 1) + 1 : key == -1 ? UINT32_MAX : 0;
+        valid &= key >= 0;
+        const uint32_t priority = key >= 0 ? ((uint32_t)key << 1) + 1 : 0;
         option->priority = option->priority > priority ? option->priority : priority;
         uint32_t word = 0;
         uint32_t bit = 0;
