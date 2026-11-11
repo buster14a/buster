@@ -14625,6 +14625,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .count = plan->inline_count,
                     .block = plan->block != 0 ? object : BUSTER_TIER0_ASM_NO_BLOCK,
                     .touched = plan->inline_touched,
+                    .masks = plan->inline_masks,
                     .branches = plan->inline_branches,
                     .targets = plan->inline_targets,
                     .branch_count = plan->inline_branch_count,

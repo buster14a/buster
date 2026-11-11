@@ -1414,9 +1414,11 @@ Registers outside `touched` hold no value across the node: the allocator gives
 values xmm0 to xmm14 alone (xmm15 is the vector class's scratch within a node,
 zmm16 and on a row's or a call's staging within a node), and the x87 stack is
 empty after every node (`tier1_emit_cfg_x87`), so a template may use all eight
-of its slots. Nothing saves a mask value around a body, so in a lowering for
-Tier 1 a template whose records name k0 to k7 keeps its helper
-(`check_asm_names_opmask`), whose call saves the masks.
+of its slots. The masks live in the opmask registers its records write
+(`IrAsmBody.masks`, from `x86_semantics.c`'s opmask effects) are saved into their
+rows around it and reloaded, by kmov of their widths, as around a call; a mask in
+another opmask register stays there. `test-tier1-masks`' "masks across an asm
+body" fixture runs masks live across records that write k1 to k7.
 
 Some bodies keep their function on Tier 0, which then compiles it whole:
 
