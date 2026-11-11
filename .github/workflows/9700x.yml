@@ -275,8 +275,9 @@ jobs:
       # inventory's own build.sh calls (check-call-graph) share the build's tree.
       BUSTER_DEBUG_INFO: '0'
       BUSTER_ORACLE_CACHE: check
-      # The native plain row also runs each of the semantic driver's in-process and served runs as a child and fails on
-      # a difference (test-checker-driver --differential, #2071); the other rows run them in-process and served alone.
+      # The native plain row also runs each of the semantic driver's in-process and served runs, and the parser's and
+      # the preprocessor's served clang oracle runs, as a child and fails on a difference (--differential, #2071); the
+      # other rows run them in-process and served alone.
       BUSTER_DRIVER_DIFFERENTIAL: ${{ matrix.host_arch == 'native' && matrix.sanitizer == 'none' && '1' || '' }}
     steps:
       - name: Check out triggering commit
