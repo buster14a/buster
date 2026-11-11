@@ -235,6 +235,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_ASM_CONSTRAINT: result = "invalid constraint in asm"; break;
         case CHECK_INPUT_BLOCK_EXTERN_INITIALIZER: result = "declaration of block scope identifier with linkage cannot have an initializer"; break;
         case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
@@ -3783,6 +3784,15 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                             "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
                                                             message.length != 0 ? ": " : "", (int)message.length, message.pointer);
                             }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ASM_CONSTRAINT)
+                        {
+                            // An asm operand's constraint clang's validation refuses (#1973), as written.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t length = report->detail & ~BUSTER_CHECK_ASM_OUTPUT;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid %s constraint '%.*s' in asm",
+                                                  (report->detail & BUSTER_CHECK_ASM_OUTPUT) != 0 ? "output" : "input", (int)length,
+                                                  (const char*)(uintptr_t)report->value);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_INTERRUPT_HANDLER && (input->reports[index].detail & BUSTER_CHECK_INTERRUPT_UNLOCATED) != 0)
                         {
@@ -9082,7 +9092,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool time_stages = false;
     for (int i = 0; i < count; i += 1)
     {
-        time_stages |= strcmp(arguments[i], "--time-stages") == 0;
+        time_stages |= c_option_is(arguments[i], "--time-stages");
     }
     CheckClock clock_storage = { 0 };
     if (time_stages)
@@ -9219,7 +9229,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool helper_report = false;
     for (int i = 0; linker_ready && !libraries.linker.resource && filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
-        if (!end_options && strcmp(arguments[i], "--") == 0)
+        // The argument's option IDs (c_option_table.c), which the tests below compare; none past --.
+        const COptionMatch match = end_options ? (COptionMatch){ .exact = C_OPTION_NONE, .joined = C_OPTION_NONE } : c_option_find(arguments[i]);
+        if (!end_options && match.exact == C_OPTION_END_OF_OPTIONS)
         {
             end_options = true;
             filtered[filtered_count++] = arguments[i];
@@ -9231,7 +9243,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             {
                 filtered[filtered_count++] = arguments[i];
             }
-            const bool standard_input = strcmp(arguments[i], "-") == 0;
+            const bool standard_input = arguments[i][0] == '-' && arguments[i][1] == 0;
             stdin_count += standard_input;
             invalid_stdin |= standard_input && language == CHECK_DRIVER_INPUT_AUTO;
             input_kinds[input_count] = check_driver_classify(arguments[i], language);
@@ -9242,57 +9254,56 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             inputs[input_count++] = arguments[i];
             continue;
         }
-        if (strncmp(arguments[i], "-x", 2) == 0)
+        if (arguments[i][0] == '-' && arguments[i][1] == 'x')
         {
             const char* value = arguments[i][2] != 0 ? arguments[i] + 2 : i + 1 < count ? arguments[++i] : "";
             language = check_driver_language(value);
             invalid_language = language == CHECK_DRIVER_INPUT_INVALID && invalid_language == NULL ? value : invalid_language;
             continue;
         }
-        if (strcmp(arguments[i], "--intel") == 0)
+        if (match.exact == C_OPTION_INTEL)
         {
             assembly_intel = true;
             continue;
         }
-        scalar |= strcmp(arguments[i], "--scalar") == 0;
-        quiet |= strcmp(arguments[i], "-w") == 0;
+        scalar |= match.exact == C_OPTION_SCALAR;
+        quiet |= match.exact == C_OPTION_W;
         // An option that takes the next argument as its value (pp_option_takes_value: pp_parse_options' and
         // c_predefines.c's) passes on with it, unread: `-o -lresult` writes -lresult, as clang's driver takes it.
         // `-Wl` without its comma and `-Wl=...` are not linker transports: rejecting them here keeps them from
         // becoming warning options, the silent-ignore class this issue fixes.
-        const bool malformed_forwarding = strcmp(arguments[i], "-Wl") == 0 || strncmp(arguments[i], "-Wl=", 4) == 0;
+        const bool malformed_forwarding = match.exact == C_OPTION_WL || match.joined == C_OPTION_WL_EQ;
         if (malformed_forwarding)
         {
             libraries.linker.error = arguments[i];
-            libraries.linker.missing = strcmp(arguments[i], "-Wl") == 0;
+            libraries.linker.missing = match.exact == C_OPTION_WL;
         }
-        const bool forwarding = !malformed_forwarding && (strcmp(arguments[i], "-Xlinker") == 0 || strncmp(arguments[i], "-Wl,", 4) == 0);
-        const bool valued = !forwarding && !malformed_forwarding && i + 1 < count && pp_option_takes_value(arguments[i]);
+        const bool forwarding = !malformed_forwarding && (match.exact == C_OPTION_XLINKER || c_option_starts(arguments[i], "-Wl,"));
+        const bool valued = !forwarding && !malformed_forwarding && i + 1 < count && pp_option_id_takes_value(match.exact);
         if (!valued)
         {
-            const char* argument = arguments[i];
-            if (strcmp(argument, "-Wreturn-type") == 0 || strcmp(argument, "-Werror=return-type") == 0)
+            if (match.exact == C_OPTION_WRETURN_TYPE || match.exact == C_OPTION_WERROR_EQ_RETURN_TYPE)
             {
                 return_warning = true;
             }
-            else if (strcmp(argument, "-Wno-return-type") == 0)
+            else if (match.exact == C_OPTION_WNO_RETURN_TYPE)
             {
                 return_warning = false;
             }
-            if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
+            if (match.exact == C_OPTION_WERROR || match.exact == C_OPTION_WNO_ERROR)
             {
-                warning_errors = strcmp(argument, "-Werror") == 0;
+                warning_errors = match.exact == C_OPTION_WERROR;
             }
-            else if (strcmp(argument, "-Werror=return-type") == 0 || strcmp(argument, "-Wno-error=return-type") == 0)
+            else if (match.exact == C_OPTION_WERROR_EQ_RETURN_TYPE || match.exact == C_OPTION_WNO_ERROR_EQ_RETURN_TYPE)
             {
-                return_error = strcmp(argument, "-Werror=return-type") == 0 ? 1 : -1;
+                return_error = match.exact == C_OPTION_WERROR_EQ_RETURN_TYPE ? 1 : -1;
             }
         }
         const bool library = !valued && arguments[i][0] == '-' && arguments[i][1] == 'l';
         const bool directory = !valued && arguments[i][0] == '-' && arguments[i][1] == 'L';
         if (forwarding)
         {
-            if (strcmp(arguments[i], "-Xlinker") == 0)
+            if (match.exact == C_OPTION_XLINKER)
             {
                 if (i + 1 < count)
                 {
@@ -9354,56 +9365,56 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 }
             }
         }
-        else if (strcmp(arguments[i], "-static") == 0 || strcmp(arguments[i], "-static-pie") == 0 || strcmp(arguments[i], "-pie") == 0)
+        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE)
         {
             // Clang gives -static-pie priority over -static, and either static request priority over -pie,
             // irrespective of their argv order. Never downgrade a static request to shared-library resolution.
-            if (strcmp(arguments[i], "-static-pie") == 0)
+            if (match.exact == C_OPTION_STATIC_PIE)
             {
                 runtime_kind = RUNTIME_KIND_STATIC_PIE;
             }
-            else if (strcmp(arguments[i], "-static") == 0 && runtime_kind != RUNTIME_KIND_STATIC_PIE)
+            else if (match.exact == C_OPTION_STATIC && runtime_kind != RUNTIME_KIND_STATIC_PIE)
             {
                 runtime_kind = RUNTIME_KIND_STATIC;
             }
         }
-        else if (!check_request_scan(&request, arguments[i]))
+        else if (!check_request_scan_match(&request, arguments[i], match))
         {
             // An option that asks for code generation the driver doesn't implement, which the preprocessor doesn't model:
             // refused below (check_request_refusal). The stack protector's, -fcf-protection's and the layout options go
             // on to pp_parse_options as the other options do, for their predefined macros. Values of options above are
             // already consumed, so an output name like -pg is never treated as a flag.
         }
-        else if (strcmp(arguments[i], "--verify") == 0)
+        else if (match.exact == C_OPTION_VERIFY)
         {
             verify = true;
         }
-        else if (strcmp(arguments[i], "--check-transitions") == 0)
+        else if (match.exact == C_OPTION_CHECK_TRANSITIONS)
         {
             check_transitions = true;
         }
-        else if (strcmp(arguments[i], "--tier1") == 0)
+        else if (match.exact == C_OPTION_TIER1)
         {
             lanes->tier1 = true;
         }
-        else if (strcmp(arguments[i], "--tier1-strict") == 0)
+        else if (match.exact == C_OPTION_TIER1_STRICT)
         {
             lanes->tier1_strict = true;
         }
-        else if (strcmp(arguments[i], "--tier1-report") == 0)
+        else if (match.exact == C_OPTION_TIER1_REPORT)
         {
             tier1_report = true;
         }
-        else if (strcmp(arguments[i], "--tier1-refusals") == 0)
+        else if (match.exact == C_OPTION_TIER1_REFUSALS)
         {
             lanes->tier1_refusals = stderr;
         }
-        else if (strcmp(arguments[i], "--helper-report") == 0)
+        else if (match.exact == C_OPTION_HELPER_REPORT)
         {
             helper_report = true;
             lanes->helper_reporting = true;
         }
-        else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
+        else if (match.joined == C_OPTION_HELPER_FORMS_EQ)
         {
             // #1059's paired measurements: the families, by --helper-report's names (or `all`), whose operations take
             // their helpers where they have a direct form.
@@ -9415,28 +9426,28 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             invalid_helper_forms |= forms == 0;
             lanes->helper_forms = forms;
         }
-        else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
+        else if (match.exact == C_OPTION_TIER1_NO_REMATERIALIZE)
         {
             lanes->tier1_no_rematerialize = true;
         }
-        else if (strcmp(arguments[i], "--tier1-no-inline") == 0)
+        else if (match.exact == C_OPTION_TIER1_NO_INLINE)
         {
             lanes->tier1_no_inline = true;
         }
-        else if (strcmp(arguments[i], "--tier0-no-inline") == 0)
+        else if (match.exact == C_OPTION_TIER0_NO_INLINE)
         {
             lanes->tier0_no_inline = true;
         }
-        else if (strcmp(arguments[i], "--tier1-gvn") == 0)
+        else if (match.exact == C_OPTION_TIER1_GVN)
         {
             lanes->tier1_gvn = true;
             tier1_gvn = true;
         }
-        else if (strcmp(arguments[i], "--tier1-no-lifetimes") == 0)
+        else if (match.exact == C_OPTION_TIER1_NO_LIFETIMES)
         {
             lanes->tier1_no_lifetimes = true;
         }
-        else if (strncmp(arguments[i], "--tier1-schedule=", 17) == 0)
+        else if (match.joined == C_OPTION_TIER1_SCHEDULE_EQ)
         {
             // #172's measurement: Tier 1's code scheduled block by block after allocation (post) or before selection
             // (pre); none, the default, as without the option.
@@ -9452,7 +9463,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
             invalid_tier1_schedule |= !known;
         }
-        else if (strcmp(arguments[i], "--lane-cpus") == 0 || strncmp(arguments[i], "--lane-cpus=", 12) == 0)
+        else if (match.exact == C_OPTION_LANE_CPUS || match.joined == C_OPTION_LANE_CPUS_EQ)
         {
             const char* value = arguments[i][11] == '=' ? arguments[i] + 12 : i + 1 < count ? arguments[++i] : NULL;
             invalid_lanes |= pinned_cpus_seen;
@@ -9460,7 +9471,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             pinned_cpu_count = check_driver_cpu_list(value, pinned_cpus, BUSTER_CHECK_EMIT_MAX_LANES);
             invalid_lanes |= pinned_cpu_count == 0;
         }
-        else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
+        else if (match.exact == C_OPTION_LANES || match.joined == C_OPTION_LANES_EQ)
         {
             const char* value = arguments[i][7] == '=' ? arguments[i] + 8 : i + 1 < count ? arguments[++i] : 0;
             char* end = 0;
@@ -9469,7 +9480,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             lanes->lanes = (uint32_t)lane_count;
             lanes->every_lane = true;
         }
-        else if (strcmp(arguments[i], "--worker-budget") == 0 || strncmp(arguments[i], "--worker-budget=", 16) == 0)
+        else if (match.exact == C_OPTION_WORKER_BUDGET || match.joined == C_OPTION_WORKER_BUDGET_EQ)
         {
             const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
             char* end = NULL;
@@ -9477,33 +9488,33 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             invalid_lanes |= value == NULL || end == value || *end != 0 || workers == 0 || workers > BUSTER_CHECK_EMIT_MAX_LANES;
             worker_budget.maximum = (uint32_t)workers;
         }
-        else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
+        else if (match.exact == C_OPTION_FLAZY_SYSTEM_HEADERS)
         {
             lazy_system_headers = true;
         }
-        else if (strcmp(arguments[i], "--deferred-bodies") == 0 || strcmp(arguments[i], "--no-deferred-bodies") == 0)
+        else if (match.exact == C_OPTION_DEFERRED_BODIES || match.exact == C_OPTION_NO_DEFERRED_BODIES)
         {
             deferred_bodies = arguments[i][2] == 'd';
         }
-        else if (strcmp(arguments[i], "--lower-all") == 0)
+        else if (match.exact == C_OPTION_LOWER_ALL)
         {
             lower_all = true;
         }
-        else if (strcmp(arguments[i], "--poison-arenas") == 0)
+        else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
         }
-        else if (strcmp(arguments[i], "--shared-parts") == 0)
+        else if (match.exact == C_OPTION_SHARED_PARTS)
         {
             shared_parts = true;
         }
-        else if (strncmp(arguments[i], "--units-memory=", 15) == 0)
+        else if (match.joined == C_OPTION_UNITS_MEMORY_EQ)
         {
             char* end = NULL;
             units_memory = strtoull(arguments[i] + 15, &end, 10);
             invalid_units_memory |= end == arguments[i] + 15 || *end != 0 || units_memory == 0 || arguments[i][15] == '-';
         }
-        else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
+        else if (match.exact == C_OPTION_ID_ORDER || match.joined == C_OPTION_ID_ORDER_EQ)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
             char* end = NULL;
@@ -9511,41 +9522,41 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             invalid_id_order |= value == NULL || end == value || *end != 0;
             id_ordered = true;
         }
-        else if (strcmp(arguments[i], "--time-stages") == 0)
+        else if (match.exact == C_OPTION_TIME_STAGES)
         {
             time_stages = true;
         }
-        else if (strcmp(arguments[i], "-fno-lazy-system-headers") == 0)
+        else if (match.exact == C_OPTION_FNO_LAZY_SYSTEM_HEADERS)
         {
             lazy_system_headers = false;
         }
-        else if (strcmp(arguments[i], "-c") == 0)
+        else if (match.exact == C_OPTION_C)
         {
             emit_object = true;
         }
-        else if (strcmp(arguments[i], "-fsyntax-only") == 0)
+        else if (match.exact == C_OPTION_FSYNTAX_ONLY)
         {
             syntax_only = true;
         }
-        else if (strcmp(arguments[i], "--dump-typed") == 0)
+        else if (match.exact == C_OPTION_DUMP_TYPED)
         {
             dump = true;
         }
-        else if (strcmp(arguments[i], "--dump-static") == 0)
+        else if (match.exact == C_OPTION_DUMP_STATIC)
         {
             dump_static = true;
         }
         else
         {
             // A source file: the first goes to pp_parse_options in its place, and each is a unit.
-            const bool source = arguments[i][0] != '-' || strcmp(arguments[i], "-") == 0;
+            const bool source = arguments[i][0] != '-' || match.exact == C_OPTION_STANDARD_INPUT;
             if (!source || input_count == 0)
             {
                 filtered[filtered_count++] = arguments[i];
             }
             if (source)
             {
-                const bool standard_input = strcmp(arguments[i], "-") == 0;
+                const bool standard_input = match.exact == C_OPTION_STANDARD_INPUT;
                 stdin_count += standard_input;
                 invalid_stdin |= standard_input && language == CHECK_DRIVER_INPUT_AUTO;
                 input_kinds[input_count] = check_driver_classify(arguments[i], language);

@@ -29,6 +29,14 @@ pushes.
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
+On a pull request the native row is the vector row instead (#2033): the
+explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
+whose 4 shards are items that each draw's collector assigns, by rank, to the
+hosted runners whose probe found their CPU qualifies (`tools/ci/vector-draw.sh`,
+tested by `bash tests/ci/vector-draw.sh`), drawn in up to 4 levels, with no
+emulation; an item no qualifying CPU held fails it as incomplete ([The vector
+row](../ci.md#the-vector-row)). Its race fixture is
+`.github/workflows/vector-claim-race.yml`.
 Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
@@ -185,7 +193,11 @@ there at a time, so everything takes one lock:
   commands unrun with every job green; and when the row workflow weakens its shared products
   (`changes_row_policy`: the portable rows alone, the triggering revision, the
   ownership check on the build's tree, the shards' wait for the build, its
-  SHA-256 and their verified install, nothing from a cache or another run). The
+  SHA-256 and their verified install, nothing from a cache or another run); and
+  when the vector row's probe, `host_isa.h`'s predicate and the build's vector
+  flags fall out of step, or its records stop being per attempt and
+  non-overwriting, or its candidates take items without their collector's
+  assignment (`changes_vector_policy`). The
   selector doesn't read the row workflow's steps: a change to that file runs
   the steps it gates on `performance`. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
@@ -202,7 +214,9 @@ there at a time, so everything takes one lock:
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
-`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031). Each table is
+`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64` and `native`
+rows, each sanitizer, and the plain `vector` row that pull requests run (#2033).
+Each table is
 `tools/ci/costs.c`'s output alone, never edited by hand. Its first line says
 so, and `costs --self-test --root .`, which the selector's job runs on every
 pull request, fails a table that differs in any byte from what `costs refresh`
@@ -238,7 +252,10 @@ build/costs --self-test --root .
   check`. Give it full runs together with recent main pushes, for more plain
   samples. `collect` writes each row the logs have. A log is data. One that
   lacks the job's name, its CPU, its checkout, or the runner's shard line and
-  summary is rejected, and so is the same job twice.
+  summary is rejected, and so is the same job twice. A vector row's draw
+  (`Vector draw L, candidate C`) takes its row from its caller's name and its
+  shard from its report, which names the item its collector assigned; a
+  candidate that took no item has no report, and `costs.sh` skips it.
 - **Refresh.** A pull request that adds, renames or removes a heading runs
   `build/costs refresh --tests tools/ci/correctness.tests --costs
   tools/ci/costs`. It keeps every measurement, estimates the new commands and
@@ -270,6 +287,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 | plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
 | `x86-64` TSan, MSan | 6 | a portable row's extra shard costs a minute of setup; 6 reach the rows' longest commands |
 | `native` MSan | 5 | each extra native shard rebuilds the instrumented compiler (about 10 minutes) |
+| `vector` (plain) | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the run step counts them |
 | others | 4 | already shorter than the run's longest row |
 
 No deal beats a row's longest command. In the MSan rows that is a part of the

@@ -102,6 +102,13 @@
 #else
 #define BUSTER_X86_TARGET_DATA_ELSEWHERE
 #endif
+// So are the option spellings (c_option_table.c): a compile reads them in the driver's, the front end's and the
+// checker's units, from the front end's copy.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+#define BUSTER_C_OPTION_DATA __attribute__((visibility("hidden")))
+#else
+#define BUSTER_C_OPTION_DATA_ELSEWHERE
+#endif
 
 #include <stdint.h>
 #include <inttypes.h>
@@ -797,6 +804,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_program_templates_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_lanes_benchmark_test.c"
+#include "buster/compiler/c_option_table_test.c"
 #include "buster/compiler/c_check_request_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
 #endif
@@ -1081,13 +1089,16 @@ static bool main_preprocessing(int count, char** arguments)
     bool result = false;
     for (int i = 0; !result && i < count; i += 1)
     {
-        if (strcmp(arguments[i], "--") == 0)
+        // The argument's option ID (c_option_table.c).
+        const COption option = c_option_exact(arguments[i]);
+        if (option == C_OPTION_END_OF_OPTIONS)
         {
             break;
         }
-        result = strcmp(arguments[i], "-E") == 0 || strcmp(arguments[i], "-M") == 0 || strcmp(arguments[i], "-MM") == 0;
-        if ((pp_option_takes_value(arguments[i]) || strcmp(arguments[i], "--lanes") == 0 || strcmp(arguments[i], "--lane-cpus") == 0 || strcmp(arguments[i], "--worker-budget") == 0 ||
-             strcmp(arguments[i], "--id-order") == 0 || strcmp(arguments[i], "-l") == 0 || strcmp(arguments[i], "-L") == 0 || strcmp(arguments[i], "-Xlinker") == 0) && i + 1 < count)
+        result = option == C_OPTION_E || option == C_OPTION_M || option == C_OPTION_MM;
+        if ((pp_option_id_takes_value(option) || option == C_OPTION_LANES || option == C_OPTION_LANE_CPUS || option == C_OPTION_WORKER_BUDGET ||
+             option == C_OPTION_ID_ORDER || option == C_OPTION_L_LIBRARY || option == C_OPTION_L_DIRECTORY || option == C_OPTION_XLINKER) &&
+            i + 1 < count)
         {
             i += 1;
         }
@@ -1249,7 +1260,6 @@ static __attribute__((unused)) void main_benchmark_test_interfaces(void)
 static __attribute__((unused)) void main_checker_consumer_interfaces(void)
 {
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    (void)&check_action_quad_bits;
     (void)&check_varargs;
     (void)&check_builtin_float_strict;
     (void)&check_builtin_float;

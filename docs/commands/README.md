@@ -25,7 +25,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `check-call-graph, test-call-graph` | `call_graph.c` | [call-graph](call-graph.md) |
 | `test-calling-convention, benchmark-calling-convention` | `calling_convention.c` | [calling-convention](calling-convention.md) |
 | `check, test-checker, test-checker-driver` | `c_checker.c` | [checker](checker.md) |
-| `test-checker --requests` (request configuration, source preparation) | `c_check_request.c` | [checker](checker.md) |
+| `test-checker --requests` (request configuration, source preparation, option IDs) | `c_check_request.c`, `c_option_table.c` | [checker](checker.md) |
 | `test-checker-asm` | `c_check_program_asm.c` | [checker-asm](checker-asm.md) |
 | `test-checker-corpus` | `c_check_corpus.c` | [checker-corpus](checker-corpus.md) |
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |

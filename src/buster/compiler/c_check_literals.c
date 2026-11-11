@@ -391,7 +391,13 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             }
             else if (type == BUSTER_TYPE_FLOAT128)
             {
-                represented = check_literal_quad(spelling, &end, &value);
+                // Its bits in `integer` and `high`, its mirror the value (c_check_quad.c), as check_literal_value reads
+                // them.
+                unsigned __int128 bits = 0;
+                represented = check_literal_quad(spelling, &end, &bits);
+                value = check_quad_mirror(bits);
+                result->integer = (uint64_t)bits;
+                result->high = (uint64_t)(bits >> 64);
             }
             else
             {
@@ -469,6 +475,15 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             check_literal_number_plain(spelling, length - 1, scratch, result);
             // A bit-precise constant has no imaginary form: clang refuses 5wbi's suffix.
             result->valid &= result->bit_width == 0;
+            if (result->valid && result->type == BUSTER_TYPE_FLOAT128)
+            {
+                // A _Complex __float128 constant holds its components as long doubles (#1250): an imaginary q/Q literal
+                // is taken where its long double mirror is its value exactly, and keeps no bits.
+                const unsigned __int128 bits = (unsigned __int128)result->high << 64 | result->integer;
+                result->valid = check_quad_widen(result->floating, false) == bits;
+                result->integer = 0;
+                result->high = 0;
+            }
             if (result->valid)
             {
                 result->type = BUSTER_TYPE_COMPLEX(type_index(result->type));

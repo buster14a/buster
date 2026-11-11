@@ -151,7 +151,8 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
         case CBUILTIN_LIBRARY_WCSLEN: result = CBUILTIN_LIBRARY_FOLD_LENGTH; break;
         case CBUILTIN_LIBRARY_ABS:
         case CBUILTIN_LIBRARY_LABS:
-        case CBUILTIN_LIBRARY_LLABS: result = CBUILTIN_LIBRARY_FOLD_ABSOLUTE; break;
+        case CBUILTIN_LIBRARY_LLABS:
+        case CBUILTIN_LIBRARY_FABSF128: result = CBUILTIN_LIBRARY_FOLD_ABSOLUTE; break;
         case CBUILTIN_LIBRARY_FMAX:
         case CBUILTIN_LIBRARY_FMAXF:
         case CBUILTIN_LIBRARY_FMAXL:
@@ -159,7 +160,9 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
         case CBUILTIN_LIBRARY_FMAXIMUM_NUMF:
         case CBUILTIN_LIBRARY_FMAXIMUM_NUML:
         case CBUILTIN_LIBRARY_FMAXF16:
-        case CBUILTIN_LIBRARY_FMAXIMUM_NUMF16: result = CBUILTIN_LIBRARY_FOLD_MAXIMUM; break;
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUMF16:
+        case CBUILTIN_LIBRARY_FMAXF128:
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUMF128: result = CBUILTIN_LIBRARY_FOLD_MAXIMUM; break;
         case CBUILTIN_LIBRARY_FMIN:
         case CBUILTIN_LIBRARY_FMINF:
         case CBUILTIN_LIBRARY_FMINL:
@@ -167,8 +170,11 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
         case CBUILTIN_LIBRARY_FMINIMUM_NUMF:
         case CBUILTIN_LIBRARY_FMINIMUM_NUML:
         case CBUILTIN_LIBRARY_FMINF16:
-        case CBUILTIN_LIBRARY_FMINIMUM_NUMF16: result = CBUILTIN_LIBRARY_FOLD_MINIMUM; break;
-        case CBUILTIN_LIBRARY_COPYSIGNL: result = CBUILTIN_LIBRARY_FOLD_COPY_SIGN; break;
+        case CBUILTIN_LIBRARY_FMINIMUM_NUMF16:
+        case CBUILTIN_LIBRARY_FMINF128:
+        case CBUILTIN_LIBRARY_FMINIMUM_NUMF128: result = CBUILTIN_LIBRARY_FOLD_MINIMUM; break;
+        case CBUILTIN_LIBRARY_COPYSIGNL:
+        case CBUILTIN_LIBRARY_COPYSIGNF128: result = CBUILTIN_LIBRARY_FOLD_COPY_SIGN; break;
         default: break;
     }
     return result;

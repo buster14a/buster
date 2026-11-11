@@ -141,7 +141,7 @@ static bool check_init_scalar_bytes(const TypeTable* types, const CheckValue* va
     }
     else if (valid)
     {
-        // A __float128's constants are the constant builtins' (check_action_quad_bits).
+        // A __float128's constants are its bits (c_check_quad.c).
         valid = type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE || type == BUSTER_TYPE_FLOAT128 ||
                 check_action_half_format(type) != CHECK_HALF_NONE;
         if (valid)
@@ -150,7 +150,7 @@ static bool check_init_scalar_bytes(const TypeTable* types, const CheckValue* va
             valid = isnan(value->floating) || (rounded == value->floating && signbit(rounded) == signbit(value->floating));
             if (valid)
             {
-                check_data_float_bytes(bytes, type, value->floating);
+                check_data_scalar_float_bytes(bytes, type, value);
             }
         }
     }
@@ -189,6 +189,10 @@ static CheckValue check_init_bytes_scalar(const TypeTable* types, TypeId type, c
         memcpy(&number, &bits, sizeof(number));
         result.constant_kind = CHECK_CONSTANT_FLOATING;
         result.floating = number;
+    }
+    else if (type == BUSTER_TYPE_FLOAT128)
+    {
+        check_quad_set(&result, check_init_bytes_integer(bytes, 16));
     }
     else if (type == BUSTER_TYPE_LONG_DOUBLE)
     {

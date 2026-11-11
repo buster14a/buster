@@ -28,10 +28,10 @@ fetch()
 fetched=()
 for run in "$@"; do
     [[ "$run" =~ ^[1-9][0-9]*$ ]] || { echo "costs.sh: not a run id: $run" >&2; exit 2; }
-    # The run's latest attempt's shard jobs whose test step ran (passed or failed): a shard that stopped before it has no
-    # report, which costs.c would reject.
+    # The run's latest attempt's shard jobs, and the vector row's draws (#2033), whose test step ran (passed or failed):
+    # one that stopped before it, such as a draw's candidate that took no item, has no report, which costs.c would reject.
     fetch --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=latest" \
-        --jq '.jobs[] | select(.name | test(", shard [0-9]+ of [0-9]+\\)$"))
+        --jq '.jobs[] | select(.name | test(", shard [0-9]+ of [0-9]+\\)$| / Vector draw [0-9]+, candidate [0-9]+ \\("))
               | select(any(.steps[]?; .name == "Run correctness tests within the hosted CPU budget" and (.conclusion == "success" or .conclusion == "failure")))
               | .id' > "$logs/jobs-$run.txt"
     while IFS= read -r job; do

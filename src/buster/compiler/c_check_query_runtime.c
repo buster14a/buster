@@ -133,7 +133,16 @@ static bool check_query_scalar_conversion_exact(const TypeTable* types, const Ch
     const uint8_t target = check_action_kind(types, after->type);
     const uint8_t source = check_action_kind(types, before->type);
     bool exact = true;
-    if (target == BUSTER_TYPE_KIND_FLOATING && source == BUSTER_TYPE_KIND_FLOATING && before->constant_kind == CHECK_CONSTANT_FLOATING && after->constant_kind == CHECK_CONSTANT_FLOATING)
+    const bool quad_from = type_unqualified(type_strip_aligned(types, before->type)) == BUSTER_TYPE_FLOAT128;
+    const bool quad_to = type_unqualified(type_strip_aligned(types, after->type)) == BUSTER_TYPE_FLOAT128;
+    if ((quad_from || quad_to) && target == BUSTER_TYPE_KIND_FLOATING && source == BUSTER_TYPE_KIND_FLOATING &&
+        before->constant_kind == CHECK_CONSTANT_FLOATING && after->constant_kind == CHECK_CONSTANT_FLOATING && !isnan(before->floating))
+    {
+        // A __float128 by its bits (c_check_quad.c), which its mirror rounds: exact where the value is the same
+        // binary128.
+        exact = (quad_from ? before->integer : check_quad_widen(before->floating, false)) == (quad_to ? after->integer : check_quad_widen(after->floating, false));
+    }
+    else if (target == BUSTER_TYPE_KIND_FLOATING && source == BUSTER_TYPE_KIND_FLOATING && before->constant_kind == CHECK_CONSTANT_FLOATING && after->constant_kind == CHECK_CONSTANT_FLOATING)
     {
         const CheckQueryNumber from = check_query_float(before->floating);
         const CheckQueryNumber to = check_query_float(after->floating);
@@ -151,7 +160,16 @@ static bool check_query_scalar_conversion_exact(const TypeTable* types, const Ch
             const unsigned __int128 bits = before->integer & mask;
             const bool negative = sign && (bits >> (width - 1)) != 0;
             const CheckQueryNumber integer = { .magnitude = negative ? (0 - bits) & mask : bits, .negative = negative };
-            exact = check_query_number_equal(integer, check_query_float(after->floating));
+            if (quad_to)
+            {
+                // A __float128's magnitude, its bits' (c_check_quad.c): exact where it is the integer's, below 2^128.
+                const __float128 magnitude = check_quad_host(after->integer & ~BUSTER_CHECK_QUAD_SIGN);
+                exact = magnitude < (__float128)0x1p128 && (unsigned __int128)magnitude == integer.magnitude;
+            }
+            else
+            {
+                exact = check_query_number_equal(integer, check_query_float(after->floating));
+            }
         }
     }
     // C floating-to-integer constant evaluation uses truncation and separately checks its representable range.

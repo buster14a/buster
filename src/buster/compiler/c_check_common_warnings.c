@@ -4557,7 +4557,13 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const bool out_of_range = (changed.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0;
             const __int128 target_integer = check_common_integer_value(&changed, width, is_signed);
             const long double target_float = is_signed ? (long double)target_integer : (long double)changed.integer;
-            if (out_of_range || value->floating != target_float)
+            // A __float128's value is its bits' (c_check_quad.c), which its mirror may round. A -0 changes too, as
+            // clang takes its sign (its mirror's is the bits').
+            const bool quad = type_unqualified(type_strip_aligned(types, value->type)) == BUSTER_TYPE_FLOAT128;
+            const bool negative_zero = value->floating == 0 && signbit(value->floating) != 0;
+            const bool different = negative_zero || (quad ? check_common_quad_changed(value->integer, target_integer, changed.integer, is_signed) :
+                                                            value->floating != target_float);
+            if (out_of_range || different)
             {
                 const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
                 const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(target), 0);
@@ -4574,7 +4580,14 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                           source_type == BUSTER_TYPE_FLOAT ? 24 : source_type == BUSTER_TYPE_DOUBLE ? 53 : source_type == BUSTER_TYPE_FLOAT128 ? 113 : 64;
                     char original[96];
                     char result[48];
-                    check_common_float_number(original, sizeof(original), value->floating, (bits * 59 + 195) / 196);
+                    if (source_type == BUSTER_TYPE_FLOAT128)
+                    {
+                        check_common_quad_number(original, sizeof(original), value->integer, (bits * 59 + 195) / 196);
+                    }
+                    else
+                    {
+                        check_common_float_number(original, sizeof(original), value->floating, (bits * 59 + 195) / 196);
+                    }
                     check_common_number(result, sizeof(result), target_integer);
                     const bool boolean = type_unqualified(type_strip_aligned(types, target)) == BUSTER_TYPE_BOOL;
                     const char* converted_text = boolean ? (changed.integer != 0 ? "true" : "false") : result;
