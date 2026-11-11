@@ -2271,9 +2271,14 @@ static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckI
     uint32_t spelling = 0;
     for (uint32_t steps = 0; spelling == 0 && node < graph->count && steps < graph->count; steps += 1)
     {
-        spelling = check_input_operand_type_spelling(input, parser, node);
         const CheckOp op = graph->ops[node];
-        uint32_t next = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        // A member's own declarator's specifiers (#1837): its typedef or typeof (`&s.m` of a `typeof(long) m`).
+        const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, node) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+        spelling = !member ? check_input_operand_type_spelling(input, parser, node) :
+                   declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : 0;
+        uint32_t next = !member && (op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) ? graph->operand0[node] : BUSTER_CHECK_NONE;
         if (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
         {
             const uint32_t first = graph->operand0[node];
@@ -3175,6 +3180,12 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t left = graph->operand0[node];
         const TypeId lvalue = left < stream->count ? check_stream_type(stream, left) : 0;
         target = left < stream->count ? check_input_object_spelling(types, input, parser, graph->tokens[left], 0, lvalue, &target_spelling) : 0;
+        // A member's own declarator's specifiers (#1837): `s.lp = m` of a member `LP lp` assigns to 'LP'.
+        const bool member = left < stream->count && (graph->ops[left] == CHECK_OP_MEMBER || graph->ops[left] == CHECK_OP_ARROW);
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, left) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+        target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
+        target = member ? lvalue : target;
     }
     else if (applies && returning)
     {
