@@ -559,6 +559,22 @@ struct CheckProgram
     // view; the input's asm-label facts remain unchanged for syntax and type checks.
     uint8_t* symbol_pragma_originals;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
+    // GNU's weak attribute and `#pragma weak` after a use (#1849): the weak declarations of the objects none of whose
+    // weak declarations is its first declaration's own (a `#pragma weak` after the declaration it attaches to being
+    // late too), as keys of their object in the high half and their token in the low, sorted by key, and beside each
+    // where clang applies it (weak_late_points: the declaration's token, or its pragma's when that is later); null in
+    // the other units (check_program_weak_late). Clang's code generation gives such an object's symbol the binding of
+    // the declaration its first emitted reference names (or its acting tentative definition), so the selection decides
+    // which keep their weak binding (check_program_weak_bindings): weak_globals lists the objects whose symbols it makes
+    // global, and weak_refused is one more than the token of a declaration whose binding it can't decide (0 for none);
+    // weak_decided says it decided them (a program no selection made keeps every weak declaration's binding).
+    uint64_t* weak_late_keys;
+    uint32_t* weak_late_points;
+    uint32_t weak_late_count;
+    uint32_t* weak_globals;
+    uint32_t weak_global_count;
+    uint32_t weak_refused;
+    bool weak_decided;
     // lifetime_first (by the block's closing brace, BUSTER_CHECK_NONE for a block without them) through lifetime_next (by
     // declaration), in token order; null otherwise.
     uint32_t* lifetime_first;
@@ -708,6 +724,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE 256u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE 512u
 // CheckProgram.object_inline's bits.
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK 1024u
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
@@ -716,7 +733,8 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
 // CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
 // (#147, CheckProgram.object_interrupt), force_align_arg_pointer (#1447, CheckProgram.object_realign), returns_twice
-// (#1549, CheckProgram.object_returns_twice) and patchable_function_entry (#1447, CheckProgram.patchable_keys).
+// (#1549, CheckProgram.object_returns_twice), patchable_function_entry (#1447, CheckProgram.patchable_keys) and weak
+// (#1849, CheckProgram.weak_late_keys).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -736,7 +754,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t realign = kind == CHECK_ATTRIBUTE_FORCE_ALIGN_ARG_POINTER ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN : 0;
         const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
         const uint32_t patchable = kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable;
+        const uint32_t weak = kind == CHECK_ATTRIBUTE_WEAK ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak;
     }
     return bits;
 }
@@ -747,8 +766,9 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
 // code generation's check of target features or a late symbol rename's emission walk reads (#775,
 // CheckProgram.attribute_keys); the file-scope declarations with an alias, ifunc or weakref attribute, which
-// check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases); and the function declarations with a
-// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys).
+// check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases); the function declarations with a
+// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); and the declarations with a weak attribute,
+// `#pragma weak`'s among them (#1849, check_program_weak_late).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -766,11 +786,17 @@ struct CheckProgramTargetEvents
     uint32_t patchable_count;
     uint32_t patchable_capacity;
     bool room;
+    uint64_t* weak_keys;
+    uint32_t weak_count;
+    uint32_t weak_capacity;
 };
 
 // clang's cpu_specific and cpu_dispatch multiversioning (#1447), defined in c_check_program_cpu_dispatch.c.
 static bool check_program_cpu_groups(CheckProgram* program, const CheckProgramTargetEvents* events, Arena* output);
 static void check_program_cpu_needed(const CheckProgram* program, uint8_t* needed);
+// GNU's weak attribute and `#pragma weak` after a use (#1849, CheckProgram.weak_late_keys), in
+// c_check_program_symbol_pragma.c.
+static bool check_program_weak_late(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch);
 static bool check_program_cpu_number(CheckProgram* program, Arena* output);
 static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output);
 static uint64_t check_program_cpu_features_write(const CheckProgram* program, const CheckInputAttribute* attribute, char* text, uint64_t capacity);
@@ -3477,7 +3503,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0))
+                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 ? (mask & (1u << a)) != 0 : mask == UINT32_MAX))
                     {
                         const CheckOverloadResult* selected = check_program_overload_address(program, node, a + 3);
                         if (selected != NULL)
@@ -3805,6 +3831,10 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
             check_program_event_push(events, &events->patchable_keys, &events->patchable_count, &events->patchable_capacity, object, token);
         }
         // An alias's, ifunc's or weakref's: clang's code generation takes them at file scope alone (EmitGlobal).
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK) != 0)
+        {
+            check_program_event_push(events, &events->weak_keys, &events->weak_count, &events->weak_capacity, object, token);
+        }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
             check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
@@ -4133,6 +4163,8 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
         late = pragmas->records[i].after_use;
     }
     if (valid && (events->count != 0 || late))
+    // A late weak declaration's emission walk reads the callee keys too (#1849).
+    late |= events->callee_count != 0 && program->weak_late_count != 0;
     {
         uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
         uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);
@@ -4858,6 +4890,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                                          check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
         valid = naked_room && aliased && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
+        valid = valid && (target_events.weak_count == 0 || check_program_weak_late(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
     {
         program->status = CHECK_PROGRAM_RESOURCE;

@@ -667,18 +667,10 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // bit-field, a complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field", "struct S{int a:3,b:5;};int tested(struct S __seg_gs*p){return p->b;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-store", "struct S{int a:3,b:5;};void tested(struct S __seg_gs*p){p->b=3;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-update", "struct S{int a:3,b:5;};void tested(struct S __seg_fs*p){p->b+=3;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-field-increment", "struct S{int a:3,b:5;};int tested(struct S __seg_fs*p){return p->b++;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -754,6 +746,18 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "r+=__c11_atomic_load(e,5)+__c11_atomic_fetch_add(e,n,5);__c11_atomic_store(e,4,5);"
         "return r+ta+(int)tb+tc+td+te;}",
         "segment-atomics", clang);
+    // Bit-fields: their unit's pieces read and written through %fs (check_lower_bit_unit, check_lower_bit_store), a unit of
+    // 1, 2, 4 and 8 bytes and one of 3 bytes' pieces, signed and unsigned, by assignments, updates and increments.
+    check_test_program_source(test,
+        "struct B{unsigned a:3;int b:5;unsigned c:12;long d:33;unsigned char e:2;};"
+        "struct __attribute__((packed)) P{char x;unsigned y:20;};"
+        "static _Thread_local struct B tb={5,-3,100,-7,1};static _Thread_local struct P tp_={1,0x12345};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();struct B __seg_fs*b=(struct B __seg_fs*)((char*)&tb-tp);"
+        "struct P __seg_fs*p=(struct P __seg_fs*)((char*)&tp_-tp);"
+        "int r=b->a+b->b+b->c+(int)b->d+b->e+p->y;b->a=n;b->b+=n;b->c++;--b->d;b->e=b->a;r+=b->b++;"
+        "p->y^=n*977;r+=p->y+(p->y=n);"
+        "return r+tb.a+tb.b+tb.c+(int)tb.d+tb.e+(int)tp_.y+tp_.x;}",
+        "segment-bit-fields", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.

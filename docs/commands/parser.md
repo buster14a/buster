@@ -37,11 +37,14 @@ its own static parser so that its kernel measurements use the same code.
 
 ## Parser tests
 
-`./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
-[--streams N] [--reports N] [--keep] [--files-only] [options] [file or directory...]`
-(about 7 s on the 9700X without files, with `--clang`) checks the parser interface
-and implementation; `--clang` needs
-clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
+`./build/compiler test-parser [--clang [PATH] [--clang-server PATH [--differential]]]
+[--mutations N] [--seed N] [--streams N] [--reports N] [--keep] [--files-only] [options]
+[file or directory...]` (about 7 s on the 9700X without files, with `--clang`)
+checks the parser interface and implementation; `--clang` needs
+clang 23 on `PATH`, or the one PATH names. `--clang-server PATH` sends that
+clang's `-fsyntax-only` runs (`parse_test_clang`, a file each through the oracle
+cache's runs) to `tools/clang-server`, and `--differential` also runs each as
+before and fails on a difference ([Served runs](oracle-cache.md#served-runs)). Each unit goes through both paths,
 the vector path with its fallback and the scalar parser alone, which must read
 the same tokens and give the same outcome, and on a unit without errors the same
 tree: the same parent, node depth and role on every token. The tree must keep

@@ -1402,11 +1402,14 @@ access's memory operand, and which Tier 1 leaves to Tier 0. A global in one of
 those spaces goes through its address (GLOBAL_ADDRESS, then LOAD or STORE), as a
 memory class's does: `lea sym(%rip)` and `%gs:(%rax)` reach the byte clang's
 `%gs:sym(%rip)` does. What takes the override (`check_lower_segment_carried`):
-a read by indirection, member (not a bit-field's), subscript (not a vector's
-element's) or name, and an assignment, compound assignment, increment or
+a read by indirection, member, subscript (not a vector's element's) or name, and an assignment, compound assignment, increment or
 decrement, of an integer's, a floating value's (long double's too), a 128-bit
 integer's or a vector's class (not a transport vector), which one LOAD or STORE
-moves. An array's lvalue isn't read: its value is its address. An atomic builtin's
+moves. An array's lvalue isn't read: its value is its address. A bit-field's
+read and store take it on each piece of its unit (`check_lower_bit_unit`,
+`check_lower_bit_store`): its place (`CheckLowerBitField.segment`, packed in its
+task's bits 14 and 15) has its record's override, from the member's type
+(`check_lower_bit_member`). An atomic builtin's
 object in `%fs` or `%gs` takes it where a direct plan (#1059) takes the builtin:
 its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),
 `ATOMIC_CAS` (`lock cmpxchg`) and a fetch's loop of a relaxed LOAD and
@@ -1415,7 +1418,7 @@ pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
 `__atomic_test_and_set`'s, doesn't carry it).
 
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an aggregate's copy, a bit-field, a complex, half-precision or `_BitInt` value
+an aggregate's copy, a complex, half-precision or `_BitInt` value
 and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
 `__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
