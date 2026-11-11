@@ -684,7 +684,9 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
                                   parser->tree.parents[group_close + 1] == inner_end - 1 &&
                                   type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, reader->query_types[group_close])));
             const bool unbraced = first_role != PARSE_ROLE_OPEN_INITIALIZER && first_role != PARSE_ROLE_OPEN_COMPOUND_BODY && !compound;
-            const bool needs_list = !valid && unbraced && status != CHECK_INIT_MEMBER && !reader->output->resource;
+            const bool designator = status == CHECK_INIT_MEMBER || status == CHECK_INIT_ARRAY_DESIGNATOR || status == CHECK_INIT_FIELD_DESIGNATOR ||
+                                    status == CHECK_INIT_NON_AGGREGATE_DESIGNATOR;
+            const bool needs_list = !valid && unbraced && !designator && !reader->output->resource;
             if (needs_list)
             {
                 const uint32_t before = reader->output->report_count;
@@ -724,10 +726,12 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             else if (!valid)
             {
                 const uint32_t before = reader->output->report_count;
-                check_input_report(reader, failed, status == CHECK_INIT_MEMBER ? CHECK_INPUT_INITIALIZER_MEMBER : CHECK_INPUT_DECLARATION);
-                if (reader->output->report_count > before && status == CHECK_INIT_MEMBER)
+                check_input_report(reader, failed, designator ? CHECK_INPUT_INITIALIZER_MEMBER : CHECK_INPUT_DECLARATION);
+                if (reader->output->report_count > before && designator)
                 {
                     reader->output->reports[before].type = failed_type;
+                    // Which designator's error (#2202): the walk's status, which the driver words.
+                    reader->output->reports[before].detail = (uint32_t)status;
                     reader->output->reports[before].completion = end;
                 }
             }
