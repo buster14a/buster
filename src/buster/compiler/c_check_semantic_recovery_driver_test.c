@@ -439,6 +439,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int c = b;\n"
         "void f(void) { int p[-1], r; int s = r; (void)s; }\n"
         "int x = undeclared;\n",
+        // An array bound of another type than an integer's (#2170): clang's "size of array has non-integer type", its
+        // declaration invalid and its uses quiet, in a function, at file scope, in a typedef, a variable array's, a
+        // conditional's, a cast's.
+        "void h(int n) { int k[(long double)1]; int *pk = k; (void)pk; }\n"
+        "int g1[1.5];\n"
+        "int use1 = g1 + 1;\n"
+        "void h2(void) { int k2[2.0f]; double d = 1; int k3[d]; (void)k2; (void)k3; }\n"
+        "typedef int T[(double)2];\n"
+        "T t;\n"
+        "void h3(void) { int k4[(void*)0 == 0 ? 1.0 : 2]; (void)k4; }\n"
+        "int after = undeclared;\n",
         "typedef int T, U[-1], V;\nV v;\n",
         // C23's enum redefinitions in a block, and a third and fourth definition (#1826): compatible ones are taken, and an
         // ambiguous use lists every candidate, a block's qualified by its function (`g(int, char *)::B`, `k()::P`).

@@ -329,6 +329,9 @@ typedef enum CheckInputMessage
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
+    // An array bound of a type that isn't an integer's (#2170, clang's err_array_size_non_int), at the bound's first token:
+    // "size of array has non-integer type 'double'", the bound's type in `type`.
+    CHECK_INPUT_ARRAY_NON_INTEGER,
     // A list of specifiers whose only type specifier was a _BitInt with an undeclared name in its width (#1447), which clang
     // drops: its parser's error at the list's end, by `detail`: 0 "type specifier missing, defaults to 'int'; ISO C99 and
     // later do not support implicit int [-Wimplicit-int]", 1 C23's "a type specifier is required for all declarations",
@@ -7888,8 +7891,10 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 valid = check_input_vla_bound(reader, i, bound, close, frame->name, frame->parameter_context || reader->kr_declarator, star, &run->bound, &run->definition,
                                               &part.kind, &part.extent);
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
-                // A negative constant bound (#1447): an invalid declaration, its array a stand-in of no element.
-                if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 && reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE &&
+                // A negative constant bound (#1447), or one of another type than an integer's (#2170): an invalid
+                // declaration, its array a stand-in of no element.
+                if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 &&
+                    (reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE || reader->output->reports[before].message == CHECK_INPUT_ARRAY_NON_INTEGER) &&
                     check_input_declarator_recover(reader, run, frame, before))
                 {
                     valid = true;
