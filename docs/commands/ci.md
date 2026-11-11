@@ -387,7 +387,7 @@ never ones that failed, so green keeps meaning the tests passed.
   | Steps | What they do |
   | --- | --- |
   | `Set up job` | GitHub's own: the runner, the actions' downloads |
-  | `Check out triggering commit`, `Check out the triggering commit and its parents`, `Check out the run's commit and its first parent`, `Check out the exact caller revision`, `Check out the qualification policy`, `Check out the pull request's history`, `Check out reviewed first-party performance fixtures and acceptance harnesses`, `Fetch the vector draw's script from this commit` | the checkouts |
+  | `Check out triggering commit`, `Check out the triggering commit and its parents`, `Check out the run's commit and its first parent`, `Check out the exact caller revision`, `Check out the qualification policy`, `Check out reviewed first-party performance fixtures and acceptance harnesses`, `Fetch the vector draw's script from this commit` | the checkouts |
   | `Restore verified hosted release inputs` | `.github/actions/hosted-tools` |
   | `Acquire missing inputs once and verify the complete set`, `Acquire missing offline inputs once and check each as the jobs read it` | `prepare-hosted-tools.yml`'s acquisitions |
   | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` | `tools/ci/setup-hosted.sh` |
