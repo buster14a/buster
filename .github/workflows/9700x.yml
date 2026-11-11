@@ -1440,9 +1440,10 @@ jobs:
           options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           ./build/compiler benchmark-check-units --lanes 1,2,4,8 --runs 5 -- "${options[@]}"
 
-      - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
+      - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc, clang -O0 and gcc -O0
         # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
-        # record, as whole processes in a Williams design's order with tcc's, with --time-stages' report of where the time goes;
+        # record, as whole processes in a Williams design's order with tcc's, clang -O0's and gcc -O0's (#146), with
+        # --time-stages' report of where the time goes;
         # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
         # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
         if: needs.changes.outputs.compile_time != 'false'
@@ -1455,7 +1456,15 @@ jobs:
           tcc="$(command -v tcc)"
           "$tcc" -v
           printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
-          taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" -- "${options[@]}"
+          # clang -O0 and gcc -O0 are references too, unpinned (the owner's decision on #146, 2026-11-11): each run
+          # records their versions and hashes, and an upgrade of either changes their rows without failing the step.
+          clang="$(command -v clang)"
+          gcc="$(command -v gcc)"
+          "$clang" --version
+          "$gcc" --version
+          sha256sum "$clang" "$(readlink -f "$clang")" "$gcc" "$(readlink -f "$gcc")"
+          taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" --reference "$clang" --reference-option -O0 \
+            --reference "$gcc" --reference-option -O0 -- "${options[@]}"
           # The counters of 11 compiles of each, user and kernel apart, and the functions the default's samples fall
           # in. They are the stage report's cross-check (#518), so the step fails when perf can't give them: when it
           # can't run, when a counter isn't counted, or when the profile is empty.

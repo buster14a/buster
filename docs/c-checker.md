@@ -4281,8 +4281,8 @@ take clang's words and places:
   failure before its first undeclared name is reported with it, in source
   order.
 
-Each of these, but a typedef's or a parameter's, now makes its declaration
-invalid, as clang's does, and the reader goes on (below). The semantic-recovery
+Each of these now makes its declaration invalid, as clang's does, and the
+reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
 fixtures compare each with clang.
 
 #### Invalid declarations (#1447)
@@ -4291,8 +4291,8 @@ Clang marks a declaration whose declarator or type is in error invalid, keeps it
 bound, and leaves its uses quiet: a `RecoveryExpr` around each, whose enclosing
 expressions give no diagnostic of their own. The reader does the same for the
 declarator errors above and a variable of type `void` or of an incomplete type,
-in a declaration's own declarator (not a typedef's, a parameter's, a deduced
-`auto`'s or a K&R definition's):
+in a declaration's own declarator (not a deduced `auto`'s or a K&R
+definition's; a typedef's and a parameter's are below):
 
 - **The error recovers.** `check_input_declarator_recover` and
   `check_input_variable_recover` move the report to the recovered ones, so the
@@ -4326,6 +4326,26 @@ in a declaration's own declarator (not a typedef's, a parameter's, a deduced
 - **Source order.** A unit with an invalid declaration at file scope reads its
   bodies in source order (`check_deferred_bodies`), and a lane that meets one
   in its body refuses, so source order recovers it.
+
+- **A typedef's.** Clang marks the typedef invalid but keeps its stand-in
+  type, whose uses are checked as any other's: `typedef int U[-1]; U u = "x";`
+  gives "initializing 'U' (aka 'int')". So the typedef isn't marked invalid,
+  only its error recovered.
+- **A parameter's.** Its error recovers in any parameter list, nested ones too
+  (`int f(void (*cb)(int n[-1]))`), and the parameter is a stand-in `int`,
+  marked invalid, so that its uses in a definition's body are quiet. The
+  function whose own list it is is invalid too, as clang's
+  `ActOnFunctionDeclarator` marks it, and so are its uses (`bad("x")`). A
+  function pointer's parameter (`void (*fp)(int r[-1])`) leaves the pointer
+  valid, its type `void (*)(int)`.
+- **The rest of its group.** After a declarator whose own type is in error
+  (not a void variable's, nor one whose only error is its own parameter's),
+  clang's parser declares none of the group's later declarators: `int a[-1],
+  b;` leaves `b` undeclared, and `typedef int U[-1], V; V v;` is "unknown type
+  name 'V'" (which still stops the reader). The reader skips them to the
+  `;`. A later declarator with an initializer, which is clang's parse error
+  "expected ';' after top level declarator", still stops the reader without
+  it.
 
 Left as before: an initialized invalid declaration still stops the reader
 (clang checks its initializer without the declaration's type, and its
@@ -5083,9 +5103,10 @@ What clang 23 does with each is followed:
   with the complex type's alignment (`SC` a `long` aligned to 4, `DC` an
   `__int128` aligned to 8), unless an alignment attribute gives one, which replaces it
   even downward (`mode(SC), aligned(2)` is aligned to 2); its enumerators stay
-  `int`. `XC` and `TC` (32 bytes, no integer) still stop the reader, and `HC`'s
-  complex `__fp16`, which the type table can't make, installs nothing (4 bytes
-  aligned to 4, where clang's are aligned to 2).
+  `int`. `XC` and `TC` (32 bytes, which no integer has) and `HC` (complex
+  `__fp16`, which the type table can't make) install nothing: the error
+  recovers and the enum is one with no mode (4 bytes aligned to 4, where
+  clang's are 32 aligned to 16, and 4 aligned to 2).
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.
@@ -5134,8 +5155,8 @@ alignments that stand.
 `c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
 These differences remain:
 
-- An enum's `XC` or `TC` mode still stops the reader, and an `HC` one has
-  the layout of an enum with no mode.
+- An enum's `XC`, `TC` or `HC` mode leaves it the layout of an enum with no
+  mode.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
@@ -5170,14 +5191,11 @@ The later phases are left:
 - **Invalid declarations.** Not covered by phase 2 or the invalid
   declarations above:
   - C23's redefinition of an enum in a block, or a third time (above).
-  - An initialized invalid declaration, a typedef's declarator error and a
-    parameter's, which clang marks invalid too.
+  - An initialized invalid declaration, which clang marks invalid too.
 
-  These still stop the reader. A non-constant initializer's error is at its
-  first token, where clang's is at the operand that isn't constant
-  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
-  is not permitted here" at the `sizeof`, where clang's names the type at its
-  operand; both on main too.
+  These still stop the reader. (A non-constant initializer's place, `sizeof`
+  of an incomplete type's words and a nested tag's redefinition are clang's,
+  above and in phase 2.)
 - **Errors no view part leaves out.** A body's error in a part that holds a
   `case` label or a tag's definition whose names are used outside it, or in a
   typedef's declaration, still leaves its body out, and its warnings with it. A reader's
@@ -5745,10 +5763,13 @@ declaration and one byte of its name.
 A statement expression in an unevaluated operand drops them, as clang does
 (`check_common_report_discarded`). The functions stay out of line, as does the
 discarded selection's marker: inlined into the emission's loops they cost
-sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a call
-whose callee is a member, an element, another call's result, a comma's or a
-conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a pointer's
-dereference (`(*pp)()`), which warns of no return type's attribute. A call a
+sqlite3.c's `-fsyntax-only` instructions even where no call warns. A call whose
+callee has no function's name reads its return type's typedef from the
+declaration that spells the pointer (`check_common_ignored_callee`): a member's
+declarator, an element's or a pointer to a pointer's object (through its
+further `*` and its bound), another call's callee's return typedef, a comma's
+or a conditional's value (its true arm), and reports at the callee's first
+token. A call a
 macro's argument writes gets clang's "expanded from macro" note for each macro
 whose argument it is (#1447): clang's macro backtrace leaves an argument's own
 note out only where every range the diagnostic highlights is one token of that
@@ -9457,8 +9478,11 @@ enables, which this checker doesn't all give.
   with a typedef name as written (`typeof(L)`), a nested typeof's own sugar,
   and `typeof (x)` for an expression that is one name
   (`check_input_typeof_spelling`, `check_driver_typeof_text`). Another
-  expression operand, and a type name that holds a typedef name, print no
-  sugar.
+  expression operand prints as clang's StmtPrinter prints it, with expression
+  spacing (`'typeof (x + 1) *'`, `'typeof ((L)x)'`, the static assertion's
+  `check_semantic_requirement`), and a type name with its typedef names as
+  written (`'typeof(L *)' (aka 'long *')`). A member's declarator spells its
+  type too (below).
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that
@@ -9592,7 +9616,9 @@ enables, which this checker doesn't all give.
   `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
   `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`, and a warning's
   member operand (`check_common_operand_spelling`) keeps it too:
-  `x.n < i` is `'ul' (aka 'unsigned long')`. An a.k.a. keeps a
+  `x.n < i` is `'ul' (aka 'unsigned long')`. A failed conversion's source and
+  target and the null pointer warning's target do too, with a member's
+  `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
@@ -9651,9 +9677,13 @@ enables, which this checker doesn't all give.
     declaration.
   - The reader's spelling helpers (`check_input_operand_type_spelling`,
     `check_input_object_spelling`), which run before the stream has types,
-    don't follow members. The warnings the driver spells after checking
+    don't follow members. Their callers that can do follow them with the
+    stream (#1837): the warnings the driver spells after checking
     (`check_common_operand_spelling`: `-Wsign-compare`, `-Wformat`,
-    `-Wenum-compare` and the like) do.
+    `-Wenum-compare` and the like), a failed conversion's source through `&`
+    and `*` (`check_driver_pointer_spelling`) and an assignment's member target,
+    and the null pointer warning's member target. An initializer's member or
+    element target (`struct S x = { .lp = c }`) still prints canonically.
 
 ## Ignorable and unsupported pragmas
 
@@ -9781,9 +9811,40 @@ is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
 'align' following '#pragma options'", "expected '='", "expected identifier",
 "invalid alignment option", "extra tokens"), as the options and pragmas map
 it. `mac68k`, clang's error on this target, is refused by name, as are other
-unsupported semantic effects. `#pragma pack`'s own warnings (`pack(show)`, a
-pop of an empty stack, an unterminated push at the end of the file, which
-clang also gives an align push) are not reported yet.
+unsupported semantic effects.
+
+`#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
+`check_input_pack_align_warnings`) are clang's, whole output on both paths:
+- its parser's (`HandlePragmaPack`, `-Wignored-pragmas`), for a malformed
+  directive, which is ignored: "missing '('", "unknown action", "expected
+  integer or identifier", "missing ')'", "extra tokens", at the token it names
+  or past the line's last one. A raw client's operand that a macro spells is
+  left unhandled, as an align one's, for the checker's refusal;
+- Sema's (`ActOnPragmaPack`), at the directive's `pack`, where the parser
+  handles its annotation: after the construct before it and before the next
+  directive's line. Right after a function's body they follow that body's own
+  end-of-body warnings, which the checker publishes at the next parser token,
+  so there a later pack directive's parser warnings come before them, where
+  clang's come after. They are "expected #pragma pack parameter to be '1', '2',
+  '4', '8', or '16'", "specifying both a name and alignment to 'pop' is
+  undefined" (no option), "#pragma pack(pop, ...) failed: stack empty" and
+  `pack(show)`'s value (no option: 8 for the default, as clang prints it);
+- at the unit's end (`-Wpragma-pack`, `CHECK_WARNING_ID_PRAGMA_PACK`), one
+  "unterminated '#pragma pack (push, ...)'" per push left open, an align
+  push's too, the innermost first. The innermost has clang's note "did you
+  intend to use '#pragma pack (pop)'" where the value is the default's, at the
+  directive that last set it (clang's `CurrentPragmaLocation`, which a pop
+  restores from its push), or without a place where none did;
+- for an inclusion that leaves the value other than it found it ("the current
+  #pragma pack alignment value is modified in the included file", clang's
+  `ChangedStateAtExit`), at the include's file name, where its output ends,
+  with the note at that directive. The inclusions come from the preprocessor's
+  runs of output by range (`check_input_pack_includes`), a unit without pack
+  directives or with inexact runs walking none. clang's
+  `-Wpragma-pack-suspicious-include`, off by default, isn't reported.
+
+`test-checker-driver` compares them in the default-warning sweep (both paths,
+`-Werror`, `-w`, `-c`) and with real headers (`check_test_driver_pack_includes`).
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 
