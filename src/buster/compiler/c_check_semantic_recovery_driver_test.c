@@ -11,25 +11,6 @@
 // source order, and test-checker-deferred checks the deferred reader's scalar twins. Include after c_check_resume_driver_test.c, whose reader this
 // takes.
 
-// The legacy preprocessor omits #warning's option suffix (the initializer/constant timing controls have the same
-// boundary). Normalize only this fixture's explicit lookahead marker; its location, severity, message and ordering,
-// and every semantic diagnostic's full text and option label, remain exact.
-static void check_test_semantic_recovery_lookahead(char* text)
-{
-    static const char marker[] = ": warning: after-loop";
-    static const char labeled[] = ": warning: after-loop [-W#warnings]";
-    char* match = text != NULL ? strstr(text, labeled) : NULL;
-    if (match != NULL)
-    {
-        const char* end = match + sizeof(labeled) - 1;
-        if (*end == '\n' || *end == 0)
-        {
-            memmove(match + sizeof(marker) - 1, end, strlen(end) + 1);
-        }
-    }
-}
-
-
 // The typo stress fixture's source (#1447): three thousand file-scope names (alpha_000 to charlie_999) declared one by one,
 // and a function that reads fifty-three of them misspelled, each without its `_`, which only its own name is one edit from.
 // Its length, or 0 where `capacity` is too small.
@@ -920,7 +901,6 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                 {
                     compile[compile_count++] = (char*)options[o];
                 }
-                check_test_semantic_recovery_lookahead(expected);
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
                 check_test_expect(test, lines && oracle != 0, "semantic recovery: clang rejects the fixture and its lines are read");
                 // The vector path, the scalar one, and deferred bodies on 1, 2 and 3 lanes.
@@ -952,7 +932,6 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                     char* actual = NULL;
                     const int status = check_test_driver_spawn(spawned, &actual);
                     const bool written = spawned == compile && access(object, F_OK) == 0;
-                    check_test_semantic_recovery_lookahead(actual);
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
