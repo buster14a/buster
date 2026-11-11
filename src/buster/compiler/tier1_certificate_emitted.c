@@ -309,8 +309,18 @@ struct Tier1CertEmittedBuild
 static const uint8_t tier1_cert_emitted_callee[6] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
 #define BUSTER_CERT_EMITTED_PSEUDO 7u
 
-static bool tier1_cert_emitted_refuse(Tier1CertEmittedBuild* build, Tier1CertEmittedReason reason, uint32_t record)
+#include <stdlib.h>
+static bool tier1_cert_emitted_refuse_at(Tier1CertEmittedBuild* build, Tier1CertEmittedReason reason, uint32_t record, int line)
 {
+    if (build->stats->reason == TIER1_CERT_EMITTED_OK && getenv("B4_DEBUG") != 0)
+    {
+        fprintf(stderr, "B4 refuse reason=%d record=%u line=%d count=%u\n", (int)reason, record, line, build->emitted->code.count);
+        for (uint32_t k = record >= 4 ? record - 4 : 0; record != UINT32_MAX && k < record + 3 && k < build->emitted->code.count; k += 1)
+        {
+            const X86Instruction* x = &build->emitted->code.records[k];
+            fprintf(stderr, "B4 %s[%u] form=%u reg=%u rm=%u index=%u mode=%u disp=%d imm=%lld\n", k == record ? ">>" : "  ", k, (unsigned)x->form, (unsigned)x->reg, (unsigned)x->rm, (unsigned)x->index, (unsigned)x->mode, (int)x->displacement, (long long)x->immediate);
+        }
+    }
     if (build->stats->reason == TIER1_CERT_EMITTED_OK)
     {
         build->stats->reason = reason;
@@ -318,6 +328,7 @@ static bool tier1_cert_emitted_refuse(Tier1CertEmittedBuild* build, Tier1CertEmi
     }
     return false;
 }
+#define tier1_cert_emitted_refuse(b, r, rec) tier1_cert_emitted_refuse_at((b), (r), (rec), __LINE__)
 
 static uint32_t tier1_cert_emitted_gpr(uint32_t reg, uint32_t width)
 {
