@@ -694,6 +694,30 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "(0xfedcba9876543210ULL+(unsigned)i*0x0101010101010101ULL);q[i]=0;}copy_masks(p,q);int r=0;"
         "for(int i=0;i<8;i++)r+=q[i]==p[280+i];return r+n;}",
         "asm-naked-kmov", clang, masks_native);
+    // Opmask operands (#1846): k's and Yk's registers of a short (kmovw), a byte, an unsigned (kmovd) and an unsigned long
+    // long (kmovq), a k clobber the operands avoid, a matching input, and an opmask input into a general output, in
+    // functions whose target attributes have the moves' features: compiled and linked everywhere, run where the host has
+    // AVX-512BW. Without the features, each width is refused by name, as clang can't place one.
+    if (!masks_native)
+    {
+        printf("test-checker: asm-opmask: AVX-512BW unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
+        "static __attribute__((target(\"avx512f\"))) unsigned short mask_not(unsigned short m){unsigned short r;__asm__(\"knotw %1, %0\" : \"=k\"(r) : \"k\"(m));return r;}"
+        "static __attribute__((target(\"avx512f\"))) unsigned char mask_byte(unsigned char m){__asm__(\"knotw %0, %0\" : \"+k\"(m));return m;}"
+        "static __attribute__((target(\"avx512f,avx512bw\"))) unsigned mask_add(unsigned a, unsigned b){__asm__(\"kaddd %1, %0, %0\" : \"+k\"(a) : \"Yk\"(b) : \"k1\");return a;}"
+        "static __attribute__((target(\"avx512f,avx512bw\"))) unsigned long long mask_shift(unsigned long long m){unsigned long long r;__asm__(\"kshiftlq $3, %1, %0\" : \"=Yk\"(r) : \"k\"(m));return r;}"
+        "static __attribute__((target(\"avx512f\"))) unsigned short mask_tied(unsigned short m){unsigned short r;__asm__(\"kshiftrw $1, %0, %0\" : \"=k\"(r) : \"0\"(m));return r;}"
+        "static __attribute__((target(\"avx512f\"))) unsigned short mask_general(unsigned short m){unsigned r;__asm__(\"kmovw %1, %0\" : \"=r\"(r) : \"k\"(m));return (unsigned short)r;}"
+        "int tested(int n){unsigned long long wide=((unsigned long long)(unsigned)n*2654435761u<<17)^0x123456789abcdefull;"
+        "return mask_not((unsigned short)(n*977))+mask_byte((unsigned char)(n*31))*3+(int)mask_add((unsigned)n*40503u,0x10001u*(unsigned)n)+(int)(mask_shift(wide)>>7)+mask_tied((unsigned short)(n*12345))*5+mask_general((unsigned short)(n+77))*7;}",
+        "asm-opmask", clang, masks_native);
+    check_test_program_boundary_reason(test, "int tested(int n){unsigned short m=(unsigned short)n;__asm__(\"knotw %0, %0\" : \"+k\"(m));return m;}",
+                                       "asm-opmask-baseline", true, false, 0, 1, "inline assembly opmask operands without AVX-512F");
+    check_test_program_boundary_reason(test, "__attribute__((target(\"avx512f\"))) int tested(int n){unsigned m=(unsigned)n;__asm__(\"knotd %0, %0\" : \"+k\"(m));return (int)m;}",
+                                       "asm-opmask-wide", true, false, 0, 1, "inline assembly opmask operands of 4 or 8 bytes without AVX-512BW");
+    check_test_program_boundary_reason(test, "__attribute__((target(\"avx512f\"))) int tested(int n){unsigned short m=(unsigned short)n;__asm__(\"kmovw %w0, %0\" : \"+k\"(m));return m;}",
+                                       "asm-opmask-modifier", true, false, 0, 1, "this inline assembly operand modifier");
     // Vectors in vector registers' constraints in templates of no instructions, main.c's compiler barriers (c_lexer.c's
     // and x86_64_encoder.c's `__asm__("" : "+v"(x))`): a `+` operand keeps its value, an output through a call's pointer
     // is evaluated once, and an input's value is evaluated once and dropped, a call's that returns a vector and one loaded

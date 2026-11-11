@@ -358,6 +358,7 @@ alternative (`check_asm_constraint_parse`):
 | `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
 | `t`, `u` | the x87's st(0) and st(1), for a `float`, a `double` or a `long double` |
 | `y` | an MMX register, mm0 up, for an integer, a pointer, a `float` or a `double` of up to 8 bytes |
+| `k`, `Yk` | an opmask register, k0 up (`Yk`: k1 up), for an integer or a pointer of up to 8 bytes |
 | `m`, `o`, `V`, `<`, `>` | memory at an lvalue's address, which a general register holds |
 | `i`, `n`, `I J K M N O`, `e`, `Z` | an integer constant, within its letter's range |
 | a digit, `[name]` | the output's register (a matching input) |
@@ -413,6 +414,21 @@ the same), and so is one whose template takes directives. A statement of MMX
 operands keeps its helper: #1839's asm bodies don't load them. A template of no
 instructions has no helper, as for general registers: clang's code would move
 the values through an MMX register and back, unchanged.
+
+### The opmasks' operands
+
+`k` places an operand in an opmask register, k0 up, and `Yk` in one a write
+mask takes, k1 up (#1846), but the ones the clobbers name (`"k1"`): an integer
+or a pointer of 1, 2, 4 or 8 bytes, as clang takes them (a `float` crashes
+clang's code generation; the lowering refuses it by name). The template names
+it `%k0`; clang refuses every modifier of one, and so does the lowering. The
+helper loads it zero-extended into rax and moves it in by its width (`kmovw
+%eax, %k0`, `kmovd`, `kmovq`), and stores an output's bits through a general
+register, as clang's code does (a statement of one keeps its helper: #1839's
+asm bodies don't move them). kmovw needs AVX-512F, kmovd and kmovq
+AVX-512BW, by the body's instruction set (its function's target attributes
+among them): without them, clang can't place the operand ("could not allocate
+output register"), and the lowering refuses it by name.
 
 ### The x87's operands
 
@@ -764,10 +780,13 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - an asm goto's label as anything but a jmp's or a jcc's target;
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
-- the opmasks' and the rax and rdx pair's constraints (`k`, `A`), and the
-  other letters it doesn't place;
+- the rax and rdx pair's constraint (`A`), and the other letters it doesn't
+  place;
 - MMX operands with a modifier (clang refuses each), beside x87 operands in
   one statement, and in templates that take directives;
+- opmask operands with a modifier, in templates that take directives, and
+  without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
+  or 8), where clang can't place one;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
   at st(0), a clobber below the outputs), which clang's code refuses too; and
   an integer in an x87 register. An x87 operand named in the template prints as
@@ -938,6 +957,12 @@ has the commands, the logs and the default path's numbers against main.
     matching input, MMX clobbers that the operands avoid, an MMX input into a
     general output, and a template of no instructions; their refusals: a
     modifier, x87 operands beside them, and a template that takes directives;
+  - opmask operands (#1846): `k`'s and `Yk`'s of a `short`, a byte, an
+    `unsigned` and an `unsigned long long` in functions whose target
+    attributes have AVX-512F or AVX-512BW, a `k` clobber the operands avoid, a
+    matching input, and an opmask input into a general output, run where the
+    host has AVX-512BW; their refusals: no AVX-512F, 4 bytes without
+    AVX-512BW, and a modifier;
   - `f`'s inputs, below the fixed operands, each in a register of its own,
     beside a `+t` operand, early-clobbered outputs the template pushes, and a
     template of no instructions;
