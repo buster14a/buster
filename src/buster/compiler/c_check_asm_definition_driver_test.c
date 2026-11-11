@@ -130,8 +130,8 @@ static bool check_test_asm_definition_symbols(const char* path, const char* func
     return valid;
 }
 
-// Whether the object at `path` has a symbol named `.L...` defined in a code section, which an assembler never keeps
-// (#1845), its name in `found`; false when it has none or doesn't read.
+// Whether the object at `path` has a label named `.L...` (a symbol not a function's) defined in a code section, which an
+// assembler never keeps (#1845), its name in `found`; false when it has none or doesn't read.
 static bool check_test_asm_definition_code_temporary(const char* path, char* found, uint64_t capacity)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 24);
@@ -144,7 +144,7 @@ static bool check_test_asm_definition_code_temporary(const char* path, char* fou
             const Elf64_Sym* symbol = &elf.symbols[i];
             const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
             const char* section = symbol->st_shndx != SHN_UNDEF && symbol->st_shndx < SHN_LORESERVE ? check_test_elf_section_name(&elf, symbol->st_shndx) : 0;
-            kept = name != 0 && strncmp(name, ".L", 2) == 0 && section != 0 && strncmp(section, ".text", 5) == 0;
+            kept = name != 0 && strncmp(name, ".L", 2) == 0 && ELF64_ST_TYPE(symbol->st_info) != STT_FUNC && section != 0 && strncmp(section, ".text", 5) == 0;
             if (kept)
             {
                 snprintf(found, capacity, "%s", name);
@@ -359,9 +359,9 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         unlink(path);
         unlink(output);
     }
-    // The `.L` labels of code (#1845): a per-statement helper template's, a naked function's, `&&label`'s and the
-    // helpers' own symbols are temporaries, which -c's object leaves out as clang's assembler does, on both paths; the
-    // objects still link and run as clang's build.
+    // The `.L` labels of code (#1845): a per-statement helper template's, a naked function's and `&&label`'s are
+    // temporaries, which -c's object leaves out as clang's assembler does, on both paths (the helpers' own function
+    // symbols stay); the objects still link and run as clang's build.
     static const char temporaries[] =
         "#include <stdio.h>\n"
         "int test_zero(int x) { __asm__ volatile(\"test %0, %0\\n\\tjz .Lskip%=\\n\\tnop\\n.Lskip%=:\" : : \"r\"(x)); return x; }\n"

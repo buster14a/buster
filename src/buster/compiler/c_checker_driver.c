@@ -6764,13 +6764,15 @@ static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
-// Whether `link`'s symbol `s` is a local `.L` one defined in code, which -c's object leaves out as an assembler's
-// temporary (#1845).
+// Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
+// temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
+// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them.
 static bool check_driver_code_temporary(const Link* link, uint32_t s)
 {
     const NameId name = link->symbols.name[s];
     const AtomId atom = link->symbols.atom[s];
-    return (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL && atom != 0 && atom < link->atoms.count &&
+    return (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL &&
+           (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION && atom != 0 && atom < link->atoms.count &&
            link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && name != 0 && link->names.length[name] >= 2 && link->names.bytes[name][0] == '.' &&
            link->names.bytes[name][1] == 'L';
 }
@@ -6789,9 +6791,9 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
     // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
     // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
     // entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones.
-    // And every local `.L` symbol in code (#1845): the labels of asm templates assembled by their own statements and of
-    // naked functions, the address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`) and the helpers' own symbols, all
-    // places in a function's code, which an assembler never keeps.
+    // And every local `.L` label in code (#1845): the labels of asm templates assembled by their own statements and of
+    // naked functions and the address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's
+    // code, which an assembler never keeps.
     const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
     const Link* link = &code->link;
     bool coded = false;
