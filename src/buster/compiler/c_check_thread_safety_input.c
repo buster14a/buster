@@ -102,6 +102,14 @@ static uint32_t check_input_generic_undeclared(CheckInputReader* reader, const C
         {
             const bool named = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
             undeclared = named && !check_input_thread_name(reader, in_scope, frames, depth, members, member_count, token) ? token : BUSTER_CHECK_NONE;
+            // An undeclared library function's name: clang's lookup of it declares the function implicitly, with its
+            // diagnostic, as an expression's elsewhere does (check_input_implicit_function): diagnose_as_builtin's builtin
+            // then takes that declaration (check_input_attribute_diagnose_builtin).
+            if (undeclared != BUSTER_CHECK_NONE)
+            {
+                check_input_implicit_function(reader, token);
+                undeclared = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) != 0 ? BUSTER_CHECK_NONE : undeclared;
+            }
         }
         argument = stop + 1;
     }

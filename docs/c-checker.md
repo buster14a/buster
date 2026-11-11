@@ -8442,10 +8442,14 @@ arguments against the function. The checker now gives these as clang does.
     (`int __builtin_abs(int);`) is still that builtin, as an argument and in
     another expression, but a static one.
     More than 32 arguments are the count's error, as no builtin takes as many.
-    Refused by name are an undeclared library function's name, whose
-    diagnostics are its implicit declaration's (`diagnose_as_builtin(memcpy,
-    ...)` with no declaration of `memcpy`), and an index of 0, on which clang
-    23 crashes. A definition's identifier list compares its parameters by
+    An undeclared library function's name (`diagnose_as_builtin(memcpy,
+    ...)` with no declaration of `memcpy`, or `(memmove)`) is its implicit
+    declaration, as clang's lookup of a name in any attribute argument's
+    expression makes it: "call to undeclared library function" with its
+    header's note (C89's "implicitly declaring library function" warning),
+    and the attribute takes it, so a later call declares nothing again
+    (`check_input_generic_undeclared`). Refused by name is an index of 0, on
+    which clang 23 crashes. A definition's identifier list compares its parameters by
     their declarations' types, the promoted prototype's standing aside, as
     clang's ParmVarDecl types do. It changes nothing else here: the
     `-Wfortify-source` warnings clang gives the function's calls, as it gives

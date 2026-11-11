@@ -834,14 +834,14 @@ static const BuiltinIntrinsicInfo* check_input_checks_library(CheckInputReader* 
 // diagnose_as_builtin's checks (#1447, clang's handleDiagnoseAsBuiltinAttr), on a function of type `function` named at `name`
 // whose declarator's named parameters CheckInputReader.attribute_parameters links. Its first argument names a builtin
 // function (getBuiltinID): a name no declaration hides of one of the catalogue's builtins this language has but a library
-// function's, which clang declares implicitly, or the unit's declaration of a library function that is its builtin
-// (check_input_checks_library); any other first argument is clang's error at its expression's place. Then its builtin's
+// function's, or the unit's declaration of a library function that is its builtin (check_input_checks_library), which an
+// undeclared one's name has made as clang's lookup does (check_input_generic_undeclared); any other first argument is
+// clang's error at its expression's place. Then its builtin's
 // parameters (its prototype as GetBuiltinType declares it, past any custom checking) must be as many as its other
 // arguments, each of which is the index, from 1, of the function's parameter whose type (canonical, unqualified) is that
 // builtin parameter's: in 32 bits (checkUInt32Argument's errors), within the function's parameters. Refused by name where
-// clang's diagnostics are its own (an undeclared library function's implicit declaration, a builtin's name in another
-// expression, a redeclared builtin), where it crashes (an index of 0), where the checker can't spell a builtin parameter's
-// type in its error, and for more than 32 arguments. A definition's identifier list compares its parameters by their
+// clang crashes (an index of 0), where the checker can't spell a builtin parameter's type in its error, and for more than
+// 32 arguments. A definition's identifier list compares its parameters by their
 // declarations' types, the promoted prototype's standing aside (clang's ParmVarDecl types). Nothing else changes: the
 // -Wfortify-source warnings it would give the function's calls, as a builtin's, the checker doesn't make. Whether the
 // declaration goes on.
