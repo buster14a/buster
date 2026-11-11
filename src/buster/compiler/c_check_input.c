@@ -145,6 +145,10 @@ typedef enum CheckInputMessage
     // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
     CHECK_INPUT_UNKNOWN_BUILTIN,
     CHECK_INPUT_INVOKE_ARGUMENTS,
+    // A unary, overflow or complex part builtin's call with another count of arguments (#1860), which the graph doesn't
+    // take: clang's "too few/too many arguments to function call", the count it takes and the call's in the detail's low
+    // and high halves, at the call's `)` (too few) or its first extra argument.
+    CHECK_INPUT_BUILTIN_ARGUMENT_COUNT,
     CHECK_INPUT_BUILTIN_NOT_CALLED,
     // A declaration with external linkage of a builtin's name (#1843, check_input_builtin_declaration), at its name: one
     // whose type isn't compatible with the builtin's (clang's "conflicting types", with its note of the builtin's type, the
@@ -654,7 +658,9 @@ struct CheckInputKrDiagnostic
     uint32_t token;
     uint32_t warning;
     // A definition diagnostic's body opening, where clang completes the warning when the function's checking does:
-    // its body's own diagnostics publish first, ahead of the same boundary's deferred and return ones (#992).
+    // its body's own diagnostics publish first, ahead of the same boundary's deferred and return ones (#992). A call's:
+    // its callee's name, which names the function and chooses the severity, where `token` is clang's place for it
+    // (check_input_kr_call), or BUSTER_CHECK_NONE where `token` is the name itself.
     uint32_t body;
 };
 
@@ -2867,6 +2873,35 @@ static void check_input_report_argument(CheckInputReader* reader, uint32_t token
     }
 }
 
+// A unary, overflow or complex part builtin's call, closed by `close`, with `count` arguments where it takes `expected`
+// (CHECK_INPUT_BUILTIN_ARGUMENT_COUNT): too many at the first extra argument, the one after `expected` commas.
+static void check_input_builtin_count(CheckInputReader* reader, uint32_t close, uint32_t expected, uint32_t count)
+{
+    const Parser* parser = reader->parser;
+    uint32_t open = count > expected ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    uint32_t at = expected == 0 && open != 0 && open + 1 < close ? open + 1 : close;
+    uint32_t commas = 0;
+    for (uint32_t k = open + 1; open != 0 && k < close && commas < expected; k += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[k];
+        const bool nested = (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && parser->tree.parents[k] > k &&
+                            parser->tree.parents[k] < close;
+        commas += kind == PARSE_KIND_COMMA ? 1u : 0u;
+        at = kind == PARSE_KIND_COMMA && commas == expected ? k + 1 : at;
+        k = nested ? parser->tree.parents[k] : k;
+    }
+    const uint32_t before = reader->output->report_count;
+    check_input_report(reader, at, CHECK_INPUT_BUILTIN_ARGUMENT_COUNT);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].detail = (expected & 0xffffu) | (count < 0xffffu ? count : 0xffffu) << 16;
+    }
+}
+
 // check_input_report of a message that names `subject`, a declaration's token, at another token (an attribute's).
 static void check_input_report_subject(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t subject)
 {
@@ -3257,6 +3292,22 @@ static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, 
             input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning, .body = body };
         }
     }
+}
+
+// A call's K&R warning the constant reader checks (#1994), at clang's place as the graph's
+// (check_diagnostic_kr_call_place): passing arguments without a prototype at the call's `(`, too few or too many at its
+// `)`, `close`; the callee's name, `name`, in the record's body.
+static void check_input_kr_call(CheckInputReader* reader, uint32_t name, uint32_t close, uint32_t warning)
+{
+    const Parser* parser = reader->parser;
+    uint32_t open = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && close < parser->tokens.count ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    const uint32_t place = open != 0 ? open : close;
+    const bool placed = name < parser->tokens.count && place < parser->tokens.count;
+    check_input_kr_diagnostic(reader, placed ? place : name < parser->tokens.count ? name : close, warning, placed ? name : BUSTER_CHECK_NONE);
 }
 
 // Scans of a token column for the reader's passes that act on few tokens (#529): each gives the tokens from `first`
@@ -13492,6 +13543,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         const bool component = check_input_complex_builtin((CBuiltinId)builtin);
         supported = intrinsic || (component ? count == 1 : special == CHECK_OP_BUILTIN_OVERFLOW ? count == 3 :
                     builtin != 0 ? special != CHECK_OP_COUNT || (builtin < CBUILTIN_COUNT && count == (overflow ? 3 : 1)) : count != 0);
+        const uint32_t expected = component ? 1 : special == CHECK_OP_BUILTIN_OVERFLOW || overflow ? 3 : 1;
+        if (!supported && !intrinsic && builtin != 0 && (component || special == CHECK_OP_BUILTIN_OVERFLOW || (builtin < CBUILTIN_COUNT && special == CHECK_OP_COUNT)))
+        {
+            check_input_builtin_count(reader, token, expected, count);
+        }
         op = intrinsic ? CHECK_OP_BUILTIN_X86 : component ? (builtin >= CBUILTIN_CIMAG ? CHECK_OP_IMAGINARY : CHECK_OP_REAL) :
              special != CHECK_OP_COUNT ? special : builtin != 0 ? (overflow ? CHECK_OP_BUILTIN_OVERFLOW : CHECK_OP_BUILTIN_UNARY) : CHECK_OP_CALL;
     }

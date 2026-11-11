@@ -252,7 +252,13 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     const uint32_t count = input->token_count;
     const String8 name = check_semantic_name(parser, pp, token);
     const char* result = check_driver_input_report_message(input, report);
-    if (report->message == CHECK_INPUT_RETURN)
+    if (report->message == CHECK_INPUT_BUILTIN_ARGUMENT_COUNT)
+    {
+        const uint32_t expected = report->detail & 0xffffu;
+        const uint32_t have = report->detail >> 16;
+        result = check_warning_text(scratch, "too %s arguments to function call, expected %u, have %u", have < expected ? "few" : "many", expected, have);
+    }
+    else if (report->message == CHECK_INPUT_RETURN)
     {
         const uint32_t function = check_semantic_function(parser, input, token);
         const String8 function_name = check_semantic_name(parser, pp, function);

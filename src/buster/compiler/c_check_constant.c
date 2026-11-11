@@ -2828,7 +2828,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     const uint32_t warning = checked->warnings & CHECK_WARNING_KR_CALLS;
     if (warning != 0)
     {
-        check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning, BUSTER_CHECK_NONE);
+        check_input_kr_call(reader, source, action->node, warning);
     }
     if (action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT)
     {

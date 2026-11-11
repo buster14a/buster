@@ -7989,6 +7989,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
+#include "c_check_call_count_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -8132,6 +8133,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
     bool asm_definitions_only = false;
+    // --call-counts-only: the call argument count section alone (#1860).
+    bool call_counts_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -8167,6 +8170,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             asm_definitions_only = true;
         }
+        else if (strcmp(argv[i], "--call-counts-only") == 0)
+        {
+            call_counts_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -8198,7 +8205,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8713,6 +8720,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && call_counts_only)
+    {
+        check_test_driver_call_counts(&test, clang, executable, directory);
+    }
     if (temporary && asm_definitions_only)
     {
         check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
@@ -8896,6 +8907,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_type_sugar(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_call_counts(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
