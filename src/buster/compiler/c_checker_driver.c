@@ -66,9 +66,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
-        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
+        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
         // words, check_input_constant_failure_report.)
         case CHECK_INPUT_CONSTANT_EXPRESSION: result = "invalid constant expression"; break;
