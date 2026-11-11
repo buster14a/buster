@@ -140,3 +140,182 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
     }
     unlink(source);
 }
+
+// Cleanups' shared chains (#1370): each exit runs one copy of each cleanup's call, the one at its scope's end, and goes on
+// to its own destination. A program of every kind of path through a chain (a goto back before a declaration of its own
+// block, which stops in the middle of a scope's run; exits through three scopes with a fall at each; a continue, a break
+// and a fall at one record, and a switch's break; a statement expression's break, continue, goto and return, which keep
+// their runs; kept, named and void returns; an array of a runtime length whose cleanup reads it, left by a break; a for
+// statement's own variables; and a cleanup that longjmps out, then the same chain's fall) and the issue's four shapes of
+// many cleanups, each followed by an exit, run against clang -O0's build by Tier 0 and Tier 1, on both paths. The
+// shapes' objects at 300 and 600 cleanups take linear room: past 85, the run at each exit exhausted the call rows.
+static const char check_test_cleanup_chain_paths[] =
+    "#include <setjmp.h>\n"
+    "#include <stdio.h>\n"
+    "static unsigned trace;\n"
+    "static void note(int *p) { trace = trace * 31u + (unsigned)*p; }\n"
+    "static int midrun(int n) { int r = 0; int k = 0; { int a __attribute__((cleanup(note))) = 1;\n"
+    "again:; int b __attribute__((cleanup(note))) = 10 + k; int c __attribute__((cleanup(note))) = 20 + k; k++; if (k < n) goto again; r += b + c; } return r; }\n"
+    "static int three(int n) { int r = 0; { int a __attribute__((cleanup(note))) = 1; { int b __attribute__((cleanup(note))) = 2; { int c __attribute__((cleanup(note))) = 3;\n"
+    "if (n == 0) return r; if (n == 1) goto out; r += c; } if (n == 2) return r + 1; r += b; } if (n == 3) goto out; r += a; }\n"
+    "out: { int d __attribute__((cleanup(note))) = 4; if (n == 4) return 9; } return r; }\n"
+    "static int loops(int n) { int r = 0; for (int i = 0; i < n; i++) { int a __attribute__((cleanup(note))) = i; if (i % 3 == 1) continue; if (i == 7) break; r += a; }\n"
+    "int j = 0; while (1) { int b __attribute__((cleanup(note))) = 100 + j; j++; if (j > n) break; if (j & 1) continue; r += b; }\n"
+    "switch (n) { case 1: { int s __attribute__((cleanup(note))) = 50; if (r) break; r += 2; } case 2: { int s2 __attribute__((cleanup(note))) = 51; break; } default: r += 1; }\n"
+    "return r; }\n"
+    "static int expressions(int n) { int r = 0; for (int i = 0; i < 4; i++) { int a __attribute__((cleanup(note))) = i;\n"
+    "r += ({ int b __attribute__((cleanup(note))) = 10 + i; if (n == i) break; if (n == i + 1) continue; if (n == 9 && i == 2) goto out; if (n == 8 && i == 3) return 77; b; }); }\n"
+    "out: return r; }\n"
+    "struct S { int a, b; };\n"
+    "static void sn(struct S *p) { trace = trace * 31u + (unsigned)p->a; p->a = -5; }\n"
+    "static struct S named(int n) { int x __attribute__((cleanup(note))) = n; if (n == 1) { struct S s __attribute__((cleanup(sn))) = { 1, 2 }; if (n) return s; }\n"
+    "struct S t __attribute__((cleanup(sn))) = { 3, n }; if (n == 2) return t; { int y __attribute__((cleanup(note))) = 9; if (n == 3) return t; } return t; }\n"
+    "static int kept(int n) { int x __attribute__((cleanup(note))) = n; { int y __attribute__((cleanup(note))) = n + 1; if (n == 1) return x + y; if (n == 2) return y; }\n"
+    "if (n == 3) return 4; return x; }\n"
+    "static void none(int n) { int x __attribute__((cleanup(note))) = n; if (n == 1) return; { int y __attribute__((cleanup(note))) = n + 1; if (n == 2) return; } }\n"
+    "static void array(int (*p)[]) { trace = trace * 31u + (unsigned)(*p)[0] + (unsigned)(*p)[1]; }\n"
+    "static int lengths(int n) { int r = 0; for (int i = 0; i < 5; i++) { int v[n + 2] __attribute__((cleanup(array))); v[0] = i; v[1] = n;\n"
+    "{ int w __attribute__((cleanup(note))) = i; if (i == n) break; if (i == 1) continue; r += v[0]; } } return r; }\n"
+    "static int owned(int n) { int r = 0; for (int a __attribute__((cleanup(note))) = 1, b __attribute__((cleanup(note))) = 2; a < 6; a++) {\n"
+    "int c __attribute__((cleanup(note))) = a; if (a == n) break; if (a == n + 2) return r; r += c; } return r + 100; }\n"
+    "static jmp_buf jumps; static int jumpy;\n"
+    "static void leave(int *p) { trace = trace * 31u + (unsigned)*p; if (jumpy) { jumpy = 0; longjmp(jumps, 1); } }\n"
+    "static int jumped(int n) { int r = 0; { int a __attribute__((cleanup(leave))) = 1; { int b __attribute__((cleanup(note))) = 2; if (n == 1) return 3; r += b; }\n"
+    "if (n == 2) return 4; r += a; } return r; }\n"
+    "int main(void) {\n"
+    "    for (int n = 0; n < 10; n++) {\n"
+    "        trace = 0; int r = midrun(n) + 3 * three(n) + 5 * loops(n) + 7 * expressions(n) + 11 * kept(n) + 13 * lengths(n) + 17 * owned(n);\n"
+    "        struct S s = named(n); none(n); jumpy = 1; if (setjmp(jumps) == 0) { jumped(n); } r += 19 * jumped(n);\n"
+    "        printf(\"%d %d %d %d %u\\n\", n, r, s.a, s.b, trace);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// The issue's shapes (#1370) of `count` cleanups, each followed by an exit, and a main that runs each over every exit.
+static bool check_test_cleanup_chain_shapes(char* text, size_t capacity, uint32_t count)
+{
+    size_t used = 0;
+    bool valid = true;
+#define BUSTER_CHECK_TEST_CHAIN_PRINT(...) do { const int written = valid ? snprintf(text + used, capacity - used, __VA_ARGS__) : 0; valid = valid && written >= 0 && (size_t)written < capacity - used; used += valid ? (size_t)written : 0; } while (0)
+    BUSTER_CHECK_TEST_CHAIN_PRINT("#include <stdio.h>\nstatic unsigned trace;\nstatic void rel(int *p) { trace = trace * 131u + (unsigned)*p; }\n");
+    BUSTER_CHECK_TEST_CHAIN_PRINT("static int returns(int a) { int s = 0;\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) return s; s += c%u;\n", i, i, i, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("return s; }\nstatic int nested(int a) { int s = 0;\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("{ int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) return s; s += c%u;\n", i, i, i, i);
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("}");
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("\nreturn s; }\nstatic int loop(int a) { int s = 0; for (int k = 0; k < 3; k++) {\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u + k; if (a == %u + k) continue; if (a == %u + 2 * k) break; s += c%u;\n", i, i, i, i, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("} return s; }\nstatic int jumps(int a) { int s = 0; {\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) goto fail; s += c%u;\n", i, i, i, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("} return s; fail: return -s; }\n");
+    BUSTER_CHECK_TEST_CHAIN_PRINT("int main(void) { unsigned h = 0; for (int a = -1; a < %u; a++) { trace = 0; int r = returns(a) + 3 * nested(a) + 5 * loop(a) + 7 * jumps(a);\n"
+                                  "h = h * 31u + (unsigned)r + trace; } printf(\"%%u\\n\", h); return 0; }\n", count + 3);
+#undef BUSTER_CHECK_TEST_CHAIN_PRINT
+    return valid;
+}
+
+static void check_test_driver_cleanup_chains(CheckTest* test, const char* clang, const char* driver, const char* directory)
+{
+    const char* const executable = driver != NULL ? driver : "/proc/self/exe";
+    static char shapes[1 << 20];
+    static const char* const names[2] = { "paths", "shapes" };
+    static const char* const ways[4] = { "vector, Tier 0", "scalar, Tier 0", "vector, Tier 1", "scalar, Tier 1" };
+    for (uint32_t program = 0; program < 2; program += 1)
+    {
+        const bool generated = program == 0 || check_test_cleanup_chain_shapes(shapes, sizeof(shapes), 100);
+        const char* text = program == 0 ? check_test_cleanup_chain_paths : shapes;
+        char source[512];
+        char outputs[5][512];
+        snprintf(source, sizeof(source), "%s/cleanup-chains-%s.c", directory, names[program]);
+        for (uint32_t k = 0; k < 5; k += 1)
+        {
+            snprintf(outputs[k], sizeof(outputs[k]), "%s/cleanup-chains-%s-%u", directory, names[program], k);
+        }
+        const bool written = generated && parse_test_write(source, text, strlen(text));
+        char* output = NULL;
+        char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
+        const int built = written ? check_test_driver_spawn(reference, &output) : 1;
+        free(output);
+        output = NULL;
+        static char expected[4096];
+        const bool referenced = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+        char description[256];
+        snprintf(description, sizeof(description), "cleanup chains (%s): clang's build runs", names[program]);
+        check_test_expect(test, referenced && strlen(expected) != 0, description);
+        for (uint32_t mode = 0; referenced && mode < 4; mode += 1)
+        {
+            char* arguments[16] = { (char*)executable };
+            uint32_t count = 1;
+            if ((mode & 1) != 0)
+            {
+                arguments[count++] = "--scalar";
+            }
+            if (mode >= 2)
+            {
+                arguments[count++] = "--tier1";
+                arguments[count++] = "--verify";
+            }
+            arguments[count++] = "-o";
+            arguments[count++] = outputs[mode];
+            arguments[count++] = source;
+            arguments[count] = NULL;
+            const int status = check_test_driver_spawn(arguments, &output);
+            static char captured[4096];
+            const bool ran = status == 0 && check_test_driver_capture(outputs[mode], captured, sizeof(captured));
+            snprintf(description, sizeof(description), "cleanup chains (%s): each cleanup runs once on every path, as clang's build's do (%s)", names[program], ways[mode]);
+            check_test_expect(test, ran && strcmp(captured, expected) == 0, description);
+            if (status != 0 && output != NULL)
+            {
+                fprintf(stderr, "%s", output);
+            }
+            else if (ran && strcmp(captured, expected) != 0)
+            {
+                fprintf(stderr, "cleanup chains (%s, %s):\n%s\nclang's build:\n%s\n", names[program], ways[mode], captured, expected);
+            }
+            free(output);
+            output = NULL;
+            unlink(outputs[mode]);
+        }
+        unlink(outputs[4]);
+        unlink(source);
+    }
+    // Linear room: the shapes' object at 600 cleanups is about twice the one at 300 (the runs made it about four times).
+    int64_t sizes[2] = { 0, 0 };
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        char source[512];
+        char object[512];
+        snprintf(source, sizeof(source), "%s/cleanup-chains-room-%u.c", directory, k);
+        snprintf(object, sizeof(object), "%s/cleanup-chains-room-%u.o", directory, k);
+        const bool written = check_test_cleanup_chain_shapes(shapes, sizeof(shapes), 300 * (k + 1)) && parse_test_write(source, shapes, strlen(shapes));
+        char* output = NULL;
+        char* arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+        const int status = written ? check_test_driver_spawn(arguments, &output) : 1;
+        struct stat built = { 0 };
+        sizes[k] = status == 0 && stat(object, &built) == 0 ? (int64_t)built.st_size : 0;
+        if (status != 0 && output != NULL)
+        {
+            fprintf(stderr, "%s", output);
+        }
+        free(output);
+        unlink(object);
+        unlink(source);
+    }
+    check_test_expect(test, sizes[0] != 0 && sizes[1] != 0 && sizes[1] * 2 < sizes[0] * 5,
+                      "cleanup chains: 300 and 600 cleanups, each with an exit, compile, and the object grows linearly");
+}

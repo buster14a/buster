@@ -91,25 +91,29 @@ evidence()
     local hardware=admit reason=admitted retired=false notes='' window_start='' window_deadline='' window_override=false
     case "$event" in
         pull_request)
-            # A ready pull request's 9700X job measures, without native correctness, which its hosted rows cover and
-            # which runs after the merge (#1272); a draft keeps off the 9700X.
+            # A pull request, draft or ready, never uses the 9700X (#2055, the owner's choice on 2026-11-10): its hosted
+            # plain rows qualify it, and native correctness and measurements are its merged first-parent state's, run
+            # in the 02:00-08:00 window. Its 9700X job is skipped as soon as its tests finish, so nothing waits on it.
             scope=plain
-            if [ "${EVIDENCE_DRAFT:-false}" = true ]; then
-                hardware=skip
-                reason=draft
-            fi
+            native=-
+            measurement=-
+            hardware=skip
+            reason=pull-request
             ;;
         push)
-            # A push to main: its full hosted rows here. In the nightly mode (the owner's choice on 2026-11-05) it keeps
-            # off the 9700X: its native correctness and targeted measurements are its first-parent state's, run in the
-            # 02:00-08:00 window, after these hosted rows. Before the nightly mode, it runs both here, after its hosted
-            # rows. Either way it reuses nothing from its pull request, whose run measures without native correctness.
+            # A push to main runs its own hosted rows here and reuses nothing from its pull request. In the nightly mode
+            # (the owner's choice on 2026-11-05) it keeps off the 9700X: its native correctness and targeted
+            # measurements are its first-parent state's, run in the 02:00-08:00 window. It also runs only the plain
+            # rows (#2057, the owner's choice on 2026-11-10, until the merge queue carries the full suite): the sanitizer
+            # rows and fuzz campaigns run on the nightly snapshot's daily run. Before the nightly mode, which has no
+            # snapshot to cover them, a push runs every hosted row and the 9700X job here.
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
+                scope=plain
                 native=-
                 measurement=-
                 hardware=skip
                 reason=deferred
-                notes='the nightly mode defers a push'"'"'s native correctness and measurements to the 02:00-08:00 Europe/Madrid window'
+                notes='the nightly mode runs a push'"'"'s plain rows only; its sanitizer rows and fuzzing run on the nightly snapshot, and its native correctness and measurements in the 02:00-08:00 Europe/Madrid window'
             fi
             ;;
         schedule)

@@ -19,7 +19,10 @@ trap 'rm -rf "$staging"' EXIT
 fetch_package()
 {
     local path="$1" digest="$2" filename="${1##*/}"
-    curl --fail --location --retry 3 "https://archive.ubuntu.com/ubuntu/$path" --output "$staging/$filename"
+    # Curl's default retry policy omits transport resets (exit 35/56): a stalled download that ended in a reset failed
+    # main's x86-64 shard 3 (run 42888849321). These packages are SHA-256 checked, so retry all errors.
+    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 "https://archive.ubuntu.com/ubuntu/$path" \
+        --output "$staging/$filename"
     printf '%s  %s\n' "$digest" "$staging/$filename" | sha256sum --check --status
     ar p "$staging/$filename" data.tar.zst | tar --zstd -xf - -C "$staging" --no-same-owner
 }

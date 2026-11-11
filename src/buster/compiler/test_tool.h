@@ -51,6 +51,8 @@ static void test_tool_skip(const TestTool* tool, const char* section);
 // The helper's own checks: parsing, comparison, a fake tool's version, a missing tool, an unreadable version, a failing
 // --version with and without a minimum, a hanging tool killed at its deadline, and the exact skip text. Prints a line
 // and returns the failures. test-tool refuses any argument with a usage error rather than running these.
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 static uint32_t test_tool_test(void);
+#endif
 
 #endif
