@@ -3909,7 +3909,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 // an inline-only function, which has no symbol, and then no label).
                 const uint32_t function = opening < input->token_count ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
                 const uint32_t function_object = function != BUSTER_CHECK_NONE ? input->objects[function] : 0;
-                const SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
+                // (A multiversioned function's are clang's: its versions' references reach the group's IFUNC, #1838.)
+                SymbolId version_symbol = 0;
+                if (program->target_group_count != 0 && check_program_target_static_context(program, function_object, &version_symbol))
+                {
+                    function_symbol = version_symbol;
+                }
                 const String8 label = function_symbol != 0 ? symbol_names[function_symbol] : (String8){ 0 };
                 const uint32_t function_identifier = function != BUSTER_CHECK_NONE ? parser->tokens.names[function] : 0;
                 const uint8_t* context = label.length != 0 ? (const uint8_t*)label.pointer : intern_bytes(identifiers, function_identifier);

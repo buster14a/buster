@@ -3370,7 +3370,13 @@ What the lowering covers past scalars (#145's programs):
     microarchitecture level's bit) and its features' bits. A version of
     neither is taken unconditionally, and a model none matches is a `ud2`. A
     static group's versions are emitted where its resolver is, as clang emits
-    them. The CPU model's symbols are the lowering's, only those a resolver
+    them. A block-scope static in a version is named by the function's name
+    where clang emits it (`check_program_target_static_context`). In a
+    `target` version, that is the version's mangled name where the function
+    is multiversioned by then (`s.avx512f.n`: a static group's deferred
+    versions, or a version after another), and its plain name otherwise
+    (`f.n`). In a `target_clones` body, it is its first version's
+    (`c.avx2.0.n`). The CPU model's symbols are the lowering's, only those a resolver
     reads (`check_lower_finish`).
   - *Tests.* `test-checker-driver --target-versions-only` also compiles a unit
     of versions (`target`'s and `target_clones`', external and static) and one
