@@ -103,7 +103,9 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const CheckStream* stream = writer->program->stream;
     const CheckGraph* graph = &writer->program->input->graph;
     const CheckOp op = graph->ops[node];
-    const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
+    // (A cast to a union fills an object of its own, check_lower_union_cast's, #2301.)
+    const bool wrapper = (op == CHECK_OP_CAST && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) == 0) ||
+                         op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
     // A truth test, but a vector's !, which is check_lower_expand's (a vector of bool's complement, #137).
     const bool truth = (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION) &&
                        !check_lower_transport_is_vector(writer->program->types, stream->conversions[node].operands[0].type);

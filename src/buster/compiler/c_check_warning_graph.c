@@ -1121,6 +1121,35 @@ static void check_warning_graph_pointer_cast(CheckInputReader* reader, const Che
     }
 }
 
+// GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast, BUSTER_CHECK_CONVERT_TO_UNION): the extension's
+// -Wgnu-union-cast at the cast's `(`, as soon as it is read, in an unevaluated operand too. Off by default.
+static void check_warning_graph_union_cast(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    const uint32_t close = graph->tokens[node];
+    const bool to_union = node < stream->count && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0 &&
+                          stream->diagnostics[node] == CHECK_DIAG_NONE;
+    const uint32_t open = to_union && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
+                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    if (open < parser->tokens.count)
+    {
+        const uint32_t completion = graph->source_positions[node];
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_GNU_UNION_CAST,
+            .kind = CHECK_WARNING_EVENT_GNU_UNION_CAST,
+            .token = open,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion > open ? completion : close + 1,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // -Wunevaluated-expression (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr): the expression
 // operand of a sizeof or an alignof (of no variable array type) and a _Generic's controlling expression are unevaluated,
 // and one with a side effect, as Expr::HasSideEffects finds it without the possible ones, warns at its expression's
@@ -1592,6 +1621,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 else if (op == CHECK_OP_CAST)
                 {
                     check_warning_graph_pointer_cast(&reader, stream, node);
+                    check_warning_graph_union_cast(&reader, stream, node);
                 }
                 else if (op == CHECK_OP_CALL)
                 {

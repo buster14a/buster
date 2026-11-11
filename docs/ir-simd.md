@@ -1271,6 +1271,90 @@ The tests:
   masked-off lane is never read or written. An interpreter that read every
   lane is refused on every one of them.
 
+## One lane's moves and movemasks (#1840)
+
+Three more `intrinsic` kinds move one lane between a vector and a general
+register, or gather the lanes' sign bits:
+
+```text
+%6 = intrinsic.i32 %3 lane_extract 2
+%10 = intrinsic.v4i32 %3, %1 lane_insert 14
+%12 = intrinsic.i32 %3 movemask 0
+```
+
+- **`lane_extract`** (unary): a's lane, zero-extended into an `i32` (a lane of
+  1, 2 or 4 bytes) or an `i64` (8 bytes). Its flags hold the lane's bytes' log2
+  in bits 0 and 1 and its index in bits 2 to 7, below the vector's lanes.
+- **`lane_insert`** (binary): a, of the result's type, with that lane replaced
+  by b's low bits. b is an `i32`, or an `i64` for a quadword. Same flags.
+- **`movemask`** (unary): an `i32` whose bit i is the sign bit of a's lane i, a
+  of 16 or 32 bytes. Its flags are the lanes' bytes' log2: 0, 2 or 3.
+- **Model:** `IR_SIMD_LANE_EXTRACT`, `_LANE_INSERT` and `_MOVEMASK`. A scalar
+  result is the model's word 0, its shape none, as a shift's count is. The
+  interpreter runs the scalar-result kinds through the model too.
+- **Passes:** SCCP leaves them overdefined, and GVN and LICM treat them as
+  impure (neither merges nor moves them). Folding them is left for later.
+
+**Decoder** (`ir_simd_typed_lane`):
+
+- An extraction is `vmovd`/`vmovq` of lane 0, or `vpextrb` to `vpextrq` of a
+  lane of the low 16 bytes. A lane past them takes `vextracti32x4` into
+  VECTOR(1) first. Its integer is the lane's bytes, or 4 for a narrower lane
+  (the instruction zero-extends); the lowering narrows the kind's `i32` to it.
+- An insertion is `vpinsrb` to `vpinsrq` into a 16-byte vector. A narrower
+  integer is zero-extended to the kind's `i32` first.
+- A movemask is `vpmovmskb`, `vmovmskps` or `vmovmskpd` of a 16- or 32-byte
+  vector.
+- The target needs the records' features and the vector's moves.
+
+**Tier 1** selects each as a `TIER1_RULE_VECTOR` kind (`tier1_select_lane`),
+the scalar results' destination a general register:
+
+- `vmovd` or `vmovq` for lane 0 of 4 or 8 bytes, else `vpextr*`, after
+  `vextracti32x4` into the vector scratch register for a lane past the low 16
+  bytes.
+- `vpinsr*` in place in a 16-byte vector's low lane; otherwise through the
+  scratch register and `vinserti32x4`.
+- `vpmovmskb`, `vmovmskps` or `vmovmskpd`.
+- The integer intrinsics' rule now stops at `smulo`, so these kinds can't be
+  taken for BMI instructions.
+
+The 14 forms that had no Zen 5 row (`vpextrb` to `vpextrq`, `vpinsrb` to
+`vpinsrq`, and the three movemasks at 16 and 32 bytes) were measured on the
+9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-lane-moves-1840-2026-11-11)):
+
+- **`vpextrb` to `vpextrq`:** 6.5 cycles of latency (derived across the
+  register files), 2 per cycle, two macro-ops.
+- **`vpinsrb` to `vpinsrq`:** 4.5 cycles, 1 per cycle, two macro-ops.
+- **Movemasks:** 4.5 cycles of an xmm register and 6.5 of a ymm one, 2 per
+  cycle, one macro-op.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against the masked loads and stores
+(`3b4e02cc`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 38 | 15 |
+| `main_unit_backend.c` | 218 | 193 |
+
+The tests:
+
+- **`test-ir`:** both verifiers admit the three kinds exactly at a lane below
+  the vector's lanes, with the scalar of the lane's width, and a movemask's
+  flags 0, 2 or 3 of a 16- or 32-byte vector, at every width and all 256 flags.
+  The model gives C's lane, replaced lane and sign bits on random vectors.
+- **`test-ir-parse`:** `tests/ir/lane-moves.ir` round-trips.
+- **`test-ir-simd`:** the 246 rows (210 extractions over every lane of every
+  part and width, 30 insertions, 6 movemasks) decode at exactly their features.
+  Each is refused without each feature it needs, and under 4 changes.
+- **`test-tier1-masks`:** 50 rows run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C's lanes: 36
+  extractions, 8 insertions, 6 movemasks.
+- **Native check:** a C file of `_mm_extract_epi*`, `_mm_insert_epi*`,
+  `_mm*_movemask_*` and `_mm_cvtsi128_si*`, compiled by `--tier1
+  -march=x86-64-v4`, matches clang's output; its 17 machine rows are all gone.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

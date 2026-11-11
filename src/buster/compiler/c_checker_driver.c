@@ -900,6 +900,9 @@ static const char* check_driver_initializer_message(CheckInitStatus status)
         case CHECK_INIT_RESOURCE: result = "initializer checking capacity exhausted"; break;
         case CHECK_INIT_INVALID:
         case CHECK_INIT_CHECK_FAILED:
+        case CHECK_INIT_ARRAY_DESIGNATOR:
+        case CHECK_INIT_FIELD_DESIGNATOR:
+        case CHECK_INIT_NON_AGGREGATE_DESIGNATOR:
         case CHECK_INIT_OK: break;
     }
     return result;
@@ -1198,15 +1201,39 @@ static bool check_driver_asm_errors(const Parser* parser, Preprocessor* pp, cons
 #include "c_check_common_warnings.c"
 
 // Initializer failures retain the actual selected record, not merely the root declaration's type. The same
-// payload reaches here from early array inference and from final/damaged-unit initializer planning.
+// payload reaches here from early array inference and from final/damaged-unit initializer planning. A designator of the
+// wrong kind (`status` CHECK_INIT_ARRAY_DESIGNATOR, CHECK_INIT_FIELD_DESIGNATOR or CHECK_INIT_NON_AGGREGATE_DESIGNATOR, #2202)
+// names its current object's type, spelled by the typedef at `spelling` where it isn't 0.
 static const char* check_driver_initializer_field_message(const Parser* parser, Preprocessor* pp, const CheckInput* input,
-                                                         const TypeTable* types, TypeId type, uint32_t token, Arena* scratch)
+                                                         const TypeTable* types, CheckInitStatus status, TypeId type, uint32_t spelling, uint32_t token,
+                                                         Arena* scratch)
 {
     CheckWarningSpelling spell = { 0 };
-    const String8 printed = check_driver_warning_type(parser, pp, input, types, &spell, scratch, type, 0);
+    const String8 printed = check_driver_warning_type(parser, pp, input, types, &spell, scratch, type, spelling);
     const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : 0;
-    return printed.length != 0 ? check_warning_text(scratch, "field designator '%.*s' does not refer to any field in type %.*s",
-        (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)printed.length, printed.pointer) : NULL;
+    const char* result = NULL;
+    if (printed.length == 0)
+    {
+        result = NULL;
+    }
+    else if (status == CHECK_INIT_ARRAY_DESIGNATOR)
+    {
+        result = check_warning_text(scratch, "array designator cannot initialize non-array type %.*s", (int)printed.length, printed.pointer);
+    }
+    else if (status == CHECK_INIT_NON_AGGREGATE_DESIGNATOR)
+    {
+        result = check_warning_text(scratch, "initialization of non-aggregate type %.*s with a designated initializer list", (int)printed.length, printed.pointer);
+    }
+    else if (status == CHECK_INIT_FIELD_DESIGNATOR)
+    {
+        result = check_warning_text(scratch, "field designator cannot initialize a non-struct, non-union type %.*s", (int)printed.length, printed.pointer);
+    }
+    else
+    {
+        result = check_warning_text(scratch, "field designator '%.*s' does not refer to any field in type %.*s", (int)intern_length(pp->table, name),
+                                    intern_bytes(pp->table, name), (int)printed.length, printed.pointer);
+    }
+    return result;
 }
 
 static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
@@ -4567,7 +4594,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         else if (phase == 0 && kind == CHECK_INPUT_INITIALIZER_MEMBER)
                         {
                             const uint64_t type_mark = scratch->length;
-                            const char* text = check_driver_initializer_field_message(parser, pp, input, types, input->reports[index].type, token, scratch);
+                            const CheckInitStatus status = (CheckInitStatus)input->reports[index].detail;
+                            const char* text = check_driver_initializer_field_message(parser, pp, input, types, status, input->reports[index].type, 0, token, scratch);
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s",
                                                   text != NULL ? text : "initializer checking capacity exhausted");
                             arena_pop_to(scratch, type_mark);
@@ -6572,15 +6600,18 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
 }
 
 // Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
-// #1835): no other error is there. Only a rejected unit's rounds call it.
-static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token)
+// #1835): no other error is there. A typo's correction (#1447, CHECK_INPUT_UNDECLARED_CORRECTED) does in a body too
+// (`bodied`): the reading corrects it again, its use bound as clang's, whose warnings (an array index's) stay. Only a
+// rejected unit's rounds call it.
+static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token, bool bodied)
 {
     bool recovered = false;
     bool stopped = false;
     for (uint32_t i = 0; i < input->report_count; i += 1)
     {
         const bool at = input->reports[i].token == token;
-        const bool keeps = check_driver_report_keeps_valid(input->reports + i);
+        const bool corrected = input->reports[i].message == CHECK_INPUT_UNDECLARED_CORRECTED && input->reports[i].recovered;
+        const bool keeps = corrected || (!bodied && check_driver_report_keeps_valid(input->reports + i));
         recovered |= at && keeps;
         stopped |= at && !keeps;
     }
@@ -7263,10 +7294,10 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             }
             const bool head = !bodied && top < count && parser->tree.roles[top] == PARSE_ROLE_CLOSE_BODY;
             // A recovered error outside every body (#1447, CheckInputReport.recovered: a definition's parameter's, #1835)
-            // needs no part left out: the reading recovers it again, its declaration valid, as clang keeps it. It still
-            // counts in its scope (error_counts). (A prototype's dropped declaration would leave out the bodies that name
-            // its parameters' names too.)
-            const bool recovered = !bodied && check_driver_rejected_recovered(first_input, token);
+            // needs no part left out, nor does a typo's correction anywhere: the reading recovers it again, its declaration
+            // valid, as clang keeps it. It still counts in its scope (error_counts). (A prototype's dropped declaration would
+            // leave out the bodies that name its parameters' names too.)
+            const bool recovered = token < count && check_driver_rejected_recovered(first_input, token, bodied);
             // A conversion that defaults to an error (#1969) is kept, its source cast, where its tokens are all kept; where
             // the parts left out before it hold them all, it is left out with them. (Its sites come after the others' errors.)
             const CheckDriverConversionSite* site = NULL;
@@ -7306,7 +7337,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
                 memset(fallback_mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
             }
-            if (!kept && bodied)
+            if (!kept && !recovered && bodied)
             {
                 memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
             }
@@ -10018,10 +10049,20 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 const char* conversion = failure.status == CHECK_INIT_INVALID ?
                                     check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, failure.failed_type, failure.failed_source - 1,
                                                                         failure.failed_declaration, failure.failed_offset, failure.token, &place, output_arena) : NULL;
-                                const char* message = conversion != NULL ? conversion : failure.status == CHECK_INIT_MEMBER ?
-                                    check_driver_initializer_field_message(checking, checking_pp, &input, &types, failure.failed_type, failure.token, output_arena) :
+                                const bool designator = failure.status == CHECK_INIT_MEMBER || failure.status == CHECK_INIT_ARRAY_DESIGNATOR ||
+                                                        failure.status == CHECK_INIT_FIELD_DESIGNATOR || failure.status == CHECK_INIT_NON_AGGREGATE_DESIGNATOR;
+                                // A designated list of a non-aggregate is clang's at the declarator where it is the whole initializer (#2202),
+                                // its type as the declarator spells it.
+                                const bool outermost = failure.status == CHECK_INIT_NON_AGGREGATE_DESIGNATOR && failure.failed_declaration < input.token_count &&
+                                                       check_sparse_get(input.initializer_begins, failure.failed_declaration) == failure.token;
+                                uint32_t spelling = 0;
+                                const TypeId designated = outermost ? check_input_object_spelling(&types, &input, checking, failure.failed_declaration, 0, failure.failed_type,
+                                                                                                  &spelling) : failure.failed_type;
+                                const char* message = conversion != NULL ? conversion : designator ?
+                                    check_driver_initializer_field_message(checking, checking_pp, &input, &types, failure.status, designated, spelling, failure.token,
+                                                                           output_arena) :
                                     check_driver_initializer_message(failure.status);
-                                place = conversion != NULL ? place : failure.token;
+                                place = conversion != NULL ? place : outermost ? failure.failed_declaration : failure.token;
                                 const TypeId converted = conversion != NULL && failure.failed_source != 0 && failure.failed_source - 1 < stream.count ?
                                     check_stream_type(&stream, failure.failed_source - 1) : 0;
                                 const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&

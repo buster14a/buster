@@ -1878,6 +1878,23 @@ stated encodings, deep signatures, allocation failures, deterministic emission,
 cross-compiler linkage in both directions and the installed `<tgmath.h>` through
 both object and direct-executable driver paths; the full checker suite runs it too.
 
+A designator of the wrong kind for its current object is clang's
+`CheckDesignatedInitializer` error, named by that object's type (#2202,
+`CHECK_INIT_ARRAY_DESIGNATOR`, `CHECK_INIT_FIELD_DESIGNATOR`): "array designator
+cannot initialize non-array type 'T'" at a `[` and "field designator cannot
+initialize a non-struct, non-union type 'T'" at a `.` (at the name of GNU's
+old-style `name:`), T the object the previous designator selected for a later
+one (`.a[0]` of an `int a`), and an array of unknown bound's as declared
+(`int[]`), through its inference. A designation in a scalar's or a vector's
+braces is "initialization of non-aggregate type 'T' with a designated
+initializer list" (`CHECK_INIT_NON_AGGREGATE_DESIGNATOR`): at the declarator
+where the list is the whole initializer, its type as the declaration spells
+it, else at the list's `{`. Each used to be "invalid initializer". The
+initializer-field fixtures (`check_test_driver_initializer_fields`) compare
+each with clang on both paths, `-fsyntax-only` and `-c`. Differences left: an
+array of unknown bound's error still stops the unit's later initializers'
+checks, as an unknown field's in one does.
+
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
 still expression-checked, but produce no stores, runtime evaluations or live
@@ -2502,6 +2519,39 @@ What the lowering covers past scalars (#145's programs):
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
   `test-checker-driver` links and runs glibc's socket calls with `_GNU_SOURCE`
   by both paths against clang's build (`c_check_transparent_driver_test.c`).
+- **Casts to a union (#2301).** GCC's cast to a union from a member's type is
+  clang's `CK_ToUnion`. `check_action_cast` takes the operand after its lvalue
+  conversion, an array's or a function's decay included, and finds the union's
+  first member of its unqualified type that is no unnamed bit-field
+  (`check_action_union_cast_member`, clang's `getTargetFieldForToUnionCast`).
+  The operand converts to that member (`BUSTER_CHECK_CONVERT_TO_UNION`), and
+  the cast's value is an rvalue of the union, never a constant of the member.
+  A vector operand's cast to a union is this cast, not a vector cast. The
+  lowering (`check_lower_union_cast`) makes a frame object of the union, stores
+  the member's value into its first bytes (copies an aggregate's), and gives
+  the object's address as the cast's value. The batch and template fast paths
+  leave such a cast to it. The union's other bytes stay as they are, as clang's
+  code leaves them. A static object's initializer (`check_init_value`) clears
+  the union, then initializes its member from the operand, as clang's constant
+  evaluator folds the cast. `-Wgnu-union-cast`
+  (`check_warning_graph_union_cast`) is at the cast's `(`, off by default and
+  given by `-pedantic`, `-Wpedantic`, `-Wgnu` and itself. A union cast from no
+  member's type gets clang's "cast to union type from type 'T' not present in
+  union", and a cast to a struct from another type its "used type 'T' where
+  arithmetic or pointer type is required", both at the `(`
+  (`check_semantic_expression`). Differences left:
+  - a function designator's decayed type in that error drops its parameters'
+    typedef names, as buster's other diagnostics of a decayed function do;
+  - clang's `-Wpedantic` "C99 forbids casting nonscalar type 'T' to the same
+    type" isn't given;
+  - a cast to a scalar from a record keeps the generic error, where clang says
+    "operand of type 'T' where arithmetic or pointer type is required" at the
+    operand.
+
+  `test-checker`'s programs (`c_check_program_union_cast_test.c`) run each
+  kind of member, static initializers and a transparent union's cast against
+  clang -O0's build. `test-checker-driver`'s default-warning sweep compares the
+  diagnostics with clang's under `-pedantic`.
 - **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
   aggregate-returning body's control graph removes unreachable transfers
   without renumbering labels. A reachable implicit return supplies an address
@@ -3269,9 +3319,10 @@ What the lowering covers past scalars (#145's programs):
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
   scalars; nontemporal builtins of scalars and at underaligned addresses; bit
-  casts of other types; and the rows whose extensions the target hasn't (VBMI
-  for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI,
-  BMI2) are refused by name. `test-checker`'s vector builtin programs
+  casts of other types; and the rows whose extensions the target hasn't
+  (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
+  8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
+  VPERMT2W, run element by element, as the baseline's do (#1834). `test-checker`'s vector builtin programs
   (`c_check_program_vector_builtins_test.c`) call each at every width, those
   of vectors of 1, 2, 4 and 8 bytes and wider than 64 bytes, the narrowing conversions and the floating
   intrinsics as the headers write them, with the masked truncating stores and
@@ -5109,7 +5160,15 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   deprecated"; `check_driver_corrected_name`), and a warning at a declarator
   or an operator whose operand holds the use comes after the correction's
   error (`CheckInput.corrected_tokens`, `check_driver_after_corrections`):
-  clang gives that warning once the operand is read.
+  clang gives that warning once the operand is read. In a unit with another
+  error, the readings that give its warnings keep the corrected use's part,
+  which they correct again, where they leave out an error's
+  (`check_driver_rejected_recovered`): `arx[5]` for `int arr[3]` still gets
+  its `-Warray-bounds` at the function's end, as a division by zero its
+  operand holds gets `-Wdivision-by-zero`. In a file-scope initializer an
+  array index's warning comes at the declarator's end, after the
+  correction's error and the operands' queued warnings, as clang checks the
+  index once the full expression is complete (`check_common_report_bounds`).
 - **Keywords and type names in an expression.** Clang offers keywords too
   (`AddKeywordsToConsumer`): an expression's (`sizeof`, `_Alignof` from C11,
   `true` and `false` in C23) and, within a function and not before a `)`
@@ -7842,7 +7901,11 @@ change, it refused such a declaration by name.
   (`[[x]] l:`), read as GNU ones after its colon are
   (`check_input_label_attributes`); their closer is the name's parent in the
   tree, so a label's name is the token before its colon there
-  (`check_input_label_name`). The parser reports clang's errors for C23
+  (`check_input_label_name`). A name clang refuses on a label is its error
+  before the attributes are read, but a `suppress` whose argument is no string
+  literal (`check_input_label_suppress_literal`, #2332): clang's parser drops
+  it with its string error first, which the reading gives. A refused attribute
+  before it in the list still gives its subject error instead. The parser reports clang's errors for C23
   attributes after GNU ones and before a block's `}`. Specifiers of
   attributes alone have no type: an implicit int's error at an unbound
   declarator's name. In a block, an already-declared ordinary name after GNU
@@ -8282,6 +8345,19 @@ arguments against the function. The checker now gives these as clang does.
   an undeclared name, which the walk builds no node of, gets it too, after the
   name's error, as clang reads it as an expression; a type name's doesn't
   (`check_input_alignof_undeclared`, #1946).
+- **`-Wgnu-designator`** (#2202, `check_input_gnu_designator`). GNU's designators
+  get the warnings clang's parser gives as it reads them, where the reader
+  prepares the initializer: an array designation of one designator without
+  its `=` (`[0] 2`), "use of GNU 'missing =' extension in designator" at the
+  value, and an old-style field designator (`b: 1`), "use of GNU old-style
+  field designator extension" at its name, both on by default
+  (`CHECK_WARNING_ID_GNU_DESIGNATOR`, an extension `-pedantic-errors`
+  promotes); and an array range (`[1 ... 2]`), "use of GNU array range
+  extension" at its `...`, `-pedantic`'s (`CHECK_WARNING_ID_GNU_ARRAY_RANGE`,
+  ignored by default). All three are `-Wgnu-designator`'s, under `-Wgnu`.
+  Differences left: in a unit rejected by a parse error that holds a record
+  definition, these warnings are dropped, as the reader's other warnings are
+  there.
 - **Attributes after a definition.** A function's or variable's declaration
   after the entity's definition may carry a declaration attribute that the
   definition lacks: the definition's own and those it took from earlier
