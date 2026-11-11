@@ -5933,7 +5933,14 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. `-Wstring-plus-int` (#2190, on by
+`-Wdangling-else` and `-Wuninitialized`. `-Wshift-op-parentheses` (#2264, on
+by default, `-Wparentheses`' and so `-Wall`'s,
+`check_common_shift_op_parentheses`) is clang's `DiagnoseAdditionInShift`:
+each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
+one first, "operator '<<' has lower precedence than '+'; '+' will be
+evaluated first" at the `+` with its note, given as the shift is built; a `+`
+from a macro's argument shows that macro, its range being the `+`
+expression's. `-Wstring-plus-int` (#2190, on by
 default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 `+` of a string literal, not parenthesized, and an operand of integer,
 boolean or enumeration type in either order, "adding 'T' to a string does not
