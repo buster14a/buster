@@ -97,15 +97,24 @@ static bool check_builtin_bits_convert(TypeTable* table, const CheckBuiltinMiscA
     return accepted;
 }
 
-// An argument's integer type: its width and signedness, or false with a diagnostic, an unsupported one for a _BitInt past
-// the 128 bits a constant holds, which clang takes.
+// An argument's integer type: its width and signedness, or false with a diagnostic. A _BitInt past the 128 bits a
+// constant holds (#1447) is taken, as clang takes it: no constant of it reaches the fold, and the lowering computes it
+// limb by limb (check_lower_bits_limbs).
 static bool check_builtin_bits_integer(const TypeTable* table, TypeId type, uint32_t index, uint32_t* width, bool* is_signed, CheckBuiltinMiscResult* output)
 {
-    const bool integer = check_action_integer_type(table, type, width, is_signed);
+    bool integer = check_action_integer_type(table, type, width, is_signed);
+    const TypeId base = type_unqualified(type_strip_aligned(table, type));
+    if (!integer && type_kind(table, base) == BUSTER_TYPE_KIND_BIT_INT)
+    {
+        uint64_t rank = 0;
+        uint64_t bits = 0;
+        type_integer_properties(table, base, &rank, &bits, is_signed);
+        *width = (uint32_t)bits;
+        integer = true;
+    }
     if (!integer)
     {
-        const bool wide = type_kind(table, type_unqualified(type_strip_aligned(table, type))) == BUSTER_TYPE_KIND_BIT_INT;
-        check_action_diagnose(&output->action, wide ? CHECK_DIAG_UNSUPPORTED : CHECK_DIAG_INVALID_TYPE, index);
+        check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, index);
     }
     return integer;
 }
@@ -303,7 +312,8 @@ static void check_builtin_bits(TypeTable* table, const CheckBuiltinMiscAction* i
     {
         check_action_inherit(value, values + i);
     }
-    bool constant = output->action.diagnostic == CHECK_DIAG_NONE && !carry && value->fault == CHECK_FAULT_NONE;
+    // A _BitInt past 128 bits' value or count is no constant the fold reads (#1447).
+    bool constant = output->action.diagnostic == CHECK_DIAG_NONE && !carry && value->fault == CHECK_FAULT_NONE && width <= 128 && second_width <= 128;
     for (uint32_t i = 0; i < input->argument_count; i += 1)
     {
         constant = constant && values[i].constant_kind == CHECK_CONSTANT_INTEGER && values[i].fault == CHECK_FAULT_NONE;

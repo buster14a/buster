@@ -166,7 +166,7 @@ static void check_common_report_published(const Parser* parser, Preprocessor* pp
 // casts, dereferences, subscripts, conversions and arithmetic; a bounded work budget leaves unusually large expressions
 // in their canonical spelling. `sizeof` and `alignof` use the renderer's __size_t sentinel.
 static uint32_t check_common_operand_spelling(const Parser* parser, const CheckInput* input, const CheckGraph* graph,
-                                              const CheckStream* stream, uint32_t node)
+                                              const CheckStream* stream, const TypeTable* types, uint32_t node)
 {
     typedef struct CheckCommonSpellingFrame
     {
@@ -290,6 +290,14 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                     result = 0;
                     count -= 1;
                 }
+            }
+            else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+            {
+                // A member's own declarator's typedef (#1447), found in its record's body.
+                const uint32_t member = check_semantic_member_of(parser, input, stream, types, current);
+                const uint32_t declarator = member != 0 ? check_semantic_member_token(parser, input, types, member) : BUSTER_CHECK_NONE;
+                result = declarator < input->token_count ? check_input_typedef_spelling(input, parser, declarator) : 0;
+                count -= 1;
             }
             else
             {
@@ -526,7 +534,14 @@ static bool check_common_statement_terminator(const Parser* parser, uint32_t tok
         const uint32_t owner = role == PARSE_ROLE_TERMINATOR ? parser->tree.parents[at] : count;
         const uint8_t owner_role = owner < count ? parser->tree.roles[owner] : PARSE_ROLE_NONE;
         // The block that owns the `;`, by its `}`: a statement expression's where a `)` closes the group right after it.
-        const uint32_t close = owner_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[owner] : owner_role == PARSE_ROLE_CLOSE_BLOCK ? owner : count;
+        // A labeled last statement's `;` is the block's through its labels (#1447), as clang's StmtExpr value is.
+        uint32_t labeled = owner;
+        for (uint32_t label_steps = 0; labeled < count && parser->tree.roles[labeled] == PARSE_ROLE_LABEL && label_steps < count; label_steps += 1)
+        {
+            labeled = parser->tree.parents[labeled];
+        }
+        const uint8_t block_role = labeled < count ? parser->tree.roles[labeled] : PARSE_ROLE_NONE;
+        const uint32_t close = block_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[labeled] : block_role == PARSE_ROLE_CLOSE_BLOCK ? labeled : count;
         const bool last_value = close < count && at + 1 == close && close + 1 < count && parser->tokens.kinds[close + 1] == PARSE_KIND_R_PAREN &&
                                 parser->tree.roles[close + 1] == PARSE_ROLE_CLOSE_GROUP;
         if (last_value)
@@ -1291,6 +1306,8 @@ typedef struct CheckCommonEmission
     // full worklist fails the translation rather than dropping warnings.
     uint32_t* work_nodes;
     uint8_t* work_kinds;
+    // The conversion a frame's arm belongs to (BUSTER_CHECK_EMIT_ARM, BUSTER_CHECK_EMIT_ARM_LEAF), else BUSTER_CHECK_NONE.
+    uint32_t* work_owners;
     uint32_t work_capacity;
     uint32_t work_count;
     Arena* scratch;
@@ -1387,6 +1404,18 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_EMIT_CONVERSIONS 17u
 // A root's whole visit (check_common_root_frames), for a statement expression's inner root (check_common_inner_roots).
 #define BUSTER_CHECK_EMIT_ROOT 18u
+// A conditional arm of a conversion whose source is a conditional (#1895, clang's CheckConditionalOperand): a conditional's
+// condition, then its arms; a leaf's own conversions, then its BUSTER_CHECK_EMIT_ARM_LEAF report. The frame's owner is the
+// conversion node.
+#define BUSTER_CHECK_EMIT_ARM 19u
+#define BUSTER_CHECK_EMIT_ARM_LEAF 20u
+// The same in an arm a known condition doesn't select, where the constant conversions' runtime warnings are pruned.
+#define BUSTER_CHECK_EMIT_ARM_PRUNED 21u
+#define BUSTER_CHECK_EMIT_ARM_LEAF_PRUNED 22u
+// An arm frame's owner (BUSTER_CHECK_EMIT_ARM): a conversion node, or a call argument's slot with this bit, and the
+// prototype bit where its call has one (#1895).
+#define BUSTER_CHECK_ARM_ARGUMENT 0x80000000u
+#define BUSTER_CHECK_ARM_PROTOTYPE 0x40000000u
 
 // A count scan must not claim ordinary tree ownership: the latter also publishes unrelated warning families.
 // Keep these facts in the existing per-node byte, with publication claimed only after an eligible count visit.
@@ -1444,6 +1473,7 @@ static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node,
     {
         emission->work_nodes[emission->work_count] = node;
         emission->work_kinds[emission->work_count] = kind;
+        emission->work_owners[emission->work_count] = BUSTER_CHECK_NONE;
         emission->work_count += 1;
     }
     else
@@ -1897,10 +1927,10 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left),
-                                                                check_common_operand_spelling(parser, emission->input, graph, stream, left));
+                                                                check_common_operand_spelling(parser, emission->input, graph, stream, types, left));
             const String8 right_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                  check_stream_type(stream, right),
-                                                                 check_common_operand_spelling(parser, emission->input, graph, stream, right));
+                                                                 check_common_operand_spelling(parser, emission->input, graph, stream, types, right));
             if (left_name.length != 0 && right_name.length != 0)
             {
                 const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
@@ -1938,6 +1968,7 @@ static bool check_common_call_prototype(const CheckCommonEmission* emission, uin
 }
 
 static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node);
+static uint32_t check_common_enum_cast_unselected(const CheckGraph* graph, uint32_t node);
 static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node);
 
 // Whether `source`, converted to an enumeration's target, may be an enumeration: its own kind an enumeration's (or an aligned
@@ -1947,7 +1978,9 @@ static __attribute__((noinline)) bool check_common_enum_cast_source(const Parser
                                                                     const TypeTable* types, uint32_t source)
 {
     const uint8_t source_kind = type_kind(types, check_stream_type(stream, source));
+    // (A selection's arm may carry the conversion as a conditional's arms do: `_Generic(c, int: c ? g : g)`.)
     return source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
+           (graph->ops[source] == CHECK_OP_SELECT && check_common_conversion_arms(graph, check_common_enum_cast_unselected(graph, source))) ||
            (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
             graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER);
 }
@@ -2028,7 +2061,11 @@ static uint32_t check_common_enum_cast_location(const Parser* parser, const Chec
     const CheckOp op = graph->ops[leaf];
     const bool operator = (op == CHECK_OP_COMMA || check_common_write_op(op)) && op != CHECK_OP_PRE_INCREMENT && op != CHECK_OP_PRE_DECREMENT &&
                           op != CHECK_OP_POST_INCREMENT && op != CHECK_OP_POST_DECREMENT && graph->operand1[leaf] < graph->count;
-    const uint32_t right = operator ? check_warning_graph_first(graph, parser, graph->operand1[leaf]) : 0;
+    uint32_t right = operator ? check_warning_graph_first(graph, parser, graph->operand1[leaf]) : 0;
+    for (uint32_t steps = 0; right != 0 && parser->tokens.kinds[right - 1] == PARSE_KIND_L_PAREN && steps < parser->tokens.count; steps += 1)
+    {
+        right -= 1;
+    }
     const uint32_t token = operator && right != 0 ? right - 1 : graph->tokens[leaf];
     const uint8_t role = token < parser->tokens.count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
     const bool binary = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL ||
@@ -2046,14 +2083,15 @@ static uint32_t check_common_enum_cast_location(const Parser* parser, const Chec
 // The target's typedef as written (clang's sugar) for the conversion node `conversion` (BUSTER_CHECK_NONE for none): an
 // assignment's left operand's, an initializer's declaration's (its `=` reads the specifiers back) or a return's
 // function's. Only a warning reads it: the function's search is a scan of the unit's bodies.
-static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t conversion)
+static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                uint32_t conversion)
 {
     const CheckGraph* graph = &input->graph;
     const CheckOp op = conversion < graph->count ? graph->ops[conversion] : CHECK_OP_COUNT;
     const uint32_t token = conversion < graph->count ? graph->tokens[conversion] : BUSTER_CHECK_NONE;
     const bool returned = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const uint32_t function = returned ? check_semantic_function(parser, input, token) : BUSTER_CHECK_NONE;
-    return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, graph->operand0[conversion]) :
+    return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, types, graph->operand0[conversion]) :
            op == CHECK_OP_INITIALIZE ? check_input_typedef_spelling(input, parser, token) :
            function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
 }
@@ -2064,7 +2102,7 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
 // (check_common_enum_coerced), is a named enumeration other than the target's named one. It is a plain Diag, published
 // as the full expression completes.
 static __attribute__((noinline)) void check_common_enum_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
-                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t conversion, const uint32_t* parents,
+                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t conversion, bool arm, const uint32_t* parents,
                                    uint32_t at_once, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
@@ -2091,7 +2129,8 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
             count += graph->operand1[node] < graph->count;
             continue;
         }
-        const uint32_t leaf = op == CHECK_OP_COMMA && node == root ? check_common_enum_cast_unselected(graph, graph->operand1[node]) : node;
+        // (An arm's comma is its own leaf: only a root's carries the conversion to its result.)
+        const uint32_t leaf = op == CHECK_OP_COMMA && node == root && !arm ? check_common_enum_cast_unselected(graph, graph->operand1[node]) : node;
         const TypeId coerced = leaf < graph->count ? check_common_enum_coerced(input, stream, leaf) : 0;
         const TypeId leaf_enum = coerced != 0 ? type_unqualified(type_strip_aligned(types, coerced)) : 0;
         const bool converts = leaf_enum != 0 && type_kind(types, leaf_enum) == BUSTER_TYPE_KIND_ENUM && leaf_enum != target_enum &&
@@ -2099,7 +2138,7 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         if (converts && !rendered)
         {
             rendered = true;
-            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, conversion);
+            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, types, conversion);
             target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
             const String8 target_plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, target_enum, 0);
             // (An unnamed target warns of nothing.)
@@ -2108,7 +2147,7 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         if (converts && target_name.length != 0)
         {
             const bool enumerator = coerced != check_stream_type(stream, leaf);
-            const uint32_t spelling = enumerator ? 0 : check_common_operand_spelling(parser, input, graph, stream, leaf);
+            const uint32_t spelling = enumerator ? 0 : check_common_operand_spelling(parser, input, graph, stream, types, leaf);
             const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, coerced, spelling);
             const String8 plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, leaf_enum, 0);
             if (source_name.length != 0 && memmem(plain.pointer, plain.length, "(unnamed", 8) == NULL)
@@ -2125,6 +2164,9 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
 
 // One argument conversion, interleaved with its own subtree. K&R parameters receive their promoted types;
 // only a prototype converts directly to the declared parameter type.
+static uint32_t check_common_enum_cast_arms(const CheckCommonEmission* emission, uint32_t owner);
+static bool check_common_constant_arms(const CheckCommonEmission* emission, uint32_t owner);
+
 static void check_common_call_argument(CheckCommonEmission* emission, uint32_t index, bool prototype)
 {
     const CheckGraph* graph = &emission->input->graph;
@@ -2134,6 +2176,9 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
         const uint32_t argument = graph->argument_nodes[index];
         const CheckConversion conversion = stream->argument_conversions[index];
         const bool arms = check_common_conversion_arms(graph, argument);
+        // (A conditional argument's arms report in their own frames, as an assignment's do: check_common_enum_cast_arms.)
+        const uint32_t owner = BUSTER_CHECK_ARM_ARGUMENT | index | (prototype ? BUSTER_CHECK_ARM_PROTOTYPE : 0u);
+        const bool conditional = argument < graph->count && graph->ops[check_common_enum_cast_unselected(graph, argument)] == CHECK_OP_CONDITIONAL;
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             (conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
             !check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) && check_common_bool_candidate(graph, argument) &&
@@ -2146,14 +2191,15 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
         }
         if (argument < graph->count && prototype && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-            check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, argument, conversion.type))
+            check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, argument, conversion.type) &&
+            !conditional)
         {
-            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, BUSTER_CHECK_NONE,
+            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, BUSTER_CHECK_NONE, false,
                                    emission->parents, emission->at_once, emission->scratch);
         }
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-            check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) &&
+            check_common_conversion_source(check_stream_constant_kind(stream, argument), arms) && !(conditional && check_common_constant_arms(emission, owner)) &&
             (check_common_emit_evaluated(emission, argument) || ((emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || arms))))
         {
@@ -2175,6 +2221,107 @@ static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp
                                           __int128 original, __int128 truncated, uint32_t token, uint32_t publication, bool initialization,
                                           Arena* scratch);
 static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node);
+
+// Whether `owner` is an argument slot's, and its slot's index.
+static bool check_common_arm_argument(uint32_t owner)
+{
+    return (owner & BUSTER_CHECK_ARM_ARGUMENT) != 0;
+}
+
+static uint32_t check_common_arm_slot(uint32_t owner)
+{
+    return owner & ~(BUSTER_CHECK_ARM_ARGUMENT | BUSTER_CHECK_ARM_PROTOTYPE);
+}
+
+// Whether `owner` names a conversion node or an argument slot of the graph.
+static bool check_common_arm_owner(const CheckCommonEmission* emission, uint32_t owner)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    return check_common_arm_argument(owner) ? check_common_arm_slot(owner) < graph->argument_count && emission->stream->argument_conversions != NULL :
+                                              owner < graph->count;
+}
+
+// The conversion's source, its flags and its target: a node's (an assignment's right operand), or an argument's, whose
+// target is its parameter's or, without a prototype, its promoted type.
+static uint32_t check_common_arm_source(const CheckCommonEmission* emission, uint32_t owner, uint32_t* flags, TypeId* target)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    uint32_t source = BUSTER_CHECK_NONE;
+    *flags = 0;
+    *target = 0;
+    if (check_common_arm_argument(owner))
+    {
+        const uint32_t slot = check_common_arm_slot(owner);
+        const CheckConversion conversion = stream->argument_conversions[slot];
+        source = graph->argument_nodes[slot];
+        *flags = conversion.flags;
+        *target = (owner & BUSTER_CHECK_ARM_PROTOTYPE) != 0 ? conversion.type : type_default_argument_promote(emission->types, conversion.type);
+    }
+    else
+    {
+        const CheckOp op = graph->ops[owner];
+        const bool conversion = op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT;
+        source = conversion ? (op == CHECK_OP_ASSIGN ? graph->operand1[owner] : graph->operand0[owner]) : BUSTER_CHECK_NONE;
+        *flags = conversion ? stream->conversions[owner].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags : 0;
+        *target = check_stream_type(stream, owner);
+    }
+    return source;
+}
+
+// The source of the conversion `owner` whose enumeration conversions its arms' frames report (#1895), else BUSTER_CHECK_NONE:
+// an initialization's, an assignment's, a conversion's or a prototype's argument's that may change an enumeration
+// (check_common_enum_cast_candidate), whose source is a conditional past its selections. Clang's CheckConditionalOperand
+// checks each arm's own conversions before the arm's: the walk's BUSTER_CHECK_EMIT_ARM frames replay that, the
+// condition's first and the true arm's before the false one's.
+static uint32_t check_common_enum_cast_arms(const CheckCommonEmission* emission, uint32_t owner)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    uint32_t flags = 0;
+    TypeId target = 0;
+    const uint32_t source = check_common_arm_source(emission, owner, &flags, &target);
+    const bool typed = !check_common_arm_argument(owner) || (owner & BUSTER_CHECK_ARM_PROTOTYPE) != 0;
+    const bool candidate = typed && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+                           (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
+                           graph->ops[check_common_enum_cast_unselected(graph, source)] == CHECK_OP_CONDITIONAL &&
+                           check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, emission->stream, emission->types, source, target);
+    return candidate ? source : BUSTER_CHECK_NONE;
+}
+
+// Whether the conversion `owner`'s constant conversions are its arms' frames' (#1895): an initialization's, an assignment's
+// (not a bit-field's, which check_common_bitfield_assignment reports), a conversion's or an argument's to an integer type,
+// whose source is a conditional, as check_common_conversion_own's and check_common_call_argument's walk would carry it
+// (check_common_conversion_warning_at). The conversion is evaluated where its node is, an argument's where the argument is.
+static bool check_common_constant_arms(const CheckCommonEmission* emission, uint32_t owner)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    uint32_t flags = 0;
+    TypeId target = 0;
+    const uint32_t source = check_common_arm_source(emission, owner, &flags, &target);
+    const bool argument = check_common_arm_argument(owner);
+    const uint32_t evaluated_at = argument ? source : owner;
+    const bool conditional = source < graph->count && graph->ops[source] == CHECK_OP_CONDITIONAL;
+    const bool bitfield = !argument && conditional && graph->ops[owner] == CHECK_OP_ASSIGN && graph->operand0[owner] < graph->count &&
+                          (check_stream_flags(stream, graph->operand0[owner]) & BUSTER_CHECK_BIT_FIELD) != 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    return conditional && !bitfield && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
+           (!argument || !check_common_query_suppressed(graph, source)) &&
+           (check_common_emit_evaluated(emission, evaluated_at) || (emission->emitted[evaluated_at] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+           check_common_integer(emission->types, target, &width, &is_signed);
+}
+
+// An arm frame's push, owned by the conversion `owner` (BUSTER_CHECK_EMIT_ARM, BUSTER_CHECK_EMIT_ARM_LEAF).
+static void check_common_emit_arm(CheckCommonEmission* emission, uint32_t node, uint8_t kind, uint32_t owner)
+{
+    const uint32_t at = emission->work_count;
+    check_common_emit_push(emission, node, kind);
+    if (emission->work_count > at)
+    {
+        emission->work_owners[at] = owner;
+    }
+}
 
 static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t node)
 {
@@ -2211,14 +2358,17 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             check_common_bitfield_warning(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source, bit_width,
                                           original, truncated, graph->tokens[node], publication, false, emission->scratch);
         }
+        // (A conditional source's arms report in their own frames: check_common_enum_cast_arms.)
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-            check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)))
+            check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)) &&
+            graph->ops[check_common_enum_cast_unselected(graph, source)] != CHECK_OP_CONDITIONAL)
         {
             check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source,
-                                   check_stream_type(stream, node), node, emission->parents, emission->at_once, emission->scratch);
+                                   check_stream_type(stream, node), node, false, emission->parents, emission->at_once, emission->scratch);
         }
+        // (A conditional source's arms report in their own frames: check_common_constant_arms.)
         if (!bitfield && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
-            check_common_conversion_source(check_stream_constant_kind(stream, source), arms) &&
+            check_common_conversion_source(check_stream_constant_kind(stream, source), arms) && !(arms && check_common_constant_arms(emission, node)) &&
             (flags & BUSTER_CHECK_CONVERT_ATOMIC) == 0 &&
             (evaluated || ((emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0 &&
              (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || arms))))
@@ -2924,8 +3074,88 @@ static void check_common_emit_run(CheckCommonEmission* emission)
         emission->work_count -= 1;
         const uint32_t node = emission->work_nodes[emission->work_count];
         const uint8_t kind = emission->work_kinds[emission->work_count];
+        const uint32_t owner = emission->work_owners[emission->work_count];
         switch (kind)
         {
+            case BUSTER_CHECK_EMIT_ARM:
+            case BUSTER_CHECK_EMIT_ARM_PRUNED:
+                if (node < graph->count && check_common_arm_owner(emission, owner))
+                {
+                    // A selection's own visit, then its selected arm's; a conditional's own visit, its condition's, then its
+                    // arms (pushed in reverse), a known condition's unselected one pruned; a leaf's own conversions, then its
+                    // report.
+                    const CheckOp op = graph->ops[node];
+                    const bool reached = kind == BUSTER_CHECK_EMIT_ARM;
+                    const bool branch = op == CHECK_OP_SELECT || op == CHECK_OP_CONDITIONAL;
+                    if (branch && (emission->emitted[node] & BUSTER_CHECK_EMITTED_CONVERSIONS) == 0 && !check_common_query_suppressed(graph, node) &&
+                        (check_common_emit_evaluated(emission, node) || (emission->emitted[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0))
+                    {
+                        emission->emitted[node] |= BUSTER_CHECK_EMITTED_CONVERSIONS;
+                        check_common_conversion_own(emission, node);
+                    }
+                    uint32_t owner_flags = 0;
+                    TypeId owner_target = 0;
+                    (void)check_common_arm_source(emission, owner, &owner_flags, &owner_target);
+                    if (op == CHECK_OP_CONDITIONAL && check_common_bool_target(emission->types, owner_target) && check_common_constant_arms(emission, owner))
+                    {
+                        check_common_int_in_bool(emission->parser, emission->pp, emission->input, emission->stream, emission->types, node, emission->parents,
+                                                 emission->at_once, emission->scratch);
+                    }
+                    if (op == CHECK_OP_SELECT)
+                    {
+                        check_common_emit_arm(emission, graph->operand0[node], kind, owner);
+                    }
+                    else if (op == CHECK_OP_CONDITIONAL)
+                    {
+                        const uint32_t condition = graph->operand0[node];
+                        const CheckValue condition_value = condition < graph->count ? check_stream_value(emission->stream, condition) : (CheckValue){ 0 };
+                        bool truth = false;
+                        const bool known = condition < graph->count && check_action_truth(emission->types, &condition_value, &truth);
+                        const bool true_reached = reached && (!known || truth);
+                        const bool false_reached = reached && (!known || !truth);
+                        check_common_emit_arm(emission, graph->operand2[node], false_reached ? BUSTER_CHECK_EMIT_ARM : BUSTER_CHECK_EMIT_ARM_PRUNED, owner);
+                        check_common_emit_arm(emission, graph->operand1[node], true_reached ? BUSTER_CHECK_EMIT_ARM : BUSTER_CHECK_EMIT_ARM_PRUNED, owner);
+                        check_common_emit_reach(emission, condition, BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                    }
+                    else
+                    {
+                        check_common_emit_arm(emission, node, reached ? BUSTER_CHECK_EMIT_ARM_LEAF : BUSTER_CHECK_EMIT_ARM_LEAF_PRUNED, owner);
+                        check_common_emit_reach(emission, node, BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                    }
+                }
+                break;
+            case BUSTER_CHECK_EMIT_ARM_LEAF:
+            case BUSTER_CHECK_EMIT_ARM_LEAF_PRUNED:
+                if (node < graph->count && check_common_arm_owner(emission, owner))
+                {
+                    // The owner's conversion of this arm (clang's CheckConditionalOperand's CheckImplicitConversion): a
+                    // `<<` converted to _Bool, a constant's value, then the enumerations.
+                    uint32_t flags = 0;
+                    TypeId target = 0;
+                    (void)check_common_arm_source(emission, owner, &flags, &target);
+                    if (check_common_constant_arms(emission, owner))
+                    {
+                        if (check_common_bool_target(emission->types, target))
+                        {
+                            check_common_int_in_bool(emission->parser, emission->pp, emission->input, emission->stream, emission->types, node, emission->parents,
+                                                     emission->at_once, emission->scratch);
+                        }
+                        const CheckValue leaf = check_stream_value(emission->stream, node);
+                        if (kind == BUSTER_CHECK_EMIT_ARM_LEAF || leaf.constant_kind == CHECK_CONSTANT_FLOATING)
+                        {
+                            check_common_conversion_leaf(emission->parser, emission->pp, emission->input, emission->stream, emission->types, emission->spell, node,
+                                                         &leaf, target, emission->parents, emission->at_once, BUSTER_CHECK_LEAVES_ALL, emission->scratch);
+                        }
+                    }
+                    if (check_common_enum_cast_arms(emission, owner) != BUSTER_CHECK_NONE)
+                    {
+                        // (An argument's target has no typedef spelling here, as check_common_call_argument's had none.)
+                        check_common_enum_cast(emission->parser, emission->pp, emission->input, emission->stream, emission->types, emission->spell, node,
+                                               target, check_common_arm_argument(owner) ? BUSTER_CHECK_NONE : owner, true, emission->parents, emission->at_once,
+                                               emission->scratch);
+                    }
+                }
+                break;
             case BUSTER_CHECK_EMIT_CONVERSIONS:
                 // (Not in an unevaluated query's operand, whose conversions clang's DiagRuntimeBehavior drops.)
                 if (node >= graph->count || (emission->emitted[node] & BUSTER_CHECK_EMITTED_CONVERSIONS) != 0 ||
@@ -2945,7 +3175,21 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     const uint32_t offset = graph->argument_offsets[node];
                     for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                     {
-                        check_common_emit_reach(emission, graph->argument_nodes[offset + i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                        // A conditional argument's arms come after its own frame, each arm's conversions before its own (#1895).
+                        const uint32_t argument = graph->argument_nodes[offset + i];
+                        const uint32_t owner = BUSTER_CHECK_ARM_ARGUMENT | (offset + i) |
+                                               (argument_kind == BUSTER_CHECK_EMIT_ARGUMENT ? BUSTER_CHECK_ARM_PROTOTYPE : 0u);
+                        const bool conditional = argument < graph->count &&
+                                                 __builtin_expect(graph->ops[check_common_enum_cast_unselected(graph, argument)] == CHECK_OP_CONDITIONAL, 0);
+                        if (conditional && (check_common_enum_cast_arms(emission, owner) != BUSTER_CHECK_NONE || check_common_constant_arms(emission, owner)))
+                        {
+                            check_common_emit_arm(emission, argument,
+                                                  check_common_emit_evaluated(emission, argument) ? BUSTER_CHECK_EMIT_ARM : BUSTER_CHECK_EMIT_ARM_PRUNED, owner);
+                        }
+                        else
+                        {
+                            check_common_emit_reach(emission, argument, BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                        }
                         check_common_emit_push(emission, offset + i, argument_kind);
                     }
                 }
@@ -2957,9 +3201,24 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                 else
                 {
                     const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                    // (Only a conditional source, past its selections, has arms: the rest pay one test.)
+                    const uint32_t source = graph->ops[node] == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
+                    const CheckOp source_op = source < graph->count ? graph->ops[source] : CHECK_OP_COUNT;
+                    const bool branch = __builtin_expect(source_op == CHECK_OP_CONDITIONAL || source_op == CHECK_OP_SELECT, 0);
+                    const uint32_t enum_arms = branch ? check_common_enum_cast_arms(emission, node) : BUSTER_CHECK_NONE;
+                    const bool constant_arms = branch && check_common_constant_arms(emission, node);
                     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
                     {
-                        check_common_emit_reach(emission, operands[i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                        if (operands[i] == source && (enum_arms != BUSTER_CHECK_NONE || constant_arms))
+                        {
+                            // (An unevaluated conversion's arms are pruned from the start, as the walk's would be.)
+                            check_common_emit_arm(emission, source, check_common_emit_evaluated(emission, node) ? BUSTER_CHECK_EMIT_ARM : BUSTER_CHECK_EMIT_ARM_PRUNED,
+                                                  node);
+                        }
+                        else
+                        {
+                            check_common_emit_reach(emission, operands[i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                        }
                     }
                     if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
                     {
@@ -3448,8 +3707,10 @@ static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStre
                                  input->declarations[token] : BUSTER_CHECK_NONE;
     if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
     {
-        // The definitions are in their braces' order: the last that opens before the declaration holds it, but for one
-        // nested in an enumerator's value (`sizeof(enum I { x })`), where every definition is searched.
+        // The definitions are in their `enum` keywords' order, which is their braces' but for one nested in a C23 fixed
+        // underlying type (`enum E : typeof(sizeof(enum F { x })) { e }`). The last that opens before the declaration holds
+        // it, but for that one and one nested in an enumerator's value (`sizeof(enum I { x })`), where every definition is
+        // searched.
         uint32_t low = 0;
         uint32_t high = input->enum_definition_count;
         while (low < high)
@@ -3589,8 +3850,8 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
             const uint32_t question = check_common_enum_question(parser, graph->tokens[node], op == CHECK_OP_CONDITIONAL);
             const TypeId left_coerced = check_common_enum_coerced(input, stream, left);
             const TypeId right_coerced = check_common_enum_coerced(input, stream, right);
-            const uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
-            const uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+            const uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, types, left) : 0;
+            const uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, types, right) : 0;
             check_common_enum_mix(parser, pp, input, types, spell, scratch, kind, question, op == CHECK_OP_CONDITIONAL && question + 1 == graph->tokens[node],
                                   left_coerced, right_coerced, left_spelling, right_spelling);
         }
@@ -5000,7 +5261,7 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
             if (!atomic && check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, emission->types, root, part->conversion.type))
             {
-                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, BUSTER_CHECK_NONE, emission->parents,
+                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, BUSTER_CHECK_NONE, false, emission->parents,
                                        emission->at_once, emission->scratch);
             }
             if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
@@ -5406,7 +5667,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     const uint32_t work_capacity = graph->count * 8 + 16;
     uint32_t* work_nodes = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, work_capacity) : NULL;
     uint8_t* work_kinds = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, work_capacity) : NULL;
-    if (graph->count != 0 && (work_nodes == NULL || work_kinds == NULL))
+    uint32_t* work_owners = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, work_capacity) : NULL;
+    if (graph->count != 0 && (work_nodes == NULL || work_kinds == NULL || work_owners == NULL))
     {
         check_common_exhausted(pp);
     }
@@ -5453,6 +5715,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .reach = reach,
             .work_nodes = work_nodes,
             .work_kinds = work_kinds,
+            .work_owners = work_owners,
             .work_capacity = work_capacity,
             .work_count = 0,
             .scratch = scratch,
@@ -6022,7 +6285,7 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
+                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
@@ -6050,7 +6313,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
+                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     if (actual.length != 0)
@@ -9054,15 +9317,47 @@ static bool check_common_loop_unevaluated_builtin(const CheckGraph* graph, uint3
            (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE || id == CBUILTIN_CLASSIFY_TYPE);
 }
 
-// Whether `node`'s evaluation is clang's EvaluatedExprVisitor's: not under a sizeof, an alignof or an unevaluated-argument
-// builtin's call, whose operands it skips.
+// Whether `node`'s evaluation is clang's EvaluatedExprVisitor's: not under a sizeof (of a variable array too, whose bounds
+// it never visits either), an alignof or an unevaluated-argument builtin's call, whose operands it skips.
 static bool check_common_loop_evaluated(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
 {
     bool result = true;
     for (uint32_t at = node, steps = 0; result && at < graph->count && steps < graph->count; steps += 1)
     {
-        result = graph->ops[at] != CHECK_OP_SIZEOF && graph->ops[at] != CHECK_OP_ALIGNOF && !check_common_loop_unevaluated_builtin(graph, at);
+        result = graph->ops[at] != CHECK_OP_SIZEOF && graph->ops[at] != CHECK_OP_SIZEOF_VLA && graph->ops[at] != CHECK_OP_ALIGNOF &&
+                 !check_common_loop_unevaluated_builtin(graph, at);
         at = parents[at];
+    }
+    return result;
+}
+
+// Whether the visitor reaches `token`, inside the for statement whose `)` is `close` (#1821): its node, where it has one,
+// is evaluated (check_common_loop_evaluated), and so is the value of each GNU statement expression around it there, a
+// node at its `)`, as a statement expression's statements are graph roots of their own that only the parse tree places in
+// its operand; none is in a specifier's operand (typeof's), nor has a value without a node. And each static selection
+// around it there chooses the operand it is in (check_warning_graph_chooses), as the visitor reads the chosen operand
+// alone: a selection's other operands and its controlling expression are graph roots of their own too, which a selection
+// inside a statement expression inside another selection's chosen operand would hide from a test of the roots alone.
+static bool check_common_loop_reached(const Parser* parser, const CheckInput* input, const uint32_t* parents, uint32_t token, uint32_t close)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t first = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    bool result = first >= graph->count || check_common_loop_evaluated(graph, parents, first);
+    for (uint32_t at = token, steps = 0; result && at < parser->tokens.count && at != close && parser->tree.parents[at] != at && steps < parser->tokens.count;
+         steps += 1)
+    {
+        at = parser->tree.parents[at];
+        const bool group = at < input->token_count && parser->tree.roles[at] == PARSE_ROLE_CLOSE_GROUP && input->expression_regions != NULL &&
+                           input->expression_regions[at] != 0;
+        const uint32_t node = group && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+        // (A specifier's operand, typeof's or _Alignas's, is the visitor's no more than a type's, nor is a sizeof's or an
+        // alignof's, a type name's bounds too.)
+        const uint8_t role = at < parser->tokens.count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
+        const bool unevaluated = role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_SIZEOF ||
+                                 (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[at] == PARSE_KIND_SIZEOF) ||
+                                 (role == PARSE_ROLE_CLOSE_KEYWORD && !check_warning_graph_chooses(input, parser, at, token));
+        result = !unevaluated &&
+                 (!group || (node < graph->count && graph->ops[node] == CHECK_OP_STATEMENT_VALUE && check_common_loop_evaluated(graph, parents, node)));
     }
     return result;
 }
@@ -9177,20 +9472,14 @@ static bool check_common_loop_extract(const Parser* parser, const Preprocessor* 
 
 // Whether the use of a loop's variable at `token` may change it, clang's DeclMatcher: any but a read of its value (an
 // assignment's target, an increment's operand, an address, a member's object or an array's decay). An unevaluated use
-// is none.
-static bool check_common_loop_changes(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const uint32_t* parents,
-                                      const uint8_t* unselected, uint32_t token)
+// is none, a statement expression's inside an unevaluated operand too (check_common_loop_reached).
+static bool check_common_loop_changes(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const uint32_t* parents, uint32_t token, uint32_t close)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
     bool result = false;
-    // (A static selection's unchosen operand, or its controlling expression, is a root clang's visitor never reaches.)
-    uint32_t root = node;
-    for (uint32_t steps = 0; root < graph->count && parents[root] < graph->count && steps < graph->count; steps += 1)
-    {
-        root = parents[root];
-    }
-    if (node < graph->count && check_common_loop_evaluated(graph, parents, node) && (unselected == NULL || unselected[root] == 0))
+    if (node < graph->count)
     {
         const uint32_t parent = parents[node];
         const CheckOp op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
@@ -9198,6 +9487,8 @@ static bool check_common_loop_changes(const CheckInput* input, const CheckStream
         result = type_kind_is_array(check_action_kind(types, check_stream_type(stream, node))) || op == CHECK_OP_ADDRESS ||
                  (target && (op == CHECK_OP_ASSIGN || op == CHECK_OP_MEMBER || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) ||
                              (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)));
+        // (Only a change asks for the climb.)
+        result = result && check_common_loop_reached(parser, input, parents, token, close);
     }
     return result;
 }
@@ -9231,11 +9522,9 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
     static const uint8_t roles[] = { PARSE_ROLE_CLOSE_FOR };
     CheckCommonScan scan = { 0 };
     const bool enabled = parents != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true);
-    // The condition's walk's stack and variables, and the static selections' unchosen roots, made at the first loop that
-    // needs each.
+    // The condition's walk's stack and variables, made at the first loop that needs them.
     uint32_t* stack = NULL;
     uint32_t* decls = NULL;
-    const uint8_t* unselected = NULL;
     for (uint32_t close = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count;
          close < count && !pp->fatal; close = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
     {
@@ -9295,10 +9584,6 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         uint32_t at = BUSTER_CHECK_NONE;
         if (root < input->graph.count && decls != NULL && check_common_loop_extract(parser, pp, input, stream, root, stack, decls, &used, &at) && used != 0)
         {
-            if (unselected == NULL)
-            {
-                unselected = check_common_unselected(&input->graph, parser, scratch);
-            }
             bool found = false;
             for (uint32_t token = semis[0] + 1; !found && token <= end; token += 1)
             {
@@ -9309,8 +9594,9 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                 {
                     listed |= decls[i] == declaration;
                 }
-                found = kind == PARSE_KIND_RETURN || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_GOTO ||
-                        (listed && check_common_loop_changes(input, stream, types, parents, unselected, token));
+                const bool jump = kind == PARSE_KIND_RETURN || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_GOTO;
+                found = (jump && check_common_loop_reached(parser, input, parents, token, close)) ||
+                        (listed && check_common_loop_changes(parser, input, stream, types, parents, token, close));
             }
             if (!found)
             {

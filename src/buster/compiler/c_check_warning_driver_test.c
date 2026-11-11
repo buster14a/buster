@@ -695,6 +695,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "duplicate specifiers in operand type names",
+        .source = "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+                  "_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+                  "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1; }\n",
+        .warnings = 7,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
@@ -1779,6 +1787,23 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
+        // Clang takes the overflow builtins of _BitInts past 128 bits (#1447) but mul_overflow's of a signed one, as an
+        // operand or the destination, at that argument, the first of them alone; an unsigned one's product, and a signed
+        // one's sum and difference, are taken.
+        .name = "mul_overflow of a signed _BitInt past 128 bits",
+        .source = "typedef _BitInt(200) S; typedef unsigned _BitInt(200) U;\n"
+                  "int f1(S a, S b, S *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f2(int a, int b, S *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f3(U a, U b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f4(U a, S b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f5(U a, int b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f6(_BitInt(129) a, int b, int *r) { return __builtin_mul_overflow(a, (b), r); }\n"
+                  "int f7(__int128 a, __int128 b, _BitInt(256) *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f8(S a, S b, S *r) { return __builtin_add_overflow(a, b, r) + __builtin_sub_overflow(a, b, r); }\n"
+                  "int f9(unsigned _BitInt(129) a, U *r) { return __builtin_mul_overflow(a, 3, r); }\n",
+        .errors = 5,
+    },
+    {
         // A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
         // keyword), in a definition's list, a nested prototype's (not one the outer list declares already), a member's, a
         // block's and a bound's, a definition shadowing a file-scope tag; a list's redefinition, with its note, and an
@@ -1879,6 +1904,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
+    // test-checker-driver reports this sweep's time with each run mode (#2071, check_driver_run_modes).
+    const uint64_t began = check_test_driver_nanoseconds();
     char source[PATH_MAX];
     char objects[4][PATH_MAX];
     snprintf(source, sizeof(source), "%s/default-warning.c", directory);
@@ -2003,6 +2030,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
         }
     }
     unlink(source);
+    check_driver_run_modes.sweep_fixtures += fixture_count;
+    check_driver_run_modes.sweep_nanoseconds += check_test_driver_nanoseconds() - began;
 }
 
 static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
