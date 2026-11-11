@@ -413,6 +413,52 @@ static bool check_semantic_binary(uint8_t role)
 
 // Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace. This
 // is a bounded token pass, including macro expansions; it never walks the expression recursively.
+// A run of builtin type keywords as clang's TypePrinter spells their type (#1447): `unsigned` is "unsigned int",
+// `long unsigned int` "unsigned long", `signed` "int". NULL where the run isn't one it reorders (a typedef's, a
+// complex's, a _BitInt's, or any keyword it doesn't know), which keeps the keywords as written.
+static const char* check_semantic_builtin_spelling(const String8* parts, uint32_t count)
+{
+    uint32_t longs = 0;
+    bool is_unsigned = false;
+    bool is_signed = false;
+    bool is_int = false;
+    bool is_char = false;
+    bool is_short = false;
+    bool is_double = false;
+    bool known = count != 0;
+    for (uint32_t i = 0; known && i < count; i += 1)
+    {
+        const String8 word = parts[i];
+        const bool unsigned_word = word.length == 8 && memcmp(word.pointer, "unsigned", 8) == 0;
+        const bool signed_word = (word.length == 6 && memcmp(word.pointer, "signed", 6) == 0) ||
+                                 (word.length == 8 && memcmp(word.pointer, "__signed", 8) == 0) ||
+                                 (word.length == 10 && memcmp(word.pointer, "__signed__", 10) == 0);
+        const bool int_word = word.length == 3 && memcmp(word.pointer, "int", 3) == 0;
+        const bool char_word = word.length == 4 && memcmp(word.pointer, "char", 4) == 0;
+        const bool short_word = word.length == 5 && memcmp(word.pointer, "short", 5) == 0;
+        const bool long_word = word.length == 4 && memcmp(word.pointer, "long", 4) == 0;
+        const bool double_word = word.length == 6 && memcmp(word.pointer, "double", 6) == 0;
+        is_unsigned |= unsigned_word;
+        is_signed |= signed_word;
+        is_int |= int_word;
+        is_char |= char_word;
+        is_short |= short_word;
+        is_double |= double_word;
+        longs += long_word ? 1 : 0;
+        known = unsigned_word || signed_word || int_word || char_word || short_word || long_word || double_word;
+    }
+    const bool integer = !is_double && !(is_unsigned && is_signed) && longs <= 2 && !(is_char && (is_short || is_int || longs != 0)) && !(is_short && longs != 0);
+    const char* result = !known ? NULL :
+                         is_double ? (longs == 1 && !is_unsigned && !is_signed && !is_int && !is_char && !is_short ? "long double" : longs == 0 && count == 1 ? "double" : NULL) :
+                         !integer ? NULL :
+                         is_char ? (is_unsigned ? "unsigned char" : is_signed ? "signed char" : "char") :
+                         is_short ? (is_unsigned ? "unsigned short" : "short") :
+                         longs == 2 ? (is_unsigned ? "unsigned long long" : "long long") :
+                         longs == 1 ? (is_unsigned ? "unsigned long" : "long") :
+                         is_unsigned ? "unsigned int" : "int";
+    return result;
+}
+
 static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch)
 {
     const uint32_t count = end - first;
@@ -425,15 +471,54 @@ static const char* check_semantic_requirement(const Parser* parser, Preprocessor
         valid = parts[i].length != 0 && parts[i].length < UINT64_MAX - length - 1;
         length += valid ? parts[i].length + 1 : 0;
     }
+    // A cast's type name prints its builtin type as clang's TypePrinter does (#1447, `(unsigned)n`'s `(unsigned int)n`):
+    // its run of type keywords becomes the first one's text, and the rest print nothing.
+    uint8_t* dropped = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    valid &= dropped != NULL;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        dropped[i] = 0;
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const bool cast = parser->tree.roles[first + i] == PARSE_ROLE_OPEN_CAST;
+        uint32_t run = cast ? i + 1 : count;
+        while (run < count && parser->tokens.kinds[first + run] == PARSE_KIND_QUALIFIER)
+        {
+            run += 1;
+        }
+        uint32_t stop = run;
+        while (stop < count && parser->tokens.kinds[first + stop] == PARSE_KIND_TYPE)
+        {
+            stop += 1;
+        }
+        const char* spelled = cast && stop > run ? check_semantic_builtin_spelling(parts + run, stop - run) : NULL;
+        if (spelled != NULL)
+        {
+            parts[run] = (String8){ .pointer = (char*)spelled, .length = strlen(spelled) };
+            length += parts[run].length;
+            for (uint32_t k = run + 1; k < stop; k += 1)
+            {
+                dropped[k] = 1;
+            }
+        }
+    }
     char* result = valid && length < UINT64_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, length + 1) : NULL;
     uint64_t at = 0;
+    uint32_t last = UINT32_MAX;
     for (uint32_t i = 0; result != NULL && i < count; i += 1)
     {
+        if (dropped[i] != 0)
+        {
+            continue;
+        }
+        const uint32_t prior = last;
+        last = i;
         const uint8_t role = parser->tree.roles[first + i];
-        const uint8_t previous = i != 0 ? parser->tree.roles[first + i - 1] : PARSE_ROLE_NONE;
-        const bool word = i != 0 && pp_word_character((uint8_t)parts[i - 1].pointer[parts[i - 1].length - 1], pp_dollar_punctuation(&pp->options)) &&
-                                   pp_word_character((uint8_t)parts[i].pointer[0], pp_dollar_punctuation(&pp->options));
-        if (i != 0 && (check_semantic_binary(role) || check_semantic_binary(previous) || word))
+        const uint8_t previous = prior != UINT32_MAX ? parser->tree.roles[first + prior] : PARSE_ROLE_NONE;
+        const bool word = prior != UINT32_MAX && pp_word_character((uint8_t)parts[prior].pointer[parts[prior].length - 1], pp_dollar_punctuation(&pp->options)) &&
+                                                 pp_word_character((uint8_t)parts[i].pointer[0], pp_dollar_punctuation(&pp->options));
+        if (prior != UINT32_MAX && (check_semantic_binary(role) || check_semantic_binary(previous) || word))
         {
             result[at++] = ' ';
         }
