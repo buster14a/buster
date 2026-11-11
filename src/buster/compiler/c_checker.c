@@ -335,6 +335,11 @@ struct CheckGraph
     CheckVectorCall* vector_members;
     uint32_t vector_member_count;
     uint32_t vector_member_capacity;
+    // Whether no `->` node has a record in vector_members (#2278): the unit's reader decodes a `->` member as a swizzle
+    // only in a unit with an extended vector type (#2095), and sets this, once it has read the unit, for a unit without
+    // one. check_graph_action then looks only `.` members up, as it did before #2106. False, as a graph another reader
+    // builds has it, searches for both.
+    bool plain_arrows;
     CheckX86Call* x86_calls;
     uint32_t x86_count;
     uint32_t x86_capacity;
@@ -1902,7 +1907,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
         .node = node,
         .context = check_graph_context(graph, node, stream->constant_evaluated != NULL && __builtin_expect(stream->constant_evaluated[node] != 0, 0)),
     };
-    if (__builtin_expect(action->op == CHECK_OP_MEMBER || action->op == CHECK_OP_ARROW, 0) && graph->vector_member_count != 0)
+    if (__builtin_expect(action->op == CHECK_OP_MEMBER || (action->op == CHECK_OP_ARROW && !graph->plain_arrows), 0) && graph->vector_member_count != 0)
     {
         uint32_t first = 0;
         uint32_t last = graph->vector_member_count;

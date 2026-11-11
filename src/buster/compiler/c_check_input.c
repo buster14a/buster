@@ -15869,6 +15869,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 {
                     check_graph_record_finish(&input->graph);
                 }
+                // No `->` member was decoded as a swizzle in a unit without an extended vector type (#2278).
+                input->graph.plain_arrows = !reader.types->ext_vectors;
             }
         }
         // A sparse column's write that found no block (c_check_sparse.c), which the pool's capacity rules out, lost its value.
