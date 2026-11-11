@@ -900,6 +900,14 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "void *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2, 3)));\n",
         "typedef unsigned long size_t;\nstatic void *memcpy(void *d, const void *s, size_t n);\n"
         "void *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2, 3)));\n",
+        // An undeclared library function (#1447): clang's lookup declares it implicitly, with its diagnostic, and the
+        // attribute takes that declaration; a later call doesn't declare it again.
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2, 3)));\n"
+        "void g(void *a, const void *b) { f(a, b, 1); memcpy(a, b, 1); }\n",
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2)));\n",
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin((memmove), 1, 2, 3)));\n",
+        "typedef unsigned long size_t;\nsize_t f(const char *s) __attribute__((diagnose_as_builtin(strlen, 1)));\nsize_t g(const char *s) { return strlen(s) + f(s); }\n",
+        "typedef unsigned long size_t;\nvoid g(void) {\nvoid *f(void *d, int c, size_t n) __attribute__((diagnose_as_builtin(memset, 1, 2, 3)));\nmemset(0, 0, 0);\n}\n",
         "int x;\nint f(int a) __attribute__((diagnose_as_builtin(x, 1)));\n",
         "int f(int a) __attribute__((diagnose_as_builtin(y, 1)));\n",
         "int f(int a) __attribute__((diagnose_as_builtin(__builtin_abs, a)));\n",
@@ -1029,6 +1037,10 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "void g(void) { k(); }\n__attribute__((enforce_tcb(\"x\"))) void f(void) { k(); }\n",
         "__attribute__((enforce_tcb(\"x\"), enforce_tcb(\"y\"))) void f(void) { k(); }\n",
         "__attribute__((enforce_tcb(\"x\"))) void f(void) { int a = sizeof(k()); (void)a; }\n",
+        // C89's implicit library declaration in diagnose_as_builtin's argument: clang's warning, and the attribute's
+        // count error.
+        "typedef unsigned long size_t;\nvoid *f(void *d, const void *s, size_t n) __attribute__((diagnose_as_builtin(memcpy, 1, 2)));\n"
+        "void g(void *a, const void *b) { memcpy(a, b, 1); }\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
