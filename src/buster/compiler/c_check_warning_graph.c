@@ -86,7 +86,15 @@ static inline __attribute__((always_inline)) void check_warning_graph_null(Check
         // The destination operand's own spelling (#992): the lvalue's declared type, qualifiers kept, and its
         // typedef specifier's declaration where its base was a typedef name.
         uint32_t spelling = 0;
-        const TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser, lvalue, declared, destination, &spelling);
+        TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser, lvalue, declared, destination, &spelling);
+        // A member's own declarator's specifiers (#1837): `s.lp = 1-1` of a member `LP lp` converts to 'LP'.
+        const CheckInput* input = reader->output;
+        const uint32_t lvalue_node = lvalue != 0 && lvalue < input->token_count && input->token_nodes != NULL ? input->token_nodes[lvalue] : BUSTER_CHECK_NONE;
+        const bool member = lvalue_node < graph->count && (graph->ops[lvalue_node] == CHECK_OP_MEMBER || graph->ops[lvalue_node] == CHECK_OP_ARROW);
+        const uint32_t selected = member ? check_semantic_member_of(reader->parser, input, stream, reader->types, lvalue_node) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(reader->parser, input, reader->types, selected) : BUSTER_CHECK_NONE;
+        spelling = declarator < input->token_count ? check_input_specifier_spelling(input, reader->parser, declarator) : spelling;
+        printed = declarator < input->token_count ? destination : printed;
         spelling = call < graph->count ? check_input_call_parameter_spelling(reader->parser, reader->output, stream, reader->types, call, argument) : spelling;
         check_input_null_spelling(reader, destination, printed, spelling, &value, first, end, completion);
     }

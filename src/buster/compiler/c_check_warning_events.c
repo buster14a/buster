@@ -150,13 +150,19 @@ enum
     // An enum's fixed underlying type with const or volatile, which it drops (#1952, clang's ActOnTag):
     // -Wunderlying-cv-qualifier-ignored, on by default.
     CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER = 122,
+    // A `#pragma pack (push, ...)` left open at the unit's end, or a pack value an included file changes (#1849, clang's
+    // DiagnoseUnterminatedPragmaAlignPack): -Wpragma-pack, on by default, under -Wpragmas.
+    CHECK_WARNING_ID_PRAGMA_PACK = 123,
+    // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
+    // of no option.
+    CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
     // A C-style cast from a pointer to a narrower integer type (#1943, clang's CheckCStyleCast), on by default:
     // -Wpointer-to-int-cast's, with -Wvoid-pointer-to-int-cast's from a pointer to void under it, and to an enumeration
     // -Wpointer-to-enum-cast's, with -Wvoid-pointer-to-enum-cast's under it.
-    CHECK_WARNING_ID_POINTER_TO_INT_CAST = 123,
-    CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 124,
-    CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 125,
-    CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 126,
+    CHECK_WARNING_ID_POINTER_TO_INT_CAST = 125,
+    CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
+    CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
+    CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -511,7 +517,7 @@ typedef enum CheckWarningCompletion
 // after a definition), its token the attribute's that made it, for its policy's place.
 #define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
-// `#pragma options align` or `#pragma align` warning).
+// `#pragma pack`, `#pragma options align` or `#pragma align` warning, whose payload.name is its CheckPackMessage).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its

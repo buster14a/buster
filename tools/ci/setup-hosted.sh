@@ -14,7 +14,7 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 bash "$here/hosted-release.sh" verify "$BUSTER_HOSTED_RELEASES"
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends gcc g++ binutils libc6-dev \
-    gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev
+    gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev tcl8.6-dev
 root="$RUNNER_TEMP/buster-hosted-tools"
 start=$SECONDS
 bash "$here/install-hosted-tools.sh" "$root"
