@@ -133,24 +133,38 @@ static void check_test_driver_symbol_pragmas(CheckTest* test, const char* clang,
     unlink(program);
 }
 
-// `#pragma weak A = T` (#1849): the weak aliases of the shapes whose A the unit declares, each symbol's binding and
-// visibility clang's by both paths, whose objects must be the same bytes, linked and run as clang's object; the shapes
-// still refused by name; and the warning for a T never declared, line for line clang's.
+// `#pragma weak A = T` (#1849): the weak aliases, each symbol's binding and visibility clang's by both paths, whose
+// objects must be the same bytes, linked and run as clang's object: the shapes whose A the unit declares, and clang's
+// clones of T's declaration (an A never declared, of a function or a variable, a static, a T defined later; an A declared
+// before the pragma, never named, of another kind, type, thread-local storage or with a section); an A that is an alias
+// already, which keeps its own; the shapes still refused by name, which clang's Sema errors at; and the warning for a T
+// never declared, line for line clang's.
 static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char source[] =
         "#include <stdio.h>\n"
         "int t(void) { return 1; }\nlong w_storage = 5;\nstatic int s(void) { return 4; }\n"
         "int a(void);\nextern long v;\nint ps(void);\nint b(void);\nint c(void) { return 3; }\n"
-        "int main(void) { printf(\"%d %ld %d %d %d\\n\", a(), v, ps(), b(), c()); return 0; }\n"
+        "long k1(void);\nextern int k2;\nextern long k3 __attribute__((section(\"sx\")));\n__thread int tls_t = 3;\nextern int k4;\n"
+        "static int st = 6;\nlong other = 8;\nextern long k5 __attribute__((alias(\"other\")));\nlong get_k6(void);\n"
+        "int main(void) { printf(\"%d %ld %d %d %d %ld %ld %d\\n\", a(), v, ps(), b(), c(), k5, get_k6(), tls_t); return 0; }\n"
         "#pragma weak a = t\n#pragma weak v = w_storage\n#pragma weak ps = s\n#pragma weak c = t\n#pragma weak b = later\n"
-        "int later(void) { return 9; }\n";
-    static const char* const names[] = { "t", "w_storage", "s", "a", "v", "ps", "b", "c", "later", "main" };
+        "#pragma weak u1 = t\n#pragma weak u2 = w_storage\n#pragma weak k1 = w_storage\n#pragma weak k2 = w_storage\n#pragma weak k3 = w_storage\n"
+        "#pragma weak k4 = tls_t\n#pragma weak u3 = st\n#pragma weak k5 = w_storage\n#pragma weak u4 = later2\n#pragma weak k6 = w_storage\n"
+        "extern long k6;\nlong get_k6(void) { return k6; }\n"
+        "int later(void) { return 9; }\nint later2(void) { return 11; }\n";
+    static const char* const names[] = {
+        "t", "w_storage", "s", "a", "v", "ps", "b", "c", "later", "main", "u1", "u2", "u3", "u4", "k1", "k2", "k3", "k4", "k5", "k6", "st", "other", "tls_t",
+    };
     static const char* const refused[] = {
-        "int t(void) { return 1; }\n#pragma weak a = t\n",
+        // A declared before the pragma and named after it: clang's "reference to 'a' is ambiguous".
         "int t(void) { return 1; }\nint a(void);\n#pragma weak a = t\nint u(void) { return a(); }\n",
-        "int t(void) { return 1; }\nlong a(void);\n#pragma weak a = t\n",
+        // T not defined: "alias must point to a defined variable or function".
         "int t(void);\nint a(void);\n#pragma weak a = t\n",
+        // A defined after the pragma: "redefinition of 'a'".
+        "int t = 1;\n#pragma weak a = t\nint a = 2;\n",
+        // A declared after the pragma with another type: "redeclaration of 'a' with a different type".
+        "long t = 1;\n#pragma weak a = t\nextern int a;\n",
     };
     char path[512];
     char objects[3][512];

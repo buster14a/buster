@@ -612,10 +612,36 @@ static const char* check_vector_lower_baseline_element(const X86Target* target, 
         check_vector_baseline_shuffle(&context, v2, v2, 0x88);
         check_vector_baseline_binary(&context, X86_FORM_PUNPCKLDQ_X_XM128, v0, v0, v2);
     }
+    else if (op == CHECK_OP_MULTIPLY && !element.floating && element.bytes == 8)
+    {
+        // No qword multiply without AVX-512DQ (#1834): a * b modulo 2^64 is lo(a) * lo(b) plus (hi(a) * lo(b) +
+        // lo(a) * hi(b)) << 32, each product PMULUDQ's of the qwords' low dwords; PSHUFD 0xF5 brings each high dword
+        // down beside a copy of itself.
+        check_vector_baseline_shuffle(&context, v2, v0, 0xf5);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PMULUDQ), v2, v2, v1);
+        check_vector_baseline_shuffle(&context, v3, v1, 0xf5);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PMULUDQ), v3, v3, v0);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PADDQ), v2, v2, v3);
+        check_vector_baseline_shift(&context, v2, 8, 32);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PMULUDQ), v0, v0, v1);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PADDQ), v0, v0, v2);
+    }
     else if (element.floating && op == CHECK_OP_DIVIDE && bytes < 16)
     {
-        // Unused zero lanes would execute 0/0 and spuriously raise FE_INVALID; do not silently use a packed divide.
-        reason = "division of narrow floating vectors without AVX-512 masking";
+        // The register's lanes past the operands' are zeros, which a packed divide would divide by, raising FE_INVALID
+        // for 0/0 (#1834): the divisor's lanes past its own are 1.0f first (PCMPEQD's ones shifted left by 25 and right
+        // by 2, 0x3F800000; a double's high one their pair, finite and not zero), joined to it by PUNPCKLQDQ, a single
+        // float's by PUNPCKLDQ first; the quotient's lanes past its own are then zeros.
+        check_vector_baseline_ones(&context, v2);
+        check_vector_baseline_shift_kind(&context, 0, v2, 4, 25);
+        check_vector_baseline_shift_kind(&context, 1, v2, 4, 2);
+        if (bytes == 4)
+        {
+            check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PUNPCKLDQ), v1, v1, v2);
+        }
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PUNPCKLQDQ), v1, v1, v2);
+        check_vector_baseline_binary(&context, element.bytes == 8 ? BUSTER_CHECK_BASE_PACKED(&context, DIVPD) : BUSTER_CHECK_BASE_PACKED(&context, DIVPS), v0,
+                                     v0, v1);
     }
     else
     {
