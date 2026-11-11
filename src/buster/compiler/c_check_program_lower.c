@@ -14974,7 +14974,19 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
 // of the checked program's, with its controls). Returns false when an arena has no room.
 static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
 {
-    const uint32_t capacity = program->case_count / 4;
+    // A table per switch of four cases or more, of each body: a target_clones copy's again (#2247, CheckProgram.body_options),
+    // of at most a fifth of its controls (its SWITCH and four CASEs each).
+    uint32_t capacity = program->case_count / 4;
+    if (capacity != 0 && program->body_options != 0)
+    {
+        uint64_t copied = 0;
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            copied += program->body_options[b] != 0 ? program->bodies[b].count : 0;
+        }
+        const uint64_t total = (uint64_t)capacity + copied / 5;
+        capacity = total < UINT32_MAX ? (uint32_t)total : UINT32_MAX;
+    }
     bool valid = true;
     if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
     {
@@ -14986,6 +14998,11 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
         for (uint32_t b = 0; valid && b < program->body_count; b += 1)
         {
             const CheckProgramBody* body = program->bodies + b;
+            // (A target_clones copy is its body again, right after it, #2247: its switches' tables are its own.)
+            while (s != 0 && program->switches[s - 1] >= body->first)
+            {
+                s -= 1;
+            }
             while (s < program->switch_count && program->switches[s] < body->first)
             {
                 s += 1;
@@ -15001,20 +15018,21 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
     return valid;
 }
 
-// The jump table of the SWITCH control at `control`, an index in the program's controls, or BUSTER_CHECK_NONE: a search
-// of the `count` tables, which check_lower_switch_tables made in the controls' order.
-static uint32_t check_lower_table_of(const CheckLowerTable* tables, uint32_t count, uint32_t control)
+// The jump table of function `function`'s SWITCH control at `control`, an index in the program's controls, or
+// BUSTER_CHECK_NONE: a search of the `count` tables, which check_lower_switch_tables made in the functions' order and
+// each function's in its controls' order (a target_clones copy shares its body's controls, but not its tables, #2247).
+static uint32_t check_lower_table_of(const CheckLowerTable* tables, uint32_t count, uint32_t function, uint32_t control)
 {
     uint32_t first = 0;
     uint32_t end = count;
     while (first < end)
     {
         const uint32_t middle = first + (end - first) / 2;
-        const bool before = tables[middle].control < control;
+        const bool before = tables[middle].function < function || (tables[middle].function == function && tables[middle].control < control);
         first = before ? middle + 1 : first;
         end = before ? end : middle;
     }
-    return first < count && tables[first].control == control ? first : BUSTER_CHECK_NONE;
+    return first < count && tables[first].function == function && tables[first].control == control ? first : BUSTER_CHECK_NONE;
 }
 
 // The index of a jump table's entry: the switch's value (in `local`, of `class`) less the table's lowest, unsigned.
@@ -16091,7 +16109,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         // Its CASE controls come next: through its jump table (check_lower_switch_tables decided it), its first one
         // writes the dispatch, and none compares.
         writer->table_switch = control.token;
-        writer->table_current = check_lower_table_of(writer->tables, writer->table_count, writer->body->first + index);
+        writer->table_current = check_lower_table_of(writer->tables, writer->table_count, (uint32_t)(writer->body - writer->program->bodies), writer->body->first + index);
         writer->table_pending = writer->table_current != BUSTER_CHECK_NONE;
     }
     else if (control.kind == CHECK_CONTROL_CASE)
