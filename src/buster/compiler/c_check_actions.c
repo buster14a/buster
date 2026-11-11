@@ -512,6 +512,10 @@ static bool check_action_integer_type(const TypeTable* table, TypeId type, uint3
     return result;
 }
 
+// _BitInt constants past 128 bits (#1447, c_check_wide.c): the cold branches that the gatekeeper above leaves to them.
+static bool check_wide_truth(const TypeTable* table, const CheckValue* value, bool* truth);
+static bool check_wide_convert(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node);
+
 static bool check_action_is_integer(const TypeTable* table, TypeId type)
 {
     const uint8_t kind = check_action_kind(table, type);
@@ -546,6 +550,25 @@ static void check_action_diagnose(CheckActionResult* result, CheckDiagnostic dia
     }
 }
 
+// A builtin's wrong argument count (#1860), the count clang names: `expected`, the bound the call breaks (0x3f at most), with
+// `bound` where clang words it as one ("expected at least" for too few, "at most" for too many). The operand carries
+// them, with 0x80 that marks it present, for the driver's words (check_driver_call_count). A count past 0x3f keeps the
+// generic operand.
+static void check_action_diagnose_expected(CheckActionResult* result, uint32_t expected, bool bound)
+{
+    const uint32_t operand = expected <= 0x3fu ? 0x80u | (bound ? 0x40u : 0u) | expected : 0u;
+    check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, operand);
+}
+
+// `count` arguments where the builtin takes `minimum` to `maximum` (UINT32_MAX for no bound), as clang's checkArgCountRange
+// and checkArgCountAtLeast word them: too few is "expected at least" only where there is no maximum, too many "at most"
+// where the two differ.
+static void check_action_diagnose_count(CheckActionResult* result, uint32_t count, uint32_t minimum, uint32_t maximum)
+{
+    const bool few = count < minimum;
+    check_action_diagnose_expected(result, few ? minimum : maximum, few ? maximum == UINT32_MAX : minimum != maximum);
+}
+
 #include "c_check_provenance.c"
 
 static bool check_action_truth(const TypeTable* table, const CheckValue* value, bool* truth)
@@ -556,8 +579,11 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
         uint32_t width = 0;
         bool is_signed = false;
         const bool integer = check_action_integer_type(table, value->type, &width, &is_signed);
-        known &= integer;
         *truth = integer && (value->integer & check_action_mask(width)) != 0;
+        if (__builtin_expect(!integer, 0))
+        {
+            known &= check_wide_truth(table, value, truth);
+        }
     }
     else if (value->constant_kind == CHECK_CONSTANT_FLOATING)
     {
@@ -875,6 +901,12 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
         value->integer = truth;
     }
+    else if (__builtin_expect((!source_integer && check_action_kind(table, source) == BUSTER_TYPE_KIND_BIT_INT) ||
+                              (!target_integer && target_kind == BUSTER_TYPE_KIND_BIT_INT), 0) &&
+             check_wide_convert(table, value, destination, node))
+    {
+        // A _BitInt past 128 bits on either side (#1447, c_check_wide.c).
+    }
     else if (target_integer && value->constant_kind == CHECK_CONSTANT_INTEGER && source_integer)
     {
         const unsigned __int128 mask = check_action_mask(source_width);
@@ -1032,7 +1064,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     value->type = destination;
     value->category = CHECK_RVALUE;
     value->flags &= ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_NULL_POINTER);
-    if (!target_integer)
+    if (!target_integer && target_kind != BUSTER_TYPE_KIND_BIT_INT)
     {
         value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
     }
@@ -1589,6 +1621,8 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
     return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
+#include "c_check_wide.c"
+
 // A __float128 operation's bits (#1250): the host's binary128 arithmetic, rounded once to nearest, ties to even, as
 // APFloat's, with its NaNs (check_action_fold_nan's rule): the first NaN operand's bits, quieted, or for an invalid
 // operation on numbers the positive canonical NaN. `op` is +, -, * or /, the only ones C applies to a real floating
@@ -1883,6 +1917,11 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                                              (check_action_kind(table, original_right) == BUSTER_TYPE_KIND_COMPLEX ? 2u : 0u);
                     result->warnings |= check_complex_fold(table, op, &left, &right, domains, &result->value, action->node, action->context.extensions,
                                                               action->context.constant_evaluated);
+                }
+                else if (__builtin_expect(left.constant_kind == CHECK_CONSTANT_INTEGER && (unary || right.constant_kind == CHECK_CONSTANT_INTEGER), 0) &&
+                         check_wide_fold(table, op, &left, &right, &result->value, action->node, action->context.extensions, action->scalar, &result->warnings))
+                {
+                    // A _BitInt past 128 bits (#1447, c_check_wide.c).
                 }
                 else if (!check_action_fold_symbolic(table, op, &left, &right, &result->value))
                 {
@@ -2181,9 +2220,15 @@ static bool check_action_i64(const TypeTable* table, const CheckValue* value, in
 {
     uint32_t width = 0;
     bool is_signed = false;
-    bool fits = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE && check_action_integer_type(table, value->type, &width, &is_signed);
+    const bool constant = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE;
+    bool fits = constant && check_action_integer_type(table, value->type, &width, &is_signed);
     *number = 0;
-    if (fits)
+    if (__builtin_expect(constant && !fits, 0))
+    {
+        // A _BitInt past 128 bits (#1447, c_check_wide.c).
+        fits = check_wide_i64(table, value, number);
+    }
+    else if (fits)
     {
         const unsigned __int128 mask = check_action_mask(width);
         const unsigned __int128 bits = value->integer & mask;

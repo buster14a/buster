@@ -128,12 +128,13 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
             walk.seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, items);
             walk.stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, items);
             walk.cleanup_tags = input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : NULL;
+            walk.cleanup_links = input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : NULL;
             emission.bits = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->graph.count);
             emission.capacity = (uint64_t)input->graph.count * 2;
             emission.stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, emission.capacity);
             emission.regions = program->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->region_count) : NULL;
             emission.options = program->parser->preprocessor != NULL ? &program->parser->preprocessor->options : NULL;
-            valid = walk.seen != NULL && walk.stack != NULL && (input->cleanup_count == 0 || walk.cleanup_tags != NULL) &&
+            valid = walk.seen != NULL && walk.stack != NULL && (input->cleanup_count == 0 || (walk.cleanup_tags != NULL && walk.cleanup_links != NULL)) &&
                     emission.bits != NULL && emission.stack != NULL && (program->region_count == 0 || emission.regions != NULL);
             if (valid)
             {
@@ -142,6 +143,10 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
                 if (walk.cleanup_tags != NULL)
                 {
                     memset(walk.cleanup_tags, 0, (uint64_t)input->cleanup_count * sizeof(uint32_t));
+                    for (uint32_t record = 0; record < input->cleanup_count; record += 1)
+                    {
+                        walk.cleanup_links[record] = record;
+                    }
                 }
                 if (emission.regions != NULL)
                 {
@@ -153,6 +158,7 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
         if (valid && candidate)
         {
             const uint64_t body_mark = scratch->length;
+            CheckTargetFeatureEmitted emitted = input->cleanup_count != 0 ? check_target_feature_emitted_reserve(scratch, body->count) : (CheckTargetFeatureEmitted){ 0 };
             const uint32_t point = eager ? program->parser->tree.parents[body->opening] + 1 : BUSTER_CHECK_NONE;
             walk.body = body;
             walk.tag = 0;
@@ -181,20 +187,25 @@ static bool check_program_symbol_bodies(CheckProgram* program, CheckProgramUses*
                     check_target_feature_control(&walk, &emission, control);
                 }
             }
-            valid = valid && walk.call_room && program->status == CHECK_PROGRAM_OK;
+            valid = valid && walk.call_room && program->status == CHECK_PROGRAM_OK && (walk.cleanup_count == 0 || emitted.ready);
+            if (valid && walk.cleanup_count != 0)
+            {
+                check_target_feature_emitted_fill(&walk, &emission, &emitted);
+            }
             for (uint32_t c = 0; valid && walk.cleanup_count != 0 && c < body->count; c += 1)
             {
                 const CheckControl* control = program->controls + body->first + c;
                 const uint32_t record = control->kind == CHECK_CONTROL_CLEANUP ? control->target : BUSTER_CHECK_NONE;
                 if (record < input->cleanup_count && walk.cleanup_tags[record] != 0)
                 {
-                    if (check_target_feature_cleanup_emitted(&walk, &emission, record))
+                    if (check_target_feature_cleanup_emitted(&walk, &emission, &emitted, record))
                     {
                         const uint32_t declaration = input->cleanups[record].function;
                         const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
                         check_program_symbol_reference(program, uses, object, point, input->cleanups[record].argument);
                     }
                     walk.cleanup_tags[record] = 0;
+                    walk.cleanup_links[record] = record;
                     walk.cleanup_count -= 1;
                 }
             }
