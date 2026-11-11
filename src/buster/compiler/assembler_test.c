@@ -126,6 +126,16 @@ static const char asm_test_segmented_movq[] =
     "movq %ss:(%r8),%xmm0\nmovq %xmm8,%ss:(%rax)\n"
     "movl %ss:4(%rdi),%eax\nmovb %al,%ss:(%rsi)\n";
 
+// 32-bit addresses in 64-bit mode (#2339), as GNU as and clang's integrated assembler take them: 32-bit bases and
+// indexes (r8d to r15d too), EIP, a VSIB with a 32-bit base, and their 67 after a waiting form's 9B and a segment
+// override but before 66, lock and VEX; an absolute disp32 of a 32-bit address is GNU as's R_X86_64_32. Both syntaxes.
+static const char asm_test_address32[] =
+    "address32:\n"
+    "leal (%eax,%ecx), %eax\nlock addl $1,(%eax)\nmovw %ax,%fs:(%eax)\nfstcw (%eax)\nvmovdqu (%r8d),%ymm0\n"
+    "movl %fs:4(%eax,%r9d,4),%eax\nlock xaddw %ax,%gs:(%ecx)\nmovl x(%eip), %eax\nmovl 8(%esp), %eax\nmovl (%ebp), %eax\n"
+    "vpgatherdd %xmm2,(%eax,%xmm1,4),%xmm0\nmovl x(,%eax,8), %ecx\njmp *(%eax)\ncallq *8(%r15d)\nmovl 0x10, %eax\n"
+    ".intel_syntax noprefix\nlea eax, [eax+ecx]\nmov eax, dword ptr [eip+x]\nmov ecx, [r9d+4*eax+8]\nmov eax, [ebx]\n.att_syntax prefix\n";
+
 // MMX's registers in both syntaxes and either case (#1846): movq's and movd's forms, the load's and the store's, and the
 // MMX instructions the target table already had (emms, pxor, paddd).
 static const char asm_test_mmx[] =
@@ -1026,10 +1036,12 @@ static void asm_test_code(AsmTest* test)
     asm_test_check(test, looped.count == 4 && looped.branch_count == 0 && looped.reference_count == 0 && looped.records[1].form == X86_FORM_LOOP_REL8 &&
                          looped.records[1].displacement == -3 && looped.records[2].form == X86_FORM_JRCXZ_REL8 && looped.records[2].displacement == 2,
                    "inline code: loop's and jrcxz's displacements fixed to their labels", 0);
-    // What it refuses: directives but the syntax's, its numeric labels and `.` but as a jmp's or jcc's target without
-    // an addend, undefined numeric labels, a dword string instruction's l in Intel syntax, and what the matcher doesn't
-    // take.
+    // What it refuses: directives but the syntax's, 32-bit addresses (#2339, whose 67 a record has no room for), its
+    // numeric labels and `.` but as a jmp's or jcc's target without an addend, undefined numeric labels, a dword string
+    // instruction's l in Intel syntax, an address mixing 32- and 64-bit registers, and what the matcher doesn't take.
     static const char* const refused[] = {
+        "leal (%eax,%ecx), %eax",
+        ".intel_syntax noprefix\nmov eax, dword ptr [eip+x]",
         ".byte 0x90",
         ".globl x\nx: nop",
         ".section .data\n.long 1",
@@ -1056,6 +1068,8 @@ static void asm_test_code(AsmTest* test)
         "rep retl",
         "repne retl",
         "bogus %eax",
+        "movl (%rax,%ecx), %eax",
+        ".intel_syntax noprefix\nmov eax, [ecx+rdx]",
         "pause %eax",
         "rdtsc %eax",
         "rep nop %eax",
@@ -1068,7 +1082,7 @@ static void asm_test_code(AsmTest* test)
         // A numeric label or `.` as data or a call's target, and a loop's branch over a branch that branch sizing sizes or with
         // an addend, are for the whole assembler (#1845, #1839): the failure asks for it, as a
         // directive's does; an undefined numeric label and the matcher's refusals don't.
-        const bool whole = i < 10 || i + 1 == BUSTER_ARRAY_LENGTH(refused);
+        const bool whole = i < 12 || i + 1 == BUSTER_ARRAY_LENGTH(refused);
         asm_test_check(test, code.directive == whole, refused[i], whole ? "the template is for the whole assembler" : "the template isn't for the whole assembler");
     }
     // A failure without room: nothing kept in either arena.
@@ -1711,6 +1725,17 @@ static int run_assembler_tests(int count, char** arguments)
         asm_test_bytes(&test, ".intel_syntax noprefix\n.equ rsi,8\nmov eax,[rax + +rsi]\n", 1, plus_register, sizeof(plus_register), "a register after a unary plus is the register, not a symbol of its name");
         const AsmResult pushed = asm_test_pair(&test, BUSTER_S8("push $external\n"), 1, 0);
         asm_test_check(&test, pushed.error == 0 && pushed.link.fixups.count == 2 && pushed.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S, "PUSH's sign-extended imm32 relocates as 32S", pushed.error);
+        // A 32-bit address's absolute disp32 (#2339): GNU as's R_X86_64_32 for a `.s` file, clang's 32S for a C unit's
+        // assembly (AsmOptions.integrated), on both paths.
+        const AsmResult narrow = asm_test_pair(&test, BUSTER_S8("movl x(,%eax,8), %ecx\n"), 1, 0);
+        asm_test_check(&test, narrow.error == 0 && narrow.link.fixups.count == 2 && narrow.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32,
+                       "a 32-bit address's disp32 relocates as GNU as's 32", narrow.error);
+        for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+        {
+            const AsmResult integrated = asm_assemble(BUSTER_S8("movl x(,%eax,8), %ecx\n"), test.index, (AsmOptions){ .vectorized = vectorized != 0, .integrated = true }, &test.vector);
+            asm_test_check(&test, integrated.error == 0 && integrated.link.fixups.count == 2 && integrated.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S,
+                           "a C unit's 32-bit address's disp32 relocates as clang's 32S", integrated.error);
+        }
         // A unit's entry atom and code, its first control flow, and its absolute symbols (#812): the C checker's planner
         // uses them to decide whether a template calls nothing, refuses a helper's early return and shares `.set`.
         const AsmResult alignment_only = asm_test_pair(&test, BUSTER_S8(".p2align 4\n"), 1, 0);
@@ -1815,6 +1840,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, asm_test_segmented_movq, directory, 0);
                 asm_test_oracle(&test, asm_test_mmx, directory, 0);
+                asm_test_oracle(&test, asm_test_address32, directory, X86_ARCH_V4);
                 asm_test_oracle(&test, asm_test_kmov, directory, X86_ARCH_V4);
                 // And musl's (#147): the lock prefix on the instruction's line and as a statement of its own, past a
                 // semicolon and a line (but before a 16-bit instruction, whose 66 GNU as then writes after the lock it

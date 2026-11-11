@@ -710,6 +710,13 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"shll %b1, %0\" : \"+r\"(y) : \"cI\"(40));int c=n;__asm__(\"subl %1, %0\" : \"+r\"(c) : \"Kr\"(-200));"
         "return a+b*3+x*5+y+c*7;}",
         "asm-register-or-immediate", clang);
+    // 32-bit addresses (#2339): int operands print as %eax-style registers in an address, which clang's integrated
+    // assembler encodes with a 67; the assembler does too, in the template's helper, as a record has no room for it.
+    check_test_program_source(test,
+        "static int add(int a,int b){int r;__asm__(\"leal (%1,%2), %0\" : \"=r\"(r) : \"r\"(a), \"r\"(b));return r;}"
+        "static int scaled(int a,int b){int r;__asm__(\"leal 3(%1,%2,4), %0\" : \"=r\"(r) : \"r\"(a), \"r\"(b));return r;}"
+        "int tested(int n){return add(n,2*n)*7+scaled(n,5)+add(-n,n);}",
+        "asm-address32", clang);
     // Naked functions: their templates, in AT&T syntax, are their whole code, with an integer constant operand.
     check_test_program_source(test,
         "__attribute__((naked)) long add3(long a,long b,long c){__asm__(\"leaq (%rdi,%rsi), %rax\\n\\taddq %rdx, %rax\\n\\tret\");}"

@@ -72,7 +72,7 @@ case (`RAX` is `rax`), and with canonical numbers only (`r08`, `xmm00` and
 `k00` are symbol names). GPRs of 8/16/32/64 bits (including
 high-byte registers), XMM/YMM/ZMM and mask registers have explicit classes.
 The frontend checks the encoder's high-byte/REX, address and decoration rules
-before trusted encoding. Addressing is 64-bit base plus index times 1/2/4/8
+before trusted encoding. Addressing is 64-bit (or 32-bit, below) base plus index times 1/2/4/8
 plus a signed 32-bit displacement, RIP relative, or absolute displacement;
 FS, GS and SS overrides are supported (SS's in a form below
 `BUSTER_X86_FORM_SS_ROWS`, every form but APX's EVEX ones). An Intel scale can come before or after its
@@ -86,6 +86,18 @@ meaning. Subtracting registers, multiplying registers together and scales
 outside 1/2/4/8 are rejected. Intel memory can specify `byte` through
 `zmmword ptr`, including GCC's uppercase `QWORD PTR`. Both `[rip+symbol]`
 and `symbol[rip]` are accepted.
+A 32-bit address in 64-bit mode (#2339), as GNU as and clang's integrated
+assembler take it: 32-bit base and index registers (`r8d` to `r15d` too), or
+EIP, in either syntax, e.g. `leal (%eax,%ecx), %eax` from an inline template's
+`int` operands. Mixing 32- and 64-bit registers in one address is refused. The
+record encodes the address by the registers' numbers and the bytes take a 67
+after a waiting form's 9B and a segment override, before 66, lock, REX and
+VEX, as both assemblers order it (`64 67 66 89 00` for `movw %ax,
+%fs:(%eax)`; `asm_emit_address32`). An absolute disp32 of such an address is
+GNU as's `R_X86_64_32` in a `.s` file and clang's `R_X86_64_32S` in a C unit's
+assembly (`AsmOptions.integrated`). `asm_assemble_code`'s records have no room
+for the 67, so an inline template with one is assembled whole, as its helper.
+`test-assembler --cross-check` compares the forms with GNU as.
 Ambiguous memory width is an error. Intel `offset symbol` requests an
 immediate address, as does GCC's `OFFSET FLAT:symbol`; a bare symbol in an ordinary operand denotes memory, and in
 a branch its destination, unless a width asks for memory: `call qword ptr

@@ -51,7 +51,9 @@ struct AsmExpr
     uint32_t plus;
     uint32_t minus;
     // Intel addresses keep register terms through parentheses. These fields occupy the record's former padding.
-    uint8_t registers[2]; // Architectural GPR number plus one; 17 is RIP; a vector index 32 + 32 * (class - XMM) + number.
+    // Architectural GPR number plus one; 17 is RIP; a vector index 32 + 32 * (class - XMM) + number; a 32-bit GPR 128 plus
+    // its number plus one, and 145 EIP (#2339).
+    uint8_t registers[2];
     uint8_t scales[2];
     uint8_t register_count;
     uint8_t indexed; // Multiplication explicitly chooses an index, including a scale of one.
@@ -185,6 +187,9 @@ struct AsmInstruction
     bool rep_scan;
     bool branch;
     bool local_branch;
+    // A memory operand of 32-bit base and index registers (or EIP) in 64-bit mode (#2339): the record encodes the
+    // address with their 64-bit numbers, and the bytes take a 67 (asm_emit_address32), one byte more than the match.
+    bool address32;
 };
 
 typedef struct AsmOptions AsmOptions;
@@ -1334,12 +1339,13 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                     {
                         // A gather's or scatter's vector index too (#1115, `[rdx+4*ymm7]`).
                         const bool vector = reg.class >= BUSTER_X86_CLASS_XMM && reg.class <= BUSTER_X86_CLASS_ZMM;
-                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != 255 && !vector))
+                        if (!address || (reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != BUSTER_X86_CLASS_GPR32 && reg.class != 255 && !vector))
                         {
                             asm_fail(parser, token.start, "invalid use of register");
                         }
+                        const uint8_t narrow = reg.class == BUSTER_X86_CLASS_GPR32 || (reg.class == 255 && reg.width == 4) ? 128 : 0;
                         value.register_count = 1;
-                        value.registers[0] = reg.class == 255 ? 17 : vector ? (uint8_t)(32 + 32 * (reg.class - BUSTER_X86_CLASS_XMM) + reg.reg) : reg.reg + 1;
+                        value.registers[0] = (uint8_t)(narrow + (reg.class == 255 ? 17 : vector ? (uint8_t)(32 + 32 * (reg.class - BUSTER_X86_CLASS_XMM) + reg.reg) : reg.reg + 1));
                         value.scales[0] = 1;
                     }
                     else
@@ -1607,9 +1613,9 @@ static bool asm_register(String8 spelling, X86Operand* operand)
             }
         }
     }
-    if (x86_match_name(name, "rip"))
+    if (x86_match_name(name, "rip") || x86_match_name(name, "eip"))
     {
-        *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = 255, .width = 8};
+        *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = 255, .width = name.pointer[0] == 'e' || name.pointer[0] == 'E' ? 4 : 8};
         found = true;
     }
     return found;
@@ -1662,10 +1668,20 @@ static bool asm_read_register(AsmParser* parser, uint32_t end, X86Operand* opera
     return found;
 }
 
+// An address's register: RIP or EIP, a base, an index or a gather's vector index. 32-bit base and index registers (and
+// EIP) give a 32-bit address in 64-bit mode (#2339), as GNU as and clang's integrated assembler take them
+// (`leal (%eax,%ecx), %eax`, an inline template's int operands): X86Operand.address_size records 4 or 8 by the general
+// registers seen, which must agree, and the instruction then takes a 67 (asm_emit_address32).
 static void asm_address_register(AsmParser* parser, X86Operand* memory, X86Operand reg, uint32_t scale, bool index, uint32_t location)
 {
     const bool vector = reg.class >= BUSTER_X86_CLASS_XMM && reg.class <= BUSTER_X86_CLASS_ZMM;
-    if (reg.class == 255 && !index && !(memory->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)))
+    const bool general = reg.class == BUSTER_X86_CLASS_GPR64 || reg.class == BUSTER_X86_CLASS_GPR32 || reg.class == 255;
+    const uint8_t size = !general ? 0 : reg.class == BUSTER_X86_CLASS_GPR32 ? 4 : (uint8_t)reg.width;
+    if (size != 0 && memory->address_size != 0 && memory->address_size != size)
+    {
+        asm_fail(parser, location, "address registers mix 32- and 64-bit sizes");
+    }
+    else if (reg.class == 255 && !index && !(memory->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)))
     {
         memory->mode = BUSTER_X86_MEMORY_RIP;
     }
@@ -1677,9 +1693,9 @@ static void asm_address_register(AsmParser* parser, X86Operand* memory, X86Opera
         memory->index = reg.reg;
         memory->vsib = reg.class;
     }
-    else if (reg.class != BUSTER_X86_CLASS_GPR64 || (memory->mode & BUSTER_X86_MODE_RIP) || scale > 3)
+    else if ((reg.class != BUSTER_X86_CLASS_GPR64 && reg.class != BUSTER_X86_CLASS_GPR32) || (memory->mode & BUSTER_X86_MODE_RIP) || scale > 3)
     {
-        asm_fail(parser, location, "address requires 64-bit base/index registers and a scale of 1, 2, 4 or 8");
+        asm_fail(parser, location, "address requires 32- or 64-bit base/index registers and a scale of 1, 2, 4 or 8");
     }
     else if (!index && !(memory->mode & BUSTER_X86_MODE_BASE))
     {
@@ -1695,6 +1711,7 @@ static void asm_address_register(AsmParser* parser, X86Operand* memory, X86Opera
     {
         asm_fail(parser, location, "too many address registers");
     }
+    memory->address_size = size != 0 ? size : memory->address_size;
 }
 
 static uint32_t asm_scale(AsmParser* parser, uint32_t end)
@@ -1733,12 +1750,14 @@ static void asm_intel_address(AsmParser* parser, uint32_t end, X86Operand* opera
         const uint32_t factor = expression->scales[i];
         const uint32_t scale = factor == 2 ? 1 : factor == 4 ? 2 : factor == 8 ? 3 : 0;
         const uint8_t number = expression->registers[i];
+        const bool narrow = number >= 128;
+        const uint8_t wide = narrow ? (uint8_t)(number - 128) : number;
         const X86Operand reg =
         {
             .kind = X86_OPERAND_REGISTER,
-            .class = number == 17 ? 255 : number >= 32 ? (uint8_t)(BUSTER_X86_CLASS_XMM + (number - 32) / 32) : BUSTER_X86_CLASS_GPR64,
-            .width = 8,
-            .reg = number >= 32 ? (uint8_t)((number - 32) % 32) : (uint8_t)(number - 1),
+            .class = wide == 17 ? 255 : wide >= 32 ? (uint8_t)(BUSTER_X86_CLASS_XMM + (wide - 32) / 32) : narrow ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64,
+            .width = narrow ? 4 : 8,
+            .reg = wide >= 32 ? (uint8_t)((wide - 32) % 32) : (uint8_t)(wide - 1),
         };
         asm_address_register(parser, operand, reg, scale, (expression->indexed >> i) & 1, location);
     }
@@ -2764,7 +2783,17 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         }
         // GNU as gives an instruction the row a `.loc` left waiting (#1115), before its prefixes.
         asm_line_instruction(parser, location);
-        if (string_prefix_count != 0 && parser->code)
+        for (uint32_t i = 0; i < instruction->request.count; i += 1)
+        {
+            instruction->address32 |= instruction->request.operands[i].kind == X86_OPERAND_MEMORY && instruction->request.operands[i].address_size == 4;
+        }
+        if (instruction->address32 && parser->code && parser->result.error == 0)
+        {
+            // Another function's records have no room for the 67: its caller assembles the template whole.
+            parser->directive = true;
+            asm_fail(parser, location, "inline assembly's 32-bit addresses are its unit's");
+        }
+        else if (string_prefix_count != 0 && parser->code)
         {
             // Code that another function's records hold has no bytes but its records': its caller assembles it whole.
             parser->directive = true;
@@ -4034,7 +4063,7 @@ static void asm_match_instructions(AsmParser* parser)
                 // The scan and count forms have matching widths, operands and segment variants; only F3 is added.
                 instruction->record.form += asm_rep_scan_delta(instruction);
             }
-            fragment->size = match.length + instruction->rep_scan;
+            fragment->size = match.length + instruction->rep_scan + instruction->address32;
             const X86FormDescription* form = x86_form_description(instruction->record.form);
             instruction->branch = form->relative_bytes != 0;
             if (instruction->branch && instruction->expressions[0].plus == 0)
@@ -4077,7 +4106,8 @@ static bool asm_layout_records(AsmParser* parser)
     for (uint32_t i = 0; eligible && i < parser->instruction_count; i += 1)
     {
         const AsmInstruction* instruction = &parser->instructions[i];
-        if (instruction->local_branch)
+        eligible = !instruction->address32;
+        if (eligible && instruction->local_branch)
         {
             const uint32_t row = instruction->record.form;
             eligible = instruction->expressions[0].value == 0 && x86_form_descriptions[row].relative_bytes == 1 && row + 1 < X86_FORM_COUNT && x86_form_descriptions[row + 1].relative_bytes == 4;
@@ -4710,6 +4740,31 @@ static void asm_layout(AsmParser* parser)
     }
 }
 
+// One instruction of a 32-bit address in 64-bit mode (#2339): its 64-bit address's encoding with a 67 after the
+// prefixes GNU as and clang's integrated assembler write first, a waiting form's 9B and a segment override
+// (`9b 67 d9 38` for `fstcw (%eax)`, `64 67 66 89 00` for `movw %ax, %fs:(%eax)`, `67 f0 83 00 01` for `lock addl $1,
+// (%eax)`): in 64-bit mode those bytes are prefixes alone. The registers' numbers and the ModRM, SIB and displacement
+// are the 64-bit address's, so the fields a fixup patches keep their distance from the instruction's end. Returns the
+// length, or -1 when the record doesn't encode.
+static int64_t asm_emit_address32(const AsmParser* parser, const X86Instruction* record, uint8_t* output)
+{
+    uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
+    const int64_t length = BUSTER_VECTOR_PATH(parser->options.vectorized) ? x86_encode(record, 1, bytes, sizeof(bytes), 0, 0) : x86_encode_scalar(record, 1, bytes, sizeof(bytes), 0, 0);
+    uint32_t at = 0;
+    const bool waiting = length > 0 && bytes[0] == 0x9b;
+    at += waiting;
+    const uint8_t first = length > at ? bytes[at] : 0;
+    const bool segment = first == 0x26 || first == 0x2e || first == 0x36 || first == 0x3e || first == 0x64 || first == 0x65;
+    at += segment;
+    if (length > 0)
+    {
+        memcpy(output, bytes, at);
+        output[at] = 0x67;
+        memcpy(output + at + 1, bytes + at, (uint64_t)length - at);
+    }
+    return length > 0 ? length + 1 : -1;
+}
+
 static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment)
 {
     // GNU as's `.long A - B` where B is in the datum's section and A isn't (#1115: GCC's -O2 PIE jump tables, `.long
@@ -4845,9 +4900,12 @@ static void asm_instruction_fixups(AsmParser* parser, AtomId atom, AsmInstructio
                 }
                 else
                 {
-                    // A disp32 and an immediate the form sign-extends (REX.W's, and PUSH's) take 32S, other imm32s 32.
+                    // A disp32 and an immediate the form sign-extends (REX.W's, and PUSH's) take 32S, other imm32s 32. A
+                    // 32-bit address's disp32 (#2339) is zero-extended, so GNU as gives it 32; clang's integrated
+                    // assembler keeps 32S, which a C unit's assembly follows.
                     const bool truncated_lea = strcmp(form->mnemonic, "lea") == 0 && !form->w;
-                    const bool signed_field = (displacement && !truncated_lea) || x86_match_sign_extends(form);
+                    const bool unsigned_address = instruction->address32 && !parser->options.integrated;
+                    const bool signed_field = (displacement && !truncated_lea && !unsigned_address) || x86_match_sign_extends(form);
                     const bool interposable = (parser->symbols[expression.plus].flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
                     uint8_t kind = instruction->branch && interposable ? BUSTER_LINK_FIXUP_CALL : pc_relative ? BUSTER_LINK_FIXUP_PC32
                                                                                  : width == 8    ? BUSTER_LINK_FIXUP_ABS64
@@ -5187,11 +5245,12 @@ static void asm_emit(AsmParser* parser)
                 uint32_t count = 0;
                 uint32_t size = 0;
                 uint32_t next = position;
-                while (next < end && count < 256)
+                const bool address32 = parser->instructions[fragment->instruction].address32;
+                while (next < end && count < (address32 ? 1u : 256u))
                 {
                     const uint32_t id = parser->fragment_order[next];
                     AsmFragment* item = &parser->fragments[id];
-                    if (item->kind != ASM_INSTRUCTION && item->kind != ASM_LABEL)
+                    if ((item->kind != ASM_INSTRUCTION && item->kind != ASM_LABEL) || (count != 0 && item->kind == ASM_INSTRUCTION && parser->instructions[item->instruction].address32))
                     {
                         break;
                     }
@@ -5204,7 +5263,9 @@ static void asm_emit(AsmParser* parser)
                     next += 1;
                 }
                 const uint64_t capacity = link->atoms.size[atom] - fragment->offset + BUSTER_X86_ENCODER_CAPACITY(256);
-                const int64_t encoded = BUSTER_VECTOR_PATH(parser->options.vectorized) ? x86_encode(records, count, bytes + fragment->offset, capacity, 0, 0) : x86_encode_scalar(records, count, bytes + fragment->offset, capacity, 0, 0);
+                const int64_t encoded = address32 ? asm_emit_address32(parser, records, bytes + fragment->offset)
+                                      : BUSTER_VECTOR_PATH(parser->options.vectorized) ? x86_encode(records, count, bytes + fragment->offset, capacity, 0, 0)
+                                                                                        : x86_encode_scalar(records, count, bytes + fragment->offset, capacity, 0, 0);
                 if (encoded != size)
                 {
                     asm_fail(parser, fragment->location, "encoder length disagrees with assembly layout");

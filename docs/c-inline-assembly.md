@@ -706,7 +706,9 @@ field without an addend in the template's code (`check_asm_unit_gotos`); any
 other use is refused by name, as on the record path. A template of directives
 alone with x87 operands or flag outputs has this helper too, as a template of
 no instructions does. A held vector (a vector type in a vector register) is
-refused in a helper, as on the record path.
+refused in a helper, as on the record path. A template with a 32-bit address
+(`leal (%1,%2), %0` of `int` operands, #2339) is assembled whole in such a
+helper too, since a record has no room for its 67 (`docs/assembler.md`).
 
 A template of alignment, section and symbol directives alone has no code
 (`entry_code` is false): its sections, data and defined labels are published,
