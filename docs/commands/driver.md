@@ -72,7 +72,10 @@ requirements. [Command index](README.md).
   `lane_session_run`, `check_driver_run`): started once, after the options and
   before any source is read, as many as the command may take (one per core of
   its CPUs, or `--lanes N`, at most `--worker-budget N`), none for one source
-  without code to emit (`-fsyntax-only`), lane 1 counting the cores in sysfs
+  without code to emit (`-fsyntax-only`), and by default for one source with
+  code only once it is preprocessed, if it has the tokens to pay for a second
+  lane (#1444, `BUSTER_LANE_SESSION_ON_DEMAND`, `check_driver_start_lanes`), so
+  that a small file's `-c` creates no thread; lane 1 counting the cores in sysfs
   (`BUSTER_LANE_SESSION_PER_CORE`, `lane_core_count`) and creating the others
   while lane 0 starts the command (`BUSTER_LANE_SESSION_LAZY`; lane 0 learns
   how many it asks for at its first wide part, `lane_session_asked`, and how
@@ -84,6 +87,13 @@ requirements. [Command index](README.md).
   It rejects malformed lists, unavailable CPUs, nested sessions, reduced capacity, and failed pin or thread start.
   Pinned sessions start eagerly, unlike the default lazy path. With `--time-stages`, each lane prints `lane-pin` with its
   index, expected CPU and observed CPU; those diagnostic system calls and output are not uninstrumented timing samples.
+  A source command whose lanes created no thread leaves its address space's teardown to a helper as it exits (#1444,
+  `lane_exit_helper_start`, called last in `main_source_command`): its streams flushed and every descriptor closed, it
+  starts a process that shares its address space and nothing else (`clone3`'s `CLONE_VM`), which ends as it does
+  (`PR_SET_PDEATHSIG`), so that its parent's wait returns before `exit_mmap` runs. By default only where PID 1 reaps
+  orphans (`lane_exit_reaped`: it blocks, ignores or catches `SIGCHLD`), since one that never does would keep each
+  helper as a zombie; `BUSTER_EXIT_HELPER=1` starts it wherever it can, `=0` never, and a sanitizer build never does.
+  The exit status, the output's bytes and the exit handlers are as without it.
   The checker reads
   a unit in source order; `--deferred-bodies` reads its function bodies apart on
   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where

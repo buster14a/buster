@@ -4141,6 +4141,43 @@ static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
     return n;
 }
 
+// Case c's code at `entry` called as its shape takes it: a copy with p and q, else p, i and the class's value; the result's
+// bits. Generated code has no -fsanitize=function signature: the check reads the 8 bytes before the entry, and case 0's
+// entry is the first byte of its mapping, so the check would fault there (#2077).
+static __attribute__((no_sanitize("function"))) uint64_t tier0_test_segment_call(void* entry, const Tier0TestSegmentCase* c, uint64_t p, uint64_t q, uint64_t i, uint64_t v, double vd, float vf)
+{
+    uint64_t result = 0;
+    if (c->shape == 6 || c->shape == 7)
+    {
+        void (*f)(uint64_t, uint64_t) = 0;
+        memcpy(&f, &entry, sizeof(f));
+        f(p, q);
+    }
+    else if (c->class == BUSTER_TYPED_CLASS_F64)
+    {
+        double (*f)(uint64_t, uint64_t, double) = 0;
+        memcpy(&f, &entry, sizeof(f));
+        const double d = f(p, i, vd);
+        memcpy(&result, &d, sizeof(d));
+    }
+    else if (c->class == BUSTER_TYPED_CLASS_F32)
+    {
+        float (*f)(uint64_t, uint64_t, float) = 0;
+        memcpy(&f, &entry, sizeof(f));
+        const float x = f(p, i, vf);
+        uint32_t low = 0;
+        memcpy(&low, &x, sizeof(x));
+        result = low;
+    }
+    else
+    {
+        uint64_t (*f)(uint64_t, uint64_t, uint64_t) = 0;
+        memcpy(&f, &entry, sizeof(f));
+        result = tier0_test_normalize(c->class, f(p, i, v));
+    }
+    return result;
+}
+
 static void tier0_test_segments(Tier0TestTally* tally)
 {
     Arena arena = arena_reserve(1ull << 26);
@@ -4277,37 +4314,9 @@ static void tier0_test_segments(Tier0TestTally* tally)
             const double vd = 2.5;
             const float vf = -1.25f;
             void* entry = region + (uint64_t)k * BUSTER_TIER0_TEST_PAGE;
-            uint64_t result = 0;
             // A compare-exchange's expected value is the object's, so that it succeeds.
             const uint64_t v = c->shape == 9 ? tier0_test_load(c->class, (uint64_t)(uintptr_t)data) : 0x1122334455667788ull;
-            if (c->shape == 6 || c->shape == 7)
-            {
-                void (*f)(uint64_t, uint64_t) = 0;
-                memcpy(&f, &entry, sizeof(f));
-                f(p, q);
-            }
-            else if (c->class == BUSTER_TYPED_CLASS_F64)
-            {
-                double (*f)(uint64_t, uint64_t, double) = 0;
-                memcpy(&f, &entry, sizeof(f));
-                const double d = f(p, i, vd);
-                memcpy(&result, &d, sizeof(d));
-            }
-            else if (c->class == BUSTER_TYPED_CLASS_F32)
-            {
-                float (*f)(uint64_t, uint64_t, float) = 0;
-                memcpy(&f, &entry, sizeof(f));
-                const float x = f(p, i, vf);
-                uint32_t low = 0;
-                memcpy(&low, &x, sizeof(x));
-                result = low;
-            }
-            else
-            {
-                uint64_t (*f)(uint64_t, uint64_t, uint64_t) = 0;
-                memcpy(&f, &entry, sizeof(f));
-                result = tier0_test_normalize(c->class, f(p, i, v));
-            }
+            const uint64_t result = tier0_test_segment_call(entry, c, p, q, i, v, vd, vf);
             uint64_t stored = v;
             if (c->class == BUSTER_TYPED_CLASS_F64)
             {
