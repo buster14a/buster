@@ -52,7 +52,8 @@
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
 // target, flag outputs of a size no integer store covers or with other alternatives, f's x87 registers, the vector
 // register classes and the other letters it doesn't place (p, Y but Yk, the floating constants), MMX operands with a
-// modifier or beside x87 ones, opmask operands with a modifier or without their moves' features, x87 operands and clobbers off the stack's top, symbolic immediates
+// modifier, opmask operands with a modifier or without their moves' features, x87 operands and clobbers off the stack's
+// top, symbolic immediates
 // and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
@@ -2938,17 +2939,15 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     bool x87 = false;
     bool held = false;
     bool flagged = false;
-    bool mmx_used = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
         held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
         flagged |= places[k].kind == BUSTER_CHECK_ASM_FLAG;
-        mmx_used |= places[k].kind == BUSTER_CHECK_ASM_MMX;
     }
-    // The MMX registers are the x87's: loading one leaves the x87's stack full, so a statement of both has no order of
-    // its loads that keeps both (#1846).
-    reason = valid && reason == NULL && x87 && mmx_used ? "inline assembly x87 and MMX operands in one statement" : reason;
+    // The MMX registers are the x87's: a statement of both (#1846, the owner's decision on #1447) loads its x87 operands
+    // first and its MMX ones after, and stores the MMX outputs before the x87 ones, as clang's code orders them; what the
+    // x87's stack holds after an MMX load is the template's to know, as in clang's object.
     reason = valid && reason == NULL && unit_assembled && unit.entry_code && held ? "inline assembly operands of this type in their constraint's registers" : reason;
     // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
     // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
