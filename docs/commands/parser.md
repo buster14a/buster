@@ -39,7 +39,7 @@ its own static parser so that its kernel measurements use the same code.
 
 `./build/compiler test-parser [--clang [PATH] [--clang-server PATH [--differential]]]
 [--mutations N] [--seed N] [--streams N] [--reports N] [--keep] [--files-only] [options]
-[file or directory...]` (about 7 s on the 9700X without files, with `--clang`)
+[file or directory...]` (about 9 s on the 9700X without files, with `--clang`, on one CPU)
 checks the parser interface and implementation; `--clang` needs
 clang 23 on `PATH`, or the one PATH names. `--clang-server PATH` sends that
 clang's `-fsyntax-only` runs (`parse_test_clang`, a file each through the oracle
@@ -85,8 +85,11 @@ Against fresh state for every unit, a per-unit digest matched on all 36,634
 generated units. It covered the tokens with their intern ids, both trees,
 postorders and columns, the diagnostics, the statistics and the kernel tallies.
 The setup and release this saves were most of the command's time: the 34,624
-alignments took 73 s, and now take 15 s, on a 4-CPU Xeon container. #2078 has
-the 9700X's and the hosted runners' numbers. On:
+alignments took 66–70 s, and now take 15 s, on a 4-CPU Xeon container. On the
+9700X, on one CPU, the command without files took 12.1 s and now takes 5.9 s;
+with `--clang`, 15.2 s and now 9.1 s. [The
+record](https://github.com/buster14a/buster-performance/tree/d9cb41a7a9b888d919a75adfb018803b893bc566/docs/measurements/test-parser-units-2078-2026-11-11)
+has those runs and the hosted runners' (#2078). On:
 
 - snippets: 541 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
