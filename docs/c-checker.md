@@ -542,9 +542,9 @@ does, each rule checked against clang's answers on probes of it:
   atoms join the unit's link before its functions', as clang emits a module's
   `asm` first (`check_program_asm_plan_file`), each in its section in `-c`'s
   object; its labels and references join the unit's symbols as a template's do
-  (#1848). Refused by name: a template the assembler doesn't take, CFI, and a
-  section of a class C's definitions don't have or of another type than its
-  class's (an init array's, a note).
+  (#1848), and its sections are any the assembler makes (notes, init and fini
+  arrays, merged strings, custom flags, CFI's frames). Refused by name: a
+  template the assembler doesn't take, and section groups.
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
   identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
@@ -3732,9 +3732,23 @@ What the lowering covers past scalars (#145's programs):
   clang's `checkNewAttributesAfterDef` drops it (with its warning), and so are
   constructors and destructors there (`check_input_attribute_late`, which
   copies a specifier's list before marking one declarator's). A weak
-  declaration after a use makes the reference weak, as GCC's does; clang's
-  stays global, as its code generation made it at the use (GCC says the
-  behavior is unspecified). A defined function's constructor and destructor
+  declaration (or `#pragma weak`) after a use binds as clang's code
+  generation does (#1849, the owner's decision on #1447; GCC makes the
+  reference weak and says the behavior is unspecified): a definition's symbol
+  is weak, a tentative definition's only where a weak declaration comes no
+  later than its last tentative definition (`getActingDefinition`), and an
+  undefined object's has the binding of the declaration that its first
+  emitted reference names, which stays. `check_program_weak_late` keeps the
+  weak declarations of the objects that have none on their first declaration
+  (a pragma's applies at the pragma), and the selection's
+  `check_program_weak_bindings` finds the first reference with the late
+  rename's emission walk (eager bodies at their ends, static data at its
+  declaration where clang must emit it, deferred bodies and data at the
+  unit's end; a body's reference names the latest declaration before it,
+  static data's the latest where it is emitted). Where only deferred code
+  refers to the object and its references disagree, clang's order of
+  deferred emission decides, which isn't modeled: that is refused by name.
+  A defined function's constructor and destructor
   each give an entry of the init or fini array: an atom of a pointer to the
   function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
   `llvm.global_dtors`, stably by priority from the definitions' order (an
@@ -3746,7 +3760,9 @@ What the lowering covers past scalars (#145's programs):
   `.fini_array.N` (`check_program_sections`'s descriptors), as clang's object
   has them. The selection takes constructors and destructors as roots.
   `test-checker-driver` (`c_check_symbol_driver_test.c`) compiles a fixture
-  of them by clang and both paths: each symbol's binding must be clang's,
+  of them by clang and both paths, and one of late weak declarations and
+  pragmas (with and without `-fcommon`, and the refused shape): each symbol's
+  binding must be clang's,
   both paths' objects the same bytes, and the objects, linked by `cc` alone
   and with another object's strong definitions, and the direct path's
   executables, must print what clang's build prints, its constructors' order
@@ -4381,8 +4397,12 @@ do:
   ignored one doesn't make the definitions incompatible: one that is otherwise
   compatible declares the earlier type, as in clang (`check_input_odr_severity`).
 
-  Left as they were: an `_Atomic(struct { ... })` member is the parser's refusal, with or without a
-  redefinition.
+  A tag defined in an `_Atomic(...)` or a `typeof(...)` specifier
+  (`_Atomic(struct S { int a; }) m;`, `typeof(_Atomic(struct S { ... }))`) is
+  read before the specifiers, as a declaration's own definition is
+  (`check_input_specifier_definition` goes on into each group, #1447), in a
+  declaration, a member, a prototype's parameter (of prototype scope, with clang's `-Wvisibility` before C23), a typedef and a type name; it used to be
+  the reader's generic refusal.
 
   An enum defined again at file scope (#1447, c_check_enum_input.c) is read the
   same way, an enum without a fixed type after one without, or one listed again
@@ -7003,7 +7023,10 @@ keys a label with its name (the function's body for the others). An inner list
 so shadows an outer one and the function's label of the same name, and a goto
 from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
-name in the list, reported as the block ends; a second definition in the scope
+name in the list, given as the block ends, after the errors within it, and a
+missing label of the function's at its first use, once a name, as the function
+ends (`check_input_report_label_undeclared`'s order key, the closing brace); a
+second definition in the scope
 is "redefinition of label" at its name, with clang's "previous definition is
 here" at the first (a local label's at its name in the list). First is clang's
 order: it defines a label as its statement completes, so of a label and one
@@ -7012,9 +7035,11 @@ definition, which gotos reach, and the outer the redefinition. The
 redefinition is recovered (#1447): clang drops the label and keeps its
 statement, so the unit is read on as a valid one, and a later duplicate case in
 the body is given too. A name that a block's lists declare
-twice is ambiguous where it is defined or used, and undeclared at both of its
-declarations. Clang reports that last one's ambiguity first, the driver in
-source order. A unit without a list builds none of it; the vector path's mask
+twice is ambiguous where it is defined or used, undeclared at both of its
+declarations as the block ends, and undeclared at a use as the function ends:
+clang's lookup makes a label of the function's for it, which nothing defines.
+The driver gives them in clang's order (the notes naming the candidates
+aren't given). A unit without a list builds none of it; the vector path's mask
 takes `__label__`'s kind among the first walk's events, which the scalar path's
 full walk meets anyway.
 
@@ -8246,23 +8271,26 @@ arguments against the function. The checker now gives these as clang does.
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
   and stores take a segment override. A load or store in `%fs` or `%gs` of an
   integer, a floating value (long double too), a 128-bit integer or a vector,
-  by indirection, member, subscript or name, and an assignment, compound
+  by indirection, member (a bit-field's unit's pieces too), subscript or name, and an assignment, compound
   assignment, increment or decrement of one, takes it (check_lower_access: the
   typed stream's `BUSTER_TYPED_ACCESS_SEGMENT` on its LOAD, STORE or SET, which
   Tier 0 puts on the access's memory operand; docs/tier0.md); a global in one
   goes through its address, as a memory class's does (`lea sym(%rip)` and then
-  `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). Tier 1 falls back to
+  `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). The atomic builtins
+  that a direct plan takes take it too (their LOAD or SET, `lock xadd`, `xchg`,
+  `lock cmpxchg`, a fetch's loop), from the object type's space or the pointer
+  argument's pointee's. Tier 1 falls back to
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
-  type at all: CheckLowerWriter.segments): an aggregate's copy, a bit-field, a
-  complex, half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
-  space (258, whose `36` prefix no 64-bit form of the encoder's has); and so are
-  the accesses whose lvalue doesn't carry the space: a vector's element, read or
-  written (its type loses the vector's space), an atomic builtin's object
-  (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
-  argument), and an asm statement's register output (stored through its
-  address; "an asm output in a segment's address space ... but a memory one").
-  Before, those compiled without the override. A memory asm operand's address is
+  type at all: CheckLowerWriter.segments): an aggregate's copy, a complex,
+  half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
+  space (258, whose `36` prefix no 64-bit form of the encoder's has), atomic
+  builtins of another plan (generic ones by pointer, `__atomic_clear`,
+  `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
+  space: a vector's element, read or written (its type loses the vector's
+  space), and an asm statement's register output (stored through its address;
+  "an asm output in a segment's address space ... but a memory one"). Those and
+  the atomic builtins compiled without the override before #1447's segment work. A memory asm operand's address is
   the template's, without the segment, as clang's is. Taking an address there is
   compiled. Any other space's code is the default space's, as clang's.
 
@@ -8413,8 +8441,16 @@ arguments against the function. The checker now gives these as clang does.
   clang's function type bit, a System V function's type whose callee keeps
   every register. Its count is checked before its subject, as clang's type
   processing does. On a tag it is nothing; elsewhere it gets the function
-  types' warning. With `sysv_abi` or `cdecl` it is the same type. With
-  another convention, which clang also takes, it is refused by name.
+  types' warning. With `sysv_abi` or `cdecl` it is the same type. Beside
+  another convention it is clang's bit beside that one (#1447,
+  `CHECK_CALL_KEEPS_REGISTERS`, `TYPE_FUNCTION_ABI_KEEPS_REGISTERS`): printed
+  after the convention (`'void (void) __attribute__((ms_abi))
+  __attribute__((no_caller_saved_registers))'`), part of the type's identity,
+  inherited by a redeclaration that names the convention alone, and clang's
+  "function declared with 'no_caller_saved_registers' attribute was previously
+  declared without" where a redeclaration adds it. Where it stands between two
+  conventions of their own (`ms_abi, no_caller_saved_registers, sysv_abi`),
+  clang 23 gives no conflict error, which the checker gives as without it.
 
   x86's `interrupt` has its own rule (`CHECK_ATTRIBUTE_INTERRUPT`), clang's
   `handleAnyX86InterruptAttr` on x86-64. Its subjects are functions and
@@ -8450,6 +8486,10 @@ arguments against the function. The checker now gives these as clang does.
   (`CheckInput.interrupt_calls`), the calls are looked through
   (`check_input_interrupt_calls`): a direct call of a function an
   interrupt attribute marks, at or before the declaration its name finds
+  (along the declarations each redeclaration's lookup found, which clang
+  merges it with: one in a closed or hidden block isn't a later file-scope
+  declaration's that has an earlier visible one, #1447,
+  `CheckInput.redeclaration_links`)
   (through parentheses, `_Generic`, `__builtin_choose_expr` and one
   address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
   operands too), is clang's "interrupt service routine cannot be called
@@ -8881,10 +8921,6 @@ arguments against the function. The checker now gives these as clang does.
       `typeof`'s, a constant array bound's), those of a builtin and those
       whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
       error nor -Wexcessive-regsave's warning;
-    - a declaration's interrupt and no_caller_saved_registers are an entity's
-      first declarations' with them, up to the declaration a call's name finds
-      (or the definition): a block's redeclaration that clang's chain doesn't
-      link is taken as linked;
     - a direct call's error drops every other diagnostic of its full
       expression (`CheckInput.interrupt_ranges`: its declarator's initializer
       or its statement, but the call's other arguments and list elements),
@@ -9301,7 +9337,10 @@ translation unit's declarations, so a local shadow does not redirect it. Forward
 directives that never acquire an external declaration warn at EOF; forward
 typedefs and internal `redefine_extname` declarations retain Clang's distinct
 warning groups and locations. A weak directive after an existing internal declaration
-or typedef is a silent no-op, as in the oracle.
+or typedef is a silent no-op, as in the oracle. A directive after a use applies
+to the declaration that was the latest at it, from the directive on, as clang
+adds the attribute there (#1849): an earlier eagerly emitted reference keeps
+the symbol global (the weak attribute's "after a use" rule).
 
 `#pragma redefine_extname NAME SYMBOL` uses the existing asm-label emission path
 for declarations and subsequent references. The first pending rename and explicit

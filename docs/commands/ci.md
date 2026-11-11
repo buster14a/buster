@@ -29,15 +29,20 @@ pushes.
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
-Each row's inventory runs as 4 shards, a runner each that builds the compiler
-itself (a native build must run on the CPU it was built for): `parallel --shard
+Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
+per row) runs its inventory as 4 shards, a runner each: `parallel --shard
 K/4 --costs tools/ci/correctness.costs` deals the commands by their hosted
 costs, the same deal on every shard's runner, so the shards run each command
-once. A plain row's test step took 14.6 minutes on one 4-CPU runner; its shards
-take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
-arena checks, the parser smoke test, the performance readers and the TSan/MSan
-`main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
-report when the shards' times drift apart ([the runner guide](parallel.md)).
+once. A portable `x86-64` row builds its compiler once, and its shards verify
+and run that product (`tools/ci/hosted-product.sh`; [Shared row
+products](../ci.md#shared-row-products), #2032); a `native` row's shards each
+build their own (a native build must run on the CPU it was built for). Run
+`bash tests/ci/hosted-product.sh` after changing the product's packing, identity
+or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
+shards take about 4 to 5. The steps a row needs once (the baseline fallback,
+QEMU and arena checks, the parser smoke test, the performance readers and the
+TSan/MSan `main.c` compiles) run in its shard 1. Refresh the costs from a hosted
+run's report when the shards' times drift apart ([the runner guide](parallel.md)).
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
@@ -169,14 +174,20 @@ there at a time, so everything takes one lock:
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
   `zen5`'s digit, closures through includes, the build's description, pushes).
-  It also fails when the hosted test job's shards disagree
-  (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
-  without a gap, and the same N must be in the job's name, the run step's
-  `--shard "${{ matrix.shard }}/N"`, since a list and an N that disagree
-  would leave a shard's commands unrun with every job green. Run it
+  It also fails when the hosted rows' shards disagree
+  (`changes_shard_policy`, on `hosted-correctness.yml`): its matrix's
+  `shard: [1, ..., N]` must count from 1 without a gap, and the same N must be
+  in the job's name, the run step's `--shard "${{ matrix.shard }}/N"`, since a
+  list and an N that disagree would leave a shard's commands unrun with every
+  job green; and when the row workflow weakens its shared products
+  (`changes_row_policy`: the portable rows alone, the triggering revision, the
+  ownership check on the build's tree, the shards' wait for the build, its
+  SHA-256 and their verified install, nothing from a cache or another run). The
+  selector doesn't read the row workflow's steps: a change to that file runs
+  the steps it gates on `performance`. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
-  benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
+  benchmark's step, the tables, the rows or the shards. Its oracle policy pins the 9700X
   job's `needs` (`[changes, evidence, test, fuzz]`), its `if:` (the `evidence`
   job's success and admission, hosted rows skipped only by evidenced reuse on a
   dispatch, fuzzing only in the plain scope), the native correctness step's

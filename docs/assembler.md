@@ -295,7 +295,7 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
@@ -307,8 +307,14 @@ Each section is identified by its name and group, and keeps its own properties,
 alignment, layout and atom, including
 `.text.*`, `.data.*`, `.rodata.*`, `.bss.*` and mergeable string sections.
 Redeclarations must preserve its properties; zero-fill sections accept only zero
-fill. Subsections, strings of characters wider than 4 bytes and
-additional ELF section types are diagnosed. Strings of 2- and 4-byte characters
+fill. A section without a type takes the one its name gives it, as GNU as and
+LLVM's assembler give it: `.note*` a note's, `.init_array*` and `.fini_array*`
+the arrays' (#1848). An array of constructors or destructors is an atom of its
+class (`BUSTER_LINK_CLASS_INIT_ARRAY`, `_FINI_ARRAY`) whatever its name, so that
+the direct path runs its entries; a note is data of its flags' class, which
+the object writer writes `SHT_NOTE`. Subsections, strings of characters wider
+than 4 bytes and other ELF section types (`@preinit_array` among them) are
+diagnosed. Strings of 2- and 4-byte characters
 (GCC's wide literals, `.rodata.str4.4,"aMS",@progbits,4`) are read-only data
 atoms, as the importer classes them, whose sections keep their merge flags and
 entry sizes (#1115). Exported absolute symbols and forward constants are

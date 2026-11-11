@@ -800,12 +800,19 @@ or undefined globals. The emission publishes it with the templates' units
 before the functions' atoms in the link, and in `-c`'s object a section of its
 own name, type and flags (`CheckProgramCode.asm_sections`,
 `check_program_sections`); the direct path's executable merges it into its
-class's output section. Refused by name, at the first file-scope statement:
-templates the assembler refuses; CFI, whose frames the emission's unwind table
-doesn't merge; a section of a class C's definitions don't have, or of another
-type than its class's (an init array's, a note); and what the templates' names
-refuse (a label another template defines too, or that the unit defines, a
-reference to another template's `.set` symbol).
+class's output section. Its sections are any the assembler makes (#1848):
+custom flags (`.pushsection __ex_table,"a"`), merged strings, notes (`-c`'s
+`SHT_NOTE`; the direct path keeps a note's bytes with its class's data, without
+a `PT_NOTE`), and the arrays of constructors and destructors
+(`.section .init_array,"aw"`), whose entries the direct path's executable runs
+as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
+beside the functions' unwind table, its CIE and FDEs as the assembler makes them
+(clang's object shares one CIE between the module's assembly and its
+functions), which the direct path's `.eh_frame_hdr` indexes with the
+functions'. Refused by name, at the first file-scope statement: templates the
+assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
+and what the templates' names refuse (a label another template defines too, or
+that the unit defines, a reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 

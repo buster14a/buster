@@ -30,12 +30,13 @@ The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
 with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`. Both use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
-LLVM object/DWARF tools and lld. Each shard also builds the clang server that
+LLVM object/DWARF tools and lld. Each row also builds the clang server that
 the semantic driver's checks send the oracle clang's runs to (#2071), from the
-release's static clang and LLVM archives, and the native plain row's
-`--differential` compares every served run with a child's. The installer runs
-only on disposable hosted runners. GCC remains the `cc` oracle for fixtures
-that require GNU C extensions.
+release's static clang and LLVM archives: an `x86-64` row's build job, once for
+its shards (see "Shared row products"), and each shard of a `native` row. The
+native plain row's `--differential` compares every served run with a child's.
+The installer runs only on disposable hosted runners. GCC remains the `cc`
+oracle for fixtures that require GNU C extensions.
 
 The build pins `-fno-stack-protector` (#916). A distribution's Clang can
 default to `-fstack-protector-strong` while the official release does not, so
@@ -56,13 +57,16 @@ The baseline leg must report `scalar`; the native leg uses vector kernels when
 the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
 CPU without AVX-512 therefore still runs the complete correctness suite.
 
-Each matrix row runs its inventory as 4 shards (`matrix.shard`), a runner each,
-dealt by `parallel --shard K/4 --costs tools/ci/correctness.costs`: the runner
-deals the commands to the shards by their costs on a hosted runner, the
-costliest first, the same deal on every shard's runner, so that a row's shards
-run every command once (docs/commands/parallel.md). Unsharded, a plain row's
-test step took 14.6 minutes of its 18-minute job on one 4-CPU runner, and the
-MSan rows took up to 98 minutes. Each shard builds the compiler itself, since a
+Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
+runs the row's inventory as 4 shards (`matrix.shard`), a runner each, dealt by
+`parallel --shard K/4 --costs tools/ci/correctness.costs`: the runner deals the
+commands to the shards by their costs on a hosted runner, the costliest first,
+the same deal on every shard's runner, so that a row's shards run every command
+once (docs/commands/parallel.md). Unsharded, a plain row's test step took 14.6
+minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
+98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
+own, and its shards run that verified product (see "Shared row products"
+below). A `native` row's shards each build the compiler themselves, since a
 native build must run on the CPU model it was built for, which hosted runners
 don't share. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
@@ -236,6 +240,118 @@ To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
 `BUSTER_HOST_ARCH=x86-64` for `build.sh`; keep Zen 5 performance measurements on
 Benchpress.
+
+## Shared row products
+
+A portable row (`x86-64`: plain, ASan, TSan and MSan) builds its compiler once
+for its 4 shards (#2032). The test job calls
+`.github/workflows/hosted-correctness.yml` for each row. In a portable row, that
+workflow's `compiler` job sets its runner up as a shard does: the verified
+hosted inputs, `setup-hosted.sh`, the sanitizer host report, the fatal policy
+and detector proofs, and the baseline runtime for the plain row. The build's
+settings are the workflow's environment, the same for the build and the
+shards. The job then builds and packs the product in four steps, three of them
+`tools/ci/hosted-product.sh`'s:
+
+- `build`: the pragma oracle, the clang server and
+  `./build.sh --config Release --jobs "$(nproc)"`, with the build step's checks
+  of `build/compiler`. A native row's shards run this same command. The
+  server's build exits 77 where a toolchain can't give it one copy of LLVM (a
+  distribution's shared LLVM without clang's archives). With another clang that
+  is a notice and no server, and the driver's checks run the oracle clang as
+  children. With the hosted installation, the clang that `toolchain_root()`
+  finds, it is an error: that tree holds the archives, so 77 means a regression
+  in its tar list or the release's layout, which would otherwise leave the row
+  green, its driver commands 251 s slower in the plain row (#2071). The check
+  sits here, the one step that knows its toolchain, rather than in the
+  inventory, which the 9700X and local runs share.
+- `ownership`: the inventory's unity fixture ownership heading. It is the one
+  heading that reads the build's tree (Ninja's dependency records) rather than
+  the executable, so it runs here, on that tree, through the built executable's
+  runner.
+- the sanitizer report audit (sanitizer rows): the post-link step and the
+  ownership heading run the instrumented executable.
+- `pack`: the compiler, the pragma oracle, the clang server, the
+  build's compile commands, the product's identity and provenance, and the
+  SHA-256 of every file, as a reproducible `product.tar.zst`. Zstandard's
+  third level packs the plain row's 48 MB compiler into 15 MB; the static clang
+  server (#2073), about 203 MB, should add some 60 MB, estimated from LLVM's
+  shared libraries' ratio.
+
+It publishes the archive as this run's artifact
+`compiler-ARCH-SANITIZER-OOPT-ATTEMPT`, kept 7 days, and its outputs give the
+artifact's name and the archive's SHA-256.
+
+The product's identity is what the build and every shard compute with the same
+function and compare byte for byte:
+
+- the repository, the run, the commit and its tree, with the tracked files
+  unmodified;
+- the row;
+- the digest of the whole hosted toolchain installation, 2.0 GB (clang, its
+  resource directory with the sanitizer runtimes, lld, mold, wild,
+  libclang-cpp, LLVM's and clang's archives, CMake and Ninja), which the
+  install step reports the time of;
+- the baseline runtime's tree, in the plain row;
+- build.sh's own configuration record, the toolchain identity, the tools on
+  PATH and every setting, which `./build.sh configure` writes;
+- `print-compile-flags`, `print-sanitizer-flags` and `print-sources`;
+- the target's predefined macros with `host_isa.h` (`BUSTER_HOST_VECTOR` 0);
+- `ldd`'s resolution of each executable.
+
+Its provenance is reported but not compared: the runner, its CPU and kernel;
+its image, glibc and the versions of the system packages the build reads; and
+the ownership check's result. Runner images can differ between a row's jobs, as
+they could between its shards when each built its own compiler, so a shard
+reports where the image, glibc or packages differ from its own.
+
+A portable row's shards need its `compiler` job and start once it ends. Their
+first step fails unless the build succeeded: no shard builds the compiler or
+fetches it elsewhere. After the usual setup, sanitizer probes and host report,
+they download the artifact by the build's output name, and
+`hosted-product.sh install` checks it:
+
+1. the archive's SHA-256 against the build's output;
+2. that it holds only directories and regular files under `product/`;
+3. exactly the files it lists, each with its hash;
+4. the identity, which a difference fails, printed;
+5. the build's image, glibc and packages, whose differences are a notice;
+6. each executable, the clang server among them, run once.
+
+Only then does it install them where `build` puts them:
+`build/compiler`, in the checkout's `build/` where the compiler finds its
+headers, `build/compile_commands.json`, and the pragma oracle and clang server
+in `RUNNER_TEMP`. It exports the same variables as `build`, and
+`BUSTER_PRODUCT`. On such a shard the inventory's ownership heading checks that
+the product records its pass and exits 77 (skipped); every other command runs
+as before. `check-call-graph`'s `./build.sh` call configures the tree and
+builds the IR it checks, which no product replaces.
+
+Products stay in their run. No cache holds one. A shard downloads only
+from its own run (no `run-id` or token), by the name and SHA-256 that its
+run's build job gave, and the identity binds the product to the repository,
+run, commit and tree. A pull request's run builds and tests its own products, a
+push or dispatch on main builds its own, and no run can use another's. The
+selector's row policy (`changes_row_policy`) pins this with counterexamples.
+
+A failed build fails its row's shards at their first step, and a cancelled one
+cancels them. Rerunning the failed jobs reruns the build first, under a new
+attempt's name and SHA-256. A shard always reads the product that its run's
+build job last published, by that job's outputs, so a shard rerun without the
+build reads the attempt that succeeded, as the hosted inputs' handoff does. A
+missing (expired), truncated or altered archive, a partial extraction or a
+mismatched configuration fails the shard and says why. Rerun the build job, or
+the workflow: nothing rebuilds or refetches by itself, so one bad product can't
+start four builds. `bash tests/ci/hosted-product.sh`, which the build job runs
+before building, checks each of these refusals, a product without its server,
+the clang server's status 77 (failing the build on the hosted toolchain and a
+notice with another clang) and the inventory's skip on a fake checkout,
+toolchain and build. `bash tests/ci/hosted-tools.sh` checks the same 77 failure
+against the tree that `install-hosted-tools.sh` installs.
+
+Native rows keep their per-shard builds until #2033 gives the vector row an
+explicit target: each hosted CPU selects its own path. Reuse across revisions
+(a change to fixture data alone) is a separate extension (#2032's discussion).
 
 ## CI latency baseline
 
