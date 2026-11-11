@@ -875,7 +875,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
 // vector), and a format of more than 255 items, whose count byte clang's code truncates (#1785); dump_struct's generated calls; and
-// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
+// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses or drops.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
     static const struct
@@ -890,6 +890,10 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
         { "struct S { char c[1L << 32]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 GiB" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
+          "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
+        // A static initializer of one, which clang's evaluator takes as an address constant (#1785): its object refused by the
+        // static data.
+        { "static const char m[] = \"x\";\nconst void* p = __builtin___NSStringMakeConstantString(m);\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
@@ -908,7 +912,7 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
         { "struct S { int a; long b; };\nint printf(const char*, ...);\nvoid f(struct S __seg_fs* s) { __builtin_dump_struct(s, printf); }\n",
           "unsupported: __builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
-          "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
+          "unsupported: __builtin_available with an empty version, an invalid expression whose code clang refuses or drops" },
     };
     char source[256];
     char object[256];
@@ -3313,6 +3317,25 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
         check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL,
                           path == 0 ? "a vector's element through a pointer is refused as a member access" :
                                       "a vector's element through a pointer is refused as a member access, scalar");
+        free(text);
+        text = NULL;
+    }
+    // `p->y` (#1447's finding): the checker takes it as `(*p).y`, and the lowering refuses it as it refuses that.
+    static const char arrow[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return p->y; }\n";
+    const bool arrow_written = parse_test_write(source, arrow, sizeof(arrow) - 1);
+    for (uint32_t path = 0; arrow_written && path < 4; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, path < 2 ? "-fsyntax-only" : "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", path < 2 ? "-fsyntax-only" : "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path % 2 == 0 ? vector_arguments : scalar_arguments, &text);
+        const bool expected = path < 2 ? status == 0 : status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL;
+        static const char* const names[] = {
+            "a pointer's extended vector's lane is checked",
+            "a pointer's extended vector's lane is checked, scalar",
+            "a pointer's extended vector's lane is refused as a member access",
+            "a pointer's extended vector's lane is refused as a member access, scalar",
+        };
+        check_test_expect(test, expected, names[path]);
         free(text);
         text = NULL;
     }
@@ -7986,9 +8009,11 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
 #include "c_check_type_safety_driver_test.c"
+#include "c_check_objc_bridge_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
+#include "c_check_call_count_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -8132,6 +8157,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
     bool asm_definitions_only = false;
+    // --call-counts-only: the call argument count section alone (#1860).
+    bool call_counts_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -8167,6 +8194,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             asm_definitions_only = true;
         }
+        else if (strcmp(argv[i], "--call-counts-only") == 0)
+        {
+            call_counts_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -8198,7 +8229,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8713,6 +8744,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && call_counts_only)
+    {
+        check_test_driver_call_counts(&test, clang, executable, directory);
+    }
     if (temporary && asm_definitions_only)
     {
         check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
@@ -8899,6 +8934,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
+            check_test_driver_call_counts(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -9027,6 +9066,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_type_safety(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_objc_bridge(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9259,6 +9302,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_twice(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_asm(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -9283,7 +9330,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_results256(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_extremes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_frame_address(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

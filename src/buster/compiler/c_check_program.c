@@ -388,6 +388,39 @@ struct CheckProgramCpuVersion
     uint32_t group;
 };
 
+// A function multiversioned by target strings (#1838, c_check_program_target_versions.c): its first declaration with an
+// attribute (its name and linkage); for target's versions, its reference object R (f.ifunc, which every reference to
+// a version reaches) and its versions, `version_count` of CheckProgram.target_versions from `version_first`; for
+// target_clones, its object (f, the IFUNC references reach) and declaration with the attribute, and the object of its
+// body's own symbol (the first clone's, f.X.0). `resolved` is whether the unit emits its resolver (target's: where a
+// version is referenced; target_clones': where the function is defined or referenced), whose code reads libgcc's CPU
+// model (`model`) and its features' second array (`features2`).
+typedef struct CheckProgramTargetGroup CheckProgramTargetGroup;
+struct CheckProgramTargetGroup
+{
+    uint32_t first;
+    uint32_t reference;
+    uint32_t clones;
+    uint32_t clones_declaration;
+    uint32_t body;
+    uint32_t version_first;
+    uint32_t version_count;
+    // Its resolver's options: its versions, or target_clones' versions with their repetitions.
+    uint32_t option_count;
+    bool internal;
+    bool resolved;
+    bool model;
+    bool features2;
+};
+
+// A version of target's: its object and its first declaration with the attribute (its string).
+typedef struct CheckProgramTargetVersion CheckProgramTargetVersion;
+struct CheckProgramTargetVersion
+{
+    uint32_t object;
+    uint32_t declaration;
+};
+
 typedef struct CheckProgram CheckProgram;
 struct CheckProgram
 {
@@ -459,6 +492,18 @@ struct CheckProgram
     CheckProgramAlias* aliases;
     uint8_t* alias_states;
     uint32_t alias_count;
+    // Asm labels that name another object's symbol (#1979, check_program_label_merges): one symbol per name, as clang's
+    // module has one global per name. Keys of an object in the high half and the object whose symbol it takes (its name's
+    // definition, else its first tentative definition, else its first object) in the low, sorted by object; null in a unit
+    // without them, the usual one, and shared by a selection. label_conflict is one more than the token of a function's
+    // second definition of a name, clang's error at code generation, and label_previous the first's; label_refused one
+    // more than the token of a variable's second definition of a name (0 for none).
+    uint64_t* label_merges;
+    uint32_t label_merge_count;
+    uint32_t label_conflict;
+    uint32_t label_previous;
+    uint32_t label_refused;
+    String8 label_conflict_name;
     // clang's cpu_specific and cpu_dispatch multiversioning (#1447, c_check_program_cpu_dispatch.c): the unit's groups and
     // versions, null in a unit without them, the usual one; a selection shares them. And each program's own symbols of the
     // versions (cpu_version_count of them, 0 for a version without a body) and of the groups' dispatchers (after them, 0
@@ -468,6 +513,14 @@ struct CheckProgram
     SymbolId* cpu_symbols;
     uint32_t cpu_group_count;
     uint32_t cpu_version_count;
+    // Multiversioning by target strings (#1838, c_check_program_target_versions.c): the unit's groups and target's
+    // versions, null in a unit without them; and each version's own symbol (target_version_count of them, 0 for a version
+    // without a body), then each group's body symbol (target_clones', 0 for none).
+    CheckProgramTargetGroup* target_groups;
+    CheckProgramTargetVersion* target_versions;
+    SymbolId* target_symbols;
+    uint32_t target_group_count;
+    uint32_t target_version_count;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
@@ -725,6 +778,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE 512u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK 1024u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL 2048u
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
@@ -755,7 +809,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
         const uint32_t patchable = kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE : 0;
         const uint32_t weak = kind == CHECK_ATTRIBUTE_WEAK ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak;
+        const uint32_t label = kind == CHECK_ATTRIBUTE_ASM_LABEL ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak | label;
     }
     return bits;
 }
@@ -767,8 +822,9 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // code generation's check of target features or a late symbol rename's emission walk reads (#775,
 // CheckProgram.attribute_keys); the file-scope declarations with an alias, ifunc or weakref attribute, which
 // check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases); the function declarations with a
-// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); and the declarations with a weak attribute,
-// `#pragma weak`'s among them (#1849, check_program_weak_late).
+// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); the declarations with a weak attribute,
+// `#pragma weak`'s among them (#1849, check_program_weak_late); and the declarations with linkage and an asm label
+// (#1979, check_program_label_merges).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -789,6 +845,9 @@ struct CheckProgramTargetEvents
     uint64_t* weak_keys;
     uint32_t weak_count;
     uint32_t weak_capacity;
+    uint64_t* label_keys;
+    uint32_t label_count;
+    uint32_t label_capacity;
 };
 
 // clang's cpu_specific and cpu_dispatch multiversioning (#1447), defined in c_check_program_cpu_dispatch.c.
@@ -801,6 +860,12 @@ static bool check_program_cpu_number(CheckProgram* program, Arena* output);
 static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output);
 static uint64_t check_program_cpu_features_write(const CheckProgram* program, const CheckInputAttribute* attribute, char* text, uint64_t capacity);
 static SymbolId check_program_body_symbol(const CheckProgram* program, uint32_t b);
+static SymbolId check_program_target_body_symbol(const CheckProgram* program, uint32_t b);
+// Multiversioning by target strings (#1838), defined in c_check_program_target_versions.c.
+static bool check_program_target_groups(CheckProgram* program, const CheckProgramTargetEvents* events, const uint32_t* initializer_references,
+                                        uint32_t initializer_reference_count, Arena* output);
+static void check_program_target_needed(const CheckProgram* program, uint8_t* needed);
+static bool check_program_target_number(CheckProgram* program, Arena* output);
 // The room a cpu_specific version's features take (check_program_cpu_features_write): more than any CPU's, 712 bytes in
 // c_check_cpu_dispatch.inc.
 #define BUSTER_CHECK_PROGRAM_CPU_FEATURES 1024u
@@ -3835,6 +3900,11 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         {
             check_program_event_push(events, &events->weak_keys, &events->weak_count, &events->weak_capacity, object, token);
         }
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL) != 0 && check_input_linkage(input->declaration_bits, token) != 0 &&
+            !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
+        {
+            check_program_event_push(events, &events->label_keys, &events->label_count, &events->label_capacity, object, token);
+        }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
             check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
@@ -4071,7 +4141,8 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
                 const int32_t attribute_cpu = readable ? last_cpu : -1;
-                versions |= (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && !attribute->ignored;
+                // A target_clones body is compiled with the unit's features (#1838, c_check_program_target_versions.c).
+                versions |= attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH && !attribute->ignored;
                 specific = specific == 0 && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC && !attribute->ignored ? attribute : specific;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
                 {
@@ -4083,16 +4154,6 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 {
                     versions |= !check_program_text_equal(attribute->text, applied->text);
                 }
-            }
-        }
-        // A version of a function multiversioned by target strings (#1838): a function of its name another object with a
-        // target attribute has (the checker keeps each version apart). A lone "default" is still compiled as the function.
-        for (uint32_t e = low; input->target_multiversion && !versions && e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
-        {
-            const uint32_t token = (uint32_t)keys[e];
-            for (uint32_t other = 0; !versions && other < count; other += 1)
-            {
-                versions = (uint32_t)(keys[other] >> 32) != body.object && program->parser->tokens.names[(uint32_t)keys[other]] == program->parser->tokens.names[token];
             }
         }
         uint32_t target = versions ? BUSTER_CHECK_PROGRAM_TARGET_VERSIONS : 0;
@@ -4883,12 +4944,16 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         // clang's cpu_specific and cpu_dispatch groups (#1447), whose members' references take their groups' symbols as
         // the symbols are numbered.
-        const bool grouped = !program->input->cpu_dispatch || check_program_cpu_groups(program, &target_events, output);
+        const bool grouped = (!program->input->cpu_dispatch || check_program_cpu_groups(program, &target_events, output)) &&
+                             (!program->input->target_multiversion ||
+                              check_program_target_groups(program, &target_events, options.initializer_references, options.initializer_reference_count, output));
         // GNU's alias, ifunc and weakref attributes (#147): the unit's entries, whose aliases' and ifuncs' objects are
         // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
         const bool aliased = grouped && (target_events.alias_count == 0 ||
                                          check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-        valid = naked_room && aliased && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
+        // Asm labels naming another object's symbol (#1979), whose objects take that symbol as the symbols are numbered.
+        const bool labelled = aliased && (target_events.label_count == 0 || check_program_label_merges(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
+        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
         valid = valid && (target_events.weak_count == 0 || check_program_weak_late(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
@@ -4939,6 +5004,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #else
 #include "c_check_program_vectors.c"
 #include "c_check_program_x86.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+// The IR decoder's conversion tests' producer (#1840).
+#include "c_check_program_vector_convert.c"
+#undef BUSTER_CHECK_BASE_PACKED
+#undef BUSTER_CHECK_BASE_UNARY
+#endif
 #include "c_check_program_emit.c"
 #endif
 #endif
