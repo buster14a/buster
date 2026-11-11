@@ -1628,8 +1628,16 @@ Each folds as clang's evaluator does, in its operand's width of up to 128 bits,
 where every argument it reads is a constant: `clzs`, `ctzs`, and `clzg` and
 `ctzg` without a second argument, of zero are undefined (a fault, as
 `check_builtins` gives `clz` of zero), and a carry chain, whose store of its
-carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
-is a runtime action (#1447): no constant of one reaches the fold yet.
+carry is an effect, never folds. A constant of a `_BitInt` past 128 bits
+(#1447) folds by its limbs (`check_builtin_bits_fold_wide`, c_check_wide.c's
+values): set bits by `vpopcntq` (with a scalar twin, compared in
+`test-check-builtins-bits`), leading and trailing counts from its significant
+bits and first set limb, a reversal of the limbs then a shift by the padding,
+a byte swap of its width's bytes, `bit_floor`'s and `bit_ceil`'s one bit, and a
+rotation by the shift kernels; a rotation's count of any width reduces modulo
+the width from its limbs (`check_builtin_bits_wide_amount`), which a narrow
+value's rotation by a wide count takes too. One constant a call: only the set
+bits are a kernel worth a vector.
 
 `c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
 zero-extended from its width, as clang's code computes on its `iN`: the
@@ -1752,11 +1760,12 @@ argument, as clang's code doesn't; a folded address still evaluates both, as
 clang computes it at run time. A local array's address is no constant: the
 call runs, and gives what the fold would, since a frame places a declaration at
 least as aligned as clang declares it (#978's large arrays). A source past 128
-bits (#1447) is a runtime action, its constant alignment checked as any
-source's (at least 1 and a power of 2; its maximum, 2 to its width less 1, is
-past every alignment of 128 bits). An alignment past 128 bits, which clang
-takes, is refused by name: clang checks a constant one, which the checker can't
-tell from a runtime one until its constants hold more than 128 bits.
+bits (#1447) folds by its limbs (`check_wide_align_fold`), its constant
+alignment checked as any source's (at least 1, at most 2 to its width less 1,
+a power of 2). An alignment past 128 bits is checked by its constant's shape
+(`check_wide_alignment_shape`: its sign, zero, significant bits and whether it
+is a power of 2), as clang checks it, through a const object's initializer too
+(the call's evidence keeps its limbs, `CheckBuiltinCall.alignment_limbs`).
 
 `c_builtin_misc_lower.c`'s `cbuiltin_misc_align` computes them as clang's code
 does, from the bit builtins' descriptors (a pointer's 64 bits): the source
@@ -2608,11 +2617,15 @@ features. Their prototypes are clang's metadata's:
   is saved in a region of the call's own in such a function
   (`tier0_layout_frame`), so the second return finds it whatever calls ran
   before the longjmp. Before #1242's review the regions were shared, so a later
-  call could overwrite the value. A value held in its depth's frame slot can't
-  be saved that way, since later expressions share the slot: a long double, an
-  `__int128`, a vector, a mask, or any value of a function with deep entries.
-  Such a call is refused by name (`tier0_returns_twice_saves`). C's contexts
-  for setjmp (a condition, compared with a constant) hold none. Ordinary Tier 1
+  call could overwrite the value. A long double's, an `__int128`'s or a
+  vector's value lives in its depth's frame slot, which later expressions
+  share: the call copies the slots below its arguments into a snapshot of its
+  own and back after it (`tier0_returns_twice_snapshot`, #1843), 8 bytes at a
+  time through the x87 stack's FILD and FISTP, which keep every bit pattern and
+  touch no register the call's moves hold. A mask on the mask stack, or any
+  value of a function with deep entries, is still refused by name
+  (`tier0_returns_twice_saves`). C's contexts for setjmp (a condition, compared
+  with a constant) hold none. Ordinary Tier 1
   leaves such a function to Tier 0.
   longjmp's second argument must be a constant 1, wherever the call is, with
   clang's two errors at the call (`check_input_longjmp_argument`).
