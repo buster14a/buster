@@ -3412,7 +3412,16 @@ What the lowering covers past scalars (#145's programs):
     feature's, doubled plus one), highest first. A version's condition is its
     `arch=` (`__builtin_cpu_is`'s test of the vendor, type or subtype; a
     microarchitecture level's bit) and its features' bits. A version of
-    neither is taken unconditionally, and a model none matches is a `ud2`. A
+    neither is taken unconditionally, and a model none matches is a `ud2`.
+    An `arch=X` version is chosen by the CPU model's vendor, family and
+    model alone, as clang's is, with no test of X's features, though its copy
+    is compiled with all of them (the owner's decision, #2355). On a machine
+    whose model is X but which doesn't report some of X's features (a VM that
+    hides AVX-512, as some hosted Zen 4 runners do), the resolver still
+    picks it, and an instruction of a hidden feature traps, as clang's build
+    does. A fixture that executes code on hosted runners chooses such a
+    version by feature (`avx512f`, which the resolver tests by its bit), not
+    by `arch=` (#2346). A
     static group's versions are emitted where its resolver is, as clang emits
     them. A block-scope static in a version is named by the function's name
     where clang emits it (`check_program_target_static_context`). In a
