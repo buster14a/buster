@@ -1249,7 +1249,6 @@ static __attribute__((unused)) void main_benchmark_test_interfaces(void)
 static __attribute__((unused)) void main_checker_consumer_interfaces(void)
 {
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    (void)&check_action_quad_bits;
     (void)&check_varargs;
     (void)&check_builtin_float_strict;
     (void)&check_builtin_float;
