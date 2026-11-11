@@ -1289,6 +1289,16 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "fill(&f,64,n+5);fill(&g,sizeof g,n+6);fill(&k,sizeof k,n+7);a[1]=-1;b[0]=(long long)(1ull<<63);"
           "v2di x[]={a*b,a*(long long)n,b*b};uq4 y[]={c*d,d*3u};sq8 z[]={e*f,f*-7};e3 w[]={g*k,g*g};FOLD(x);FOLD(y);FOLD(z);FOLD(w);return (int)h;}\n"
         },
+        // Nontemporal loads and stores (#1834): an ordinary load without SSE4.1, and vectors wider than the target's
+        // nontemporal moves a piece at a time; of 8, 16, 32 and 64 bytes.
+        { "baseline-nontemporal",
+          "typedef int d2 __attribute__((vector_size(8),aligned(8)));typedef float f8 __attribute__((vector_size(32),aligned(32)));"
+          "typedef short w32 __attribute__((vector_size(64),aligned(64)));typedef long long q4 __attribute__((vector_size(32),aligned(32)));\n"
+          "int tested(int n){unsigned h=2166136261u;d2 a,a2;v4si b,b2;f8 c,c2;w32 e,e2;q4 g,g2;fill(&a,8,n);fill(&b,16,n+1);fillf((float*)&c,8,n+2);fill(&e,64,n+3);"
+          "fill(&g,32,n+4);a2=__builtin_nontemporal_load(&a);b2=__builtin_nontemporal_load(&b);c2=__builtin_nontemporal_load(&c);e2=__builtin_nontemporal_load(&e);"
+          "g2=__builtin_nontemporal_load(&g);__builtin_nontemporal_store(a2+1,&a);__builtin_nontemporal_store(b2*3,&b);__builtin_nontemporal_store(c2,&c);"
+          "__builtin_nontemporal_store(e2,&e);__builtin_nontemporal_store(g2^7,&g);FOLD(a);FOLD(b);FOLD(c);FOLD(e);FOLD(g);FOLD(a2);FOLD(e2);return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
