@@ -7341,7 +7341,13 @@ initializer's type converted as an lvalue's (its qualifiers dropped, but not
 `_Atomic`, a kind), an array's and a function's decayed, with the specifiers'
 `const` and `volatile`. Until the walk has read the initializer, the
 declaration's type is a placeholder, `restrict int` with the specifiers'
-qualifiers (`BUSTER_CHECK_AUTO_TYPE`), which no specifiers give otherwise. Its
+qualifiers (`BUSTER_CHECK_AUTO_TYPE`), which no specifiers give otherwise; the
+specifiers' `_Atomic` and `restrict`, which clang applies to the deduced type
+(#1844), make it `restrict unsigned int` or `restrict long` instead
+(`check_input_auto_type_qualifiers`), so `_Atomic __auto_type a = 1;` is an
+`_Atomic(int)`, `const _Atomic` of an array's value a `const _Atomic(int *)`,
+and `__auto_type restrict q = p;` an `int *restrict`; a pointer declarator's own
+`restrict` is its pointer's (`__auto_type *restrict p`). Its
 initializer registers a finish event (`check_input_initializer_prepare`), so
 that the initializer's uses capture their declarations as an incomplete array's
 do (`inference_end`). The finish (`check_input_auto_type_finish`) types the
@@ -7384,8 +7390,12 @@ variable with linkage takes the earlier declaration's type rather than a
 deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 (`extern long p; __auto_type p = 1;` is a long, its initializer converted;
 `check_input_auto_type_merged`), through pointer declarators. Refused by
-name: `_Atomic`, `restrict` and type attributes with `__auto_type`, a
-variably modified cast in the initializer, and a
+name: `_Atomic` and `restrict` through a declarator (`_Atomic __auto_type *p`,
+whose initializer clang finds incompatible) or together (clang's restrict error
+names `_Atomic(__auto_type)`), `_Atomic` of an atomic value (clang's error names
+the placeholder's type), `restrict` of a value that is no pointer to an object
+(clang's `restrict int`, which the placeholder can't be told from), type
+attributes with `__auto_type`, a variably modified cast in the initializer, and a
 redeclaration whose merge clang refuses (its "redefinition of 'p' with a
 different type: 'const __auto_type' vs 'int'").
 
