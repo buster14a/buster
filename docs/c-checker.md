@@ -5934,7 +5934,15 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. `-Wshift-op-parentheses` (#2264, on
+`-Wdangling-else` and `-Wuninitialized`. `-Wsizeof-array-decay` (#2264, on by
+default, `check_common_sizeof_array_decay`) is clang's
+`warnOnSizeofOnArrayDecay`: `sizeof` of a binary operator, through
+parentheses, whose operand is an array decayed to the operator's own type
+(`sizeof(a + 1)`, `sizeof(0, a)`, `sizeof(p = a)`), "sizeof on pointer
+operation will return size of 'int *' instead of 'int[10]'" at the operator,
+once for each such operand, the array's type as written; published past the
+`sizeof`'s `)`, after its operand's `-Wunevaluated-expression`. Not alignof's
+operand. `-Wshift-op-parentheses` (#2264, on
 by default, `-Wparentheses`' and so `-Wall`'s,
 `check_common_shift_op_parentheses`) is clang's `DiagnoseAdditionInShift`:
 each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
