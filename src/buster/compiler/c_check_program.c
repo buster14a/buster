@@ -5004,6 +5004,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #else
 #include "c_check_program_vectors.c"
 #include "c_check_program_x86.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+// The IR decoder's conversion tests' producer (#1840).
+#include "c_check_program_vector_convert.c"
+#undef BUSTER_CHECK_BASE_PACKED
+#undef BUSTER_CHECK_BASE_UNARY
+#endif
 #include "c_check_program_emit.c"
 #endif
 #endif

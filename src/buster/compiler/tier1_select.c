@@ -285,6 +285,9 @@ typedef enum Tier1SelectRule
 // A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
 // shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
 #define BUSTER_TIER1_VECTOR_PERMUTE 11
+// A conversion (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTEND (0 extend, 1 truncate), `immediate` the
+// IR's flags, `source_width` the source's bytes (tier1_select_convert_form).
+#define BUSTER_TIER1_VECTOR_CONVERT 12
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1263,6 +1266,30 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+#include "buster/compiler/ir_simd_convert_forms.c"
+
+// A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
+// the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
+// source's), or X86_FORM_NONE for a pair the flags don't name.
+static uint16_t tier1_select_convert_form(uint32_t kind, uint32_t flags, uint32_t width, uint32_t source_width)
+{
+    const uint32_t from = flags & 3;
+    const uint32_t to = (flags >> 2) & 3;
+    const uint32_t mode = flags >> 4;
+    const uint32_t bytes = kind == 0 ? width : source_width;
+    const uint32_t index = bytes == 16 ? 0 : bytes == 32 ? 1 : bytes == 64 ? 2 : 3;
+    uint16_t form = X86_FORM_NONE;
+    for (uint32_t pair = 0; index < 3 && pair < 6; pair += 1)
+    {
+        const uint8_t* sizes = kind == 0 ? ir_simd_typed_extension_pairs[pair] : ir_simd_typed_truncation_pairs[pair];
+        if (sizes[0] == from && sizes[1] == to)
+        {
+            form = kind == 0 && mode <= 1 ? ir_simd_typed_extensions[mode][pair][index] : kind == 1 && mode <= 2 ? ir_simd_typed_truncations[mode][pair][index] : X86_FORM_NONE;
+        }
+    }
+    return form;
+}
+
 static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t type = holes->source_width;
@@ -1840,6 +1867,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_PERMUTE)
         {
             tier1_select_permute(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
+        {
+            // An extension's destination in reg and its source in rm; a truncation's source in reg and its destination in
+            // rm, which zeroes the register past its lanes.
+            const bool extend = holes->operation == 0;
+            const X86Instruction record = {
+                .form = tier1_select_convert_form((uint32_t)holes->operation, (uint32_t)holes->immediate, width, holes->source_width),
+                .reg = extend ? x : left,
+                .rm = extend ? left : x,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            tier1_select_append(&result, record);
         }
         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
@@ -3230,15 +3270,23 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 // The most parts a result has (#1624): a vector's split across xmm0 to xmm3.
 #define BUSTER_TIER1_SELECT_RESULT_PARTS 4u
 // The red zone's 8-byte slots, its 128 bytes below rsp, where a function's own result parts wait on the way out
-// (tier1_emit_cfg_aggregate_result, #1847): a split vector's four 32-byte parts or two 64-byte ones take all 16.
+// (tier1_emit_cfg_aggregate_result, #1847): those that aren't a whole vector register's (tier1_select_part_direct), at
+// most two eightbytes' in rax and rdx or xmm0 and xmm1.
 #define BUSTER_TIER1_SELECT_RED_ZONE_SLOTS 16u
+
+// Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
+// vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
+// widens and whose load can't overwrite the address, a general register. Any other part is staged in the red zone.
+static bool tier1_select_part_direct(Tier1SelectPart part)
+{
+    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
+}
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
 // (#141), or a vector's wider than the target's registers (#1624, tier0_vector_result_parts' shape, #1193): split
 // across the first two or four vector registers, 16, 32 or 64 bytes each (xmm's without AVX, ymm's with it, zmm's with
-// AVX512F: a 128-byte vector's), part k at byte k * part_bytes of its object, as long as the parts fit the red zone's
-// slots, where the function's own return stages them (#1847: a 256-byte vector's four zmm parts don't). None for any
-// other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
+// AVX512F: a 128-byte vector's, and a 256-byte one's four, #1847), part k at byte k * part_bytes of its object, which the
+// function's own return loads straight from the result's address (tier1_select_part_direct). None for any other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
 static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
 {
     uint32_t vectors = 0;
@@ -3252,8 +3300,7 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
         rest = rest && result.registers[k] == BUSTER_ABI_REGISTER_NONE;
     }
     const bool split = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && (vectors == 2 || vectors == 4) && rest &&
-                       (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64) && size == vectors * result.part_bytes &&
-                       vectors * tier1_select_part_slots(result.part_bytes) <= BUSTER_TIER1_SELECT_RED_ZONE_SLOTS;
+                       (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64) && size == vectors * result.part_bytes;
     const bool registers = !split && result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
     uint32_t count = registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
     for (uint32_t k = 0; split && k < vectors; k += 1)
@@ -3264,15 +3311,16 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
     return count;
 }
 
-// The first red-zone staging slot of result part k (#1624): the slots of the parts before it, each a whole vector
-// register's bytes' or an eightbyte's one (tier1_select_part_slots). Of k = the part count, the slots they all take,
-// which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds (tier1_select_result_staged).
+// The first red-zone staging slot of result part k (#1624): the slots of the staged parts before it, each an eightbyte's
+// one (tier1_select_part_slots), past those loaded straight from the result's address (#1847, tier1_select_part_direct),
+// which take none. Of k = the part count, the slots they all take, which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds
+// (tier1_select_result_staged).
 static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t k)
 {
     uint32_t slot = 0;
     for (uint32_t j = 0; j < k; j += 1)
     {
-        slot += tier1_select_part_slots(parts[j].bytes);
+        slot += tier1_select_part_direct(parts[j]) ? 0 : tier1_select_part_slots(parts[j].bytes);
     }
     return slot;
 }
@@ -4203,7 +4251,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_TRUNCATE))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4270,6 +4318,22 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.intrinsic_cost = 1;
             if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE))
+        {
+            // A conversion (#1840): its lanes and mode in the IR's flags, the source's width beside them.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_CONVERT;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTEND);
+            base.immediate = function->flags[node];
+            base.source_width = a < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[a]) : 0;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }

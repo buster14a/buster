@@ -383,7 +383,8 @@ static void check_test_program_helper_contracts(CheckTest* test)
     }
     // Every read/modify/write of every width, in its integer format, and in each other format its rule takes.
     static const CBuiltinAtomicRmwFormat formats[] = { CBUILTIN_ATOMIC_RMW_INTEGER_BITS, CBUILTIN_ATOMIC_RMW_BOOL_BITS, CBUILTIN_ATOMIC_RMW_SIGNED_BITS,
-                                                       CBUILTIN_ATOMIC_RMW_F32_BITS, CBUILTIN_ATOMIC_RMW_F64_BITS };
+                                                       CBUILTIN_ATOMIC_RMW_F32_BITS, CBUILTIN_ATOMIC_RMW_F64_BITS, CBUILTIN_ATOMIC_RMW_F16_BITS,
+                                                       CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS, CBUILTIN_ATOMIC_RMW_BF16_BITS, CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS };
     for (uint32_t r = 0; ready && r < BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules); r += 1)
     {
         const CheckBuiltinAtomicRmwRule* rule = &check_builtin_atomic_rmw_rules[r];
@@ -508,7 +509,7 @@ static void check_test_program_helper_contracts(CheckTest* test)
     // terminal builtins, FLT_ROUNDS, the math builtins, the x86 leaves and the unnamed helpers' four codes.
     static const uint32_t expected[CHECK_PROGRAM_HELPER_FAMILIES] = {
         [CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] = 8,
-        [CHECK_PROGRAM_HELPER_ATOMIC_RMW] = 239,
+        [CHECK_PROGRAM_HELPER_ATOMIC_RMW] = 255,
         [CHECK_PROGRAM_HELPER_FENCE] = 3,
         [CHECK_PROGRAM_HELPER_TERMINAL] = 2,
         [CHECK_PROGRAM_HELPER_ROUNDS] = 1,

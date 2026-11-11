@@ -1147,7 +1147,8 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
         body->label_offsets[k] += body->label_offsets[k] != UINT32_MAX ? sled : 0;
     }
     const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
-    for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
+    const uint32_t asm_label_count = naked != 0 ? naked->label_count : code->asm_label_count;
+    for (uint32_t k = 0; k < asm_label_count; k += 1)
     {
         body->asm_offsets[k] += body->asm_offsets[k] != UINT32_MAX ? sled : 0;
     }
@@ -1274,7 +1275,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // What the merge reads stays on the lane's scratch; the offsets don't.
     body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
     body->label_offsets = code->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, code->label_count) : 0;
-    body->asm_offsets = naked != 0 && naked->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, naked->label_count) : 0;
+    // A naked function's templates' labels, or its asm bodies' (#1839, EmittedCode.asm_label_records): it has no body.
+    const uint32_t asm_label_count = naked != 0 ? naked->label_count : code->asm_label_count;
+    body->asm_offsets = asm_label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, asm_label_count) : 0;
     const uint64_t rows = run->sources ? (uint64_t)code->source_count + 2 + BUSTER_CHECK_DEBUG_SLACK : 0;
     body->row_offsets = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
@@ -1295,7 +1298,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
+                 (asm_label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
                  (!run->sources || code->local_range_count == 0 || (body->debug_locations != NULL && body->debug_location_first != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
@@ -1387,9 +1390,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
                 body->label_offsets[k] = record == UINT32_MAX ? 0 : record < code->count ? offsets[record] : UINT32_MAX;
             }
             // A template's label may be its code's end.
-            for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
+            for (uint32_t k = 0; k < asm_label_count; k += 1)
             {
-                const uint32_t record = naked->labels[k].record;
+                const uint32_t record = naked != 0 ? naked->labels[k].record : code->asm_label_records[k];
                 body->asm_offsets[k] = record < code->count ? offsets[record] : record == code->count ? (uint32_t)length : UINT32_MAX;
             }
             if (sled != 0)
@@ -4254,6 +4257,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 const uint32_t offset = source_body ? body->asm_offsets[k] : record < code->count ? offsets[record] : record == code->count ? (uint32_t)body->length : UINT32_MAX;
                 const SymbolId label = asm_symbols[asm_labels[k].name];
                 valid = offset != UINT32_MAX && link_define_symbol(&result->link, label, atom, offset, 0);
+                if (valid)
+                {
+                    result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
+                }
+            }
+            // Its asm bodies' labels (#1839, EmittedCode.asm_label_records), each at its record's offset in the body: the
+            // program's definitions, as a helper's template's labels are.
+            for (uint32_t k = 0; valid && source_body && !assembly && k < code->asm_label_count; k += 1)
+            {
+                const uint32_t name = code->asm_label_names[k];
+                const SymbolId label = name < asms->name_count ? asm_symbols[name] : 0;
+                valid = label != 0 && body->asm_offsets[k] != UINT32_MAX && link_define_symbol(&result->link, label, atom, body->asm_offsets[k], 0);
                 if (valid)
                 {
                     result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;

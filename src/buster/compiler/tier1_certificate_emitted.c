@@ -2201,6 +2201,18 @@ static bool tier1_cert_emitted_row_before(const Tier0Operation* row, const Tier1
     return (born && a.end < b.start) || touching;
 }
 
+// Whether VECTOR role `a`, which holds the same value as VECTOR role `b` in the register they share (#1871: one value as
+// two operands, as _mm_packus_epi32(x, x) has it), is done reading it when `b` is first written: `b` never is, or `a` is
+// named last before that record, or in it where the record's destination may be one of its sources (it reads them
+// before it writes). Neither is an early role (#1283).
+static bool tier1_cert_emitted_row_reread(const Tier1SelectRowVectors* facts, Tier1CertEmittedRole a, Tier1CertEmittedRole b)
+{
+    const uint32_t write = facts->first_write[b.vector & 15];
+    const bool written = ((facts->written >> (b.vector & 15)) & 1) != 0;
+    const bool read_first = write != 0 && (a.end < write || (a.end == write && ((facts->exclusive >> (write - 1)) & 1) == 0));
+    return !a.early && !b.early && (!written || read_first);
+}
+
 #define BUSTER_CERT_EMITTED_ROLES (BUSTER_TIER0_OPERATION_VECTORS + 2 * BUSTER_TIER0_OPERATION_OPERANDS + 2 * BUSTER_TIER0_SCRATCH + 3 + 8)
 
 // A role byte's register by the placement, in a field of register class `class`, or UINT8_MAX for no register: a vector
@@ -2489,7 +2501,8 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         role_masks |= role.file == 2 ? 1u << (role.reg & 7) : 0;
         // No two roles share a register while both hold their values, but where Tier 0's placement puts them together:
         // the result and its class's first operand, and operands no record writes. Two VECTOR(j) roles may share one
-        // over records apart (#1283), one done with it before the other takes it.
+        // over records apart (#1283), one done with it before the other takes it, and two operands' roles of the same
+        // value (#1871) where each is done reading it when the other is first written.
         for (uint32_t m = 0; valid && m < k; m += 1)
         {
             const Tier1CertEmittedRole other = roles[m];
@@ -2502,7 +2515,10 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
                                                     : ((mask_writes >> (role.reg & 7)) & 1) == 0;
             const bool read_only = role.operand != UINT32_MAX && other.operand != UINT32_MAX && !role.result && !other.result && unwritten;
             const bool apart = vectors && (tier1_cert_emitted_row_before(row, &facts, role, other) || tier1_cert_emitted_row_before(row, &facts, other, role));
-            valid = !shared || aliased || read_only || apart;
+            const bool same_value = vectors && role.operand < row->operand_count && other.operand < row->operand_count &&
+                                    build->plan->effective_use_values[first + role.operand] == build->plan->effective_use_values[first + other.operand];
+            const bool reread = same_value && tier1_cert_emitted_row_reread(&facts, role, other) && tier1_cert_emitted_row_reread(&facts, other, role);
+            valid = !shared || aliased || read_only || apart || reread;
         }
     }
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
@@ -2579,10 +2595,14 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
     uint32_t at = r;
-    // Every part's slots in the red zone (#1847, tier1_select_result_staged), as the consumer refuses any other.
+    // Every staged part's slots in the red zone (#1847, tier1_select_result_staged), as the consumer refuses any other.
     bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end && tier1_select_result_staged(parts, part_count);
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
+        if (tier1_select_part_direct(parts[k]))
+        {
+            continue;
+        }
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         const uint32_t pieces = tier1_cert_emitted_pieces(parts[k].bytes);
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
@@ -2607,14 +2627,32 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const bool direct = tier1_select_part_direct(parts[k]);
         const X86Instruction load = {
-            .displacement = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
+            .displacement = direct ? parts[k].offset : tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
             .reg = (uint8_t)(parts[k].reg & 0x1f),
-            .rm = X86_REGISTER_RSP,
+            .rm = direct ? source : X86_REGISTER_RSP,
             .mode = BUSTER_X86_MEMORY_BASE,
             .form = vector ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64,
         };
-        valid = at < end && tier1_cert_emitted_exactly(records[at], load) && tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
+        valid = at < end && tier1_cert_emitted_exactly(records[at], load);
+        if (valid && direct)
+        {
+            // A split vector's part (#1847): its load reads the result's bytes through the address and defines the part's
+            // value in its register, which the ret reads (tier1_cert_emitted_return).
+            Tier1CertEmittedKernel kernel = {
+                .referenced = UINT32_MAX,
+                .definition = BUSTER_TIER1_CFG_NONE,
+                .definition_location = BUSTER_CERT_NONE,
+            };
+            valid = tier1_cert_emitted_take_reference(build, at, 0) && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_gpr(source, 8)) &&
+                    tier1_cert_emitted_originals(build, node, &kernel, records + at, 1);
+            valid = valid && tier1_cert_emitted_define(build, node, build->result_parts + k, tier1_cert_emitted_vector(build, parts[k].reg & 0x1f, tier1_cert_emitted_part_width(true, parts[k].bytes, false)));
+        }
+        else if (valid)
+        {
+            valid = tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
+        }
         at += 1;
     }
     int32_t hidden_offset = 0;
@@ -3232,7 +3270,9 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     // Aggregate parts need their own locations and sources (#789, #1284), in addition to carried-row facts.
     valid = valid && (value_total >= build.parameter_parts || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
     const uint64_t parts = valid ? (uint64_t)value_total - build.parameter_parts : 0;
-    const uint64_t location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * (uint64_t)records + 8 * (uint64_t)blocks + 2 * (uint64_t)function->parameter_count + 64 + row_facts + 16 * parts;
+    // A block's entry fact of a spilled value takes a frame location of its own (#1871): fact_capacity, past the carried
+    // rows' facts, bounds them.
+    const uint64_t location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * (uint64_t)records + 8 * (uint64_t)blocks + 2 * (uint64_t)function->parameter_count + 64 + fact_capacity + 16 * parts;
     const uint64_t source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * (uint64_t)count + 16 + 24 * parts;
     const uint64_t code_capacity = records + source_capacity;
     const uint64_t facts_capacity = fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + build.entry_count + 1;

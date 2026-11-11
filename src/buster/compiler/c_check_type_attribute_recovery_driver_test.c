@@ -126,6 +126,10 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "_Static_assert(sizeof(enum J) == 8 && _Alignof(enum J) == 2, \"aligned\");\nenum K { K1 } __attribute__((aligned(16), mode(SC)));\n"
         "_Static_assert(sizeof(enum K) == 8, \"late aligned\");\nstruct L { char c; enum E m; };\n_Static_assert(sizeof(struct L) == 12, \"member\");\n"
         "int use(void) { int unused; return C + J1 + K1 + B; }\n",
+        // XC's and TC's complex type (32 bytes), which no integer stands in for (#1447): its error recovers, the enum one
+        // with no mode, before and after its body.
+        "typedef int X __attribute__((mode(XC)));\nenum __attribute__((mode(XC))) E { A };\nenum __attribute__((mode(TC))) F { B };\n"
+        "enum G { C } __attribute__((mode(XC)));\nint use(void) { int unused; return A + B + C + undeclared; }\n",
         // Conversions into such an enum: a floating value's silent (no -Wliteral-conversion on an enumeration target), an
         // integer's -Wconstant-conversion at its integer's width, as clang's; no other error, so the common warnings run.
         "enum __attribute__((mode(SF))) E { A };\nenum E e = 2.5;\nenum E g = 5000000000;\nenum E h = 1e20;\n"

@@ -262,7 +262,9 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool file_scope = !local && kind == C_BINDING_OBJECT;
         const bool main_file = !file_scope || check_input_in_main_file(reader, token);
         const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
-        const bool declaration_used = parameter || local ? used_tokens[token] != 0 : used[event] != 0;
+        // An invalid declaration (#1447, a recovered parameter's) is never unused, as clang's ShouldDiagnoseUnusedDecl skips it.
+        const bool invalid_declaration = output->invalid_declarations != NULL && output->invalid_declarations[token] != 0;
+        const bool declaration_used = invalid_declaration || (parameter || local ? used_tokens[token] != 0 : used[event] != 0);
         // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
         // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
         // local's is one without linkage (#1447).
