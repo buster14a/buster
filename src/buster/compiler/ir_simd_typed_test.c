@@ -1371,6 +1371,90 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
            extends, truncates, masked, partial);
 }
 
+// The masks to vectors and back (#1840): every MASK_VECTOR rule's row (`__builtin_ia32_cvtmask2b` to `_cvtmask2q`) and
+// every VECTOR_MASK rule's (`_cvtb2mask` to `_cvtq2mask`), at each width, as the opmask conversion leaves them, decodes
+// as the IR's select of all ones and zeros or its comparison of signed lanes less than zero, at the elements' lanes and
+// exactly the features written out; refused without each and under 6 changes.
+static void ir_simd_typed_test_mask_vectors(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    uint32_t expansions = 0;
+    uint32_t signs = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool expand = rule->family == CHECK_X86_LOWER_MASK_VECTOR;
+        if (!expand && rule->family != CHECK_X86_LOWER_VECTOR_MASK)
+        {
+            continue;
+        }
+        Tier0Operation row;
+        char description[224];
+        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &every);
+        snprintf(description, sizeof(description), "%s: its row is the front end's", rule->name);
+        ir_test_expect(tally, made, description);
+        if (!made)
+        {
+            continue;
+        }
+        const uint32_t lanes = rule->bytes / rule->element;
+        const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+        const uint8_t lane = rule->element == 1 ? IR_SIMD_LANE_I8 : rule->element == 2 ? IR_SIMD_LANE_I16 : rule->element == 4 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
+        // Written out: AVX512F, VL below 64 bytes, the form's (BW for bytes and words, DQ for doublewords and quadwords),
+        // and the mask's moves (DQ for 8 lanes or fewer, BW for 32 and 64).
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                  (rule->element <= 2 || lanes >= 32 ? BUSTER_X86_FEATURE(AVX512BW) : 0) | (rule->element >= 4 || lanes <= 8 ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        snprintf(description, sizeof(description), "%s: the IR's %s at its elements' lanes and features", rule->name, expand ? "select of ones and zeros" : "comparison less than zero");
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.mask_expand == expand && decoded.sign_mask == !expand && decoded.lane == lane &&
+                                  decoded.operation == IR_SIMD_OPERATION_COUNT && !decoded.compare_mask && !decoded.expand_mask && decoded.mask_bytes == 0 &&
+                                  decoded.operand_count == 1 && decoded.operand_bytes[0] == (expand ? mask_bytes : rule->bytes) && decoded.required_features == expected,
+                       description);
+        expansions += expand && status == IR_SIMD_TYPED_OK && decoded.mask_expand;
+        signs += !expand && status == IR_SIMD_TYPED_OK && decoded.sign_mask;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            const bool needed = (expected & features[f]) != 0;
+            snprintf(description, sizeof(description), "%s: without a feature it needs it stays the machine row, and needs no other", rule->name);
+            ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && (without.mask_expand || without.sign_mask), description);
+        }
+        for (uint32_t m = 0; m < 6; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* record = &changed.records[0];
+            switch (m)
+            {
+            case 0: record->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: record->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: record->reg = expand ? BUSTER_TIER0_ROLE_VECTOR(1) : BUSTER_TIER0_ROLE_MASK_SCRATCH(0); break;
+            case 3: changed.operand_bytes[0] = expand ? (uint8_t)(mask_bytes == 8 ? 4 : mask_bytes * 2) : (uint8_t)(rule->bytes == 64 ? 32 : 64); break;
+            case 4:
+                changed.records[1] = changed.records[0];
+                changed.record_count = 2;
+                break;
+            case 5: record->immediate = 1; break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            snprintf(description, sizeof(description), "%s (change %u): not the IR's mask conversion", rule->name, m);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), description);
+        }
+    }
+    // Bytes to quadwords at three widths, each way.
+    ir_test_expect(tally, expansions == 12 && signs == 12, "every mask to vector and vector to mask rule decodes");
+    printf("  IR SIMD rows: the front end's %u masks to vectors decode to the IR's vselect of ones and zeros, and %u vectors to masks to its comparison less than zero\n",
+           expansions, signs);
+}
+
 // The masked moves' selects and the undefined vectors (#1840): every SELECT rule's row (`__builtin_ia32_select*`, of each
 // element and width) as the opmask conversion leaves it decodes as the IR's vselect of its elements' integer lanes, its
 // mask, VECTOR(1) and VECTOR(2), at exactly its forms' features and its mask's moves', and every UNDEFINED rule's as the
@@ -1487,6 +1571,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_conversions(tally);
     ir_simd_typed_test_permutes(tally);
     ir_simd_typed_test_shifts(tally);
+    ir_simd_typed_test_mask_vectors(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);

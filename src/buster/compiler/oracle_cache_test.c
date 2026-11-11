@@ -86,8 +86,8 @@
 //   - served runs (oracle_serve), through a server of the test's own (oracle_test_server) that stands for the test's
 //     program: served with the cache off; in use mode an entry taken where one fits and another run served, no entry
 //     written; in check mode a served run that differs from its entry, stale; --differential's runs both ways and a
-//     difference that fails; a server that ends in a run, the run as a child and another server for the next; a
-//     forked child's server of its own; a server whose release isn't the tool's, serving none; and runs that don't
+//     difference that fails; a server that ends in a run, the run as a child and another server for the next; one
+//     that stalls past its limit, stopped and counted, the run as a child; a forked child's server of its own; a server whose release isn't the tool's, serving none; and runs that don't
 //     fit, not served;
 //   - served runs outside the cache (oracle_serve_takes, oracle_serve_command): served and counted, a server past the
 //     run's time limit stopped and another started for the next, and --differential's comparison of two results, a
@@ -3930,7 +3930,8 @@ static void oracle_test_served_commands(OracleTest* test, const char* server, co
     status = ready && stalling ? oracle_serve_command(cat, input, 1, false, &output, &output_length, &errors, &errors_length) : 0;
     const uint64_t waited = oracle_now() - begun;
     unsetenv("ORACLE_TEST_SERVER");
-    const bool stopped = status == -1 && output == 0 && errors == 0 && oracle_serving.server.pid == 0 && waited >= 900000000 && oracle_serving.counts->unserved == 1;
+    const bool stopped = status == -1 && output == 0 && errors == 0 && oracle_serving.server.pid == 0 && waited >= 900000000 && oracle_serving.counts->unserved == 1 &&
+                         oracle_serving.counts->stalls == 1;
     status = ready ? oracle_serve_command(cat, input, 1, false, &output, &output_length, &errors, &errors_length) : -1;
     const bool again = status == 0 && output != 0 && strcmp(output, "served bytes\n") == 0 && oracle_serving.server.pid != first && oracle_serving.server.starts == 2;
     free(output);
@@ -3966,7 +3967,7 @@ static void oracle_test_served_commands(OracleTest* test, const char* server, co
 // entry taken where one fits and otherwise served, no entry written; in check mode a served run that differs from the
 // entry it would have taken, stale and the entry removed; with --differential each run both ways, the child's result the
 // run's and a difference counted, which fails the test; a server that ends in a run, the run as a child, and the next
-// served by another; a forked child's served run through a server of its own, the parent's left as it was; a server
+// served by another; one that stalls past its limit, stopped and counted, the run as a child; a forked child's served run through a server of its own, the parent's left as it was; a server
 // whose release isn't the program's, no run served and the test failed; and runs that don't fit (another tool's, a
 // response file, process statistics, a debugging variable of clang's main, a time limit, a file the run writes), not
 // served.
@@ -3994,8 +3995,9 @@ static void oracle_test_served(OracleTest* test)
     unlink(source);
     char** lying = oracle_test_served_environment("ORACLE_TEST_SERVER=lie");
     char** crashing = oracle_test_served_environment("ORACLE_TEST_SERVER=crash");
+    char** stalling = oracle_test_served_environment("ORACLE_TEST_SERVER=stall");
     char** overriding = oracle_test_served_environment("CCC_OVERRIDE_OPTIONS=#");
-    const bool ready = built && lying != 0 && crashing != 0 && overriding != 0 && oracle_test_write(input, "served bytes\n", 13) &&
+    const bool ready = built && lying != 0 && crashing != 0 && stalling != 0 && overriding != 0 && oracle_test_write(input, "served bytes\n", 13) &&
                        oracle_test_write(other, "other bytes\n", 12);
     oracle_test_expect(test, ready, "served: the test's server built");
     char* cat[] = { test->helper, "cat", 0 };
@@ -4064,6 +4066,26 @@ static void oracle_test_served(OracleTest* test)
                                  oracle_serve_end("oracle test"),
                        "served: a server that ends in a run, the run as a child and the next served by another");
 
+    // A server that stalls in a run (#2263): past the server's limit (a second here), stopped and counted, the run as a
+    // child, and the next served by another.
+    oracle_serve(server, test->helper, false);
+    oracle_serving.server.seconds = 1;
+    ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run) && run.served;
+    oracle_run_release(&run);
+    const pid_t stalled = oracle_serving.server.pid;
+    printf("oracle cache: a server that stalls on purpose, which the next line reports:\n");
+    fflush(stdout);
+    const uint64_t begun = oracle_now();
+    ran = ran && oracle_test_serve(&off, cat, input, stalling, 0, &run) && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    const uint64_t waited_stall = oracle_now() - begun;
+    oracle_run_release(&run);
+    ran = ran && oracle_test_serve(&off, cat, other, 0, 0, &run) && run.served && oracle_test_served_text(&run, "other bytes\n");
+    oracle_run_release(&run);
+    oracle_test_expect(test, ran && waited_stall >= 900000000 && oracle_serving.server.pid != stalled && oracle_serving.server.starts == 2 &&
+                                 oracle_serving.counts->stalls == 1 && oracle_serving.counts->unserved == 1 && oracle_serving.counts->answers == 2 &&
+                                 oracle_serving.counts->answer_nanoseconds != 0 && oracle_serve_end("oracle test"),
+                       "served: a server past its limit stopped and counted, the run as a child and the next served by another");
+
     // A forked child: served through a server of its own, the parent's server left as it was.
     oracle_serve(server, test->helper, false);
     ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run) && run.served;
@@ -4128,6 +4150,7 @@ static void oracle_test_served(OracleTest* test)
     unlink(server);
     free(lying);
     free(crashing);
+    free(stalling);
     free(overriding);
     oracle_cache_close(&off);
     oracle_cache_close(&use);
