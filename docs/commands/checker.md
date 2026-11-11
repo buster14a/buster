@@ -101,7 +101,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   of LLVM: a shared-LLVM toolchain's `libclang-cpp`, or the official release's
   static clang and LLVM archives, which the hosted rows install; the build
   checks one request against a spawned clang), which runs each command line through clang's own
-  driver and cc1 in its process, in the run's directory and environment;
+  driver and cc1 in its process, in the run's directory and environment, and
+  a run the server doesn't answer (it ended, or gave no answer within its
+  limit, 60 s) runs as a child (#2263);
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
   `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
@@ -109,7 +111,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   runs each such command as a child and fails on a difference in status or
   output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
   lines and lane order differ between any two runs, compare their other lines
-  in any order. The run reports the counts and the warning sweep's time. CI
+  in any order. The run reports the counts and the warning sweep's time, and
+  a `run costs` line: the served runs' time, the requests past the server's
+  limit, and the children's wall and CPU time, each in total and per run. CI
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and

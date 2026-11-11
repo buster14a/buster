@@ -960,7 +960,9 @@ static uint8_t check_warning_graph_void_step(const CheckInput* input, const Pars
     {
         const uint32_t open = check_warning_graph_void_opener(parser, parent);
         const uint8_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? parser->tokens.kinds[open - 1] : PARSE_KIND_UNKNOWN;
-        const bool inside = open != BUSTER_CHECK_NONE && child > open;
+        // Between the parentheses: a declarator's tokens past a specifier's `)` (`typeof(int) y = e;`, `_BitInt(100) n = e;`,
+        // whose `=` the parser hangs off it) are no operand of its (#1447).
+        const bool inside = open != BUSTER_CHECK_NONE && child > open && child < parent;
         if (inside && role == PARSE_ROLE_CLOSE_SPECIFIER)
         {
             result = keyword == PARSE_KIND_TYPEOF ? CHECK_VOID_CONTEXT_KNOWN | CHECK_VOID_CONTEXT_UNEVALUATED : CHECK_VOID_CONTEXT_KNOWN | transformed;

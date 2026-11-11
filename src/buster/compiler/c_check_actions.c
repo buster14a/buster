@@ -515,6 +515,11 @@ static bool check_action_integer_type(const TypeTable* table, TypeId type, uint3
 // _BitInt constants past 128 bits (#1447, c_check_wide.c): the cold branches that the gatekeeper above leaves to them.
 static bool check_wide_truth(const TypeTable* table, const CheckValue* value, bool* truth);
 static bool check_wide_convert(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node);
+static bool check_wide_type(const TypeTable* table, TypeId type, uint32_t* width, bool* is_signed);
+static uint32_t check_wide_count(uint32_t width);
+static uint64_t* check_wide_allocate(uint32_t count);
+static void check_wide_publish(CheckValue* value, const uint64_t* limbs);
+static const uint64_t* check_wide_limbs(const CheckValue* value, uint32_t count);
 
 static bool check_action_is_integer(const TypeTable* table, TypeId type)
 {
@@ -901,8 +906,9 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
         value->integer = truth;
     }
-    else if (__builtin_expect((!source_integer && check_action_kind(table, source) == BUSTER_TYPE_KIND_BIT_INT) ||
-                              (!target_integer && target_kind == BUSTER_TYPE_KIND_BIT_INT), 0) &&
+    else if (__builtin_expect(value->constant_kind != CHECK_CONSTANT_NONE &&
+                              ((!target_integer && target_kind == BUSTER_TYPE_KIND_BIT_INT) ||
+                               (!source_integer && check_action_kind(table, source) == BUSTER_TYPE_KIND_BIT_INT)), 0) &&
              check_wide_convert(table, value, destination, node))
     {
         // A _BitInt past 128 bits on either side (#1447, c_check_wide.c).
