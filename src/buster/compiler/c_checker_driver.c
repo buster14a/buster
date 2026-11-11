@@ -9504,6 +9504,9 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
         const uint32_t distance = listed && 3 * difference <= length ? check_typo_distance_table((const uint8_t*)other, other_length, spelling, length, row) : 0;
         keyword |= distance != 0 && distance <= (length + 2) / 3 && length / distance >= 3;
     }
+    // (Any other name too: one that stays undeclared is clang's "use of undeclared identifier", its expression invalid
+    // and its rest skipped as a keyword's typo's is, `u8'a'` before C23 among them; the reading confirms it.)
+    keyword |= near;
     const uint32_t end = keyword ? check_driver_skip_end(view, at) : BUSTER_CHECK_NONE;
     // (The tail ends at a `,` outside its groups too, an initializer's or an argument's end.)
     uint32_t stop = end;
@@ -9852,6 +9855,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 {
                     // Every missing `;` read past as clang's recovery reads it: the whole view, checked as a prefix is.
                     checking = recovered;
+                    resumed.parser.whole_view = true;
                     prefix_only = true;
                     ready = true;
                 }
@@ -9978,6 +9982,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     checking_pp = pp;
                     if (recovered->errors == 0)
                     {
+                        resumed.parser.whole_view = true;
                         checking = recovered;
                     }
                     else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
@@ -10523,6 +10528,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const uint8_t* flushed = check_driver_flushed_bodies(checking, recovered, pp, &program, scratch);
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, flushed, &shift_warnings, scratch);
                             arena_pop_to(scratch, flushed_mark);
+                        }
+                        else
+                        {
+                            // -w spares the common checks that are errors by default (#2264): a chained comparison's.
+                            check_common_chained_comparisons(checking, pp, &input, scratch);
                         }
                     }
                     else if (!driver_fatal && ready && (!prefix_only || checking == recovered) && !repairing && !pp->fatal &&

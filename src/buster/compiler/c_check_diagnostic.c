@@ -189,6 +189,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
     [CHECK_WARNING_ID_SHIFT_OP_PARENTHESES] = { "-Wshift-op-parentheses", "-Wparentheses", "operator has lower precedence than its operand's" },
     [CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY] = { "-Wsizeof-array-decay", NULL, "sizeof on pointer operation will return size of a pointer" },
+    [CHECK_WARNING_ID_CHAINED_COMPARISON] = { "-Wparentheses", NULL, "chained comparison does not behave the same as a mathematical expression" },
     [CHECK_WARNING_ID_UNUSED_LABEL] = { "-Wunused-label", "-Wunused", "unused label" },
 };
 

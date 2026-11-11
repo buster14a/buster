@@ -175,8 +175,15 @@ families (`x86_match_supported`): a form is admitted when
   register pairs or a default flags value. The target table classifies MMX's
   `movd` and `movq` forms (#1846: `movq %mm0, %rax`, `movq (%rdi), %mm2`, 0F 6F
   and 0F 7F between memory and an MMX register and from one to another, as GNU
-  as picks them), `emms`, and `pxor`, `paddd`, `psubd` and `pcmpeqd`; its other
-  MMX forms stay out. A VSIB operand matches only a VSIB form of its index's class, and
+  as picks them), `emms`, and the rest of MMX's integer forms (#2201): `padd*`,
+  `psub*`, `pand`, `pandn`, `por`, `pxor`, `pmul*`, `pmaddwd`, `pcmp*`, `pack*`,
+  `punpck*` and the shifts by an MMX register, memory or an immediate, all
+  baseline; SSE's and SSE2's MMX forms (`pavg*`, `pmax*`, `pmin*`, `pmulhuw`,
+  `psadbw`, `pshufw`, `pinsrw`, `pextrw`, `pmovmskb`, `movntq`, `maskmovq`,
+  `paddq`, `psubq`, `pmuludq`, `cvt*pi*`, `movq2dq`, `movdq2q`), baseline too;
+  and SSSE3's (`pshufb`, `phadd*`, `phsub*`, `pmaddubsw`, `psign*`,
+  `pmulhrsw`, `pabs*`, `palignr`), under SSSE3. `test-assembler --cross-check`'s
+  round trip compares each with GNU as. 3DNow!'s forms stay out. A VSIB operand matches only a VSIB form of its index's class, and
   memory of a general index only the others. The mask, index and destination
   registers must be distinct, which GNU as only warns of (the instruction
   faults);

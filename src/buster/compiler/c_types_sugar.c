@@ -12,7 +12,9 @@
 //
 // Kinds, after clang's:
 //   - POINTER, ARRAY: a structural level, made only to carry sugar below it (inner, never 0): `void ((*))(void)`'s pointer.
-//   - PAREN: a declarator's parentheses (ParenType) around the type built inside them, made only over sugar.
+//   - PAREN: a declarator's parentheses (ParenType) around the type built inside them, made only over sugar, or over an array
+//     itself (inner 0) in a unit that clears padding (#1842's 1b, check_input_declarator_sugar), whose walk treats such an
+//     array as one scalar.
 //   - ATTRIBUTED: a calling convention attribute (AttributedType), word a TypeSugarAttribute. modified is the canonical
 //     type the attribute was written on (clang's modified type: a function's without its convention where the attribute
 //     sits in a group before `*`, `void (MS *p)(void)`), and inner that type's sugar, 0 for none.

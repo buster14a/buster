@@ -4725,6 +4725,25 @@ and thread-local errors still note it, and a third definition's error notes
 the first. A block's duplicate local is still dropped, as clang's lookup
 finds the first there.
 
+A function's second definition of a compatible type stays in its chain as
+well (#2362): clang's `ActOnStartOfFunctionDef` reports "redefinition of
+'f'" after the declaration was merged, and marks it invalid. The checker
+recovers the error, binds the definition as an invalid declaration
+(`check_input_invalid_declare`) and leaves its entity's linked declaration
+as it was. So, while it is visible, a later declaration of the function is
+invalid and quiet, a third definition and a conflicting type alike, and so
+are the name's uses, a block's `extern` one's too. Its body's errors and
+another kind's redeclaration, noted at it, are still reported. A
+multiversioned function's version (`target`, `target_clones`, `cpu_specific`)
+is recovered the same way, as an ordinary redefinition is, so the reader goes
+on past it. A declaration of another version is another entity's, checked
+as any, and one of the invalid version's that follows it is a redefinition of
+it again, noted there, as clang's `CheckMultiVersionAdditionalDecl` finds it.
+A call of a `target` multiversioned name keeps its other versions, as clang's
+overload resolution does. Its argument errors are still the plain call's
+wording, not clang's "no matching function", as with every multiversioned
+call.
+
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
 errors included. Its extent runs from the scope's `{` to its `}`, from a
@@ -5205,9 +5224,15 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   the name (`sizeo a`, `retrn 5` in an initializer), the parse fails there;
   clang's correction takes the keyword and skips the expression's rest to the
   `,`, `;` or closer that ends it, without the parser's error. The recovery
-  view leaves that tail out for a name near an expression's or a statement's
-  keyword (`check_driver_typo_tail`, `CheckPrefixTails`), and keeps it, with
-  the parser's error, where the name's search then suggests no keyword.
+  view leaves that tail out for any name there (`check_driver_typo_tail`,
+  `CheckPrefixTails`), and keeps it, with the parser's error, where the name
+  is declared or its search corrects it to a value. A name that stays
+  undeclared is clang's "use of undeclared identifier" alone, its expression
+  invalid and its rest skipped the same way (#2255): before C23, `u8'a'` is the
+  name `u8` and a character constant. A view that reads past every parse
+  error of the unit (`Parser.whole_view`) recovers from its missing names as a
+  complete unit does (`check_input_diagnostic_recover`), so the unit's later
+  diagnostics stay.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5289,6 +5314,12 @@ Left as they were:
   so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
   C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
   before a `}` without a `;` keeps the parser's error.
+- A name before an operand that is declared, or that a correction takes as a
+  value (`a 5`, `nosuch 5` near a variable `nosuce`), keeps the parser's
+  error, which ends the checking of its body or the unit's file scope after
+  it, where clang reports the correction's error first and goes on. So does a
+  tail after the first parse error no recovery view reads past (a body's
+  missing `;` after `return 0`): its name's error is the parser's.
 - After a block item's GNU attributes, a builtin's name without a call
   (`__builtin_abs;`, clang's "expected identifier or '('") is still an
   implicit int's declarator, and before C23 an undeclared function's call
@@ -5934,7 +5965,13 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. `-Wsizeof-array-decay` (#2264, on by
+`-Wdangling-else` and `-Wuninitialized`. A chained comparison (#2264,
+`check_common_chained_comparisons`) is clang's `-Wparentheses` error by
+default: a `<`, `>`, `<=` or `>=` whose left operand is one, unparenthesized,
+"chained comparison 'X < Y < Z' does not behave the same as a mathematical
+expression" at the outer operator; `-Wno-error=parentheses` demotes it and
+`-w` leaves it an error, which the common checks under `-w` still give
+(`check_common_default_error`), with no `-Werror,` in its option. `-Wsizeof-array-decay` (#2264, on by
 default, `check_common_sizeof_array_decay`) is clang's
 `warnOnSizeofOnArrayDecay`: `sizeof` of a binary operator, through
 parentheses, whose operand is an array decayed to the operator's own type
