@@ -5,6 +5,22 @@
 // the typed graph and retained declaration/case facts decide the error, not a second semantic pass. A changed
 // caret never changes the report's completion/publication key. Text belongs to the caller's scratch arena.
 
+// A semantic report's notes, in the caller's array of this many (check_semantic_expression); the records a const
+// member's search visits (check_semantic_const_fields).
+#define BUSTER_CHECK_SEMANTIC_NOTES 32
+#define BUSTER_CHECK_SEMANTIC_RECORDS 64
+
+// The count of a report's notes: those before the first without a message.
+static uint32_t check_semantic_note_count(const PPOutputDiagnosticNote* notes)
+{
+    uint32_t count = 0;
+    while (count < BUSTER_CHECK_SEMANTIC_NOTES && notes[count].message != NULL)
+    {
+        count += 1;
+    }
+    return count;
+}
+
 static const char* check_semantic_text(Preprocessor* pp, const char* text)
 {
     // Do not quietly replace a failed contextual rendering with a successful generic diagnostic.
@@ -469,6 +485,11 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
             valid = part.length != 0 && part.length <= UINT32_MAX && parser->tokens.kinds[token] == PARSE_KIND_STRING;
             parts[token - strings] = (CheckStringPart){ .bytes = (const uint8_t*)part.pointer, .length = (uint32_t)part.length };
         }
+        // (An unevaluated string literal, whose encoding prefixes have no effect, #1447.)
+        if (valid && message)
+        {
+            check_literal_unevaluated_parts(parts, close - strings);
+        }
         CheckStringLiteral decoded = valid && message ? check_literal_strings(parts, close - strings, parser->language.standard >= 2023, scratch) : (CheckStringLiteral){ 0 };
         // A message of escapes clang takes that the fast decoding refuses (#1447: a delimited one, a named universal
         // character name, an unknown one), read as clang reads them.
@@ -574,6 +595,239 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
 
 // c_check_common_warnings.c's, included after this file.
 static uint32_t check_common_subtree_start(const Parser* parser, uint32_t root);
+
+// Whether a type is const-qualified as clang's QualType::isConstQualified has it: an array's qualifiers are its
+// innermost element's.
+static bool check_semantic_const(const TypeTable* types, TypeId type)
+{
+    bool constant = type != 0 && (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
+    TypeId level = type;
+    for (uint32_t depth = 0; !constant && level != 0 && depth < 64 && type_kind_is_array(check_action_kind(types, level)); depth += 1)
+    {
+        level = type_element(types, type_unqualified(type_strip_aligned(types, level)));
+        constant = level != 0 && (type_qualifiers(level) & BUSTER_TYPE_CONST) != 0;
+    }
+    return constant;
+}
+
+// clang's IsTypeModifiable: a level reached through a dereference (an outer `->`) is its pointer's target.
+static bool check_semantic_modifiable(const TypeTable* types, TypeId type, bool dereference)
+{
+    const bool pointer = dereference && type != 0 && check_action_kind(types, type) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId level = pointer ? type_element(types, type_unqualified(type_strip_aligned(types, type))) : type;
+    return !check_semantic_const(types, level);
+}
+
+// Appends a note to a report's notes (BUSTER_CHECK_SEMANTIC_NOTES of them, the rest dropped), at `token`'s source.
+static void check_semantic_add_note(const Parser* parser, PPOutputDiagnosticNote* notes, uint32_t* count, uint32_t token, const char* message)
+{
+    if (*count < BUSTER_CHECK_SEMANTIC_NOTES && token < parser->tokens.count && message != NULL)
+    {
+        notes[*count] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[token], .message = message };
+        *count += 1;
+    }
+}
+
+// The first token of a function declaration's return type, as clang's getReturnTypeSourceRange begins it: its
+// specifiers' first type specifier, past storage classes, qualifiers and attributes (`const struct s *f(void)`'s
+// `struct`). The declaration's own first token where none is found.
+static uint32_t check_semantic_return_type_token(const Parser* parser, const CheckInput* input, uint32_t declaration)
+{
+    const uint32_t begin = check_input_declaration_begin(parser, declaration);
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint32_t depth = 0;
+    for (uint32_t t = begin; result == BUSTER_CHECK_NONE && t < declaration; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint32_t resolved = kind == PARSE_KIND_IDENTIFIER && t < input->token_count && input->declarations != NULL ? input->declarations[t] : 0;
+        const bool name = resolved != 0 && resolved != t && resolved < input->token_count && input->declaration_kinds != NULL &&
+                          input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+        const bool specifier = kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_TYPEOF ||
+                               kind == PARSE_KIND_ATOMIC || name;
+        result = depth == 0 && specifier ? t : BUSTER_CHECK_NONE;
+        depth = kind == PARSE_KIND_L_PAREN ? depth + 1 : kind == PARSE_KIND_R_PAREN && depth != 0 ? depth - 1 : depth;
+    }
+    return result != BUSTER_CHECK_NONE ? result : begin;
+}
+
+// clang's DiagnoseConstAssignment (#1447): an assignment to a const lvalue names the first const level it finds
+// through a chain of members and subscripts, then a variable or a direct call at its root, and every const level
+// along it adds its note, outermost first: a member const itself (at its declarator, check_semantic_member_token),
+// a variable declared const, a function returning a const value (at its return type's first specifier). A member
+// reached through `->` is const by its pointer's target. "read-only variable is not assignable" where none is.
+static const char* check_semantic_const_assignment(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                   const TypeTable* types, CheckWarningSpelling* spell, uint32_t operand, PPOutputDiagnosticNote* notes,
+                                                   uint32_t* note_count, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const char* result = NULL;
+    uint32_t at = operand;
+    bool dereference = false;
+    bool next = false;
+    bool walking = true;
+    for (uint32_t steps = 0; walking && at < graph->count && steps < 256; steps += 1)
+    {
+        dereference = next;
+        const CheckOp op = graph->ops[at];
+        const uint32_t base = graph->operand0[at];
+        const TypeId base_type = base < stream->count ? check_stream_type(stream, base) : 0;
+        const uint8_t base_kind = base_type != 0 ? check_action_kind(types, base_type) : BUSTER_TYPE_KIND_NONE;
+        const bool vector = base_kind == BUSTER_TYPE_KIND_VECTOR || base_kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        if (op == CHECK_OP_MEMBER && vector)
+        {
+            // A vector's element (clang's ExtVectorElementExpr): its vector.
+            at = base;
+        }
+        else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+        {
+            next = op == CHECK_OP_ARROW;
+            const uint32_t member = check_semantic_member_of(parser, input, stream, types, at);
+            const TypeId field = member != 0 ? types->members.type[member] : 0;
+            if (member != 0 && !check_semantic_modifiable(types, field, dereference))
+            {
+                const uint32_t declarator = check_semantic_member_token(parser, input, types, member);
+                const String8 name = declarator < parser->tokens.count ? check_semantic_name(parser, pp, declarator) : (String8){ 0 };
+                const uint32_t spelling = declarator < input->token_count ? check_input_typedef_spelling(input, parser, declarator) : 0;
+                const String8 type = name.length != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, field, spelling) : (String8){ 0 };
+                result = result != NULL || type.length == 0 ? result :
+                         check_warning_text(scratch, "cannot assign to non-static data member '%.*s' with const-qualified type %.*s", (int)name.length,
+                                            name.pointer, (int)type.length, type.pointer);
+                check_semantic_add_note(parser, notes, note_count, declarator,
+                                        name.length != 0 ? check_warning_text(scratch, "non-static data member '%.*s' declared const here", (int)name.length,
+                                                                              name.pointer) : NULL);
+            }
+            walking = member != 0;
+            at = walking ? graph->operand0[at] : at;
+        }
+        else if (op == CHECK_OP_SUBSCRIPT)
+        {
+            // Its base, the operand that is the array, the vector or the pointer (`i[a]` too).
+            at = base_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(base_kind) || vector ? base : graph->operand1[at];
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    const CheckOp root = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
+    const uint32_t token = at < graph->count ? graph->tokens[at] : BUSTER_CHECK_NONE;
+    if (root == CHECK_OP_VALUE && token < input->token_count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declarations != NULL)
+    {
+        const uint32_t declaration = input->declarations[token];
+        const TypeId type = at < stream->count ? check_stream_type(stream, at) : 0;
+        if (declaration < input->token_count && type != 0 && !check_semantic_modifiable(types, type, dereference))
+        {
+            // (A typo's variable is the one its correction names, as clang's recovery reads it.)
+            const String8 name = check_driver_warning_name(pp, check_driver_corrected_name(parser, input, token, parser->tokens.names[token]));
+            const String8 declared = name.length != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, type,
+                                                                                   check_semantic_operand_spelling(parser, input, stream, types, at)) :
+                                                        (String8){ 0 };
+            result = result != NULL || declared.length == 0 ? result :
+                     check_warning_text(scratch, "cannot assign to variable '%.*s' with const-qualified type %.*s", (int)name.length, name.pointer,
+                                        (int)declared.length, declared.pointer);
+            check_semantic_add_note(parser, notes, note_count, declaration,
+                                    name.length != 0 ? check_warning_text(scratch, "variable '%.*s' declared const here", (int)name.length, name.pointer) :
+                                                       NULL);
+        }
+    }
+    else if (root == CHECK_OP_CALL)
+    {
+        // A direct call's (clang's getDirectCallee): its callee a function's name, through `*`, `&` and conversions
+        // (`(*f)()`, `(&f)()`); a function pointer variable's call is no direct one.
+        uint32_t callee = graph->operand0[at];
+        for (uint32_t steps = 0; steps < 64 && callee < graph->count &&
+                                 (graph->ops[callee] == CHECK_OP_DEREFERENCE || graph->ops[callee] == CHECK_OP_ADDRESS || graph->ops[callee] == CHECK_OP_CONVERT);
+             steps += 1)
+        {
+            callee = graph->operand0[callee];
+        }
+        const uint32_t name_token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t named = name_token < input->token_count && parser->tokens.kinds[name_token] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
+                               input->declarations[name_token] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = named < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[named] == C_BINDING_FUNCTION ?
+                                     named : BUSTER_CHECK_NONE;
+        const TypeId callee_type = callee < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, callee))) : 0;
+        const TypeId function = callee_type != 0 && type_kind(types, callee_type) == BUSTER_TYPE_KIND_POINTER ?
+                                type_unqualified(type_strip_aligned(types, type_element(types, callee_type))) : callee_type;
+        const bool direct = declaration < input->token_count && function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+        const TypeId returned = direct ? types->types.base[type_index(function)] : 0;
+        if (direct && !check_semantic_modifiable(types, returned, dereference))
+        {
+            const String8 name = check_semantic_name(parser, pp, declaration);
+            const String8 type = name.length != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, returned,
+                                                                               check_input_typedef_spelling(input, parser, declaration)) : (String8){ 0 };
+            result = result != NULL || name.length == 0 ? result :
+                     check_warning_text(scratch, "cannot assign to return value because function '%.*s' returns a const value", (int)name.length, name.pointer);
+            check_semantic_add_note(parser, notes, note_count, check_semantic_return_type_token(parser, input, declaration),
+                                    type.length != 0 ? check_warning_text(scratch, "function '%.*s' which returns const-qualified type %.*s declared here",
+                                                                          (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL);
+        }
+    }
+    return result != NULL ? result : "read-only variable is not assignable";
+}
+
+// clang's DiagnoseRecursiveConstFields (#1447): an assignment to a record with a const member somewhere in its
+// hierarchy names the first one, breadth-first through its members' records, and notes each one, "nested" past the
+// record's own members. The lvalue is named as a member (`.` or `->`), a variable, or "lvalue". NULL where none is
+// const (the caller's then DiagnoseConstAssignment's). At most BUSTER_CHECK_SEMANTIC_RECORDS records are visited.
+static const char* check_semantic_const_fields(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                               const TypeTable* types, uint32_t operand, TypeId record, PPOutputDiagnosticNote* notes,
+                                               uint32_t* note_count, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = operand < graph->count ? graph->ops[operand] : CHECK_OP_COUNT;
+    const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+    const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, operand) : 0;
+    const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+    const uint32_t token = operand < graph->count ? graph->tokens[operand] : BUSTER_CHECK_NONE;
+    const bool variable = op == CHECK_OP_VALUE && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+    // A parenthesized lvalue is clang's "lvalue" (a ParenExpr): its `)` follows the name, a member's after its operator.
+    const uint32_t last = member ? token + 1 : token;
+    const bool parenthesized = last + 1 < parser->tokens.count && parser->tokens.kinds[last + 1] == PARSE_KIND_R_PAREN;
+    const String8 name = parenthesized ? (String8){ 0 } : member ? check_semantic_name(parser, pp, declarator) :
+                         variable ? check_semantic_name(parser, pp, token) : (String8){ 0 };
+    const char* named = member && name.length != 0 ?
+                        check_warning_text(scratch, "non-static data member '%.*s'", (int)name.length, name.pointer) :
+                        variable && name.length != 0 ? check_warning_text(scratch, "variable '%.*s'", (int)name.length, name.pointer) : "lvalue";
+    TypeId records[BUSTER_CHECK_SEMANTIC_RECORDS];
+    uint32_t record_count = 1;
+    records[0] = type_unqualified(type_strip_aligned(types, record));
+    const char* result = NULL;
+    for (uint32_t r = 0; named != NULL && r < record_count; r += 1)
+    {
+        const uint32_t tag = types->types.index[type_index(records[r])];
+        const uint32_t begin = tag < types->tags.count ? types->tags.member_begin[tag] : 0;
+        const uint32_t end = tag < types->tags.count ? begin + types->tags.member_count[tag] : 0;
+        for (uint32_t m = begin; m < end; m += 1)
+        {
+            const TypeId field = types->members.type[m];
+            if (check_semantic_const(types, field))
+            {
+                const uint32_t field_token = check_semantic_member_token(parser, input, types, m);
+                const String8 field_name = field_token < parser->tokens.count ? check_semantic_name(parser, pp, field_token) : (String8){ 0 };
+                result = result != NULL || field_name.length == 0 ? result :
+                         check_warning_text(scratch, "cannot assign to %s with %sconst-qualified data member '%.*s'", named, r != 0 ? "nested " : "",
+                                            (int)field_name.length, field_name.pointer);
+                check_semantic_add_note(parser, notes, note_count, field_token,
+                                        field_name.length != 0 ? check_warning_text(scratch, "%sdata member '%.*s' declared const here", r != 0 ? "nested " : "",
+                                                                                    (int)field_name.length, field_name.pointer) : NULL);
+            }
+            const TypeId bare = field != 0 ? type_unqualified(type_strip_aligned(types, field)) : 0;
+            const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+            bool seen = !(kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) || record_count == BUSTER_CHECK_SEMANTIC_RECORDS;
+            for (uint32_t i = 0; !seen && i < record_count; i += 1)
+            {
+                seen = records[i] == bare;
+            }
+            if (!seen)
+            {
+                records[record_count] = bare;
+                record_count += 1;
+            }
+        }
+    }
+    return result;
+}
 
 // An operand's type as clang names it (#1447): an array's or a function's pointer (which the conversion made, so the
 // table has it); an operator's operand's converted to a value (`value`), unqualified, without its extended qualifiers,
@@ -787,6 +1041,8 @@ static PPOutputDiagnosticNote check_semantic_forward_note(const Parser* parser, 
     return result;
 }
 
+// A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
+// (check_semantic_note_count counts them): const assignment's are several (#1447).
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
@@ -800,7 +1056,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     const TypeId operand_type = operand < stream->count ? check_stream_type(stream, operand) : 0;
     const char* result = check_driver_report_message(report);
     *location = token;
-    *note = (PPOutputDiagnosticNote){ 0 };
+    memset(note, 0, sizeof(*note) * BUSTER_CHECK_SEMANTIC_NOTES);
+    uint32_t note_count = 0;
     if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
         result = check_semantic_assert(parser, pp, input, report, location, scratch);
@@ -940,73 +1197,15 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             {
                 result = type.length != 0 ? check_warning_text(scratch, "array type %.*s is not assignable", (int)type.length, type.pointer) : NULL;
             }
-            else if ((type_qualifiers(operand_type) & BUSTER_TYPE_CONST) != 0)
+            else if (check_semantic_const(types, operand_type))
             {
-                // clang's DiagnoseConstAssignment: through an array's subscripts and a record's `.` members to the variable
-                // they reach, named with its type as declared (an array's whole, its typedef kept), and its "declared const
-                // here" note at its name. A member that is const itself clang names (its declaration this checker doesn't
-                // keep), and any other lvalue's (an arrow's, a pointer's target) is the generic error.
-                uint32_t named = operand;
-                bool walked = true;
-                bool through_arrow = false;
-                while (walked && !through_arrow && named < count &&
-                       (graph->ops[named] == CHECK_OP_SUBSCRIPT || graph->ops[named] == CHECK_OP_MEMBER || graph->ops[named] == CHECK_OP_ARROW))
-                {
-                    const uint32_t base = graph->operand0[named];
-                    const TypeId base_type = base < stream->count ? check_stream_type(stream, base) : 0;
-                    if (graph->ops[named] == CHECK_OP_SUBSCRIPT)
-                    {
-                        walked = base_type != 0 && type_kind_is_array(check_action_kind(types, base_type));
-                    }
-                    else
-                    {
-                        // The field among the record's own members, by the name after the `.` or `->`: not one that is const
-                        // itself. An arrow's base is the pointer variable clang names (its pointee the const object), alone.
-                        through_arrow = graph->ops[named] == CHECK_OP_ARROW;
-                        const TypeId pointee = through_arrow && base_type != 0 && check_action_kind(types, base_type) == BUSTER_TYPE_KIND_POINTER ?
-                                               type_element(types, type_unqualified(type_strip_aligned(types, base_type))) : 0;
-                        const TypeId record = through_arrow ? (pointee != 0 ? type_unqualified(type_strip_aligned(types, pointee)) : 0) :
-                                              base_type != 0 ? type_unqualified(type_strip_aligned(types, base_type)) : 0;
-                        const uint8_t record_kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_VOID;
-                        const uint32_t field_name = graph->tokens[named] + 1 < parser->tokens.count ? parser->tokens.names[graph->tokens[named] + 1] : 0;
-                        bool plain = false;
-                        if ((record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) && field_name != 0)
-                        {
-                            const uint32_t tag = types->types.index[type_index(record)];
-                            const uint32_t begin = types->tags.member_begin[tag];
-                            for (uint32_t m = begin; m < begin + types->tags.member_count[tag]; m += 1)
-                            {
-                                // (An array member's constness is its innermost element's.)
-                                TypeId field = types->members.type[m];
-                                for (uint32_t depth = 0; depth < 64 && type_kind_is_array(check_action_kind(types, field)); depth += 1)
-                                {
-                                    field = type_element(types, type_strip_aligned(types, field));
-                                }
-                                plain |= types->members.name[m] == field_name && (type_qualifiers(field) & BUSTER_TYPE_CONST) == 0;
-                            }
-                        }
-                        walked = plain;
-                    }
-                    named = walked ? base : named;
-                }
-                const uint32_t target = named < count ? graph->tokens[named] : BUSTER_CHECK_NONE;
-                const uint32_t declaration = target < input->token_count ? input->declarations[target] : BUSTER_CHECK_NONE;
-                const String8 name = target < parser->tokens.count ?
-                                     check_driver_warning_name(pp, check_driver_corrected_name(parser, input, target, parser->tokens.names[target])) :
-                                     (String8){ "", 0 };
-                const bool variable = walked && named < count && graph->ops[named] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0;
-                const String8 declared = variable ? check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, named),
-                                                                              check_semantic_operand_spelling(parser, input, stream, types, named)) : (String8){ "", 0 };
-                result = !variable ? "read-only variable is not assignable" :
-                         declared.length != 0 ? check_warning_text(scratch, "cannot assign to variable '%.*s' with const-qualified type %.*s",
-                                                                   (int)name.length, name.pointer, (int)declared.length, declared.pointer) : NULL;
-                if (variable && result != NULL)
-                {
-                    *note = (PPOutputDiagnosticNote){
-                        .token = parser->tokens.sources[declaration],
-                        .message = check_warning_text(scratch, "variable '%.*s' declared const here", (int)name.length, name.pointer),
-                    };
-                }
+                result = check_semantic_const_assignment(parser, pp, input, stream, types, spell, operand, note, &note_count, scratch);
+            }
+            else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+            {
+                // A record with a const member: its first, else what the lvalue's chain finds.
+                const char* fields = check_semantic_const_fields(parser, pp, input, stream, types, operand, operand_type, note, &note_count, scratch);
+                result = fields != NULL ? fields : check_semantic_const_assignment(parser, pp, input, stream, types, spell, operand, note, &note_count, scratch);
             }
         }
         else if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE || report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP ||

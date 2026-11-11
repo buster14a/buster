@@ -25,12 +25,13 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `check-call-graph, test-call-graph` | `call_graph.c` | [call-graph](call-graph.md) |
 | `test-calling-convention, benchmark-calling-convention` | `calling_convention.c` | [calling-convention](calling-convention.md) |
 | `check, test-checker, test-checker-driver` | `c_checker.c` | [checker](checker.md) |
-| `test-checker --requests` (request configuration, source preparation) | `c_check_request.c` | [checker](checker.md) |
+| `test-checker --requests` (request configuration, source preparation, option IDs) | `c_check_request.c`, `c_option_table.c` | [checker](checker.md) |
 | `test-checker-asm` | `c_check_program_asm.c` | [checker-asm](checker-asm.md) |
 | `test-checker-corpus` | `c_check_corpus.c` | [checker-corpus](checker-corpus.md) |
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |
 | benchpress (the 9700X) over the tailnet | `.claude/hooks/join-tailnet.sh` | [benchpress](benchpress.md) |
-| `correctness.tests / CI selection` | `tools/ci/correctness.tests` | [ci](ci.md) |
+| agent memory in cloud sessions | `.claude/hooks/llm-memory.sh` | [llm-memory](llm-memory.md) |
+| `correctness.tests, costs / CI selection` | `tools/ci/correctness.tests`, `tools/ci/costs.c` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite, test-sqlite` | `c_testsuite.c`, `sqlite_test.c` | [c-testsuite](c-testsuite.md) |
 | `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
@@ -102,6 +103,7 @@ The original section titles are retained in their owning guides.
 
 - [C driver build-system integration](../cc-driver.md).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
+- [Shard costs](ci.md#shard-costs).
 - [Reuse and the nightly backlog](ci.md#reuse-and-the-nightly-backlog).
 - [Call graph check](call-graph.md#call-graph-check).
 - [Lexer tests](lexer.md#lexer-tests).

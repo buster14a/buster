@@ -271,7 +271,7 @@ static void check_varargs_one(TypeTable* table, const CheckVarargsContext* conte
         // ("'__builtin_ms_va_start' used in System V ABI function"), and every other start spelling to any other
         // ("'va_start' used in Win64 ABI function").
         const bool function = type_is_valid(table, context->function_type) && check_action_kind(table, context->function_type) == BUSTER_TYPE_KIND_FUNCTION;
-        const bool win64 = function && type_function_abi_kind(table, type_strip_aligned(table, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
+        const bool win64 = function && type_function_convention(table, type_strip_aligned(table, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
         if ((input->id == CBUILTIN_MS_VA_START) != win64)
         {
             check_action_diagnose(result, CHECK_DIAG_CALL, 0);

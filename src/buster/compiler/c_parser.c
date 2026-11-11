@@ -1131,6 +1131,9 @@ struct ParseTree
     uint32_t* parents;
 };
 
+// The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 6u
+
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
 typedef struct ParseMeanings ParseMeanings;
@@ -1140,10 +1143,10 @@ struct ParseMeanings
     uint32_t capacity;
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
-    // availability's and external_source_symbol's names, and their keyword spellings (#1447), found once in `table` where the
-    // meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads these, not the table, which
-    // a caller may have released by then (the parser benchmark's is).
-    IdentId custom_attributes[4];
+    // availability's, external_source_symbol's and type_tag_for_datatype's names, and their keyword spellings (#1447), found
+    // once in `table` where the meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads
+    // these, not the table, which a caller may have released by then (the parser benchmark's is).
+    IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];
 };
 
 typedef struct ParseScalar ParseScalar;

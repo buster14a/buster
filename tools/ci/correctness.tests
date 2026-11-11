@@ -7,8 +7,17 @@
 # The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
 # one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records
 # fail closed. Internally guarded roots also retain their complete standalone preprocessing.
+# It reads the build's tree, not the executable. A hosted shard that runs its row's shared compiler (BUSTER_PRODUCT,
+# docs/ci.md's "Shared row products") has no such tree: the job that built the product ran this heading on its tree
+# before packing it (tools/ci/hosted-product.sh ownership), and the product records that it passed.
+if [ -z "${BUSTER_PRODUCT:-}" ]; then
 cc -std=c17 -O2 -Wall -Wextra -Werror -o build/build-regression tools/ci/build_regression.c
 build/build-regression --ownership-only "$BUSTER_COMPILER"
+else
+test "$(head -n 1 "$BUSTER_PRODUCT/provenance/ownership")" = passed
+printf 'SKIP: unity fixture ownership, which passed on the shared product'"'"'s build tree (%s)\n' "$BUSTER_PRODUCT"
+exit 77
+fi
 == Test the foreign inputs [8 CPUs]
 # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
 # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
@@ -128,7 +137,9 @@ grep -q "^test-sqlite: 9 of SQLite's CLI tests and 5 scripts: every build agrees
 # The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
 # eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
-clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
 ./build/test-driver-multicore "$BUSTER_COMPILER"
 == Test c-testsuite's programs end to end [4 CPUs]
 # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
@@ -160,8 +171,11 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 "$BUSTER_COMPILER" test-ssa-source --tier1 --generate 24 --seed 141 --lifetimes --clang clang
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
-# tokens. -target and its triple (clang's default) go to both.
-"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+# tokens. -target and its triple (clang's default) go to both. clang's runs go to the job's clang server where it built
+# one (#2071), compared as the cases' parts' are.
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
 # ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
@@ -183,8 +197,11 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # to 4 parts by their weights (pp_test_sections), one CPU each, which the runner packs beside the other commands:
 # whole, on 2 CPUs, the command took 295 s on a hosted runner and 44 s on the 9700X, the list's longest. The four
 # parts together run each check once. A part's fuzz workers and clang processes run on its CPU (--jobs, and
-# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs.
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4
+# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs. The oracle cache's clang runs and
+# the fuzz batch's go to the job's clang server where it built one (#2071), and with BUSTER_DRIVER_DIFFERENTIAL each
+# also runs as before: a difference fails the command. The release fixture's wrapper script, another program, runs its
+# clang as before.
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 # --part's refusals, each before any check runs: no value, a part outside 1 to N, N past the checks' 128, other than
 # digits on either side of one '/', and a second --part.
 if "$BUSTER_COMPILER" test-preprocessor --part; then exit 1; fi
@@ -193,16 +210,17 @@ for part in '' 4 0/4 5/4 1/0 1/129 x/4 1/ /4 1/4/4 '1/ 4' 1/+4 +1/4 ' 1/4'; do
 done
 if "$BUSTER_COMPILER" test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 == Test the preprocessor's cases against clang (part 2 of 4)
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 2/4
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 2/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the preprocessor's cases against clang (part 3 of 4)
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 3/4
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 3/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the preprocessor's cases against clang (part 4 of 4)
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 4/4
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 4/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the parser's snippets against clang
 # The snippets, each also checked against clang, the generated inputs and the driver's checks. The second command
 # checks the file alone (--files-only): the checks without input are the first's, with the same language and seed.
-"$BUSTER_COMPILER" test-parser --clang
-"$BUSTER_COMPILER" test-parser --clang --files-only tests/parser-handoff/pragma-heavy.c
+# clang's runs go to the job's clang server where it built one (#2071), compared as the preprocessor's parts are.
+"$BUSTER_COMPILER" test-parser --clang ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+"$BUSTER_COMPILER" test-parser --clang --files-only tests/parser-handoff/pragma-heavy.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
 # --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 4 parts, one CPU
 # each, which the runner packs beside the other commands: alone, the command took 197 s on a hosted runner and 48 s
@@ -230,7 +248,9 @@ musl="$corpus/libc/musl"
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Test the per-file jobs on the repository's translation units
 # The predefines follow the options as clang's do (c_predefines.c).
-"$BUSTER_COMPILER" test-files -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-files -target x86_64-pc-linux-gnu "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 == Test the parser on the repository's translation units
 # Both paths, which must agree kernel by kernel, and accept each unit the build compiles (build.sh print-sources),
 # but main_unit_*.c, which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in
@@ -245,7 +265,9 @@ for unit in "${sources[@]}"; do
     [[ "${unit##*/}" == main_unit_* ]] || units+=("$unit")
 done
 test "${#units[@]}" -gt 0
-"$BUSTER_COMPILER" test-parser --files-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h "${units[@]}"
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-parser --files-only "${host_flags[@]}" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h "${units[@]}"
 == Test Tier 0
 # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
 # --cross-check also runs them beside clang -O0's builds of the same programs as C, and links those that pass
@@ -255,7 +277,9 @@ test "${#units[@]}" -gt 0
 # #1398: the driver fixture's bodies and the compiler's own main.c spliced by the vector path and its scalar twin,
 # which must give the same streams, each accepted by tier0_validate and compiled.
 "$BUSTER_COMPILER" test-tier0-inline
-"$BUSTER_COMPILER" test-tier0-inline -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-tier0-inline "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 == Check the repository's translation units with the checker
 # #619: run in both hosted variants and the target suite, using the build's expanded arguments (including
 # its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
@@ -524,7 +548,9 @@ musl="$corpus/libc/musl"
 == Test the C lexer
 "$BUSTER_COMPILER" test-lexer
 == Compare source binding columns on main.c
-"$BUSTER_COMPILER" test-parser-bindings --clang -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-parser-bindings --clang "${host_flags[@]}" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 == Test the x86-64 encoder
 "$BUSTER_COMPILER" test-x86-encoder
 == Test the backend's baked tables
@@ -704,7 +730,9 @@ corpus=$BUSTER_CORPUS
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 # The focused MSan regression retains the O1 boundary where the old full-vector
 # load is observable. The compiler and its main refinement tests keep the matrix's optimization.
-clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" -O1 tests/sanitizers/refinement_tail.c -o build/test-refinement-tail
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O3 "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" -O1 tests/sanitizers/refinement_tail.c -o build/test-refinement-tail
 ./build/test-refinement-tail
 == Test Tier 1 allocation over CFGs, edge moves and the independent checker
 "$BUSTER_COMPILER" test-tier1-cfg
@@ -712,7 +740,9 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno
 "$BUSTER_COMPILER" test-diagnostics
 == Test compiler-owned resource failure boundaries
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
-clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" tests/sanitizers/resources.c -o build/test-sanitizer-resources
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O3 "${host_flags[@]}" -Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" tests/sanitizers/resources.c -o build/test-sanitizer-resources
 ./build/test-sanitizer-resources
 == Test the profiling tools
 "$BUSTER_COMPILER" test-profile

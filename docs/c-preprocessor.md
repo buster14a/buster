@@ -533,7 +533,12 @@ makes its own; with one, the units and lanes that share it read each file once
   (`file_cache_initialize`'s `*cache = (FileCache){ 0 }`, 30 pages of it the
   lanes' arenas) nor reserves an arena for each array. A cache that units
   share (`PPOptions.files`) is still made with `file_cache_initialize`, its
-  arrays in arenas of their own.
+  arrays in arenas of their own. What walks the lanes' arenas
+  (`pp_release_file_columns` after the run, `file_cache_release`) walks only
+  the lanes whose arenas were reserved (`FileCache.lanes_reserved`, a bit a
+  lane, #1444): a walk of all 256 read and then wrote every one of those
+  pages, 63 of an empty file's 98 faults in the unit's tables on the 9700X,
+  and a release that cleared the whole cache wrote them again.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
@@ -1590,7 +1595,10 @@ flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
 **The generated tables.** The CPUs, the features and their closures and macros
 are clang's answers, and `./build/compiler test-preprocessor --generate-targets`
 prints them as `c_predefines.c`'s generated block (`predefines_features`,
-`predefines_cpus`, `predefines_tunes`). It asks clang 23 (on `PATH`, with
+`predefines_cpus`, `predefines_tunes`, and `PredefinesFeatureIndex`, each
+feature's index as `PREDEFINES_FEATURE_` and its name in capitals with `.` and
+`-` as `_`, by which the compiler's own code names a feature without looking its
+name up, #1444). It asks clang 23 (on `PATH`, with
 `CPATH` unset) these questions:
 
 - The CPUs: from its errors for an unknown `-march` (the 79 of x86-64) and an
@@ -3465,12 +3473,26 @@ spellings alone would miss this change (#272).
   and records the errors with its raw string literals' (`pp_record_named_ucns`).
   A first version, a scan of every byte of its own, added about 1 ms (3%) to
   `main.c`'s preprocessing on the 9700X (the refine phase 5.5 to 6.5 ms).
-  Not clang's yet, for `\N` as for `\u`: the error of a basic or control
-  character's UCN in a skipped group, which clang gives; a UCN of a character
-  no identifier may have within one ("character <U+2603> not allowed in an
-  identifier"), which clang reads into the identifier after that error; the
-  -Wunicode warnings of a `\N` without its braces or name; and `-pedantic`'s
-  warning that a named UCN is clang's extension.
+  A `\N` that clang reads as no UCN where a token starts or an identifier goes
+  on has its -Wunicode warning at the backslash (#1447), which is then read as
+  itself: "incomplete universal character name; treating as '\' followed by
+  identifier" without a `{`, "empty delimited universal character name;
+  treating as '\' 'N' '{' '}'", and "incomplete delimited universal character
+  name; treating as '\' 'N' '{' identifier" where the line ends before the
+  `}` (`BUSTER_PP_NAMED_UCN_INCOMPLETE` and after). One that starts a token,
+  its name exactly Unicode's, has -pedantic's "named escape sequences are a
+  Clang extension" at the backslash, before its character's error
+  (`BUSTER_PP_NAMED_UCN_EXTENSION`), as a warning under `-pedantic`,
+  `-Wpedantic` or `-Wdelimited-escape-sequence-extension` and an error under
+  `-pedantic-errors` (`pp_pedantic_severity`, the command line's alone). Both
+  are raw errors found as the others (`pp_named_ucn_at`), so a file without a
+  candidate pays nothing more, and print no flag, as the preprocessor's other
+  warnings don't. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  or control character's UCN in a skipped group, which clang gives; a UCN of a
+  character no identifier may have within one ("character <U+2603> not allowed
+  in an identifier"), which clang reads into the identifier after that error;
+  and the -Wunicode warnings of a `\u` or `\U` without its digits, which the
+  candidates' search (a backslash before `N`) doesn't find.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.

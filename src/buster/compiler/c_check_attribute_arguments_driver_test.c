@@ -1535,6 +1535,39 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void f(int a __attribute__((no_caller_saved_registers)));\n",
         "void f(void) __attribute__((stdcall(1)));\n",
         "void (*p)(void) __attribute__((stdcall(1)));\n",
+        // no_caller_saved_registers beside another convention (#1447): clang's bit, printed after the convention, part of the
+        // type's identity, inherited by a redeclaration that has the convention alone and an error where one adds it.
+        "void a(void) __attribute__((ms_abi, no_caller_saved_registers)); void t(void) { int y = a; }\n",
+        "typedef void T(void) __attribute__((vectorcall)); T f __attribute__((no_caller_saved_registers)); void t(void) { int y = f; }\n",
+        "void b(void) __attribute__((no_caller_saved_registers, preserve_most)); void b(void) __attribute__((preserve_most));\n",
+        "void e(void) __attribute__((preserve_most)); void e(void) __attribute__((no_caller_saved_registers, preserve_most));\n",
+        "typedef void N(void) __attribute__((regcall, no_caller_saved_registers)); typedef void M(void) __attribute__((no_caller_saved_registers, regcall));\n"
+        "typedef void R(void) __attribute__((regcall)); _Static_assert(__builtin_types_compatible_p(N, M), \"same\"); "
+        "_Static_assert(!__builtin_types_compatible_p(N, R), \"differ\");\n",
+        "void a(int, ...) __attribute__((vectorcall, no_caller_saved_registers));\n",
+        "void g(void) __attribute__((ms_abi, sysv_abi, no_caller_saved_registers));\n",
+        // clang's no_caller_saved_registers rebuilds the function type without the sugar of the conventions before it, so
+        // that a later convention neither conflicts with them nor keeps them, whatever list or typedef wrote them
+        // (#2014's review); one written after it conflicts as ever.
+        "void g(void) __attribute__((sysv_abi, no_caller_saved_registers, ms_abi));\n",
+        "void g(void) __attribute__((no_caller_saved_registers, sysv_abi, ms_abi));\n",
+        "void g(void) __attribute__((no_caller_saved_registers, ms_abi, sysv_abi));\n",
+        "__attribute__((sysv_abi, no_caller_saved_registers)) void g(void) __attribute__((ms_abi));\n",
+        "__attribute__((ms_abi)) void g(void) __attribute__((preserve_most, no_caller_saved_registers));\n",
+        "__attribute__((ms_abi, no_caller_saved_registers)) void g(void); void g(void) __attribute__((preserve_most));\n",
+        "typedef void M(void) __attribute__((ms_abi)); M g __attribute__((sysv_abi, no_caller_saved_registers));\n",
+        "typedef void P(void) __attribute__((preserve_most, no_caller_saved_registers)); void g(void) __attribute__((ms_abi, no_caller_saved_registers, preserve_most));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), P), \"replaced\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers)); void g(void) __attribute__((ms_abi, no_caller_saved_registers, sysv_abi));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), N), \"replaced by sysv_abi\");\n",
+        "typedef void P(void) __attribute__((preserve_most, no_caller_saved_registers)); __attribute__((ms_abi)) void g(void) __attribute__((no_caller_saved_registers, preserve_most));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), P), \"another list\");\n",
+        "typedef void M(void) __attribute__((ms_abi, no_caller_saved_registers)); void g(void) __attribute__((sysv_abi, no_caller_saved_registers, ms_abi));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), M), \"sysv_abi hidden\");\n",
+        "typedef void M(void) __attribute__((ms_abi)); typedef void N(void) __attribute__((no_caller_saved_registers)); M g __attribute__((no_caller_saved_registers, sysv_abi));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), N), \"the typedef's hidden\");\n",
+        "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long f(long a) { return a; } __attribute__((no_caller_saved_registers)) long h(long a) "
+        "__attribute__((preserve_all)) { return f(a); }\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.
         "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
         "int f(void) __attribute__((target(\"bo\\tgus\")));\n",
@@ -1890,6 +1923,59 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "int x __asm__(\"a\\N{NOT A NAME}\");\n", "-std=gnu17", NULL },
         // A bit-precise suffix's letters in one case (#1933): a mixed-case one is an invalid suffix, in #if as in an expression.
         { "#if 1wB\n#endif\n#if 1Wb\n#endif\n#if 1uWb\n#endif\n#if 1WB + 1uwb\n#endif\nint x;\nint y = 1wB;\n", "-std=gnu23", NULL },
+        // An unevaluated string literal's encoding prefix (#1447): -Winvalid-unevaluated-string's warning at each prefixed token, before
+        // its escapes' diagnostics, and the literal read as an ordinary one (a static assertion's message, an attribute's argument), with
+        // the macro argument it came from; by the option and pragmas.
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu23", NULL },
+        { "_Static_assert(1, L\"a\" \"b\");\n_Static_assert(1, \"a\" u\"b\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, L\"m\" \"sg\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, U\"\\u00e9x\");\n", "-std=gnu17", NULL },
+        { "__attribute__((deprecated(U\"x\"))) int a;\nvoid f(void) { (void)a; }\n", "-std=gnu17", NULL },
+        { "int b __attribute__((section(u8\"s\")));\n", "-std=gnu17", NULL },
+        { "[[deprecated(L\"x\")]] int a;\nvoid f(void) { (void)a; }\n", "-std=gnu23", NULL },
+        { "_Static_assert(1, u8\"msg\\q\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, \"\\q\" u8\"a\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, L\"\\q\" u8\"a\");\n", "-std=gnu17", NULL },
+        { "#define M(x) _Static_assert(1, x)\nM(u8\"a\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, u8R\"(x)\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu17", "-Wno-invalid-unevaluated-string" },
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu17", "-Werror=invalid-unevaluated-string" },
+        { "#pragma clang diagnostic ignored \"-Winvalid-unevaluated-string\"\n_Static_assert(1, L\"a\");\n", "-std=gnu17", NULL },
+        { "void f(void) { _Static_assert(1, U\"x\"); }\n", "-std=gnu17", NULL },
+        // -pedantic's warnings of an unevaluated string literal's escapes (#1447): a GNU one's before its error, a delimited or named one's
+        // at the literal while it has no error, after a universal character name's own error; by the options.
+        { "_Static_assert(1, \"\\e\\E\");\n", "-std=gnu17", "-pedantic" },
+        { "__attribute__((deprecated(\"\\(\\{\\[\\%\"))) void f(void);\n", "-std=gnu23", "-pedantic" },
+        { "_Static_assert(1, \"\\x{41}\\x{41}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\o{1}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{e9}\\u{e9}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{41}x\\u{e9}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{41}x\\u{e9}\");\n", "-std=gnu23", "-pedantic" },
+        { "_Static_assert(1, \"\\N{SNOWMAN}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"a\\e\\x{41}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\x{4g}\" \"\\N{FOO}\" \"\\u{d800}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-Wpedantic" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-Wdelimited-escape-sequence-extension" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-pedantic-errors" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", NULL },
+        // A literal's escape diagnostics show the macro argument it came from (#1447), as clang's literal parsers' do; a numeric
+        // constant's don't.
+        { "#define M(x) _Static_assert(1, x)\nM(\"\\q\");\n", "-std=gnu17", NULL },
+        { "#define D(x) __attribute__((deprecated(x)))\nD(\"a\\e\") int c;\n", "-std=gnu17", NULL },
+        { "#define M(x) (x)\n#define K(y) M(y)\nconst char *s = K(\"\\q\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x x\nconst char *s = M(\"\\q\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nconst char *a = M(\"\\N{FOO}\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nint a = M('\\q');\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nconst char *s = M(\"\\x100\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nint a = M(08);\n", "-std=gnu17", NULL },
+        // The literals past where a reader's error stopped the unit's checking (#1447): each one's errors and warnings, as clang's
+        // literal parsers give them whatever came before (an evaluated literal's, a numeric constant's, an attribute's and a
+        // static assertion's message's).
+        { "int a = undeclared;\nconst char *s = \"\\x123\";\nint c = '\\777';\nchar d[] = \"\\o{8}\";\nvoid f(void) { int x = \"\\u{}\"[0]; (void)x; }\n", "-std=gnu17", NULL },
+        { "const char *s = \"\\x123\";\nconst char *t = \"\\q\" \"\\x100\";\nint n = 09 + 1e;\n", "-std=gnu17", NULL },
+        { "const char *s = \"\\x123\";\n__attribute__((deprecated(\"\\e\"))) int y;\n_Static_assert(1, \"\\q\");\n", "-std=gnu17", NULL },
+        { "const char *s = \"\\x123\";\nconst char *t = \"\\q\";\n", "-std=gnu17", "-Wno-unknown-escape-sequence" },
         // A bit-precise constant's suffix before C23 (#1447): -Wc23-extensions' warning at the constant, once though the
         // constant evaluator reads it again, through a macro, in each context that reads a constant, and by the option and
         // pragmas; none in C23.

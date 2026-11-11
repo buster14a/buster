@@ -5,13 +5,20 @@
 // mappings and source pragmas are independent: a source mapping replaces the command-line baseline at its location.
 // The group relations and extension classes are checked against Clang 23.1.4, with original differential probes.
 
+// The warnings off by default that -pedantic (or -pedantic-errors) gives: GNU constant folding's, and an unevaluated
+// string literal's escapes' (#1447).
+static bool check_warning_pedantic(uint32_t id)
+{
+    return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE;
+}
+
 static bool check_warning_extension(uint32_t id)
 {
     const bool extension = id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_ORDERED_POINTER_INTEGER ||
                            id == CHECK_WARNING_ID_MISSING_DECLARATIONS || id == CHECK_WARNING_ID_PLAIN_COMPLEX ||
                            id == CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER || id == CHECK_WARNING_ID_MANY_SCALAR_BRACES ||
                            id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER ||
-                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE;
+                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE || check_warning_pedantic(id);
     return extension;
 }
 
@@ -46,8 +53,10 @@ static bool check_warning_option(uint32_t id, String8 option)
     const bool wextra = id == CHECK_WARNING_ID_UNUSED_PARAMETER || id == CHECK_WARNING_ID_SIGN_COMPARE ||
                         id == CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER;
     matches |= wall && check_diagnostic_option(option, "-Wall");
-    // -Wunused-value's (with -Wunused-comparison and -Wunused-result under it) is in -Wunused, which -Wmost and so -Wall hold.
-    const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT;
+    // -Wunused-value's (with -Wunused-comparison, -Wunused-result and -Wunevaluated-expression under it) is in -Wunused, which
+    // -Wmost and so -Wall hold.
+    const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT ||
+                        id == CHECK_WARNING_ID_UNEVALUATED_EXPRESSION;
     matches |= unused && (check_diagnostic_option(option, "-Wunused") || check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
     // -Wint-in-bool-context, -Wtautological-compare (with -Wtautological-constant-compare under it) and diagnose_if's
@@ -125,14 +134,14 @@ static CheckWarningCommandLine check_warning_command_line(const PPOptions* optio
         else if (strcmp(argument, "-pedantic-errors") == 0)
         {
             pedantic_errors = true;
-            if (id == CHECK_WARNING_ID_GNU_CONSTANT && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
+            if (check_warning_pedantic(id) && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
             {
                 mapped = CHECK_WARNING_WARNING;
             }
         }
         else if (strcmp(argument, "-pedantic") == 0)
         {
-            if (id == CHECK_WARNING_ID_GNU_CONSTANT && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
+            if (check_warning_pedantic(id) && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
             {
                 mapped = CHECK_WARNING_WARNING;
             }

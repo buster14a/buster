@@ -4072,6 +4072,76 @@ static void check_test_driver_tier1_wide_vectors(CheckTest* test, const char* cl
     }
 }
 
+// The wide results' fixture (#1847): a 128-byte vector returned by value, which the convention splits across the
+// target's widest vector registers (zmm0 and zmm1 at x86-64-v4, ymm0 to ymm3 at x86-64-v3), the function's own return
+// staging every part in the red zone (all 16 of its slots either way) and its caller storing them into its object.
+// The other unit (clang -O2's) passes random vectors and hashes every result.
+static const char check_test_tier1_wide_results_header[] =
+    "#include <stdint.h>\n"
+    "typedef int v32si __attribute__((vector_size(128)));\n"
+    "v32si x_mix(const v32si* p, int k);\n"
+    "void x_call(v32si* out, const v32si* p, int k);\n";
+
+static const char check_test_tier1_wide_results_source[] =
+    "#include \"tier1-wide-results.h\"\n"
+    "typedef union X1024 { v32si value; uint32_t u32[32]; } X1024;\n"
+    "__attribute__((noinline)) v32si x_mix(const v32si* p, int k)\n"
+    "{\n"
+    "    X1024 a = { .value = *p };\n"
+    "    X1024 r = { 0 };\n"
+    "    for (unsigned i = 0; i < 32; i += 1)\n"
+    "    {\n"
+    "        r.u32[i] = a.u32[31 - i] * 3u + (uint32_t)k + i;\n"
+    "    }\n"
+    "    return r.value;\n"
+    "}\n"
+    "void x_call(v32si* out, const v32si* p, int k)\n"
+    "{\n"
+    "    v32si r = x_mix(p, k);\n"
+    "    *out = r;\n"
+    "}\n";
+
+static const char check_test_tier1_wide_results_other_source[] =
+    "#include \"tier1-wide-results.h\"\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) { hash ^= b[i]; hash *= 1099511628211ull; } }\n"
+    "int main(void)\n"
+    "{\n"
+    "    uint32_t s = 2024;\n"
+    "    for (int round = 0; round < 100; round += 1)\n"
+    "    {\n"
+    "        uint32_t words[32];\n"
+    "        for (int i = 0; i < 32; i += 1) { s = s * 1664525u + 1013904223u; words[i] = s; }\n"
+    "        v32si a, out;\n"
+    "        memcpy(&a, words, 128);\n"
+    "        v32si r = x_mix(&a, round); mix(&r, 128);\n"
+    "        x_call(&out, &a, round + 7); mix(&out, 128);\n"
+    "    }\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds by x86-64-v3 and x86-64-v4, every function Tier 1's and its code certified, run where the host has each
+// target's features.
+static void check_test_driver_tier1_wide_results(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[2] = { "x86-64-v3", "x86-64-v4" };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], (uint32_t)strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char option[32];
+        char what[64];
+        snprintf(option, sizeof(option), "-march=%s", targets[t]);
+        snprintf(what, sizeof(what), "wide results' (%s)", targets[t]);
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide-results", what, check_test_tier1_wide_results_header, check_test_tier1_wide_results_source,
+                                      check_test_tier1_wide_results_other_source, option, host, 0);
+    }
+}
+
 #include "buster/compiler/c_check_tier1_rows_fixture.h"
 
 static const char check_test_tier1_rows_other_source[] =
@@ -4131,9 +4201,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
-    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, and its
-    // inserts, extracts and casts between widths into the IR's own intrinsics, which leaves 51 rows and 26 moves by Tier
-    // 1 (75 and 39 before).
+    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, its
+    // inserts, extracts and casts between widths into the IR's own intrinsics, and its variable permutes and byte shuffles
+    // into the IR's permutes, which leaves 47 rows and 26 moves by Tier 1 (75 and 39 before). The floor of 40 rows keeps the
+    // unit a machine rows' test as #1840 decodes more of them.
     const uint64_t compares = 11;
     char header[512];
     char unit[512];
@@ -4152,7 +4223,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 40 && 2 * build.row_moves <= build.machine_rows + compares, message);
         unlink(object);
     }
     unlink(unit);

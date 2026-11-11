@@ -4949,7 +4949,10 @@ them. The compiler's commands ask by default for no more lanes than the cores of
 the CPUs they may run on (`BUSTER_LANE_SESSION_PER_CORE`), which lane 1 counts
 from sysfs' sibling lists before it creates the others, a read per core off
 lane 0's path; lane 0 reads the count when a wide part first needs it
-(`lane_session_asked`). A session whose
+(`lane_session_asked`). An on-demand session (`BUSTER_LANE_SESSION_ON_DEMAND`,
+#1444, the C driver's for one source file) creates no thread until lane 0
+starts its lanes (`lane_session_start`), once its input pays for them; one that
+lane 0 settles first runs on lane 0 alone. A session whose
 lanes can't start runs the flow on lane 0 alone and never tries again; a
 terminal command's lanes stay parked when its flow ends, for the process's exit
 to end them (a sanitizer build joins them), and a test's are joined. The

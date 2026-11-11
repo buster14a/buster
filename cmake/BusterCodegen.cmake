@@ -199,7 +199,7 @@ function(buster_codegen_unit name)
     foreach(part RANGE ${BUSTER_CODEGEN_PARTITIONS})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir "-march=${buster_arch}" ${debug} -fno-stack-protector -O3 -Wall -Werror
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} -fno-stack-protector -O3 -Wall -Werror
                 -Xclang -disable-llvm-passes -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Generating ${name}'s native part ${part}"

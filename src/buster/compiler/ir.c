@@ -157,7 +157,8 @@ typedef enum IrOp
     // typed stream's lowering admits (ir_simd_typed.c). The unary splat (#1450) repeats scalar a's raw bits throughout
     // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
     // including on floating operands, so signed zeros and NaN payloads are unchanged. The vector width changes (#1840:
-    // extract, widen and insert) move a vector's bits whole between widths, their part in flags.
+    // extract, widen and insert) move a vector's bits whole between widths, their part in flags, and the permutes (#1840:
+    // permute, shuffle, align and shuffle_lanes) move lanes of two vectors, their immediate in flags.
     IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
@@ -212,7 +213,17 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_EXTRACT 15u
 #define BUSTER_IR_INTRINSIC_WIDEN 16u
 #define BUSTER_IR_INTRINSIC_INSERT 17u
-#define BUSTER_IR_INTRINSIC_COUNT 18u
+// The permutes (#1840), of two vectors of the result's type, their immediate in flags: permute's lane i is a's lane that
+// b's lane i's low bits name, its lanes' bytes 1 << flags (0 to 3: vpermb to vpermq); shuffle's byte i is 0 where b's byte
+// i has its top bit and else a's byte in i's 16 bytes that b's byte's low 4 bits name (vpshufb, flags 0); align's lane i
+// is lane i + count of b's lanes followed by a's, its lanes' bytes 1 << (flags >> 4) (2 or 3) and its count flags' low 4
+// bits, below the lanes (valignd, valignq); and shuffle_lanes' 16-byte lane j is, from a for the result's low half and b
+// for its high half, the lane flags' bits from j times log2 of the lanes name (vshufi64x2: 32 or 64 bytes).
+#define BUSTER_IR_INTRINSIC_PERMUTE 18u
+#define BUSTER_IR_INTRINSIC_SHUFFLE 19u
+#define BUSTER_IR_INTRINSIC_ALIGN 20u
+#define BUSTER_IR_INTRINSIC_SHUFFLE_LANES 21u
+#define BUSTER_IR_INTRINSIC_COUNT 22u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -734,6 +745,10 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "extract",
     "widen",
     "insert",
+    "permute",
+    "shuffle",
+    "align",
+    "shuffle_lanes",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1251,6 +1266,20 @@ static bool ir_lane_valid(uint32_t op, uint32_t lane)
 {
     const IrSimdOperation operation = ir_lane_operation(op);
     return operation != IR_SIMD_OPERATION_COUNT && lane < IR_SIMD_LANE_COUNT && ir_simd_lane_valid(operation, (IrSimdLane)lane);
+}
+
+// Whether a permute's flags (#1840, BUSTER_IR_INTRINSIC_PERMUTE to _SHUFFLE_LANES) are its kind's at vector type `type`:
+// permute's lanes' bytes' log2 (0 to 3), shuffle's 0, align's lanes' bytes' log2 (2 or 3) in bits 4 and 5 and its count,
+// below its lanes, in the low 4, and shuffle_lanes' immediate, of a 32-byte vector's two lanes' bits or a 64-byte one's.
+static bool ir_permute_flags_valid(uint32_t kind, uint32_t type, uint32_t flags)
+{
+    const uint32_t bits = ir_type_bits[type];
+    const uint32_t size = flags >> 4;
+    const bool valid = kind == BUSTER_IR_INTRINSIC_PERMUTE ? flags <= 3 :
+                       kind == BUSTER_IR_INTRINSIC_SHUFFLE ? flags == 0 :
+                       kind == BUSTER_IR_INTRINSIC_ALIGN   ? (size == 2 || size == 3) && (flags & 15) < bits / (8u << size) :
+                                                             (bits == 256 && flags < 4) || bits == 512;
+    return valid;
 }
 
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
@@ -1799,6 +1828,17 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         const uint32_t tb_part = f->type[b];
                         valid = ir_vector_type(type) && ta == type && ir_vector_type(tb_part) && ir_type_bits[tb_part] < ir_type_bits[type] &&
                                 part < ir_type_bits[type] / ir_type_bits[tb_part];
+                    }
+                }
+                else if (c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+                {
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else
+                    {
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_permute_flags_valid(c, type, part);
                     }
                 }
                 else if (part != 0)
@@ -3190,7 +3230,8 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         {
                             fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
                             // A width change's part (#1840), its immediate.
-                            if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT)
+                            if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
+                                c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

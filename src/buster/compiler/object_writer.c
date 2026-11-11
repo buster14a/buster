@@ -853,13 +853,15 @@ static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t adde
     return !kept && !pool;
 }
 
-// An empty name is no descriptor; validate every nonempty descriptor before comparing or hashing its name.
+// An empty name is no descriptor; validate every nonempty descriptor before comparing or hashing its name: its class's
+// type, or for one of bytes PROGBITS or a note's (an assembler's `.note.*`, #1848).
 static bool object_section_valid(const ObjectAtomSection* section, uint8_t class)
 {
     return section->name.length == 0 ||
            (section->name.pointer != 0 && section->name.length < UINT32_MAX &&
             memchr(section->name.pointer, 0, section->name.length) == 0 &&
-            (section->type == object_class_sections[class].type || (!object_class_is_zero_fill(class) && section->type == SHT_PROGBITS)) &&
+            (section->type == object_class_sections[class].type ||
+             (!object_class_is_zero_fill(class) && (section->type == SHT_PROGBITS || section->type == SHT_NOTE))) &&
             ((section->flags & SHF_MERGE) == 0 || section->entry_size != 0));
 }
 

@@ -197,7 +197,10 @@ to a segment: both paths alike, each record the stripped twin's but for the
 override on the access's memory operand, and validation's rules for the marker
 (a constant's top bits are its own; the segment 3 is refused).
 A child runs them, `%fs` at the thread's base and `%gs` set by `arch_prctl`, on
-addresses that hold the data only through the segment. After
+addresses that hold the data only through the segment. It calls them through
+`tier0_test_segment_call`, which turns off `-fsanitize=function`: that check
+reads a signature in the 8 bytes before the entry, which generated code lacks
+and which is unmapped before the first case's page (#2077). After
 the programs, the `x87` check (`tier0_x87_test.c`, #136's item 8) compiles long
 double code by both paths into the same records, encoded by both encoders into
 the same bytes and run natively, called from C through function pointers, so

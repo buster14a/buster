@@ -124,23 +124,40 @@ struct CheckRequestReceipt
 // spelling, which clang doesn't take, is refused here by name.
 #include "c_check_options.c"
 
-static bool check_request_codegen_option(const char* argument)
+static bool check_request_codegen_option(const char* argument, COptionMatch match)
 {
-    static const char* const exact[] = {
-        "-fstack-protector-explicit", "-fstack-check", "-pg", "-finstrument-functions",
-        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
-        "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
-        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double", "-fsanitize-coverage",
+    static const uint16_t exact[] = {
+        C_OPTION_FSTACK_PROTECTOR_EXPLICIT,
+        C_OPTION_FSTACK_CHECK,
+        C_OPTION_PG,
+        C_OPTION_FINSTRUMENT_FUNCTIONS,
+        C_OPTION_FINSTRUMENT_FUNCTIONS_AFTER_INLINING,
+        C_OPTION_FPROFILE_GENERATE,
+        C_OPTION_FPROFILE_INSTR_GENERATE,
+        C_OPTION_FCS_PROFILE_GENERATE,
+        C_OPTION_FPROFILE_GENERATE_COLD_FUNCTION_COVERAGE,
+        C_OPTION_COVERAGE,
+        C_OPTION_FPROFILE_ARCS,
+        C_OPTION_FTEST_COVERAGE,
+        C_OPTION_MNO_RED_ZONE,
+        C_OPTION_FNO_PLT,
+        C_OPTION_FPCC_STRUCT_RETURN,
+        C_OPTION_FREG_STRUCT_RETURN,
+        C_OPTION_FSHORT_DOUBLE,
+        C_OPTION_FSANITIZE_COVERAGE,
+    };
+    // The prefixes that end in '=', by ID (c_option_table.c), and the others.
+    static const uint16_t joined[] = {
+        C_OPTION_FSTACK_CHECK_EQ,
+        C_OPTION_FTLS_MODEL_EQ,
+        C_OPTION_FWIDE_EXEC_CHARSET_EQ,
+        C_OPTION_FPROFILE_GENERATE_EQ,
+        C_OPTION_FPROFILE_INSTR_GENERATE_EQ,
+        C_OPTION_FCS_PROFILE_GENERATE_EQ,
+        C_OPTION_FPROFILE_GENERATE_COLD_FUNCTION_COVERAGE_EQ,
     };
     static const char* const prefixes[] = {
         "-fstack-protector",
-        "-fstack-check=",
-        "-ftls-model=",
-        "-fwide-exec-charset=",
-        "-fprofile-generate=",
-        "-fprofile-instr-generate=",
-        "-fcs-profile-generate=",
-        "-fprofile-generate-cold-function-coverage=",
         "-ftrivial-auto-var-init",
         "-ftrapv",
         "-fzero-call-used-regs",
@@ -148,31 +165,35 @@ static bool check_request_codegen_option(const char* argument)
         "-mcmodel",
     };
     bool unsupported = false;
-    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(exact); i += 1)
     {
-        unsupported = strcmp(argument, exact[i]) == 0;
+        unsupported |= exact[i] == match.exact;
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(joined); i += 1)
+    {
+        unsupported |= joined[i] == match.joined;
     }
     for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
     {
-        unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
+        unsupported = c_option_starts(argument, prefixes[i]);
     }
     // These complete spellings request the behavior already emitted. Exemptions are never prefixes: -mcmodel=small-bogus
     // and -fzero-call-used-regs=skip,all are still refused by name. Within these families, an earlier unsupported
     // request isn't cancelled by a later inactive spelling; the stack protector's and CET's families are resolved
     // separately (check_request_scan) and do honor a later disabling spelling.
-    static const char* const inactive[] = {
-        "-ftrivial-auto-var-init=uninitialized",
-        "-fzero-call-used-regs=skip",
-        "-mcmodel=small",
+    static const uint16_t inactive[] = {
+        C_OPTION_FTRIVIAL_AUTO_VAR_INIT_EQ_UNINITIALIZED,
+        C_OPTION_FZERO_CALL_USED_REGS_EQ_SKIP,
+        C_OPTION_MCMODEL_EQ_SMALL,
     };
-    for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
     {
-        unsupported = strcmp(argument, inactive[i]) != 0;
+        unsupported &= inactive[i] != match.exact;
     }
     const bool codegen_family = argument[0] == '-' && (argument[1] == 'f' || argument[1] == 'm');
     if (!unsupported && codegen_family)
     {
-        unsupported = !check_request_known_option(argument);
+        unsupported = !check_request_known_option(argument, match);
     }
     return unsupported;
 }
@@ -218,19 +239,20 @@ static bool check_request_visibility(const char* option)
 // Reads `argument`, one that is no option's value (pp_option_takes_value's), into `scan`: whether it goes on to
 // pp_parse_options. Only an option that asks for code generation the driver doesn't implement stays apart, since the
 // preprocessor doesn't model it; the stack protector's, -fcf-protection's, the layout options and the object and
-// linkage options go on, for their predefined macros, and so does a bare -fvisibility, which clang doesn't take.
-static bool check_request_scan(CheckRequestScan* scan, const char* argument)
+// linkage options go on, for their predefined macros, and so does a bare -fvisibility, which clang doesn't take. `match`
+// is the argument's IDs (c_option_find).
+static bool check_request_scan_match(CheckRequestScan* scan, const char* argument, COptionMatch match)
 {
     bool passed = true;
-    if (strcmp(argument, "-fshort-enums") == 0 || strcmp(argument, "-fno-short-enums") == 0)
+    if (match.exact == C_OPTION_FSHORT_ENUMS || match.exact == C_OPTION_FNO_SHORT_ENUMS)
     {
-        scan->short_enums = strcmp(argument, "-fshort-enums") == 0 ? argument : NULL;
+        scan->short_enums = match.exact == C_OPTION_FSHORT_ENUMS ? argument : NULL;
     }
-    else if (strcmp(argument, "-fpack-struct") == 0 || strcmp(argument, "-fno-pack-struct") == 0)
+    else if (match.exact == C_OPTION_FPACK_STRUCT || match.exact == C_OPTION_FNO_PACK_STRUCT)
     {
-        scan->packed_bare = strcmp(argument, "-fpack-struct") == 0 ? argument : NULL;
+        scan->packed_bare = match.exact == C_OPTION_FPACK_STRUCT ? argument : NULL;
     }
-    else if (strncmp(argument, "-fpack-struct=", sizeof("-fpack-struct=") - 1) == 0)
+    else if (match.joined == C_OPTION_FPACK_STRUCT_EQ)
     {
         uint64_t value = 0;
         const bool valid = check_request_pack_value(argument + sizeof("-fpack-struct=") - 1, &value);
@@ -238,32 +260,32 @@ static bool check_request_scan(CheckRequestScan* scan, const char* argument)
         scan->invalid_pack = valid ? NULL : argument;
         scan->packed_value = value == 0 && valid ? NULL : argument;
     }
-    else if (strcmp(argument, "-fno-stack-protector") == 0 || strcmp(argument, "-fstack-protector") == 0 || strcmp(argument, "-fstack-protector-strong") == 0 ||
-             strcmp(argument, "-fstack-protector-all") == 0)
+    else if (match.exact == C_OPTION_FNO_STACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR_STRONG ||
+             match.exact == C_OPTION_FSTACK_PROTECTOR_ALL)
     {
-        scan->stack_protector = strcmp(argument, "-fno-stack-protector") == 0 ? NULL : argument;
+        scan->stack_protector = match.exact == C_OPTION_FNO_STACK_PROTECTOR ? NULL : argument;
     }
-    else if (strcmp(argument, "-fcf-protection") == 0 || strncmp(argument, "-fcf-protection=", sizeof("-fcf-protection=") - 1) == 0)
+    else if (match.exact == C_OPTION_FCF_PROTECTION || match.joined == C_OPTION_FCF_PROTECTION_EQ)
     {
-        scan->cf_protection = strcmp(argument, "-fcf-protection=none") == 0 ? NULL : argument;
+        scan->cf_protection = match.exact == C_OPTION_FCF_PROTECTION_EQ_NONE ? NULL : argument;
     }
-    else if (strcmp(argument, "-ffunction-sections") == 0 || strcmp(argument, "-fno-function-sections") == 0)
+    else if (match.exact == C_OPTION_FFUNCTION_SECTIONS || match.exact == C_OPTION_FNO_FUNCTION_SECTIONS)
     {
-        scan->function_sections = strcmp(argument, "-ffunction-sections") == 0 ? argument : NULL;
+        scan->function_sections = match.exact == C_OPTION_FFUNCTION_SECTIONS ? argument : NULL;
     }
-    else if (strcmp(argument, "-fdata-sections") == 0 || strcmp(argument, "-fno-data-sections") == 0)
+    else if (match.exact == C_OPTION_FDATA_SECTIONS || match.exact == C_OPTION_FNO_DATA_SECTIONS)
     {
-        scan->data_sections = strcmp(argument, "-fdata-sections") == 0 ? argument : NULL;
+        scan->data_sections = match.exact == C_OPTION_FDATA_SECTIONS ? argument : NULL;
     }
-    else if (strcmp(argument, "-fvisibility-ms-compat") == 0 || strncmp(argument, "-fvisibility=", sizeof("-fvisibility=") - 1) == 0)
+    else if (match.exact == C_OPTION_FVISIBILITY_MS_COMPAT || match.joined == C_OPTION_FVISIBILITY_EQ)
     {
         scan->visibility = argument;
     }
-    else if (strcmp(argument, "-fvisibility") == 0)
+    else if (match.exact == C_OPTION_FVISIBILITY)
     {
         scan->codegen = scan->codegen != NULL ? scan->codegen : argument;
     }
-    else if (check_request_codegen_option(argument))
+    else if (check_request_codegen_option(argument, match))
     {
         scan->codegen = scan->codegen != NULL ? scan->codegen : argument;
         passed = false;
@@ -398,15 +420,16 @@ static bool check_request_read(PPOptions* parsed, CheckRequestRefusal* refusal, 
     bool end_options = false;
     for (uint32_t i = 0; own != 0 && i < count; i += 1)
     {
-        const bool ending = !end_options && strcmp(arguments[i], "--") == 0;
-        const bool valued = !end_options && !ending && i + 1 < count && pp_option_takes_value(arguments[i]);
+        const COptionMatch match = end_options ? (COptionMatch){ .exact = C_OPTION_NONE, .joined = C_OPTION_NONE } : c_option_find(arguments[i]);
+        const bool ending = !end_options && match.exact == C_OPTION_END_OF_OPTIONS;
+        const bool valued = !end_options && !ending && i + 1 < count && pp_option_id_takes_value(match.exact);
         if (valued)
         {
             own[passed++] = arguments[i];
             own[passed++] = arguments[i + 1];
             i += 1;
         }
-        else if (end_options || ending || check_request_scan(&scan, arguments[i]))
+        else if (end_options || ending || check_request_scan_match(&scan, arguments[i], match))
         {
             own[passed++] = arguments[i];
         }

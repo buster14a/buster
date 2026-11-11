@@ -29,7 +29,7 @@ license; do not select or change this repository's license on the owner's behalf
 ## Licensing and contributions
 
 Read [LICENSING.md](LICENSING.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-and [CONTRIBUTING.md](CONTRIBUTING.md) before importing or submitting material.
+and [CONTRIBUTING.md](CONTRIBUTING.md) before importing, submitting or merging material.
 Original contributions use `Apache-2.0 WITH LLVM-exception`; identified
 components and local changes to their portions follow their retained terms.
 Do not add the LLVM exception over Apache-only upstream material or label a
@@ -282,21 +282,20 @@ replaces the 9700X's lock: benchmark timings still come from there.
 ## Agent memory
 
 Agents keep what they learn about this project in the owner's private
-`davidgmbb/llm-memory` repository, cloned at `~/llm-memory` on each of the
-owner's computers:
+`davidgmbb/llm-memory` repository, cloned at `~/llm-memory` on the owner's
+computers:
 
 - Claude Code's memory folder for this project is a symlink to
   `~/llm-memory/projects/buster-fast/`, so Claude saves its memories there as
   usual.
 - Any other agent reads `~/llm-memory/projects/buster-fast/MEMORY.md` before
-  starting and saves what later sessions will need there, in the same format:
+  starting and saves what later sessions need there, in the same format:
   one fact per file, indexed in `MEMORY.md`. `~/llm-memory/AGENTS.md` has the
   rules, and Codex's automatic memories are copied to `~/llm-memory/codex/`.
-- Don't save what this repository already records, and never save secrets.
-- After saving, run `~/llm-memory/bin/llm-memory sync` to share the memory with
-  the owner's other computers.
-
-Where `~/llm-memory` doesn't exist, skip this.
+- Don't save what this repository records, and never save secrets.
+- After saving, run `~/llm-memory/bin/llm-memory sync` to share it.
+- A hook sets it up in the cloud ([guide](docs/commands/llm-memory.md)).
+  Elsewhere, without `~/llm-memory`, skip this.
 
 ## Build
 
@@ -424,7 +423,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-checker-asm` — `c_check_program_asm.c` — [guide](docs/commands/checker-asm.md).
 - `test-checker-corpus` — `c_check_corpus.c` — [guide](docs/commands/checker-corpus.md).
 - `test-check-debug, benchmark-check-debug` — `c_check_debug.c` — [guide](docs/commands/check-debug.md).
-- `correctness.tests / CI selection` — `tools/ci/correctness.tests` — [guide](docs/commands/ci.md).
+- `correctness.tests, costs / CI selection` — `tools/ci/correctness.tests`, `tools/ci/costs.c` — [guide](docs/commands/ci.md).
 - `measure-compile, --time-stages` — `c_check_clock.c` — [guide](docs/commands/compile-time.md).
 - `test-c-testsuite, test-sqlite` — `c_testsuite.c`, `sqlite_test.c` — [guide](docs/commands/c-testsuite.md).
 - `dco status, audit, compose` — `tools/dco/dco.c` — [guide](docs/commands/dco.md).

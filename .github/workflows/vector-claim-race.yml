@@ -1,0 +1,248 @@
+name: Vector claim race fixture
+
+# The race fixture of the vector row's claims (#2033; docs/ci.md, "The vector row"). The row's draws start candidates at
+# once, and each item must go to exactly one of the qualifying ones. 16 racers, each a job of its own on its own runner,
+# act as one draw's candidates at the same instant, through the row's own script (tools/ci/vector-draw.sh): each
+# publishes a verdict (about half qualify, by a hash of the racer and the run), and the draw's collector, one job,
+# assigns the 4 items by rank, which the racers take. The judge requires that each assigned item went to exactly the one
+# racer the assignment names, that only qualifying racers took one, that nobody took two, and that the assignment
+# covers min(4, qualifying racers) items.
+#
+# A control round first: every racer uploads one artifact name at once, as a claim by artifact name would. GitHub
+# documents that an upload under a name the run already has fails, not that the refusal holds under a race, and on
+# 2026-11-11 (run 42993863311) all 16 uploads succeeded in each of 4 rounds, leaving 16 artifacts by one name: why the
+# row's collector assigns rather than its candidates claim. The judge reports the control's count, and doesn't fail
+# on it.
+on:
+  # A pull request that changes the draws (the row workflow, its script) or this fixture.
+  pull_request:
+    paths:
+      - .github/workflows/hosted-correctness.yml
+      - .github/workflows/vector-claim-race.yml
+      - tools/ci/vector-draw.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vector-claim-race-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The script's settings: its artifacts are vector-race-O0-ATTEMPT-..., apart from the row's.
+env:
+  BUSTER_SANITIZER: race
+  BUSTER_SANITIZER_OPTIMIZATION: '0'
+  BUSTER_VECTOR_ITEMS: '1 2 3 4'
+
+jobs:
+  start:
+    name: Set the race's instant
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      at: ${{ steps.at.outputs.at }}
+    steps:
+      # Far enough ahead for the racers' jobs to start: hosted jobs start seconds after their run asks, at quiet times.
+      - name: Set the race's instant
+        id: at
+        shell: bash
+        run: printf 'at=%s\n' "$(($(date +%s) + 120))" >> "$GITHUB_OUTPUT"
+
+  race:
+    # The row's candidates' name, which the collector reads in the run's jobs.
+    name: Vector draw 1, candidate ${{ matrix.racer }} (Clang 23, race, O0)
+    needs: start
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        racer: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    defaults:
+      run:
+        shell: bash
+    env:
+      AT: ${{ needs.start.outputs.at }}
+      RACER: ${{ matrix.racer }}
+    steps:
+      - name: Wait for the race's instant
+        run: |
+          race="$RUNNER_TEMP/race"
+          mkdir -p "$race"
+          verdict=unqualified
+          if [ $(((RACER * 7 + GITHUB_RUN_ID) % 10)) -lt 5 ]; then
+              verdict=qualified
+          fi
+          {
+              printf 'level\t1\ncandidate\t%s\nrunner\t%s\n' "$RACER" "$RUNNER_NAME"
+              printf 'cpu\t%s\n' "$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)"
+              printf 'probe\t%s\n' "$verdict"
+          } > "$race/record"
+          printf 'racer\t%s\nrunner\t%s\nverdict\t%s\n' "$RACER" "$RUNNER_NAME" "$verdict" > "$race/outcomes"
+          now=$(date +%s.%N)
+          late=$(awk -v now="$now" -v at="$AT" 'BEGIN { print (now > at) ? 1 : 0 }')
+          if [ "$late" = 0 ]; then
+              sleep "$(awk -v now="$now" -v at="$AT" 'BEGIN { printf "%.3f", at - now }')"
+          fi
+          printf 'late\t%s\n' "$late" >> "$race/outcomes"
+          printf 'verdict=%s\nyes=%s\n' "$verdict" "$([ "$verdict" = qualified ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          printf 'late %s, %s, racing at %s\n' "$late" "$verdict" "$(date +%s.%N)"
+        id: wait
+
+      - name: Upload the control's name with every other racer
+        id: control
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-control
+          path: ${{ runner.temp }}/race/record
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish the racer's verdict
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vector-race-O0-${{ github.run_attempt }}-probe-1-${{ matrix.racer }}-${{ steps.wait.outputs.yes }}
+          path: ${{ runner.temp }}/race/record
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Take the item the collector assigns, or nothing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.wait.outputs.verdict }}
+          CONTROL: ${{ steps.control.outcome }}
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          GITHUB_ENV="$RUNNER_TEMP/race/env" bash "$RUNNER_TEMP/vector-draw.sh" take 1 "$RACER" "$VERDICT" "$RUNNER_TEMP/race/record"
+          {
+              printf 'control\t%s\n' "$CONTROL"
+              printf 'took\t%s\n' "$(sed -n 's/^BUSTER_SHARD=//p' "$RUNNER_TEMP/race/env" 2> /dev/null)"
+          } >> "$RUNNER_TEMP/race/outcomes"
+          cat "$RUNNER_TEMP/race/outcomes"
+
+      - name: Publish the racer's outcome
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-racer-${{ matrix.racer }}
+          path: ${{ runner.temp }}/race/outcomes
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+  collect:
+    # The row's collector's name, which a racer looks for in a rerun.
+    name: Vector draw 1's assignment (Clang 23, race, O0)
+    needs: start
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Assign the race's items to its qualifying racers by rank
+        id: assign
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          bash "$RUNNER_TEMP/vector-draw.sh" assign 1 16 4
+          cat "$RUNNER_TEMP/vector-assignment"
+
+      - name: Publish the assignment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.assign.outputs.name }}
+          path: ${{ runner.temp }}/vector-assignment
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+  judge:
+    name: Each item to exactly one qualifying racer
+    needs: [race, collect]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download the racers' outcomes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: race-${{ github.run_attempt }}-racer-*
+          path: ${{ runner.temp }}/race
+
+      - name: Require each assigned item taken by its one racer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          race="$RUNNER_TEMP/race"
+          names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[].name')
+          field() { sed -n "s/^$1\t//p" "$2" | head -n 1; }
+          prefix="vector-race-O0-$GITHUB_RUN_ATTEMPT"
+          assignment=$(grep -E "^$prefix-assign-1(-[0-9]+x[0-9]+)*\$" <<< "$names" || true)
+          failures=()
+          [ "$(grep -c . <<< "$assignment")" -eq 1 ] || failures+=("$(grep -c . <<< "$assignment") assignments")
+          declare -A holder=()
+          for pair in $(tr '-' ' ' <<< "${assignment#"$prefix-assign-1"}"); do
+              holder[${pair%x*}]=${pair#*x}
+          done
+          racers=0 qualified=0 on_time=0 controls=0
+          declare -A took=()
+          {
+              printf '## Claim race, attempt %s\n\n' "$GITHUB_RUN_ATTEMPT"
+              printf 'Assignment: %s\n\n' "${assignment:-none}"
+              printf '| Racer | On time | Verdict | Took | Control upload |\n| ---: | --- | --- | --- | --- |\n'
+          } > "$race/summary.md"
+          for outcomes in "$race"/race-"$GITHUB_RUN_ATTEMPT"-racer-*/outcomes; do
+              [ -e "$outcomes" ] || continue
+              racer=$(field racer "$outcomes")
+              item=$(field took "$outcomes")
+              racers=$((racers + 1))
+              [ "$(field verdict "$outcomes")" = qualified ] && qualified=$((qualified + 1))
+              [ "$(field late "$outcomes")" = 0 ] && on_time=$((on_time + 1))
+              [ "$(field control "$outcomes")" = success ] && controls=$((controls + 1))
+              if [ -n "$item" ]; then
+                  [ -z "${took[$item]:-}" ] || failures+=("item $item taken by racers ${took[$item]} and $racer")
+                  took[$item]=$racer
+                  [ "${holder[$item]:-}" = "$racer" ] || failures+=("racer $racer took item $item, assigned to ${holder[$item]:-nobody}")
+                  [ "$(field verdict "$outcomes")" = qualified ] || failures+=("racer $racer took item $item without qualifying")
+              fi
+              printf '| %s | %s | %s | %s | %s |\n' "$racer" "$([ "$(field late "$outcomes")" = 0 ] && echo yes || echo no)" \
+                  "$(field verdict "$outcomes")" "${item:-nothing}" "$(field control "$outcomes")" >> "$race/summary.md"
+          done
+          for item in "${!holder[@]}"; do
+              [ "${took[$item]:-}" = "${holder[$item]}" ] || failures+=("item $item, assigned to racer ${holder[$item]}, taken by ${took[$item]:-nobody}")
+          done
+          expected=$((qualified < 4 ? qualified : 4))
+          [ "${#holder[@]}" -eq "$expected" ] || failures+=("${#holder[@]} items assigned, with $qualified racers qualifying")
+          [ "$racers" -eq 16 ] || failures+=("$racers of 16 racers reported")
+          controls_named=$(grep -cxF "race-$GITHUB_RUN_ATTEMPT-control" <<< "$names" || true)
+          {
+              printf '\n%s racers, %s on time, %s qualifying; %s items assigned.\n' "$racers" "$on_time" "$qualified" "${#holder[@]}"
+              printf 'Control: %s of %s simultaneous uploads of one name succeeded, and the run has %s artifacts by that name.\n' "$controls" "$racers" "$controls_named"
+              printf '%s\n' "${failures[@]/#/- FAILED: }"
+          } >> "$race/summary.md"
+          cat "$race/summary.md"
+          cat "$race/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$controls" -gt 1 ] || [ "$controls_named" -gt 1 ]; then
+              printf '::notice title=Vector claim race::%s uploads of one name succeeded at once: an artifact name is no claim.\n' "$controls"
+          fi
+          if [ "${#failures[@]}" -ne 0 ]; then
+              printf '::error title=Vector claim race::%s\n' "${failures[*]}"
+              exit 1
+          fi

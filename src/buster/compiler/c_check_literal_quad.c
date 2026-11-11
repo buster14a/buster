@@ -19,25 +19,18 @@
 extern __float128 check_literal_strtof128(const char* spelling, char** end) __asm__("strtof128");
 #endif
 
-// q/Q is rounded in binary128 first (#1250). CheckLiteral and CheckValue still hold x87 values: accept only when
-// that storage preserves the rounded binary128 result exactly. Reading with strtold first would silently turn
-// 0.1Q and 1 + 2^-112 into different constants. Wider values remain explicitly unsupported until their whole path,
-// including folding and static storage, retains 113 significant bits. The rare format stays out of line.
-static __attribute__((noinline)) bool check_literal_quad(const char* spelling, char** end, long double* value)
+// q/Q is rounded in binary128 once, by glibc's strtof128 (correctly rounded, ties to even), as clang's APFloat reads it
+// (#1250): its bits, the constant's (c_check_quad.c). Reading with strtold first would round 0.1Q and 1 + 2^-112 twice.
+// false where the host has no reader, which refuses the literal. The rare format stays out of line.
+static __attribute__((noinline)) bool check_literal_quad(const char* spelling, char** end, unsigned __int128* bits)
 {
 #if BUSTER_CHECK_HAVE_QUAD_READER
-    const __float128 quad = check_literal_strtof128(spelling, end);
-    const long double narrowed = (long double)quad;
-    const bool exact = (__float128)narrowed == quad;
-    if (exact)
-    {
-        *value = narrowed;
-    }
-    return exact;
+    *bits = check_quad_from_host(check_literal_strtof128(spelling, end));
+    return true;
 #else
     (void)spelling;
     (void)end;
-    (void)value;
+    *bits = 0;
     return false;
 #endif
 }
