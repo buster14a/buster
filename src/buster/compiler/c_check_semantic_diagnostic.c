@@ -469,6 +469,11 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
             valid = part.length != 0 && part.length <= UINT32_MAX && parser->tokens.kinds[token] == PARSE_KIND_STRING;
             parts[token - strings] = (CheckStringPart){ .bytes = (const uint8_t*)part.pointer, .length = (uint32_t)part.length };
         }
+        // (An unevaluated string literal, whose encoding prefixes have no effect, #1447.)
+        if (valid && message)
+        {
+            check_literal_unevaluated_parts(parts, close - strings);
+        }
         CheckStringLiteral decoded = valid && message ? check_literal_strings(parts, close - strings, parser->language.standard >= 2023, scratch) : (CheckStringLiteral){ 0 };
         // A message of escapes clang takes that the fast decoding refuses (#1447: a delimited one, a named universal
         // character name, an unknown one), read as clang reads them.
