@@ -238,8 +238,8 @@ jobs:
     # row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     # Each row is hosted-correctness.yml: its 4 shards, and for a portable row the job that builds its compiler once for
-    # them (#2032; docs/ci.md, "Shared row products"). Its jobs' names start with this one's, which must start with
-    # `Tests on ` (tools/ci/nightly.c reads the plain rows' shards by their names).
+    # them (#2032; docs/ci.md, "Shared row products"). Their names are this one's, ` / ` and their own, which
+    # tools/ci/nightly.c reads to find the plain rows' shards.
     needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     strategy:
