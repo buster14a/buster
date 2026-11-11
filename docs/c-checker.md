@@ -3541,12 +3541,20 @@ What the lowering covers past scalars (#145's programs):
   alignment less 16 bytes more, and its address rounds up to its alignment,
   `(address + alignment - 1) & -alignment`, where clang's code rounds rsp down:
   `ALLOCA`'s address is a multiple of 16. An array declared in a `for`
-  statement's clause or directly in a statement expression's block, and one
-  initialized (C23's `= {}`), are refused by name. The source reader doesn't yet take a bound whose
-  statement expression holds more than expression statements (a declaration,
-  an `if` or a jump: `invalid or unsupported declaration`); the control stream
-  already puts such a jump out of a block's first array's bounds before the
-  block's `STACK_SAVE`, where it needs no restore.
+  statement's clause is released where the statement ends, after its own
+  variables' cleanups, which its condition and its breaks reach; one declared
+  directly in a statement expression's block, after the expression's value is
+  kept and its block's cleanups ran, as clang's code releases them (#1447). One
+  initialized (C23's `= {}`, the only initializer one takes) is cleared whole
+  where it is allocated, by memset of its runtime size, as clang's code clears
+  it. A bound whose statement expression holds more than expression statements
+  (a declaration, an `if`, a jump or a label: `[({ int k = n; k + 1; })]`),
+  which the constant reader can't read before the walk has, makes a block-scope
+  array variable without that reading (#1447, `check_input_vla_walked`): it is
+  no integer constant expression, and the walk checks and evaluates it whole,
+  its block's declarations among its statements. The control stream puts such a
+  jump out of a block's first array's bounds before the block's `STACK_SAVE`,
+  where it needs no restore.
 - **Labels as values** (GNU C's, which Lua's interpreter dispatches with).
   `&&label` is a `void *` address constant of the label's own object (its
   token plus one, which no declaration has); a label its function doesn't
@@ -4021,10 +4029,12 @@ constraints still run at translation-unit end. `test-checker`
 name silences and the siblings it doesn't with clang, by both paths, with
 `-fsyntax-only` and `-c`. What remains conservative: a statement expression
 that holds the name is cut whole, where clang still checks an operator on its
-value (`({ undeclared; p; }) + 1.5`); and a missing name that the
-declaration walk reports in an array's bound, a `typeof` operand, a
-`_BitInt` width or a file-scope designator is a declarator failure (an
-enumerator's value's and a bit-field width's are recovered: below). A
+value (`({ undeclared; p; }) + 1.5`); and a missing name that
+the declaration walk reports in an array's bound, a `typeof` operand, a
+`_BitInt` width or a file-scope designator is a declarator failure, which
+keeps the whole unit's conservative prefix (an enumerator's value's, a
+bit-field width's, and a declaration's last declarator's bound's or
+`typeof`'s are recovered: below). A
 rejected unit's later warnings, its runtime shifts' (`x << 40`) among them,
 and those of a unit with other reports (a `break` outside a loop, a
 declaration conflict), come from the reparsed view of "Semantic error
@@ -4080,10 +4090,56 @@ take clang's words and places:
   failure before its first undeclared name is reported with it, in source
   order.
 
-Each still ends the unit's checking as before: its later declarations' errors
-are lost (`struct S{int a;} s; typeof(s.b) x; enum E { A = sizeof(s.b) };`
-gives one of clang's two). The semantic-recovery fixtures compare each with
-clang.
+Each of these, but a typedef's or a parameter's, now makes its declaration
+invalid, as clang's does, and the reader goes on (below). The semantic-recovery
+fixtures compare each with clang.
+
+#### Invalid declarations (#1447)
+
+Clang marks a declaration whose declarator or type is in error invalid, keeps it
+bound, and leaves its uses quiet: a `RecoveryExpr` around each, whose enclosing
+expressions give no diagnostic of their own. The reader does the same for the
+declarator errors above and a variable of type `void` or of an incomplete type,
+in a declaration's own declarator (not a typedef's, a parameter's, a deduced
+`auto`'s or a K&R definition's):
+
+- **The error recovers.** `check_input_declarator_recover` and
+  `check_input_variable_recover` move the report to the recovered ones, so the
+  reader goes on, and the type has a stand-in `int` where clang's has its
+  error: a function returning an array returns `int`, as clang's
+  `BuildFunctionType` makes it; an array of functions, of an incomplete
+  element, past the object limit or of a negative bound, and a `void` or
+  incomplete variable, are `int`. A constant read at the walk (a bound,
+  `typeof`, an enumerator, `_Static_assert`, a bit-field's width) sees the
+  stand-in; its uses there are quiet all the same.
+- **It stays bound.** `check_input_invalid_declare` marks its name in
+  `CheckInput.invalid_declarations` (a byte per token, allocated by the unit's
+  first, with `invalid_count`). `check_input_bind` binds it as it is, with no
+  redeclaration checks and no linkage. After a visible invalid declaration, a
+  function's redeclaration is invalid too, and an object's is checked as if
+  nothing were visible, but for its linkage: `static void v; int v;` gives
+  "non-static declaration of 'v' follows static declaration", and that one is
+  invalid too. Another kind of entity's (`int a[-1]; int a(void);`, a typedef
+  after either) is checked against it as against any other, clang's
+  "redefinition of 'a' as different kind of symbol".
+- **Its uses are quiet.** `check_input_binding_answers` gives each use of an
+  invalid declaration no declaration and the silent report
+  `CHECK_INPUT_INVALID_USE`, which recovers as an undeclared name's does
+  (`check_input_diagnostic_recover`'s limits, the initializer and repair
+  checks). The driver publishes nothing for it and counts it as no error of its
+  scope, so the scope keeps its unused variables, and a unit whose only reports
+  are such uses has its unused declarations' warnings from the first reading.
+  The rejected unit's later readings leave each use's part out, and each
+  invalid declaration with it, without leaving out the bodies that name them
+  (`check_driver_rejected_common`'s `quiet`).
+- **Source order.** A unit with an invalid declaration at file scope reads its
+  bodies in source order (`check_deferred_bodies`), and a lane that meets one
+  in its body refuses, so source order recovers it.
+
+Left as before: an initialized invalid declaration still stops the reader
+(clang checks its initializer without the declaration's type, and its
+undeclared names and warnings there), and so does an invalid function
+definition's K&R list. `-c` refuses every such unit.
 
 #### Extern objects of type void (#1447)
 
@@ -4306,10 +4362,39 @@ do:
   ignored one doesn't make the definitions incompatible: one that is otherwise
   compatible declares the earlier type, as in clang (`check_input_odr_severity`).
 
-  Left as they were: an enum defined again under C23 still refuses with the
-  generic error, which stops the reader. Clang compares its enumerators, and keeps both lists' names in
-  scope with ambiguous references. An `_Atomic(struct { ... })` member is the
-  parser's refusal, with or without a redefinition.
+  Left as they were: an `_Atomic(struct { ... })` member is the parser's refusal, with or without a
+  redefinition.
+
+  An enum defined again at file scope (#1447, c_check_enum_input.c) is read the
+  same way, an enum without a fixed type after one without, or one listed again
+  with its fixed base:
+  - Its body is an anonymous enum's. An enumerator of a name the earlier
+    definition's declare too is no redefinition but a name both declare
+    (`check_tag_enum_ambiguous`): its uses get clang's "reference to 'X' is
+    ambiguous" (`CHECK_INPUT_AMBIGUOUS`), with the candidates' notes at the
+    second definition's enumerator and the earlier's, and recover as an
+    undeclared name's do.
+  - Once complete it is compared as clang's structural equivalence compares
+    enums (`check_tag_enum_compatible`): each list sorted by the names' bytes,
+    then pairwise their names and values, and past the shorter list the
+    longer one's next. The first difference is "type 'enum G' has
+    incompatible definitions", with "enumerator 'Z' with value 1 here" notes
+    (the second's, then the earlier's), or one past the other list and "no
+    corresponding enumerator here" at the other definition's name.
+  - A compatible one declares the earlier type, and its names are ambiguous
+    within its body alone; an incompatible one keeps its own type, and the
+    names both lists declare stay ambiguous.
+  - A unit with one reads its bodies in source order. A rejected unit's later
+    readings, which leave the redefinition out, count its enumerators of the
+    earlier one's names as still declared there (`CheckInput.ambiguous_index`),
+    and a body's own local of such a name as no use of it.
+
+  Left: a block's redefinition, whose notes clang qualifies (`f()::X`), still
+  refuses with the generic error; a third definition's ambiguous uses note its
+  own enumerator and the first's, where clang's candidates list all three; and a
+  rejected unit whose incompatible redefinition's own names are used at file
+  scope next to an ambiguous use loses its later readings' warnings, as its
+  view leaves the redefinition out.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next
@@ -4440,7 +4525,18 @@ error to the nearest part it can leave out:
   a type.
 
 Each error's parts are left out all or none (an undo log). A part that holds a
-label, a `case`, a `goto`, a label's address or a tag's definition isn't. The
+`case` or `default` label isn't, as its switch's checks (`-Wswitch`'s
+coverage, duplicate values) need it, nor one that holds a tag's definition
+declaring a name used outside the part (its tag, an enumerator), which the
+reading would take for an outer declaration's without an error
+(`check_driver_tag_local`; a tag it can't find, as a C23 enumeration's with
+`: type`, counts as used), nor one that holds a `goto` inside a loop, whose
+jump `-Wfor-loop-analysis` looks for. A part may hold a label, another
+`goto`, a label's address or a local label's declaration (#1447): a left-out
+label that a kept `goto` names leaves the reading an error, so its view isn't
+taken, and a left-out `goto` outside loops changes no warning a flushed body
+gives (buster gives no `-Wunused-label` yet: once it does, a kept label whose
+only `goto` is left out would warn). The
 replacements are chosen to give no warning of their own (a constant condition
 would: clang's "no case matching constant switch condition"). A part left out
 gives no warning of its own reading, where clang gives those of what it builds
@@ -4496,8 +4592,8 @@ its scopes' unused variables and the unit-end warnings are left out
 (`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
 compares fixtures of graph, control, asm and reader errors with clang.
 `c_check_structural_recovery_driver_test.c` compares the view parts' fixtures
-(conditions, for clauses, statement expressions, declarators, and the fallback
-of a part that holds a label or a goto) with clang 23 under `-Wall` and `-Wall
+(conditions, for clauses, statement expressions, declarators, parts that hold
+a label, a goto, a label's address or a local tag's definition) with clang 23 under `-Wall` and `-Wall
 -Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
 with errors mid-body among warnings before and after them.
 
@@ -4650,9 +4746,14 @@ Left as they were:
   or width does. In a `typeof` operand, an array's bound, a `_BitInt` width
   or a designator's index, a correction is taken too (`typeof(countr)` has
   counter's type, `int v[countr]` is a VLA), and each name with none is
-  clang's error at it, in the expression's order, and stops the reader
-  there: clang keeps such a declaration invalid with quiet uses, which waits
-  for the reader's invalid binding. A `_BitInt` whose width had one is no
+  clang's error at it, in the expression's order. A declaration's last
+  declarator whose bound or `typeof` holds such names, uninitialized and not
+  a typedef, is an invalid declaration (below), as clang's, and the reader
+  goes on (`check_input_declarator_recover_names`, and the specifiers'
+  `typeof` with a stand-in `int`). Another still stops the reader there: a
+  typedef's, a type name's, a designator's, an initialized one's, and a
+  declarator before another, whose rest clang's parser skips (`int a[zzz],
+  b;` declares no `b`, whose uses are then clang's undeclared errors). A `_BitInt` whose width had one is no
   type specifier, as clang drops it, and its parser's error follows: a
   declaration's "type specifier missing" (C23's "a type specifier is
   required") at its first declarator's name, a C23 parameter's "unknown type
@@ -4831,14 +4932,20 @@ own nodes take them.
 
 The later phases are left:
 
-- **Invalid declarations.** Not covered by phase 2: C23's redefinition of an
-  enum (above) reads "invalid or unsupported declaration", where clang
-  accepts a compatible one and calls an incompatible one's type "has
-  incompatible definitions", with its enumerators' notes; the unit's later
-  warnings are kept.
+- **Invalid declarations.** Not covered by phase 2 or the invalid
+  declarations above:
+  - C23's redefinition of an enum in a block, or a third time (above).
+  - An initialized invalid declaration, a typedef's declarator error and a
+    parameter's, which clang marks invalid too.
+
+  These still stop the reader. A non-constant initializer's error is at its
+  first token, where clang's is at the operand that isn't constant
+  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
+  is not permitted here" at the `sizeof`, where clang's names the type at its
+  operand; both on main too.
 - **Errors no view part leaves out.** A body's error in a part that holds a
-  label, a `case`, a `goto` or a tag's definition, or in a typedef's
-  declaration, still leaves its body out, and its warnings with it. A reader's
+  `case` label or a tag's definition whose names are used outside it, or in a
+  typedef's declaration, still leaves its body out, and its warnings with it. A reader's
   error that ends its walk in a declarator (`int a[s.b];`, still "invalid or
   unsupported declaration") leaves its declarator out, but the first reading
   never saw the body's later errors, so a second reading that meets one isn't
@@ -4850,9 +4957,11 @@ The later phases are left:
   (`check_driver_rejected_declaration`, #1447), and every body that names one
   of its names; a dropped part's error counts just before the token after it,
   so the definition that follows keeps its unused variables. Clang instead
-  keeps such a declaration bound and invalid, its uses quiet: the bodies that
-  name it lose their warnings here, and so does the declaration's own
-  initializer (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
+  keeps such a declaration bound and invalid, its uses quiet: the reader does
+  so for the declarator errors (invalid declarations, above), whose uses are
+  known errors of their own; for the others the bodies that name it lose their
+  warnings here, and so does the declaration's own initializer
+  (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
   an error in a function definition outside its body, or an error outside
   every body other than an initializer's or a file-scope declaration's still
   leaves the unit without its common warnings.
@@ -8110,9 +8219,15 @@ arguments against the function. The checker now gives these as clang does.
 
   What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
   the others), which slide from a declaration to its specifiers with clang's
-  deprecation warning, are refused by name; clang names a type whose space a
-  macro wrote by the macro (MacroQualifiedType: `'AS1 int *'`), where the
-  attribute is spelled out here, and spells a group's leading space where it was
+  deprecation warning, are refused by name. Clang names a type by the macro
+  that wrote its space (MacroQualifiedType: `'AS1 int *'`), declaration by
+  declaration. Here a space prints by its macro only where one macro writes it
+  throughout the unit (`check_driver_space_macros`, #1447). Its attribute is
+  spelled out in three cases: a space the unit writes both ways or with two
+  macros (`address_space(1u)` is space 1 written directly), every space where
+  an operand isn't an integer constant (`address_space(1+0)`), and
+  `__builtin_dump_struct`'s output. Clang spells a group's leading
+  space where it was
   written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
   collection qualifier inside a function's level is refused by name, and the
   specifiers' one that moves to a pointer whose chunk has another is
@@ -9049,6 +9164,12 @@ enables, which this checker doesn't all give.
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  A target address space that one macro writes throughout the unit prints by
+  that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
+  `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.
+  An a.k.a. spells the space out.
+  A variable array prints its size expression as written, with expression
+  spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
   - An assignment to a member that is const itself is "read-only variable is
@@ -9056,6 +9177,12 @@ enables, which this checker doesn't all give.
   - A qualifier written again over a qualified typedef's array
     (`const CI twice[1]`) is dropped: clang prints
     `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
+  - A cast inside a variable array's bound prints its type name as written
+    (`int[(unsigned)n]`), where clang prints the type's own spelling
+    (`'int[(unsigned int)n]'`), and `sizeof` of a parenthesized expression
+    has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
+    requirement shares the spacing). Only a type's first eight bounds print;
+    later ones print `[]`.
   - The reader's spelling helpers (`check_input_operand_type_spelling`,
     `check_input_object_spelling`), which run before the stream has types,
     don't follow members. The warnings the driver spells after checking

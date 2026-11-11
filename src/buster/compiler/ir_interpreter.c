@@ -268,8 +268,9 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         // A variadic definition's anchors take its call's arguments' places (#148); no other frame takes any.
         status = INTERPRETER_INVALID;
     }
-    else if (simd && !ir_interpreter_simd_supported(function))
+    else if ((simd && !ir_interpreter_simd_supported(function)) || function->asm_body_count != 0)
     {
+        // An asm body (#1839) is x86 records too, which the interpreter has no model of.
         status = INTERPRETER_UNSUPPORTED;
     }
     else if ((uint64_t)function->instruction_count + count > UINT32_MAX || active_values + function->instruction_count + count > options->max_values)

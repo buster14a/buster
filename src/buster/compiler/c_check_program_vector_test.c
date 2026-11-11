@@ -1010,6 +1010,35 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "S(SW,16);S(SD,32);S(UQ,64);S(SQ,64);long long kk=k%64;v2di z;fill(&z,16,n);v2di zz=z>>kk;FOLD(zz);}\n"
           "return (int)h;}\n"
         },
+        // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
+        // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
+        // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
+        // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, and with AVX the IEEE maxima and minima,
+        // of every pair of NaNs (their payloads), signed zeros, infinities, a denormal and others.
+        { "baseline-scalar-builtins",
+          "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
+          "__builtin_elementwise_rint(v),__builtin_elementwise_nearbyint(v),__builtin_elementwise_roundeven(v),__builtin_elementwise_round(v)};FOLD(r_);}while(0)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "static const float fs[]={0.5f,-0.5f,1.5f,2.5f,-2.5f,0.49999997f,-0.49999997f,8388607.5f,-0.0f,1e30f,-3.75f,0.0f};\n"
+          "static const double ds[]={0.5,-0.5,1.5,2.5,-2.5,0.49999999999999994,-0.49999999999999994,4503599627370495.5,-0.0,1e300,-3.75,0.0};\n"
+          "for(int i=0;i<12;i++){float x=fs[i]*(float)(n+1);double y=ds[i]*(double)(n+1);R(x);R(y);"
+          "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
+          "#define B(x,y) do{__typeof__(x) r_[]={__builtin_elementwise_copysign(x,y),__builtin_elementwise_maxnum(x,y),__builtin_elementwise_minnum(x,y),"
+          "__builtin_elementwise_canonicalize(x)IEEE(x,y)};FOLD(r_);}while(0)\n"
+          "#ifdef __AVX__\n"
+          "#define IEEE(x,y) ,__builtin_elementwise_maximum(x,y),__builtin_elementwise_minimum(x,y),__builtin_elementwise_maximumnum(x,y),__builtin_elementwise_minimumnum(x,y)\n"
+          "#else\n"
+          "#define IEEE(x,y)\n"
+          "#endif\n"
+          "union{unsigned u;float f;}fu[]={{0x7fc01234u},{0xffc05678u},{0x80000000u},{0},{0x3f800000u},{0xbf800000u},{0x7f800000u},{0xff800000u},{1},{0x40490fdbu}};\n"
+          "union{unsigned long long u;double f;}du[]={{0x7ff8000000001234ull},{0xfff8000000005678ull},{0x8000000000000000ull},{0},{0x3ff0000000000000ull},"
+          "{0xbff0000000000000ull},{0x7ff0000000000000ull},{0xfff0000000000000ull},{1},{0x400921fb54442d18ull}};\n"
+          "for(int i=0;i<10;i++)for(int j=0;j<10;j++){float x=fu[i].f,y=fu[(unsigned)(j+n+40)%10].f;double a=du[i].f,b=du[(unsigned)(j+n+40)%10].f;B(x,y);B(a,b);}\n"
+          "float l[]={__builtin_elementwise_ldexp(1.5f,n),__builtin_elementwise_ldexp(3.0f,(long)n-100),__builtin_elementwise_ldexp(1.0f,(short)(n*7)),"
+          "__builtin_elementwise_ldexp(2.0f,(long)n+0x100000000L)};FOLD(l);\n"
+          "double k[]={__builtin_elementwise_ldexp(1.5,n),__builtin_elementwise_ldexp(3.0,(long)n-1000),__builtin_elementwise_ldexp(1.0,(unsigned)n*3)};FOLD(k);\n"
+          "return (int)h;}\n"
+        },
         // __builtin_elementwise_min, _max and _abs of integers without their instructions (#1834): SSE2's compares and
         // blends, unsigned elements biased by their sign bits, unsigned words' saturating subtractions, bytes' and words'
         // absolute values of each and its negation and the others' by their signs; qwords' minima and maxima with SSE4.2's
@@ -1122,7 +1151,6 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                   "vector shuffles of 8-bit elements without SSSE3" },
                 { 1, "typedef short V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,7,8,1,15,4,4,9,0);}",
                   "vector shuffles of 16-bit elements without SSSE3" },
-                { 1, "float tested(float a,float b,float c){return __builtin_elementwise_fma(a,b,c);}", "fused multiply-adds of scalars without FMA or AVX-512F" },
                 { 1, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
                   "vector minimum and maximum of 64-bit elements without SSE4.2" },
                 { 3, "typedef int V __attribute__((vector_size(32)));typedef short N __attribute__((vector_size(16)));N tested(V a){return __builtin_convertvector(a,N);}",

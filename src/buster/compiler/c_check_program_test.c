@@ -4419,6 +4419,31 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int j=0;again:{char v[(n&3)+1];char*p=__builtin_alloca(8192);p[2]=(char)j;v[0]=p[2];s+=v[0];if(++j<20000)goto again;}"
             "return (int)(s&0x7fffffff);}",
             "alloca-released-with-variable-length-arrays", clang);
+        // #1447: a variable-length array declared in a for statement's clause is released where the statement ends, and
+        // one in a statement expression's block after the expression's value is kept: 20,000 arrays of 4 KB each would take
+        // 80 MB of stack without the releases. A break, a continue and a goto leave them.
+        check_test_program_source(test,
+            "int tested(int n){long s=0;for(int k=0;k<20000;k++){for(char v[(n&7)+4096],*p=v;p<v+3;p++){*p=(char)(k+(p-v));s+=*p;"
+            "if(p==v+1&&k==n+3)break;}if(k==n+5)continue;}"
+            "for(int k=0;k<20000;k++){s+=({char w[(n&7)+4096];w[0]=(char)k;w[4095]=1;w[0]+w[4095]+(int)sizeof w;});}"
+            "for(int k=0;k<20000;k++){int t=({char w[(n&3)+4096];w[1]=(char)(k*3);w[1]+(int)(sizeof w&1);});s+=t;"
+            "if(k==n+9)goto next;next:;}"
+            "int j=0;again:for(char u[(n&3)+4096],*q=u;q<u+1;q++){*q=(char)j;s+=*q;if(++j<20000)goto again;}"
+            "return (int)(s&0x7fffffff);}",
+            "variable-length-arrays-in-for-clauses-and-statement-expressions", clang);
+        // #1447: C23's `= {}` of a variable-length array clears it whole, on a stack an earlier array dirtied.
+        check_test_program_source(test,
+            "int tested(int n){int m=n&7,s=0;{char d[m+4096];for(int i=0;i<m+4096;i++)d[i]=7;s+=d[m];}"
+            "{int c[m+1000]={};for(int i=0;i<m+1000;i++)s+=c[i]+1;}{long e[2][m+3]={};s+=(int)e[1][m+2]+(int)sizeof e;}"
+            "return s;}",
+            "variable-length-array-empty-initializer", clang);
+        // #1447: a bound whose statement expression holds a declaration, an if, a goto and a label.
+        check_test_program_source(test,
+            "int tested(int n){int d[({int k=n&7;k+1;})];"
+            "int e[({int r=2;if(n>3)goto out;r=5;out:r;})];"
+            "long f[n&1][({int w=3;for(int i=0;i<n;i++)w+=i&1;w;})];"
+            "return (int)(sizeof d*100+sizeof e*10+sizeof f);}",
+            "variable-length-array-bounds-with-statements", clang);
         // Allocations in a realigned frame (an object aligned to 64) and in a variadic definition, whose va_arg reads the
         // incoming areas the allocation moved rsp past.
         check_test_program_source(test,

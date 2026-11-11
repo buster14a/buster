@@ -968,7 +968,8 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
 // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
 // room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
-// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, and a rule a form
+// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, a function an asm
+// statement's template returns from, and a rule a form
 // x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
 // (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
 // internal error; no room is a resource failure,
@@ -1610,7 +1611,10 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 {
                     tier0_inline_code(&compiled, function, &inlined, lane->scratch);
                 }
-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources, naked != 0, lane->scratch);
+                // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
+                // read, as it doesn't a naked function's.
+                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources, naked != 0 || tier0_asm_leaves(source),
+                                                   lane->scratch);
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
             if (forbidden || run->codes[b].error != TIER0_OK)
