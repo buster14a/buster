@@ -2105,6 +2105,21 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 6,
         .notes = 1,
     },
+    {
+        // Clang diagnoses the unused file-scope declarations only where no error occurred (#2141): under -Werror the
+        // undefined internal function's error leaves them out, and alone they reject the unit themselves.
+        .name = "unit end unused declarations after an error",
+        .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nstatic void declared(void);\nint main(void) { declared(); return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 3,
+        .notes = 1,
+    },
+    {
+        .name = "unit end unused declarations alone",
+        .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
