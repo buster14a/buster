@@ -448,8 +448,9 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
 `TAIL_CALL` is refused with `IR_ERROR_UNSUPPORTED`, as is a
-function with segment overrides (#1447, `Tier0Function.segments`: loads and
-stores in `__seg_fs` and `__seg_gs`, which the IR's flags don't carry yet), and the
+segment override the IR doesn't carry (#1447, `ir_typed_segment_valid`: an
+`ATOMIC_RMW`'s or `ATOMIC_CAS`'s, or a long double's or a mask's access; "Segment
+overrides" below), and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
 for the output target (any, through the old entry points) with
 `IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything
@@ -505,6 +506,27 @@ reads every order of both scopes back, `test-ir-optimize`'s `fence-dce` and
 executor traces a fence among the stores, volatile loads and calls), and
 `tests/ir-source/fences.c` runs through both lowerings, promotion, the text's
 round trip and the IR's three forms against clang.
+
+### Segment overrides (#1447)
+
+A `load` or a `store` in `__seg_fs` or `__seg_gs` carries its segment in
+`BUSTER_IR_SEGMENT` (flags bits 5 and 6: 1 FS, 2 GS, 3 refused), from the typed
+stream's `BUSTER_TYPED_ACCESS_SEGMENT` (`ir_typed_access`), printed last as `fs`
+or `gs` (`load.i32 %0 align=4 fs`; `tests/ir/segments.ir`). Its address is an
+offset from the segment's base, which nothing relates to a flat address, so the
+segment is in `BUSTER_IR_OBSERVABLE`: promotion, private-field replacement and
+Tier 1's folding keep the access as they keep a volatile one, and both
+interpreters refuse it (`INTERPRETER_UNSUPPORTED`). A 128-bit integer's halves
+(`ir_wide.c`) and a wide vector's pieces (`ir_vector_split.c`) keep their
+access's flags. Tier 1's selection gives the access's memory record the
+override (`Tier1SelectHoles.segment`, `tier1_select_segment`: `form + segment *
+X86_FORM_COUNT`, as Tier 0's `tier0_apply_segments` does), a RIP-relative one
+too. An atomic read/modify/write's flags hold its operation in those bits, so a
+function with one in a segment is refused with `IR_ERROR_UNSUPPORTED` and Tier
+0's, as is one with a long double's or a mask's access in one, which Tier 1
+moves through rows of their own (`ir_typed_segment_valid`).
+`check_test_driver_tier1_segments` runs such a unit, every function Tier 1's,
+against clang's build, by both paths, for the native target and x86-64-v3.
 
 ### Atomic accesses (#1059)
 

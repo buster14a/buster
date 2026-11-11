@@ -202,9 +202,12 @@ struct AsmAbsolute
 };
 
 // Per Link symbol, the directives the source gave it: a binding directive (`.globl`, `.local`, `.weak`) and a `.size`.
-// The C checker applies them to a program symbol a template's name maps to, as clang's assembled module does.
+// The C checker applies them to a program symbol a template's name maps to, as clang's assembled module does. And an
+// `.lcomm` or a local's `.comm` (ASM_COMMON_BSS), whose local binding clang's assembler reports when C's definition of
+// the name is global (#1848).
 #define BUSTER_ASM_DIRECTIVE_BINDING 0x01
 #define BUSTER_ASM_DIRECTIVE_SIZE 0x02
+#define BUSTER_ASM_DIRECTIVE_LOCAL_COMMON 0x04
 
 typedef struct AsmResult AsmResult;
 struct AsmResult
@@ -222,7 +225,7 @@ struct AsmResult
     // same C unit doesn't see them (the checker refuses such a reference by name), and -c's object has none.
     AsmAbsolute* absolutes;
     uint32_t absolute_count;
-    // Indexed by SymbolId: BUSTER_ASM_DIRECTIVE_BINDING and _SIZE for the symbols whose directives gave them.
+    // Indexed by SymbolId: BUSTER_ASM_DIRECTIVE_BINDING, _SIZE and _LOCAL_COMMON for the symbols whose directives gave them.
     uint8_t* directives;
     // The atom the source's first fragment is in: the code other function's records hold starts there (asm_assemble_code
     // callers that assemble a whole unit, C's inline assembly helpers).
@@ -5147,7 +5150,8 @@ static void asm_emit(AsmParser* parser)
             if (symbol->link != 0)
             {
                 parser->result.directives[symbol->link] |=
-                    (uint8_t)((symbol->explicit_binding ? BUSTER_ASM_DIRECTIVE_BINDING : 0) | (symbol->has_size ? BUSTER_ASM_DIRECTIVE_SIZE : 0));
+                    (uint8_t)((symbol->explicit_binding ? BUSTER_ASM_DIRECTIVE_BINDING : 0) | (symbol->has_size ? BUSTER_ASM_DIRECTIVE_SIZE : 0) |
+                              (symbol->common == ASM_COMMON_BSS ? BUSTER_ASM_DIRECTIVE_LOCAL_COMMON : 0));
             }
         }
     }
