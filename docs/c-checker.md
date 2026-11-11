@@ -5204,9 +5204,15 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   the name (`sizeo a`, `retrn 5` in an initializer), the parse fails there;
   clang's correction takes the keyword and skips the expression's rest to the
   `,`, `;` or closer that ends it, without the parser's error. The recovery
-  view leaves that tail out for a name near an expression's or a statement's
-  keyword (`check_driver_typo_tail`, `CheckPrefixTails`), and keeps it, with
-  the parser's error, where the name's search then suggests no keyword.
+  view leaves that tail out for any name there (`check_driver_typo_tail`,
+  `CheckPrefixTails`), and keeps it, with the parser's error, where the name
+  is declared or its search corrects it to a value. A name that stays
+  undeclared is clang's "use of undeclared identifier" alone, its expression
+  invalid and its rest skipped the same way (#2255): before C23, `u8'a'` is the
+  name `u8` and a character constant. A view that reads past every parse
+  error of the unit (`Parser.whole_view`) recovers from its missing names as a
+  complete unit does (`check_input_diagnostic_recover`), so the unit's later
+  diagnostics stay.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5288,6 +5294,12 @@ Left as they were:
   so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
   C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
   before a `}` without a `;` keeps the parser's error.
+- A name before an operand that is declared, or that a correction takes as a
+  value (`a 5`, `nosuch 5` near a variable `nosuce`), keeps the parser's
+  error, which ends the checking of its body or the unit's file scope after
+  it, where clang reports the correction's error first and goes on. So does a
+  tail after the first parse error no recovery view reads past (a body's
+  missing `;` after `return 0`): its name's error is the parser's.
 - After a block item's GNU attributes, a builtin's name without a call
   (`__builtin_abs;`, clang's "expected identifier or '('") is still an
   implicit int's declarator, and before C23 an undeclared function's call
