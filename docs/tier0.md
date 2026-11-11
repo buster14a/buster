@@ -656,6 +656,8 @@ at the target's forms, by both of the checker's paths:
   spread over the qword by `psrad` and `pshufd` 0xf5; `>` swaps the operands, and `<=` and `>=`, past a row's 8
   records, are `>`'s and `<`'s rows followed by `~`'s (`check_vector_baseline_complement`), which `?:`, `!` and `&&`
   take as they take the other compares.
+  Products of qwords without AVX-512DQ's `vpmullq` (#1834) are `pmuludq`'s of the low dwords plus, shifted up by 32,
+  the sum of `pmuludq`'s of each operand's high dwords (`pshufd` 0xf5) by the other's low ones.
   The integers' `__builtin_elementwise_min` and `_max` without SSE4.1's (or AVX-512's qword) instructions are a
   compare's blend (`check_vector_baseline_extremes`, #1834): the mask `pcmpgt` of a and b (of b and a for a minimum),
   unsigned elements' biased by their sign bits first (a constant operand, `xorps`), then `pand`, `pandn` and `por`;

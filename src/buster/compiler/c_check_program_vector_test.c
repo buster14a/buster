@@ -1259,6 +1259,15 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "int tested(int n){unsigned h=2166136261u;f2 a={(float)n,7.5f},b={3.0f,-0.25f};f1 c={(float)n*1.5f},e={-2.0f};d1 g={(double)n/3},k={0.1};"
           "f2 x=a/b;f1 y=c/e;d1 z=g/k;f2 w=b/(f2){(float)(n*n+1),2.0f};FOLD(x);FOLD(y);FOLD(z);FOLD(w);return (int)h;}\n"
         },
+        // Products of qwords without AVX-512DQ (#1834): PMULUDQ's of the low dwords and of each high one by the other's
+        // low one, the latter two summed and shifted up; of 16, 32 and 64 bytes, by a splat and of an odd length.
+        { "baseline-qword-multiply",
+          "typedef unsigned long long uq4 __attribute__((vector_size(32),aligned(16)));typedef long long sq8 __attribute__((vector_size(64),aligned(16)));"
+          "typedef long long e3 __attribute__((ext_vector_type(3)));\n"
+          "int tested(int n){unsigned h=2166136261u;v2di a,b;uq4 c,d;sq8 e,f;e3 g,k;fill(&a,16,n);fill(&b,16,n+1);fill(&c,32,n+2);fill(&d,32,n+3);fill(&e,64,n+4);"
+          "fill(&f,64,n+5);fill(&g,sizeof g,n+6);fill(&k,sizeof k,n+7);a[1]=-1;b[0]=(long long)(1ull<<63);"
+          "v2di x[]={a*b,a*(long long)n,b*b};uq4 y[]={c*d,d*3u};sq8 z[]={e*f,f*-7};e3 w[]={g*k,g*g};FOLD(x);FOLD(y);FOLD(z);FOLD(w);return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
