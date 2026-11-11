@@ -3177,7 +3177,7 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             char message[256];
             snprintf(message, sizeof(message), "the asm bodies' fixture's code is certified but the long doubles' functions' (%" PRIu64 " certified, %" PRIu64 " not)", build.code_certified,
                      build.code_uncertified);
-            check_test_expect(test, compiled && build.code_certified == 11 && build.code_uncertified == 4, message);
+            check_test_expect(test, compiled && build.code_certified == 12 && build.code_uncertified == 4, message);
             char actual[4096] = { 0 };
             check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                               "Tier 1's asm bodies print clang -O0's build's output");
