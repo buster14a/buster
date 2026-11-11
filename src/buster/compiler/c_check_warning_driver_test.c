@@ -2112,6 +2112,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
         .c23 = true,
     },
+    {
+        // `#pragma pack`'s own warnings (#1849): clang's parser's for malformed directives, at the token they name or past
+        // the line's last, and Sema's at the directive (a bad value, a name and a value to pop, an empty stack's pop,
+        // show's value: the default's 8, a pack value, options align's).
+        .name = "pragma pack syntax and Sema warnings",
+        .source = "#pragma pack(3)\n#pragma pack(push, r, 4)\n#pragma pack(pop, r, 2)\n#pragma pack(pop, nosuch)\n#pragma pack\n"
+                  "#pragma pack(foo)\n#pragma pack(push, 4) extra\n#pragma pack(pop, 32)\n#pragma pack(push, 4\n#pragma pack(push, r, x)\n"
+                  "#pragma pack(+)\n#pragma pack(show)\n#pragma pack(2)\n#pragma pack(show)\n#pragma options align=packed\n#pragma pack(show)\n"
+                  "#pragma pack(pop)\n#pragma pack(pop)\nstruct S { char c; int i; };\nint main(void) { return sizeof(struct S) != 6; }\n",
+        .warnings = 14,
+    },
+    {
+        // A push left open at the unit's end (#1849): one warning each, the innermost first, the innermost with clang's
+        // note at the reset that left the default value.
+        .name = "pragma pack pushes left open at the end",
+        .source = "#pragma pack(push, 4)\n#pragma pack(push, inner, 1)\nstruct S { char c; int i; };\n#pragma pack()\n"
+                  "int main(void) { return sizeof(struct S) != 5; }\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        // The note of a push that no directive set a value after has no place (#1849), which the oracle's count of
+        // located notes leaves out; the complete output compares it.
+        .name = "pragma pack push left open without a value",
+        .source = "#pragma pack(push)\nint main(void) { return 0; }\n",
+        .warnings = 1,
+    },
+    {
+        // Sema's show after a function comes after the function's own warnings (#1849): clang handles the annotation at
+        // the top level.
+        .name = "pragma pack show after a function's warnings",
+        .source = "#pragma pack(push, 2)\nint main(void) { int x; return 0; }\n#pragma pack(show)\n#pragma pack(pop)\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
