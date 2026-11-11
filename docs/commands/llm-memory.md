@@ -30,8 +30,9 @@ environment already sets `BUSTER_TAILNET_DISPOSABLE=1` to join the tailnet
 
 ## Sessions that start beside the checkout
 
-A Claude Code cloud session with several repositories (this one and
-`davidgmbb/llm-memory`) starts in the folder holding the checkouts,
+A Claude Code cloud session with several repositories (the owner's `buster`
+environment attaches this one, `davidgmbb/llm-memory` and
+`buster14a/buster-performance`) starts in the folder holding the checkouts,
 `/home/user`, not in `/home/user/buster`. Claude Code reads
 `.claude/settings.json` only from the folder it starts in, so there none of
 this checkout's hooks run: the tailnet, sign-off and memory are all left
