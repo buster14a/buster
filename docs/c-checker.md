@@ -6293,6 +6293,26 @@ assignment's or an increment's value is no constant to clang's evaluator, so
 its conversion warns of nothing (`char c = x = 1000;`, `{ x = 300 }`), though a
 comma's right operand's does (`check_common_conversion_leaf`, #1447).
 
+A cast to an atomic type (#2230) converts its operand to the atomic's value
+type, and its rvalue keeps the atomic type, as clang's `CheckCStyleCast` types
+it (`check_action_cast`): `(_Atomic int)x` is an `_Atomic(int)`. An `_Atomic`
+object of the same value type takes it (an initializer's, an assignment's, a
+static's as a constant clang's evaluator folds), `__auto_type` deduces it, a
+cast to void and `sizeof` take it, and the usual arithmetic conversions take it
+as their left operand alone, as clang's `UsualArithmeticConversions` unwraps
+the left operand's atomic type and not the right's (`check_action_arithmetic`:
+`(_Atomic int)x * 2` is an `int`, `2 * (_Atomic int)x` an error). It is no
+integer constant expression. Any other conversion of it is clang's
+incompatible one (`check_driver_conversion_source` keeps an rvalue's atomic
+type, where an lvalue's is its value's): "initializing 'int' with an
+expression of incompatible type '_Atomic(int)'", a pointer's and a `_Bool`'s
+too. A variadic argument's, clang's `-Wnon-pod-varargs` error, is refused by
+name. Other operators refuse it in the checker's words as they refuse a
+record's (clang's "invalid argument type '_Atomic(int)' to unary expression",
+"statement requires expression of scalar type", #2441). Buster's `-c` emits
+the static initializers clang's code generation refuses ("cannot compile this
+static initializer yet" for `_Atomic(int *) p = (_Atomic(int *))&x;`).
+
 A `_BitInt` constant past 128 bits (#1447, "Constants past 128 bits") warns as
 a narrow one does, by the same rules on its whole value
 (`check_wide_conversion_changes`, the twin of
@@ -7839,10 +7859,13 @@ Refused by name: `_Atomic` and `restrict` through a declarator
 together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
 atomic value (clang's error names the placeholder's type), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
-can't be told from), type attributes with `__auto_type` but a vector's and a
-mode's, a variably modified cast in the initializer, and a redeclaration of an
-atomic entity, which clang merges (`_Atomic int r; __auto_type r = 1;` is an
-`_Atomic int`). A vector's attribute (`vector_size`, `ext_vector_type`) and a
+can't be told from), and type attributes with `__auto_type` but a vector's and a
+mode's. A redeclaration of an atomic entity takes its type, as clang's
+`mergeTypes` merges it (#1844): a plain placeholder any atomic type
+(`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
+`__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
+alone. An initializer's cast to an atomic type is deduced as the atomic type
+(#2230, `__auto_type a = (_Atomic int)1;` is an `_Atomic(int)`). A vector's attribute (`vector_size`, `ext_vector_type`) and a
 mode's meet the undeduced placeholder, as clang's handlers do (#1844,
 `check_input_attribute_auto_type`): "invalid vector element type 'T'" at the
 first vector attribute, T the placeholder's type there (the specifiers' bare
