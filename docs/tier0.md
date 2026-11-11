@@ -183,11 +183,10 @@ table. The kinds are:
   bytes, and refuses another marker shape. A standalone seq_cst `FENCE` still emits `mfence`.
 - A `LOAD`, `STORE` or `SET` of any class, and an `ATOMIC_RMW` or `ATOMIC_CAS`, may also carry a segment override
   (#1447) in its `value`'s top two bits (`BUSTER_TYPED_ACCESS_SEGMENT`, from bit 62, past what any of them holds: the
-  atomic marker and its order, a vector's or a mask's bytes, an operation, a CAS's local): `BUSTER_TYPED_SEGMENT_FS` (1, clang's address space 257, `__seg_fs`) or `_GS` (2, space
-  256, `__seg_gs`), numbered as the encoder's overrides are, so that `form + segment * X86_FORM_COUNT` is the form with
+  atomic marker and its order, a vector's or a mask's bytes, an operation, a CAS's local): `BUSTER_TYPED_SEGMENT_FS` (1, clang's address space 257, `__seg_fs`), `_GS` (2, space
+  256, `__seg_gs`) or `_SS` (3, space 258, whose base 64-bit mode ignores but whose `36` clang emits), numbered as the encoder's overrides are, so that `form + segment * X86_FORM_COUNT` is the form with
   the override. A function with one says so (`Tier0Function.segments`, which the lowering sets and the inliners
-  propagate); no other kind takes one (another kind's value is its own whole: a constant's top bits are its own), and 3
-  is none. Validation and both compile paths see the flag and go out of line
+  propagate); no other kind takes one (another kind's value is its own whole: a constant's top bits are its own). Validation and both compile paths see the flag and go out of line
   (`tier0_validate_segments`, `tier0_compile_segments`): a scratch copy of the values column without the overrides, and a
   byte per entry with each one (`tier0_segments_strip`), go through the usual passes, which never see one; a function
   without the flag pays one test. After the form choices, `tier0_apply_segments`, a shared scalar pass, adds each

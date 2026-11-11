@@ -3447,8 +3447,9 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
 // (its section names are the source's bytes). Its labels and references join the templates' names
 // (check_program_asm_names), so that its labels define symbols C declares and its references reach C's symbols, and
 // the emission publishes its atoms before the functions' (check_program_emit_asm_unit). Refused by name, which the
-// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take, and
-// section groups, which the units' merge doesn't carry.
+// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take. Its
+// section groups (COMDAT, #1848) are the emission's too (check_program_emit_asm_groups), in -c's object as clang's, and
+// selected among the units of a link of several (check_units_keep).
 // False only for an arena without room.
 static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckProgram* program, const X86MatchIndex* index, bool scalar, Arena* output)
 {
@@ -3477,12 +3478,10 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
     }
     const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar }, output) :
                                               (AsmResult){ 0 };
-    const Link* link = &assembled.link;
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
-    // A group's sections (COMDAT) are a group the units' merge doesn't carry. Every other section is published as the
-    // assembler made it: notes, the arrays of constructors and destructors in their classes, merged strings, custom flags,
-    // and CFI's frames, an EH_FRAME atom of their own beside the functions' (#1848).
-    refused = refused == NULL && source != 0 && link->groups.count > 1 ? "file-scope assembly's section groups" : refused;
+    // Every section is published as the assembler made it: notes, the arrays of constructors and destructors in their
+    // classes, merged strings, custom flags, a group's sections (COMDAT), and CFI's frames, an EH_FRAME atom of their own
+    // beside the functions' (#1848).
     result->file_unit = refused == NULL ? assembled : (AsmResult){ 0 };
     result->file_assembled = source != 0 && refused == NULL;
     result->file_reason = refused;
