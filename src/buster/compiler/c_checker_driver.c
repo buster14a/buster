@@ -3147,11 +3147,13 @@ static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInpu
 }
 
 // Whether `to` is at least as qualified as `from` and, through one level of pointers where both are, of the same
-// unqualified type and at least as qualified (clang's compareTypesSimple in C, of canonical types).
+// unqualified type and at least as qualified (clang's compareTypesSimple in C, of canonical types). An address space is
+// a qualifier too (compatiblyIncludes): an `AS1 int` is no `int` (#1447 item 2).
 static bool check_driver_conversion_same(const TypeTable* types, TypeId from, TypeId to)
 {
     const uint32_t qualifiers = BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE | BUSTER_TYPE_RESTRICT;
-    bool same = (type_qualifiers(from) & ~type_qualifiers(to) & qualifiers) == 0;
+    bool same = (type_qualifiers(from) & ~type_qualifiers(to) & qualifiers) == 0 &&
+                type_address_space(type_object_qualifiers(types, from)) == type_address_space(type_object_qualifiers(types, to));
     TypeId left = type_strip_aligned(types, from);
     TypeId right = type_strip_aligned(types, to);
     if (type_kind(types, left) == BUSTER_TYPE_KIND_POINTER && type_kind(types, right) == BUSTER_TYPE_KIND_POINTER)
@@ -3159,7 +3161,8 @@ static bool check_driver_conversion_same(const TypeTable* types, TypeId from, Ty
         left = type_strip_aligned(types, type_element(types, left));
         right = type_strip_aligned(types, type_element(types, right));
     }
-    same = same && type_unqualified(left) == type_unqualified(right) && (type_qualifiers(left) & ~type_qualifiers(right) & qualifiers) == 0;
+    same = same && type_unqualified(left) == type_unqualified(right) && (type_qualifiers(left) & ~type_qualifiers(right) & qualifiers) == 0 &&
+           type_address_space(type_object_qualifiers(types, left)) == type_address_space(type_object_qualifiers(types, right));
     return same;
 }
 
@@ -3392,18 +3395,24 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const bool integer = value_kind == BUSTER_TYPE_KIND_INTEGER;
         const bool sized = integer && check_driver_size_sugar(parser, pp, input, stream, types, source);
         const uint32_t source_spelling = sized ? BUSTER_CHECK_NONE : integer && walked == BUSTER_CHECK_NONE ? 0 : walked;
-        // Each as its declaration's sugar writes it, where it has some (#1447).
+        // Each as its declaration's sugar writes it, where it has some (#1447), and with its declaration's own address space
+        // macros (#1447 item 2, check_driver_space_scope).
         // A declaration whose parameters' specifiers name typedefs prints them, with the a.k.a. (#1447 item 5).
+        CheckDriverSpaceScope scope;
+        check_driver_space_scope(parser, pp, input, types, spell, target_declaration, &scope, scratch);
         const String8 placed_to = target_sugar == 0 ? check_driver_placed_type(parser, pp, input, types, spell, scratch, target, target_declaration) : (String8){ 0 };
         const String8 to = placed_to.length != 0 ? placed_to : check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        check_driver_space_restore(spell, &scope);
         const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
+        const uint32_t source_declaration = check_driver_operand_declaration(input, stream, source);
+        check_driver_space_scope(parser, pp, input, types, spell, source_declaration, &scope, scratch);
         // A library builtin's designator by its prototype (#1447 item 10).
         const String8 designator = check_driver_library_designator(parser, pp, input, stream, types, source, value, scratch);
         const String8 placed_from = designator.length == 0 && source_sugar == 0 ?
-                                    check_driver_placed_type(parser, pp, input, types, spell, scratch, value, check_driver_operand_declaration(input, stream, source)) :
-                                    (String8){ 0 };
+                                    check_driver_placed_type(parser, pp, input, types, spell, scratch, value, source_declaration) : (String8){ 0 };
         const String8 from = designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
                              check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
+        check_driver_space_restore(spell, &scope);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
