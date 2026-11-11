@@ -853,6 +853,10 @@ struct PPLineDirective
     uint32_t name_length;
     // The range's next note, or BUSTER_PP_NONE.
     uint32_t next_in_range;
+    // Where a line marker's flag 1 entered the file its lines are presumed in, as clang's LineTableInfo keeps it (#1954):
+    // the location right before the marker's number, or for flag 2 or none the include location the marker returns to or
+    // keeps; BUSTER_PP_NONE for the range's own inclusion's.
+    uint32_t include_location;
     uint8_t system;
 };
 
@@ -1561,6 +1565,8 @@ struct Preprocessor
     uint32_t history_anchor;
     uint32_t history_spelling;
     uint32_t diagnostic_origin;
+    // The include location of the last diagnostic's file (pp_presumed_include), whose include stack a diagnostic prints
+    // only when its own differs.
     uint32_t diagnostic_include_range;
     uint32_t origin_peak[3];
     // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
