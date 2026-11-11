@@ -297,7 +297,8 @@ static bool check_asm_clang_valid(const CheckInputAsm* statement, uint32_t index
 {
     const CheckAsmText text = statement->operands[index].constraint;
     const bool output = index < statement->output_count;
-    bool valid = !output || (text.length != 0 && (text.bytes[0] == '=' || text.bytes[0] == '+'));
+    // (An empty constraint is neither's, an input's too: clang's "invalid input constraint '' in asm".)
+    bool valid = text.length != 0 && (!output || text.bytes[0] == '=' || text.bytes[0] == '+');
     const bool read_write = output && valid && text.bytes[0] == '+';
     bool operand = false;
     bool register_allowed = false;
