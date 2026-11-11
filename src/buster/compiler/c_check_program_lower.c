@@ -9211,11 +9211,12 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     else if (runtime == CBUILTIN_AVAILABLE)
     {
         // clang's code for a check that names no Linux platform (#148): the constant 1, whatever the specs say. An empty
-        // version (`0.0.0`) makes clang's expression invalid without a diagnostic, and its code generation refuses it.
+        // version (`0.0.0`) makes clang's expression invalid without a diagnostic. Its code generation refuses it where it
+        // reaches it, and drops a whole return value's, initializer's or conditional's statement silently, which isn't sound.
         const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
         if (witness == NULL || witness->availability_silent)
         {
-            check_lower_unsupported(writer, "__builtin_available with an empty version, which clang doesn't compile either");
+            check_lower_unsupported(writer, "__builtin_available with an empty version, an invalid expression whose code clang refuses or drops");
         }
         else
         {
