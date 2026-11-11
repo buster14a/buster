@@ -3944,7 +3944,7 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
     }
     NightlyText text = found ? nightly_read(path) : (NightlyText){ 0 };
     const char* job = found ? strstr(text.data, "\n  benchmarks:\n") : NULL;
-    const char* end = job != NULL ? strstr(job + 1, "\n  agent-guide-size:\n") : NULL;
+    const char* end = job != NULL ? strstr(job + 1, "\n  policy:\n") : NULL;
     const char* verify_end = NULL;
     const char* verify = nightly_step(job, "      - name: Verify benchmark host\n", &verify_end);
     const char* window = job != NULL ? strstr(job, "      - name: Admit nightly work inside the Europe/Madrid window, holding the lock\n") : NULL;
