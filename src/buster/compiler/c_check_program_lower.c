@@ -15109,6 +15109,21 @@ static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckI
     return result;
 }
 
+// An asm operand's input value (place->type's): the operand's expression's, or an __m64's 8 bytes (#1846,
+// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's).
+static void check_lower_asm_value(CheckLowerWriter* writer, const CheckAsmPlace* place, uint32_t node)
+{
+    if (place->m64)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_expression(writer, place->object, true, 0);
+    }
+    else
+    {
+        check_lower_expression(writer, node, false, place->type);
+    }
+}
+
 // Whether an asm body's operand `place` is its call row's argument (#1839, CheckProgramAsm.inline_passed): a value or an
 // address a register holds when the template starts (check_asm_loads'), a general register's, an XMM register's or a
 // memory operand's base.
@@ -15198,7 +15213,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
         }
     }
@@ -15316,7 +15331,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (passed)
             {
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
             else if (place->written && place->read)
             {
@@ -15336,7 +15351,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
                 check_lower_asm_slot(writer, object, place->slot);
             }
         }
@@ -15363,7 +15378,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
                 check_lower_asm_slot(writer, object, place->slot);
             }
         }
@@ -15425,7 +15440,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_DISCARD, check_lower_class(writer, place->type), 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
         }
     }
