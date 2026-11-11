@@ -1473,8 +1473,12 @@ code whose runs equal clang -O0's on both paths.
   complete object of a size but an `_Atomic` or `_BitInt` one (records, unions,
   arrays and long double among them), whose values are pointers converting to
   pointers to its unqualified type, but a store's value and a compare-exchange's
-  desired one to the first argument's own pointer type, qualifiers kept, as
-  clang's ByValType. The lowering copies the values into C11's representation
+  desired one (and an exchange's result) to the first argument's own pointer
+  type, qualifiers kept, as clang's ByValType. One of those in an address space
+  the object's doesn't include is clang's "passing 'int *' to parameter of type
+  '__attribute__((address_space(256))) int *' changes address space of
+  pointer", at the argument (#2233); the others, pointers to the value type,
+  drop the space, as clang's do. The lowering copies the values into C11's representation
   buffers and the results back out (`CheckLowerAtomic.by_pointer`), through the
   native leaves for aligned objects of 1, 2, 4 or 8 bytes and libatomic's generic
   functions otherwise, as clang's code calls them.
