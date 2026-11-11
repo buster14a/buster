@@ -891,6 +891,78 @@ static uint32_t check_unseq_count(const CheckUnseq* checker, uint32_t root, uint
     return count;
 }
 
+// Whether the walk may report in the full expression of `count` starts: some variable a modification in it names is used
+// at least twice (the modification and another use). Each usage the walk can make is listed, its subtree's (unevaluated
+// operands' and statement expressions' values' too, a superset); a node reached twice is listed twice, as the walk may
+// use it twice. A full expression with more usages than the list holds is walked.
+static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser, const uint32_t* starts, const bool* reads, uint32_t count,
+                                uint32_t* stack, uint32_t capacity)
+{
+    const CheckGraph* graph = checker->graph;
+    uint32_t objects[64];
+    bool modified[64];
+    uint32_t used = 0;
+    bool overflow = false;
+    for (uint32_t i = 0; i < count && !overflow; i += 1)
+    {
+        uint32_t name = 0;
+        const uint32_t object = reads != NULL && reads[i] && starts[i] < graph->count ? check_unseq_object(checker, parser, starts[i], false, &name) : 0;
+        overflow = object != 0 && used == 64;
+        if (object != 0 && !overflow)
+        {
+            objects[used] = object;
+            modified[used] = false;
+            used += 1;
+        }
+        uint32_t depth = 0;
+        if (starts[i] < graph->count)
+        {
+            stack[depth++] = starts[i];
+        }
+        while (depth != 0 && !overflow)
+        {
+            const uint32_t node = stack[--depth];
+            const CheckOp op = graph->ops[node];
+            const uint32_t target = check_unseq_modification(op) && graph->operand0[node] < graph->count ?
+                                        check_unseq_object(checker, parser, graph->operand0[node], true, &name) : 0;
+            overflow = target != 0 && used == 64;
+            if (target != 0 && !overflow)
+            {
+                objects[used] = target;
+                modified[used] = true;
+                used += 1;
+            }
+            const uint32_t slots = check_unseq_slots(graph, node);
+            for (uint32_t slot = 0; slot < slots && !overflow; slot += 1)
+            {
+                bool read = false;
+                const uint32_t child = check_unseq_child(checker, node, slot, &read);
+                const uint32_t object = read && child < graph->count && child < node ? check_unseq_object(checker, parser, child, false, &name) : 0;
+                overflow = (object != 0 && used == 64) || (child < graph->count && child < node && depth == capacity);
+                if (object != 0 && !overflow)
+                {
+                    objects[used] = object;
+                    modified[used] = false;
+                    used += 1;
+                }
+                if (child < graph->count && child < node && !overflow)
+                {
+                    stack[depth++] = child;
+                }
+            }
+        }
+    }
+    bool repeats = overflow;
+    for (uint32_t m = 0; m < used && !repeats; m += 1)
+    {
+        for (uint32_t u = 0; modified[m] && u < used && !repeats; u += 1)
+        {
+            repeats = u != m && objects[u] == objects[m];
+        }
+    }
+    return repeats;
+}
+
 // The walk's tables, kept across a unit's full expressions and grown as a larger one needs (CheckUnseq's), with the
 // count's stack and the statement expressions' values, and the unit's marks.
 typedef struct CheckUnseqStorage CheckUnseqStorage;
@@ -1027,20 +1099,22 @@ static void check_unseq_check(CheckCommonEmission* emission, CheckUnseqStorage* 
             }
         }
         bool valid = checker->known != NULL;
+        // (Most full expressions modify a variable they use nowhere else: no walk can report in them.)
+        modifies = !valid || check_unseq_repeats(checker, parser, starts, reads, count, storage->stack, graph->count + 1);
         uint32_t inner_count = 0;
         uint32_t nodes = 0;
-        for (uint32_t i = 0; valid && i < count; i += 1)
+        for (uint32_t i = 0; valid && modifies && i < count; i += 1)
         {
             nodes += starts[i] < graph->count ? check_unseq_count(checker, starts[i], storage->stack, graph->count + 1, storage->inner, &inner_count) : 0;
         }
-        valid = valid && check_unseq_reserve(storage, nodes, emission->scratch);
+        valid = valid && (!modifies || check_unseq_reserve(storage, nodes, emission->scratch));
         // (A table of twice the full expression's nodes, a power of two, cleared for each walk.)
         uint32_t table_size = 16;
         while (table_size < nodes * 2u && table_size < storage->table_size)
         {
             table_size <<= 1;
         }
-        for (uint32_t unit = 0; valid && unit <= inner_count && !pp->fatal; unit += 1)
+        for (uint32_t unit = 0; valid && modifies && unit <= inner_count && !pp->fatal; unit += 1)
         {
             const bool own = unit == inner_count;
             const uint32_t value = !own ? graph->operand0[storage->inner[unit]] : BUSTER_CHECK_NONE;
