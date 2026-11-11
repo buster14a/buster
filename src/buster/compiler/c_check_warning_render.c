@@ -2023,6 +2023,28 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TENTATIVE_ARRAY:
             result = "tentative array definition assumed to have one element";
             break;
+        case CHECK_WARNING_EVENT_DEFAULT_CONST_INIT:
+        {
+            // The object's type as declared, with its typedef (#2168): 'volatile CI[2]' (aka 'const volatile int[2]').
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            const bool field = event->id == CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE;
+            const bool unsafe = event->id != CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR;
+            // An unsafe one says it is incompatible with C++ too where -Wc++-compat is on there, as clang's words select
+            // by its fake diagnostic's policy.
+            const CheckWarningEvent compatibility = {
+                .id = CHECK_WARNING_ID_CXX_COMPAT,
+                .kind = event->kind,
+                .token = event->token,
+                .source = event->source,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+            };
+            const bool incompatible = unsafe && check_driver_warning_severity(pp, input, &compatibility) != CHECK_WARNING_IGNORE;
+            result = type.length != 0 ? check_warning_text(scratch, "default initialization of an object of type %.*s%s %s%s", (int)type.length, type.pointer,
+                                                           field ? " with const member" : "", unsafe ? "leaves the object uninitialized" : "is incompatible with C++",
+                                                           incompatible ? " and is incompatible with C++" : "") :
+                     NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_UNUSED_RESULT:
         {
             static const char* const messages[] =
@@ -2118,6 +2140,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_CONST_MEMBER:
+            result = check_warning_text(scratch, "member '%.*s' declared 'const' here", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
             result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
