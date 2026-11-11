@@ -5816,7 +5816,15 @@ so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
 A block's own `static`, `register` and automatic objects can be unused. A
 variable with an applied `cleanup` attribute is used, as clang treats it,
 since its cleanup takes its address (#1881); one ignored at file scope can still
-be unused. The
+be unused. `-Wunused-label` (#2264, under `-Wunused`, so `-Wmost` and `-Wall`)
+is a label no goto or `&&` address names (`check_input_unused_labels`, from
+the controls' label table), at its name, or a local label's at its
+`__label__` list's name; `unused` or `maybe_unused` on it marks it used.
+Clang's labels are the function body's scope's declarations, which it warns of
+sorted by place as it pops that scope: a body's unused labels and unused
+variables share its `}` and are ordered by token (`CheckWarningEvent.suborder`),
+after an inner block's and before the body's runtime warnings, and a function
+with an error warns of neither. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 

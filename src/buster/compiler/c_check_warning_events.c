@@ -177,6 +177,9 @@ enum
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
     // -Wunreachable-code-generic-assoc's, 131.)
     CHECK_WARNING_ID_UNSEQUENCED = 132,
+    // A function's label that no goto and no address names (#2264, clang's DiagnoseUnusedDecl of a LabelDecl):
+    // -Wunused-label, under -Wunused and so -Wmost and -Wall.
+    CHECK_WARNING_ID_UNUSED_LABEL = 133,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -215,6 +218,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_UNUSED_VARIABLE,
     CHECK_WARNING_EVENT_UNUSED_FUNCTION,
     CHECK_WARNING_EVENT_UNUSED_PARAMETER,
+    // A label no goto or address names (#2264): "unused label 'l'" at its name, or a local label's at its `__label__`
+    // list's, published as the function's body ends.
+    CHECK_WARNING_EVENT_UNUSED_LABEL,
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,

@@ -2647,7 +2647,9 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
         for (uint32_t i = 0; valid && i < events->count; i += 1)
         {
             const CheckWarningEvent* event = events->events + i;
-            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
+            // (A label's scope is its function's body, #2264.)
+            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
+                                event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL;
             const bool unit_end = unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
             const uint32_t close = unused && event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? event->completion : count;
             // The scope's opening delimiter, before the declaration. A for initializer retains its header's `)`
