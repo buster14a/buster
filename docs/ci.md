@@ -236,8 +236,9 @@ The hosted selector job runs that test before any hardware admission, and the
 selector's own policy mutants pin the draft guard and ready/draft triggers.
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
-fast, and its tests wait for the agent-guide size and DCO hook checks, which finish
-within the `changes` job's time, and don't start when either fails. Pushes
+fast, and its tests wait for the policy job (`Measurement storage policy`: the
+measurement storage, agent-guide size and DCO hook checks in one job, #2334), which
+finishes about when the `changes` job does, and don't start when it fails. Pushes
 to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
