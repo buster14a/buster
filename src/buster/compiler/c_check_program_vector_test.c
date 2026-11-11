@@ -667,7 +667,7 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // complex value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a _BitInt and an _Atomic object.
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
@@ -677,8 +677,6 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-ss", "int tested(int __attribute__((address_space(258)))*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
@@ -780,6 +778,24 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "b[0]=b[1]+n;b[1]-=1.0f;r+=(float)b[0]+(float)b[1];"
         "return (int)(4*(r+th[0]+th[1]+th[2]+th[3]+(float)tb[0]+(float)tb[1]));}",
         "segment-half-precision", clang);
+    // %ss's space (258), whose base 64-bit mode ignores, so that a flat address cast to it reaches its object: clang's 36 on
+    // each access, of integers, floating values, long double, __int128, vectors and their elements, members and bit-fields,
+    // the direct atomic plans, and globals in the space (RIP-relative, `ss:x(%rip)`).
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "typedef int v4si __attribute__((vector_size(16)));struct S{long a;int b;char c[8];unsigned u:5;int s:11;};"
+        "static SS long gl[4]={1,2,3,4};static SS struct S gs_={5,6,\"abcdefg\",3,-4};static SS double gd=2.5;"
+        "static long tl[4]={9,8,7,6};static long double tq=1.75L;static __int128 ti=77;static v4si tv={4,5,6,7};"
+        "static _Float16 th=1.5f16;static int ta=5;static short tc=3;"
+        "int tested(int n){long SS*p=(long SS*)tl;long double SS*q=(long double SS*)&tq;__int128 SS*w=(__int128 SS*)&ti;"
+        "v4si SS*v=(v4si SS*)&tv;_Float16 SS*h=(_Float16 SS*)&th;int SS*a=(int SS*)&ta;short SS*c=(short SS*)&tc;"
+        "p[n&3]=n*7L;*p+=n;p[1]++;--p[2];long r=p[(n+1)&3]+(p[3]<<=1);gl[n&3]+=gl[0];gd*=1.5;"
+        "gs_.b+=n;gs_.c[n&7]=(char)('A'+n);gs_.u=n;gs_.s-=n;r+=gl[n&3]+gs_.b+gs_.c[(n+1)&7]+gs_.u+gs_.s+(long)gd;"
+        "*q-=n;*w+=n;*w<<=3;v4si k={n,1,2,3};*v+=k;(*v)[n&3]*=3;r+=(*v)[0]+(*v)[(n+1)&3];*h+=(_Float16)n;r+=(long)(float)*h;"
+        "r+=__atomic_fetch_add(a,3,5)+__atomic_exchange_n(a,n,5)+__atomic_load_n(a,2);int x=n;"
+        "r+=__atomic_compare_exchange_n(a,&x,9,0,5,5)+__atomic_fetch_max(c,(short)n,5)+__sync_fetch_and_or(c,6);"
+        "return (int)(r+tl[0]+tl[1]+tl[2]+tl[3]+(long)tq+(long)ti+tv[n&3]+(long)(float)th+ta+tc);}",
+        "segment-ss", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1249,6 +1265,12 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "a7[1]=0;a8[2]=0;b8[3]=0;ex2 c7=a7?b7:-b7;ux4 c8=a8?b8:~b8;__typeof__(!a7) d7=!a7,e7=a7&&b7;__typeof__(!a8) d8=!a8,e8=a8&&b8;"
           "FOLD(c7);FOLD(c8);FOLD(d7);FOLD(e7);FOLD(d8);FOLD(e8);\n"
           "return (int)h;}\n"
+        },
+        // Divisions of floating vectors narrower than a register (#1834): the divisor's lanes past its own 1.0f.
+        { "baseline-narrow-division",
+          "typedef float f2 __attribute__((vector_size(8)));typedef float f1 __attribute__((vector_size(4)));typedef double d1 __attribute__((vector_size(8)));\n"
+          "int tested(int n){unsigned h=2166136261u;f2 a={(float)n,7.5f},b={3.0f,-0.25f};f1 c={(float)n*1.5f},e={-2.0f};d1 g={(double)n/3},k={0.1};"
+          "f2 x=a/b;f1 y=c/e;d1 z=g/k;f2 w=b/(f2){(float)(n*n+1),2.0f};FOLD(x);FOLD(y);FOLD(z);FOLD(w);return (int)h;}\n"
         },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.

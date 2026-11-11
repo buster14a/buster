@@ -312,13 +312,15 @@
 #define BUSTER_TYPED_ACCESS_ATOMIC 0x10
 // A LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's segment override (#1447), in its value's top two bits past what
 // each one's value holds (an atomic marker and its order, a vector's or a mask's bytes, an operation, a CAS's local): FS
-// (clang's address space 257, __seg_fs) or GS (256, __seg_gs), numbered as the encoder's overrides are (form + segment *
+// (clang's address space 257, __seg_fs), GS (256, __seg_gs) or SS (258, whose base 64-bit mode ignores but whose 36
+// clang emits), numbered as the encoder's overrides are (BUSTER_X86_SEGMENT_FS, _GS and _SS: form + segment *
 // X86_FORM_COUNT is the form with the override). A function with one says so (Tier0Function.segments); no other kind
-// takes it (another kind's value is its own whole: a constant's top bits are its own), and 3 is none.
+// takes it (another kind's value is its own whole: a constant's top bits are its own).
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
 #define BUSTER_TYPED_SEGMENT_FS 1
 #define BUSTER_TYPED_SEGMENT_GS 2
+#define BUSTER_TYPED_SEGMENT_SS 3
 // An ATOMIC_RMW's operation: an addition (lock xadd), and without it an exchange (xchg).
 #define BUSTER_TYPED_RMW_ADD 0x08
 // Where an ATOMIC_CAS's value has its address's local, above its order.
@@ -657,7 +659,7 @@ struct Tier0Function
     bool vectors;
     bool masks;
     // Whether a LOAD, STORE, SET, ATOMIC_RMW or ATOMIC_CAS has a segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT): an
-    // access in __seg_fs or __seg_gs. Validation and compilation strip the overrides out of line (tier0_segments_strip), so that
+    // access in __seg_fs, __seg_gs or address space 258 (%ss). Validation and compilation strip the overrides out of line (tier0_segments_strip), so that
     // their paths never see one, and the compilation adds each to its entry's records after (tier0_apply_segments).
     // ir_lower refuses such a function, which Tier 0 compiles.
     bool segments;
@@ -3790,6 +3792,10 @@ struct Tier0Entries
     // them (tier0_count_call's).
     uint32_t tail_finish;
     uint32_t eh_finish;
+    // A function that calls __builtin_setjmp: the words of each depth's snapshot below a call (tier0_returns_twice_snapshot),
+    // and its depths, once the frame is known, 0 for none: tier0_count_call's.
+    uint32_t snapshot_words;
+    uint32_t snapshot_depths;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and
     // full-width depths before every entry and at count, where the byte columns hold the depths its records are made at.
     uint8_t* deep;
@@ -4334,6 +4340,11 @@ struct Tier0Frame
     uint32_t memory_depths;
     uint32_t mask_area;
     uint32_t mask_slots;
+    // A function that calls __builtin_setjmp (#1843): each call's snapshot of the memory classes' and the vectors' slots
+    // below its arguments, `snapshot_bytes` from `snapshot_area` a call (tier0_returns_twice_snapshot), 0 for none.
+    uint32_t snapshot_area;
+    uint32_t snapshot_bytes;
+    uint32_t snapshot_depths;
     uint32_t variadic_area;
     uint32_t overflow_area;
     uint32_t outgoing;
@@ -5069,6 +5080,17 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         valid = valid && offset <= INT32_MAX;
         frame->mask_area = valid ? (uint32_t)offset : 0;
         offset += BUSTER_TIER0_MASK_SLOT_BYTES * (uint64_t)frame->mask_slots;
+    }
+    if (function->returns_twice && (frame->memory_slots || frame->vectors))
+    {
+        // Each call's snapshot of the slots a longjmp's resumption after it must find (tier0_returns_twice_snapshot).
+        const uint64_t bytes = (frame->memory_slots ? BUSTER_TIER0_MEMORY_SLOT_BYTES * memory_depths : 0) +
+                               (frame->vectors ? BUSTER_TIER0_VECTOR_SLOT_BYTES * memory_depths : 0);
+        valid = valid && offset <= INT32_MAX && bytes <= INT32_MAX;
+        frame->snapshot_area = valid ? (uint32_t)offset : 0;
+        frame->snapshot_bytes = valid ? (uint32_t)bytes : 0;
+        frame->snapshot_depths = valid ? (uint32_t)memory_depths : 0;
+        offset += bytes * function->call_count;
     }
     if (function->incoming_variadic != 0)
     {
@@ -6560,6 +6582,37 @@ static uint32_t tier0_call_saved(const Tier0Function* function, uint32_t call, u
     return below < limit ? below : limit;
 }
 
+// A function that calls __builtin_setjmp keeps its long doubles', 128-bit integers' and vectors' values in their depths'
+// slots, which the expressions after a call share (#1843): call `call` copies the slots of the depths below its arguments,
+// `below`, into a snapshot of its own (Tier0Frame.snapshot_area) before it, and back after it (`restore`), so that a
+// longjmp's resumption after the call finds them whatever ran since, as its saved registers' (tier0_emit_call). Each 8
+// bytes go through the x87 stack, which is empty at a call: FILD and FISTP of a 64-bit integer keep every bit pattern, and
+// need no register the call's moves may hold. Out of line: such functions are rare.
+static __attribute__((noinline)) void tier0_returns_twice_snapshot(const Tier0Frame* frame, uint32_t call, uint32_t below, bool restore, Tier0Writer* writer)
+{
+    const int64_t region = (int64_t)frame->snapshot_area + (int64_t)frame->snapshot_bytes * call + frame->bias;
+    const uint32_t depths = below < frame->snapshot_depths ? below : frame->snapshot_depths;
+    const int64_t vectors = frame->memory_slots ? (int64_t)BUSTER_TIER0_MEMORY_SLOT_BYTES * frame->snapshot_depths : 0;
+    for (uint32_t d = 0; d < depths; d += 1)
+    {
+        for (uint32_t part = 0; part < 10; part += 1)
+        {
+            // Two words of the memory class's slot, then eight of the vector's.
+            const bool memory = part < 2;
+            const bool taken = memory ? frame->memory_slots : frame->vectors;
+            const int64_t word = memory ? 8 * (int64_t)part : 8 * (int64_t)(part - 2);
+            const int64_t slot = memory ? (int64_t)frame->memory_area + BUSTER_TIER0_MEMORY_SLOT_BYTES * (int64_t)d + word + frame->bias :
+                                          (int64_t)frame->vector_area + BUSTER_TIER0_VECTOR_SLOT_BYTES * (int64_t)d + word + frame->bias;
+            const int64_t copy = memory ? region + BUSTER_TIER0_MEMORY_SLOT_BYTES * (int64_t)d + word : region + vectors + BUSTER_TIER0_VECTOR_SLOT_BYTES * (int64_t)d + word;
+            if (taken)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_FILD_M64, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)(restore ? copy : slot), 0));
+                tier0_put(writer, tier0_instruction(X86_FORM_FISTP_M64, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)(restore ? slot : copy), 0));
+            }
+        }
+    }
+}
+
 // The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
 // each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home.
 static void tier0_emit_call_record(const Tier0Function* function, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
@@ -6692,6 +6745,10 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     {
         tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), region + 8 * (saved + d), false);
     }
+    if (__builtin_expect(frame->snapshot_bytes != 0, 0) && !tail)
+    {
+        tier0_returns_twice_snapshot(frame, call, below, false, writer);
+    }
     // The masks in their registers (#179), which the call may overwrite, saved into their slots and loaded back.
     const uint32_t masks = memory ? tier0_saved_masks(entries, i) : 0;
     for (uint32_t d = 0; d < masks; d += 1)
@@ -6803,6 +6860,10 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         for (uint32_t d = 0; d < floating_below; d += 1)
         {
             tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), region + 8 * (saved + d), true);
+        }
+        if (__builtin_expect(frame->snapshot_bytes != 0, 0))
+        {
+            tier0_returns_twice_snapshot(frame, call, below, true, writer);
         }
         for (uint32_t d = 0; d < masks; d += 1)
         {
@@ -9338,6 +9399,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     const uint32_t floating_below = floating_depth - floating_after;
     const uint32_t saved = tier0_call_saved(function, call, below);
     count += 2 * (saved + floating_below + (memory ? tier0_saved_masks(entries, i) : 0));
+    // A setjmp caller's snapshot of the slots below the call, an FILD and an FISTP a word, taken and put back.
+    const uint32_t snapshot = below < entries->snapshot_depths ? below : entries->snapshot_depths;
+    count += !tail ? 4 * entries->snapshot_words * snapshot : 0;
     // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
     uint8_t source_of[32];
     uint32_t pending = 0;
@@ -10832,6 +10896,8 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->deep_floating_depths = 0;
     entries->mask_depths = 0;
     entries->mask_top = 0;
+    entries->snapshot_words = 0;
+    entries->snapshot_depths = 0;
     entries->labels = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
@@ -10889,65 +10955,44 @@ static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choic
     }
 }
 
-// Whether every value a function that calls __builtin_setjmp holds across one of its calls is in a register the call saves
-// into its own region (tier0_emit_call), which nothing else writes, so that a longjmp's resumption after the call finds
-// it (#1242's review): the integer depths below the call's arguments, of no memory class and no vector (whose values live
-// in their depth's slot, which the expressions after the call share), and the floating ones, with no mask on the mask
-// stack (whose slots are its depths'); in a function with deep entries, none at all (whose depths live in their slots). Returns
-// the first call that holds another, or the count. An integer depth's class is the one of whichever entries left it last,
-// any of them, so that a value an entry may have left there counts: that can only refuse more.
+// Whether every value a function that calls __builtin_setjmp holds across one of its calls is saved where nothing else
+// writes, so that a longjmp's resumption after the call finds it (#1242's review): the integer depths below the call's
+// arguments in registers the call saves into its own region (tier0_emit_call), and the floating ones; a long double's, a
+// 128-bit integer's or a vector's in its depth's slot, which the call copies into a snapshot of its own and back
+// (tier0_returns_twice_snapshot, #1843). Not a mask on the mask stack (whose slots are its depths'), nor any value of a
+// function with deep entries (whose depths live in their slots). Returns the first call that holds one, or the count.
 static uint32_t tier0_returns_twice_saves(const Tier0Function* function, const Tier0Entries* entries)
 {
-    uint8_t shared[256] = { 0 };
     uint32_t failed = function->count;
     const bool deep = entries->deep != 0;
     for (uint32_t i = 0; failed == function->count && i < function->count; i += 1)
     {
-        if (!entries->absorbed[i])
+        if (!entries->absorbed[i] && function->kinds[i] == BUSTER_TYPED_CALL)
         {
-            const uint32_t before = entries->depths[i];
-            const uint32_t after = (uint8_t)(before + (uint32_t)(int32_t)entries->integer_effects[i]);
-            if (function->kinds[i] == BUSTER_TYPED_CALL)
+            const uint32_t call = (uint32_t)function->values[i];
+            const uint32_t first = function->call_first[call];
+            uint32_t integer_arguments = 0;
+            uint32_t floating_arguments = 0;
+            for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
             {
-                const uint32_t call = (uint32_t)function->values[i];
-                const uint32_t first = function->call_first[call];
-                uint32_t integer_arguments = 0;
-                uint32_t floating_arguments = 0;
-                for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
-                {
-                    const bool floating = tier0_class_floating(function->argument_classes[first + a]);
-                    integer_arguments += floating ? 0 : 1;
-                    floating_arguments += floating ? 1 : 0;
-                }
-                const uint32_t pending = integer_arguments + (function->call_targets[call] == 0 ? 1u : 0u);
-                const uint32_t below = before > pending ? before - pending : 0;
-                bool kept = tier0_saved_masks(entries, i) == 0;
-                for (uint32_t d = 0; d < below; d += 1)
-                {
-                    kept &= shared[d] == 0;
-                }
-                // A deep function's values are in their depths' slots across a call (tier0_emit_deep_call): it may hold none.
-                const uint32_t integer_depth = deep ? entries->deep_depths[i] : before;
-                const uint32_t floating_depth = deep ? entries->deep_floating_depths[i] : entries->floating_depths[i];
-                kept &= !deep || (integer_depth <= pending && floating_depth <= floating_arguments);
-                failed = kept ? failed : i;
+                const bool floating = tier0_class_floating(function->argument_classes[first + a]);
+                integer_arguments += floating ? 0 : 1;
+                floating_arguments += floating ? 1 : 0;
             }
-            for (uint32_t d = after; d < before; d += 1)
-            {
-                shared[d] = 0;
-            }
-            const uint32_t class = function->classes[i];
-            if (after != 0)
-            {
-                shared[after - 1] |= tier0_class_memory(class) || tier0_class_vector(class) ? 1 : 0;
-            }
+            const uint32_t pending = integer_arguments + (function->call_targets[call] == 0 ? 1u : 0u);
+            bool kept = tier0_saved_masks(entries, i) == 0;
+            // A deep function's values are in their depths' slots across a call (tier0_emit_deep_call): it may hold none.
+            const uint32_t integer_depth = deep ? entries->deep_depths[i] : entries->depths[i];
+            const uint32_t floating_depth = deep ? entries->deep_floating_depths[i] : entries->floating_depths[i];
+            kept &= !deep || (integer_depth <= pending && floating_depth <= floating_arguments);
+            failed = kept ? failed : i;
         }
     }
     return failed;
 }
 
 // The segment overrides (#1447) of a function that has them (Tier0Function.segments), one per entry (`segments`: 0, or
-// BUSTER_TYPED_SEGMENT_FS or _GS on a LOAD, STORE, SET, ATOMIC_RMW or ATOMIC_CAS), on its records once the forms are
+// BUSTER_TYPED_SEGMENT_FS, _GS or _SS on a LOAD, STORE, SET, ATOMIC_RMW or ATOMIC_CAS), on its records once the forms are
 // chosen: each memory operand of a marked entry's records (from its first to the next one's, Tier0Entries.positions)
 // takes the override, but the frame's own (based on rsp, the frame's base or the incoming arguments' base), RIP-relative
 // ones and lea's. A marked access's address is in a register: LOAD's, STORE's and SET's templates take it from their
@@ -10955,9 +11000,11 @@ static uint32_t tier0_returns_twice_saves(const Tier0Function* function, const T
 // memory classes', vectors' and masks') read and write their values through the frame's slots, which the frame's
 // registers base; ATOMIC_RMW's xchg or lock xadd takes it from its depth, and ATOMIC_CAS's lock cmpxchg from a register
 // its local's home is read into. A shared scalar pass, which the vector path runs too: such a function is rare, and only
-// its marked entries' records are read.
-static void tier0_apply_segments(X86Instruction* records, const uint32_t* positions, uint32_t count, const uint8_t* segments, const Tier0Frame* frame)
+// its marked entries' records are read. False where a record's form has no form with SS's override (x86_form_has_segment:
+// APX's EVEX forms, which Tier 0 doesn't select), whose record keeps none.
+static bool tier0_apply_segments(X86Instruction* records, const uint32_t* positions, uint32_t count, const uint8_t* segments, const Tier0Frame* frame)
 {
+    bool valid = true;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint32_t segment = segments[i];
@@ -10972,10 +11019,13 @@ static void tier0_apply_segments(X86Instruction* records, const uint32_t* positi
             const bool address = form == X86_FORM_LEA_R64_M || form == X86_FORM_LEA_R32_M || form == X86_FORM_LEA_R16_M;
             if (memory && !slot && !address && form < X86_FORM_COUNT)
             {
-                record->form = (uint16_t)(record->form + segment * X86_FORM_COUNT);
+                const bool has = x86_form_has_segment(form, segment);
+                valid = valid && has;
+                record->form = has ? (uint16_t)(record->form + segment * X86_FORM_COUNT) : record->form;
             }
         }
     }
+    return valid;
 }
 
 // The code's asm label columns (#1839, Tier0Code.asm_label_records and asm_label_names): `count` labels, the bodies'
@@ -11070,6 +11120,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
         entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes, false) : 0;
         entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame.eh_return ? tier0_count_tail_finish(function, &frame, homes, true) : 0;
+        entries->snapshot_words = error == TIER0_OK && frame.snapshot_depths != 0 ? frame.snapshot_bytes / (8 * frame.snapshot_depths) : 0;
+        entries->snapshot_depths = error == TIER0_OK ? frame.snapshot_depths : 0;
     }
     if (error == TIER0_OK)
     {
@@ -11144,7 +11196,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         }
         if (__builtin_expect(segments != 0, 0))
         {
-            tier0_apply_segments(code->records, entries->positions, function->count, segments, &frame);
+            error = !tier0_apply_segments(code->records, entries->positions, function->count, segments, &frame) && error == TIER0_OK ? TIER0_ERROR_UNSUPPORTED : error;
         }
         if (function->entry_records)
         {
@@ -13970,10 +14022,9 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
 // A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
 // its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
 // ATOMIC_CAS's value. Another
-// kind's value is its own whole (a constant's top bits are its own). False where an override is 3, which no segment is.
-static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
+// kind's value is its own whole (a constant's top bits are its own).
+static void tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
-    bool valid = true;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         const uint8_t kind = function->kinds[i];
@@ -13981,11 +14032,9 @@ static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
                             kind == BUSTER_TYPED_ATOMIC_CAS;
-        valid = valid && (!access || segment != 3);
         values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
-    return valid;
 }
 
 // Compiles a function with segment overrides (tier0_compile's and tier0_compile_scalar's): its stripped copy
@@ -14001,12 +14050,9 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
     {
         code.error = TIER0_ERROR_MEMORY;
     }
-    else if (!tier0_segments_strip(function, values, segments))
-    {
-        code.error = TIER0_ERROR_UNSUPPORTED;
-    }
     else
     {
+        tier0_segments_strip(function, values, segments);
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
@@ -15156,13 +15202,9 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
     {
         check.error = TIER0_ERROR_MEMORY;
     }
-    else if (!tier0_segments_strip(function, values, segments))
-    {
-        check.error = TIER0_ERROR_INVALID;
-        check.rule = "an access's segment override that isn't FS or GS";
-    }
     else
     {
+        tier0_segments_strip(function, values, segments);
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;

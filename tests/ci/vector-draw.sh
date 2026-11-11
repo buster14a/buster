@@ -191,4 +191,36 @@ evidence 3 1 1 1; evidence 3 2 1 2; evidence 3 3 1 3; evidence 3 4 1 4
 verdict || fail "a full rerun's executions fail: $(cat "$work/log")"
 pass
 
+# A failing listing (the repository's REST limit, #2309) doubles the pause, up to VECTOR_DRAW_POLL_LIMIT, and a listing
+# that succeeds ends the back-off. The collector's first three calls fail (the artifacts' listing, the jobs', the
+# artifacts' again); its fifth lists no artifact yet, so it polls once more at the base pause.
+mkdir -p "$work/flaky"
+cat > "$work/flaky/gh" <<'GH'
+#!/usr/bin/env bash
+count=$(($(cat "$FLAKY_COUNT") + 1))
+printf '%s\n' "$count" > "$FLAKY_COUNT"
+if [ "$count" -le 3 ]; then
+    echo 'gh: API rate limit exceeded for installation (HTTP 403)' >&2
+    exit 1
+fi
+[ "$count" -ne 5 ] || exit 0
+exec "$REAL_GH" "$@"
+GH
+cat > "$work/flaky/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$SLEEPS"
+SLEEP
+chmod +x "$work/flaky/gh" "$work/flaky/sleep"
+echo 0 > "$work/flaky/count"
+: > "$work/flaky/sleeps"
+export GITHUB_RUN_ATTEMPT=1
+: > "$GITHUB_OUTPUT"
+artifacts "$p-1-probe-1-5-yes" "$p-1-probe-1-9-yes" "$p-1-probe-1-3-yes" "$p-1-probe-1-12-yes"
+jobs 1
+FLAKY_COUNT="$work/flaky/count" SLEEPS="$work/flaky/sleeps" REAL_GH="$work/bin/gh" PATH="$work/flaky:$PATH" \
+    VECTOR_DRAW_POLL=2 VECTOR_DRAW_POLL_LIMIT=5 VECTOR_DRAW_COLLECT_LIMIT=600 bash "$draw_script" assign 1 12 4 > "$work/log"
+[ "$(tr '\n' ' ' < "$work/flaky/sleeps")" = '4 5 2 ' ] || fail "a failing listing's back-off: $(tr '\n' ' ' < "$work/flaky/sleeps")"
+[ "$(output name)" = "$p-1-assign-1-1x3-2x5-3x9-4x12" ] || fail "the assignment after the back-off: $(output name)"
+pass
+
 printf 'vector-draw fixture: %s checks passed\n' "$checks"
