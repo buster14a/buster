@@ -2524,6 +2524,15 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             table->plan.type = type;
             table->part.type = type;
         }
+        // So do the type sugar's nodes (#1447), which only the top-level reader makes (c_check_type_sugar_input.c).
+        for (uint32_t node = 1; valid && node < input->sugar.count; node += 1)
+        {
+            const TypeId canonical = check_deferred_type(&parts[0], input->sugar.canonical[node]);
+            const TypeId modified = input->sugar.modified[node] != 0 ? check_deferred_type(&parts[0], input->sugar.modified[node]) : 0;
+            valid = canonical != 0 && (modified != 0 || input->sugar.modified[node] == 0);
+            input->sugar.canonical[node] = canonical;
+            input->sugar.modified[node] = modified;
+        }
         input->strings = strings;
         input->string_count = string_total;
         input->regions = regions;

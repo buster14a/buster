@@ -604,12 +604,13 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = IROPT_OVERDEFINED;
         }
     }
-    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_SHIFT)
+    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_LANE_OP)
     {
-        // A width change, a permute, a conversion or a scalar shift (#1840): exact integer and bit moves, folded by the
-        // model once every operand is constant (a shift's count a scalar, its shape none).
+        // A width change, a permute, a conversion, a scalar shift or a lane operation (#1840): exact integer and bit moves,
+        // folded by the model once every operand is constant (a shift's count a scalar, its shape none).
         static const uint8_t operations[] = { IR_SIMD_EXTRACT, IR_SIMD_WIDEN,  IR_SIMD_INSERT,   IR_SIMD_PERMUTE, IR_SIMD_SHUFFLE,
-                                              IR_SIMD_ALIGN,   IR_SIMD_SHUFFLE_LANES, IR_SIMD_EXTEND, IR_SIMD_TRUNCATE, IR_SIMD_SHIFT };
+                                              IR_SIMD_ALIGN,   IR_SIMD_SHUFFLE_LANES, IR_SIMD_EXTEND, IR_SIMD_TRUNCATE, IR_SIMD_SHIFT,
+                                              IR_SIMD_LANE_OP };
         const bool binary = f->c[i] != BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] != BUSTER_IR_INTRINSIC_WIDEN && f->c[i] != BUSTER_IR_INTRINSIC_EXTEND &&
                             f->c[i] != BUSTER_IR_INTRINSIC_TRUNCATE;
         const uint8_t left = work->states[a];
@@ -623,6 +624,28 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
                 .operation = (IrSimdOperation)operations[f->c[i] - BUSTER_IR_INTRINSIC_EXTRACT],
                 .result = ir_simd_shape(f->type[i]),
                 .operands = { ir_simd_shape(f->type[a]), binary ? ir_simd_shape(f->type[b]) : IR_SIMD_NONE, IR_SIMD_NONE },
+                .index = f->flags[i],
+            };
+            result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+        }
+    }
+    else if (op == IR_INTRINSIC && ir_intrinsic_kind(f->c[i]) == BUSTER_IR_INTRINSIC_PERMUTE2)
+    {
+        // A permute of two tables (#1840), its third operand in the extra array, folded by the model as the others.
+        const uint32_t third = ir_intrinsic_third(f, i);
+        const uint8_t states[3] = { work->states[a], work->states[b], work->states[third] };
+        const bool over = states[0] == IROPT_OVERDEFINED || states[1] == IROPT_OVERDEFINED || states[2] == IROPT_OVERDEFINED;
+        const bool unknown = states[0] == IROPT_UNKNOWN || states[1] == IROPT_UNKNOWN || states[2] == IROPT_UNKNOWN;
+        result = over ? IROPT_OVERDEFINED : unknown ? IROPT_UNKNOWN : IROPT_CONSTANT;
+        if (result == IROPT_CONSTANT)
+        {
+            const IrSimdValue operands[3] = { ir_optimize_simd_value(work, a), ir_optimize_simd_value(work, b), ir_optimize_simd_value(work, third) };
+            const IrSimdValue* pointers[3] = { &operands[0], &operands[1], &operands[2] };
+            const IrSimdShape shape = ir_simd_shape(f->type[i]);
+            const IrSimdAction action = {
+                .operation = IR_SIMD_PERMUTE2,
+                .result = shape,
+                .operands = { shape, shape, shape },
                 .index = f->flags[i],
             };
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;

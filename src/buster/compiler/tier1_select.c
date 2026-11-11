@@ -298,6 +298,13 @@ typedef enum Tier1SelectRule
 // lanes less than zero (vpmovb2m to vpmovq2m) (tier1_select_mask_vector).
 #define BUSTER_TIER1_VECTOR_MASK_EXPAND 14
 #define BUSTER_TIER1_VECTOR_SIGN_MASK 15
+// A lane operation (#1840): `operation` the IR's flags (its lanes and operation), values[0] and values[1] its operands,
+// the first in vvvv (ir_simd_lane_op_forms: vpminub to vpmaxsq, vpaddusb to vpsubsw).
+#define BUSTER_TIER1_VECTOR_LANE_OP 16
+// A permute of two tables (#1840): `immediate` its lanes' bytes' log2, values[0] the first table, values[1] the indices
+// and values[2] the second table: vpermt2b to vpermt2q into the first table's register, which a copy fills first where the
+// destination isn't it, the scratch register keeping an operand the copy would overwrite (tier1_select_permute2).
+#define BUSTER_TIER1_VECTOR_PERMUTE2 17
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1361,6 +1368,51 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+// A permute of two tables (#1840): vpermt2b to vpermt2q (ir_simd_permute2_forms) overwrite their first table, and
+// vpermi2b to vpermi2q (ir_simd_permute2_index_forms) their indices. Where the destination's register holds the first
+// table, the first; where it holds the indices, the second; otherwise the destination takes the first table by a move
+// first, the vector class's scratch register keeping the second table across it where the destination holds that.
+static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    const uint8_t first = holes->left & 15;
+    const uint8_t indices = holes->right & 15;
+    uint8_t table = holes->third & 15;
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    if (x != first && x == indices)
+    {
+        const X86Instruction record = {
+            .form = ir_simd_permute2_index_forms[holes->immediate & 3][at],
+            .reg = x,
+            .vvvv = first,
+            .rm = table,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(result, record);
+    }
+    else if (x != first)
+    {
+        if (x == table)
+        {
+            tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, x, width, false));
+            table = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        }
+        tier1_select_append(result, tier1_select_class_move(x, first, width, false));
+    }
+    if (x == first || x != indices)
+    {
+        const X86Instruction record = {
+            .form = ir_simd_permute2_forms[holes->immediate & 3][at],
+            .reg = x,
+            .vvvv = indices,
+            .rm = table,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(result, record);
+    }
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -1983,9 +2035,20 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_vector_shift(&result, holes);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_LANE_OP)
+        {
+            const uint32_t flags = (uint32_t)holes->operation;
+            const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+            const X86Instruction record = { .form = ir_simd_lane_op_forms[(flags >> 2) & 7][flags & 3][at], .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
+            tier1_select_append(&result, record);
+        }
         else if (kind == BUSTER_TIER1_VECTOR_MASK_EXPAND || kind == BUSTER_TIER1_VECTOR_SIGN_MASK)
         {
             tier1_select_mask_vector(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_PERMUTE2)
+        {
+            tier1_select_permute2(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4374,7 +4437,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHIFT))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4457,6 +4520,35 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.intrinsic_cost = 1;
             if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_PERMUTE2 && ir_intrinsic_ternary(c))
+        {
+            // A permute of two tables (#1840): its third operand the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_PERMUTE2;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_OP)
+        {
+            // A lane operation (#1840): its lanes and operation in the IR's flags; no candidate where its width has no form.
+            const uint32_t flags = function->flags[node];
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_LANE_OP;
+            base.operation = (uint8_t)flags;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            if (ir_simd_lane_op_forms[(flags >> 2) & 7][flags & 3][vector_width == 16 ? 0 : vector_width == 32 ? 1 : 2] != X86_FORM_NONE)
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }

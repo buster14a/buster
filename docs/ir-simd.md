@@ -825,6 +825,167 @@ The tests:
 Rotates (`vprold` and the rest by an immediate) stay machine rows: the
 compiler's own units have one.
 
+## Lane operations (#1840)
+
+One more binary kind of `intrinsic`, `lane_op` (`BUSTER_IR_INTRINSIC_LANE_OP`),
+computes what the IR's opcodes lack on two vectors' integer lanes:
+
+```text
+%6 = intrinsic.v16i32 %3, %3 lane_op 29
+```
+
+- a and b are of the result's type.
+- `flags` hold the lanes' bytes' log2 (bits 0 and 1: bytes to quadwords) and
+  the operation (bits 2 to 4): the unsigned (0) and signed (1) minimum, the
+  unsigned (2) and signed (3) maximum, and, of bytes and words alone, the
+  unsigned (4) and signed (5) saturating sum and the unsigned (6) and signed (7)
+  saturating difference a − b.
+
+`ir_lane_op_flags_valid` is the verifier's rule. The model's `IR_SIMD_LANE_OP`
+computes each lane, and the interpreter, SCCP, GVN and LICM take it as they
+take the shifts.
+
+`ir_simd_typed_lane_op` decodes clang's `__builtin_elementwise_min`, `_max`,
+`_add_sat` and `_sub_sat` of integer vectors, which clang's headers'
+`_mm512_min_epu8` to `_mm512_subs_epi16` call. Their rows are one record of
+`vpminub` to `vpmaxsq` or `vpaddusb` to `vpsubsw`, VECTOR(0) (vvvv) and
+VECTOR(1) (rm) into VECTOR(0). The target needs the form's features (BW for
+bytes and words), AVX512F's and VL's below 64 bytes. Tier 1 selects the form
+back (`BUSTER_TIER1_VECTOR_LANE_OP`), from the table the decoder shares
+(`ir_simd_lane_op_forms`). Their 72 register forms had no Zen 5 row; they were
+measured on the 9700X: 2 cycles of latency, the minima and maxima of bytes to
+doublewords 4 per cycle and the others 2
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
+buster-performance#388). The reductions (`__builtin_reduce_min` and the rest,
+several records) stay machine rows.
+
+The producer's forms (`check_vector_elementwise_forms`) moved to
+`c_check_program_vector_convert.c` with the conversions' row, so that the
+backend unit's tests read them.
+
+Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
+#1972's sources (`2461071`), against the masks' conversions:
+
+| Unit | Rows before | Rows after | Records |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 596 | 541 | 543,612 both |
+| `main_unit_backend.c` | 784 | 752 | 1,541,683 both |
+
+The tests:
+
+- `test-ir`: both verifiers admit `lane_op` at each vector width, for every
+  flags byte below 64 and a second operand of the result's type or another
+  width's, exactly where operation, lanes and operands agree (72 forms). The
+  model is checked against C's minimum, maximum and clamped sum and difference
+  of each lane, on random vectors with extreme lanes.
+- `test-ir-parse` and `test-ir-optimize`: the text, and SCCP's folds of two
+  constant vectors by both paths.
+- `test-ir-simd`: every form the producer has decodes (72: minima and maxima
+  of 4 element sizes, both signs, 3 widths; saturations of bytes and words),
+  checked against flags and features written out. Each row is refused without
+  each feature it needs and under 6 changes.
+- `test-tier1-masks`: each of the 72 rows runs as a program's only row, through
+  both lowering paths, the interpreter at every stage and Tier 1 natively,
+  against C's operations on inputs with lanes at the saturations' edges.
+
+## Permutes of two tables (#1840)
+
+The ternary kinds of `intrinsic` have a third operand, which no instruction
+field holds. The owner chose this design on #1447: one IR operation and one
+instruction, which later ternary kinds reuse (ternary logic, the dot products, a
+masked load's pointer, mask and passthrough). Their `c` is the kind in its low
+8 bits and, past them, the index in the function's extra array of the third
+operand's value, as a phi's and a call's operands are there:
+
+```text
+%6 = intrinsic.v16i32 %3, %3, %3 permute2 3
+```
+
+- `ir_intrinsic_kind`, `ir_intrinsic_ternary`, `ir_intrinsic_extra` and
+  `ir_intrinsic_third` read the layout; `ir_intrinsic_ternary_c` writes it. An
+  index past 2^24 − 1 gives a `c` the verifier refuses, never another operand.
+- A binary kind's `c` is its kind alone, so the existing kinds' tests of `c`
+  are unchanged.
+- `ir_operand` and `ir_operand_count` give the third operand at position 3, so
+  the use lists, the dominance check, SSA's undefined values and every pass that
+  walks operands see it. `ir_value_mask3` and `ir_value_third` give it where a
+  pass reads the operand columns. The vector use lists and the dataflow's vector
+  path read it from the extra array beside a call's arguments.
+- Every pass that rebuilds a function's extra array gives the operand a slot of
+  its own, never one shared with the source: the optimizer's rewrite, GVN's
+  alias view, LICM, if-conversion, SSA's rebuild, the inliner (the caller's
+  instructions and a callee's), `ir_rebuild`, `ir_wide`, the vector split and
+  the metamorphic transforms. GVN keys a ternary intrinsic on its kind and its
+  three operands' classes.
+
+`permute2` (`BUSTER_IR_INTRINSIC_PERMUTE2`) is the first kind. Lane i is, of
+a's lanes followed by the third operand's, the one that b's lane i's low bits
+name. Enough bits are read to name twice the lanes, and `flags` hold the lanes'
+bytes' log2 (0 to 3). Its operands are the order of
+`_mm512_permutex2var_epi32(a, idx, b)`. The model's `IR_SIMD_PERMUTE2` computes
+it, and the interpreter, SCCP, GVN and LICM take it as they take the binary
+permutes.
+
+`ir_simd_typed_permute2` decodes the rows of the permutex2var builtins and
+`__builtin_shufflevector` of one or two vectors. Each row is one record of
+`vpermt2b` to `vpermt2q`, with VECTOR(0) the destination and first table (reg).
+The indices are VECTOR(1) (vvvv) and the second table VECTOR(2) (rm), or the
+other way around for `__builtin_shufflevector`; a shuffle of one vector has the
+indices VECTOR(1) and VECTOR(0) both tables. A table may be narrower than the
+result (16 or 32 bytes: a shuffle of narrower vectors into a wider one). Its
+register's upper bytes are then unspecified, and the indices never name them
+where the result is defined, so the IR takes the table's `widen` (zeros past
+it). The masked builtins' rows are the same record and a separate select. The target needs the form's features (VBMI for
+bytes, BW for words) and AVX512F's and VL's below 64 bytes.
+
+Tier 1 (`BUSTER_TIER1_VECTOR_PERMUTE2`) picks the instruction by the register
+its destination already holds:
+
+- the first table's: `vpermt2*`;
+- the indices': `vpermi2*`, the same permute, which overwrites the indices and
+  whose semantics rows are new;
+- any other: a move of the first table into it first, the vector scratch
+  register keeping the second table across that move where the destination
+  holds it.
+
+The 24 register forms of both families had no Zen 5 row. On the 9700X they
+measured 3, 4 and 5 cycles of latency at 16, 32 and 64 bytes, 2 per cycle
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-permute2-1840-2026-11-11)).
+
+Measured by `--tier1 -march=znver5`, both compilers compiling this change's
+sources, against the lane operations (`f324f2ac`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 541 | 350 |
+| `main_unit_backend.c` | 753 | 642 |
+
+No `vpermt2` row is left in either unit.
+
+The tests:
+
+- `test-ir-parse`: `tests/ir/widths.ir` round-trips a permute2 at each width,
+  and a third operand is required of a ternary kind and refused of the others.
+- `test-ir-optimize`: SCCP folds a permute2 of three constant vectors on both
+  paths, at each lanes' size and width; a loop with an invariant permute2 twice
+  and a loop-carried one runs as the interpreter says under every set of passes.
+- `test-ir-licm`: GVN gives the two invariant permute2s one value and LICM
+  hoists it with their sum, alike on both paths, each result the interpreter's.
+- `test-ir-inline`: an inlined callee's permute2s, one of which takes the
+  callee's parameter, get slots of the caller's, remapped.
+- `test-ir-simd`: the 24 rows decode at exactly their features, refused without
+  each and under 6 changes; of narrower tables, one 16-byte table twice and two
+  of half the width decode, and a table wider than the result or indices
+  narrower stay machine rows.
+- `test-tier1-masks`: the 30 rows the x86-64-v4 target allows (`vpermt2b` is
+  VBMI's), of both orders at each width and of narrower tables at 32 and 64
+  bytes, run as a program's only row, through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against a C model whose
+  narrow tables are zero-extended.
+- `test-ir-source`: the vector and scalar use lists agree on C files of every
+  permutex2var builtin and shuffles of one and two vectors, narrower ones
+  included.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:
@@ -972,8 +1133,8 @@ take but the target refuses stays refused. So the decoders' refusals above are
 now each a machine row, or a refusal by class or target: `test-ir-simd`'s
 mutations of the `_k*` and BMI rows check that none decodes as the front end's
 operation, and that the decoder of its family refuses it. `test-ir-simd` also
-decodes a saturating byte addition's, a masked store's of no result and a shift's
-of a count from a general register as machine rows, with their classes and exactly their
+decodes a byte average's, a masked store's of no result and a shift's of a 64-bit
+count from a general register as machine rows, with their classes and exactly their
 features, each refused without each feature it needs.
 
 Consumers classify vectors with `ir_function_has_vectors`, 64

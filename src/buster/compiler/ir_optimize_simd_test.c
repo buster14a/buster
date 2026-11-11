@@ -772,6 +772,164 @@ static void ir_optimize_test_simd_shifts(IrOptimizeTest* test, Arena* input, Are
     }
 }
 
+// The lane operations (#1840): each operation of two constant vectors at each lanes' size it takes and each width,
+// compared with another constant: folded by both SCCP paths alike and to the interpreter's value of the original
+// (ir_optimize_test_simd_rewrite), and to a constant.
+static void ir_optimize_test_simd_lane_ops(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 32; flags += 1)
+        {
+            if (((flags >> 2) & 7) >= 4 && (flags & 3) > 1)
+            {
+                continue;
+            }
+            const uint64_t mark = input->length;
+            const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .vector_constant_count = 3 };
+            IrFunction f = { 0 };
+            if (ir_create(input, &sizes, &f) != IR_OK)
+            {
+                ir_optimize_test_expect(test, false, "constant lane operation optimizer fixture allocation");
+                continue;
+            }
+            const IrType type = (IrType)(IR_V4I32 + width);
+            const uint32_t mask = ir_lane_mask(type, IR_SIMD_LANE_I8);
+            f.result_type = (uint8_t)mask;
+            f.block_offsets[1] = 6;
+            for (uint32_t w = 0; w < (2u << width); w += 1)
+            {
+                f.vector_constants[0].words[w] = UINT64_C(0x8796a5b4c3d2e1f0) * (w + 1);
+                f.vector_constants[1].words[w] = UINT64_C(0x0f1e2d3c4b5a6978) ^ (w * UINT64_C(0x0101010101010101));
+                f.vector_constants[2].words[w] = UINT64_C(0x5555aaaa3333cccc) + w;
+            }
+            ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 1, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_LANE_OP);
+            f.flags[2] = (uint8_t)flags;
+            ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
+            f.flags[4] = IR_SIMD_LANE_I8;
+            ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            IrOptimizeResult result = { 0 };
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
+                                    "a constant lane operation folds through a comparison");
+            arena_pop_to(vector, 0);
+            arena_pop_to(input, mark);
+        }
+    }
+}
+
+// The permutes of two tables (#1840), whose third operand is in the extra array: of three constant vectors, folded by
+// both SCCP paths alike and to a constant at each lanes' size and width; and in a loop, an invariant one twice feeding a
+// loop-carried one, its result the interpreter's under every set of passes (ir_licm_test_permute2 numbers and hoists it).
+static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 4; flags += 1)
+        {
+            const uint64_t mark = input->length;
+            const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .vector_constant_count = 4, .extra_count = 1 };
+            IrFunction f = { 0 };
+            if (ir_create(input, &sizes, &f) != IR_OK)
+            {
+                ir_optimize_test_expect(test, false, "constant permute2 optimizer fixture allocation");
+                continue;
+            }
+            const IrType type = (IrType)(IR_V4I32 + width);
+            const uint32_t mask = ir_lane_mask(type, IR_SIMD_LANE_I8);
+            f.result_type = (uint8_t)mask;
+            f.block_offsets[1] = 7;
+            for (uint32_t w = 0; w < (2u << width); w += 1)
+            {
+                f.vector_constants[0].words[w] = UINT64_C(0x8796a5b4c3d2e1f0) * (w + 1);
+                f.vector_constants[1].words[w] = UINT64_C(0x0f1e2d3c4b5a6978) ^ (w * UINT64_C(0x0101010101010101));
+                f.vector_constants[2].words[w] = UINT64_C(0x5555aaaa3333cccc) + w;
+                f.vector_constants[3].words[w] = UINT64_C(0x0123456789abcdef) * (w + 3);
+            }
+            f.extra[0] = 3;
+            ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 1, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 2, IR_VCONST, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 4, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, 0));
+            f.flags[4] = (uint8_t)flags;
+            ir_optimize_test_instruction(&f, 5, IR_VCMP, mask, 4, 2, IR_ULT);
+            f.flags[5] = IR_SIMD_LANE_I8;
+            ir_optimize_test_instruction(&f, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            IrOptimizeResult result = { 0 };
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
+                                    "a constant permute2 folds through a comparison");
+            arena_pop_to(vector, 0);
+            arena_pop_to(input, mark);
+        }
+    }
+    for (uint32_t flags = 0; flags < 4; flags += 1)
+    {
+        const uint64_t mark = input->length;
+        const IrSizes sizes = {
+            .instruction_count = 18,
+            .block_count = 3,
+            .constant_count = 3,
+            .vector_constant_count = 3,
+            .extra_count = 11,
+        };
+        IrFunction f = { 0 };
+        const bool created = ir_create(input, &sizes, &f) == IR_OK;
+        ir_optimize_test_expect(test, created, "permute2 loop fixture allocation");
+        if (created)
+        {
+            f.result_type = IR_I128;
+            const uint32_t offsets[] = { 0, 7, 16, 18 };
+            const uint32_t extra[] = { 0, 0, 1, 12, 0, 3, 1, 13, 2, 2, 2 };
+            memcpy(f.block_offsets, offsets, sizeof(offsets));
+            memcpy(f.extra, extra, sizeof(extra));
+            for (uint32_t w = 0; w < 2; w += 1)
+            {
+                f.vector_constants[0].words[w] = UINT64_C(0x8796a5b4c3d2e1f0) * (w + 1);
+                f.vector_constants[1].words[w] = UINT64_C(0x0f1e2d3c4b5a6978) ^ (w * UINT64_C(0x0303030303030303));
+                f.vector_constants[2].words[w] = UINT64_C(0x5555aaaa3333cccc) + w;
+            }
+            f.constants[1].low = 1;
+            f.constants[2].low = 3;
+            for (uint32_t i = 0; i < 3; i += 1)
+            {
+                ir_optimize_test_instruction(&f, i, IR_VCONST, IR_V4I32, i, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 3 + i, IR_CONST, IR_I64, i, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            ir_optimize_test_instruction(&f, 6, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 7, IR_PHI, IR_V4I32, 0, 2, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 8, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 9, IR_INTRINSIC, IR_V4I32, 1, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, 8));
+            ir_optimize_test_instruction(&f, 10, IR_INTRINSIC, IR_V4I32, 1, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, 9));
+            ir_optimize_test_instruction(&f, 11, IR_ADD, IR_V4I32, 9, 10, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 12, IR_INTRINSIC, IR_V4I32, 7, 11, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, 10));
+            f.flags[9] = (uint8_t)flags;
+            f.flags[10] = (uint8_t)flags;
+            f.flags[12] = (uint8_t)flags;
+            ir_optimize_test_instruction(&f, 13, IR_ADD, IR_I64, 8, 4, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 14, IR_ICMP, IR_I1, 13, 5, IR_LT);
+            ir_optimize_test_instruction(&f, 15, IR_CBR, IR_VOID, 14, 1, 2);
+            ir_optimize_test_instruction(&f, 16, IR_BITCAST, IR_I128, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 17, IR_RET, IR_VOID, 16, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            for (uint32_t passes = 0; passes < 16; passes += 1)
+            {
+                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, passes);
+            }
+        }
+        arena_pop_to(input, mark);
+    }
+}
+
 static void ir_optimize_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -790,6 +948,8 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
         ir_optimize_test_simd_widths(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_permutes(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_shifts(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_simd_lane_ops(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_simd_permute2(test, &input, &vector, &scalar, &scratch);
     }
     arena_release(&input);
     arena_release(&vector);

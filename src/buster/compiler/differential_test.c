@@ -33,11 +33,16 @@ static DifferentialOptions differential_test_options(const char* output, const c
     options.csmith = tool;
     options.yarpgen = tool;
     options.fixture = true;
-    // Every command of a deliberate-hang scenario shares this watchdog, the reference and Tier 0 runs too. The
-    // 200 ms used here before was close enough to a cold start under the parallel test runner that a delayed
-    // reference was once recorded as the campaign's first timeout. The fixture's hangs never finish, so this
-    // still detects them deterministically while leaving startup a realistic bound.
-    options.timeout_ms = 1000;
+    // Only the scenarios whose fixture hangs (pause() forever) need a short watchdog; the others keep the harness's
+    // own, which a command that finishes never waits out. One second for every command was still a cold start's
+    // bound under load: on a hosted shard running the lifecycle's eight harnesses at once, beside three other
+    // suites, a passing scenario's clang -O0 step was recorded as clang-o0-compile:timeout (run 43064400880).
+    // In a hang scenario every command shares the second, the reference and Tier 0 runs before the hang too.
+    const bool hangs = strcmp(scenario, "compile-timeout") == 0 || strcmp(scenario, "run-timeout") == 0 || strcmp(scenario, "generator-timeout") == 0;
+    if (hangs)
+    {
+        options.timeout_ms = 1000;
+    }
     options.output_limit = 4096;
     options.source_limit = 4096;
     options.generator_mask = 1u << generator;
@@ -67,12 +72,13 @@ static void differential_test_processes(DifferentialTests* tests, const char* di
         DifferentialArguments arguments = {0};
         differential_add(&arguments, fixture);
         differential_add(&arguments, switches[i]);
-        // An instrumented child may not finish startup in 100 ms on a busy hosted runner. The deliberate hang still
-        // reaches its deadline; the other cases must reach their tree/flood assertions before the watchdog fires.
-        const DifferentialProcess result = differential_process(directory, labels[i], &arguments, 1000, 256, 256, 4096);
+        // Only the deliberate hang needs a short deadline: a busy hosted runner can delay another case's startup
+        // past any short one, and a case that ends never waits out the harness's own watchdog.
+        const bool hang = kinds[i] == 3;
+        const DifferentialProcess result = differential_process(directory, labels[i], &arguments, hang ? 1000 : BUSTER_DIFFERENTIAL_TIMEOUT_MS, 256, 256, 4096);
         differential_test_check(tests, result.kind == kinds[i], labels[i]);
         differential_test_check(tests, result.cleanup_complete, "subreaper reaped complete process tree");
-        differential_test_check(tests, result.elapsed_ms < 2000, "process deadline bounded");
+        differential_test_check(tests, !hang || result.elapsed_ms < 2000, "process deadline bounded");
         if (i == 0)
         {
             differential_test_check(tests, differential_contains(directory, "process-tree.json", "\"argv_hex\":[") && differential_contains(directory, "process-tree.json", "\"2d2d74726565\"") && differential_contains(directory, "process-tree.json", "\"cwd_hex\":"), "command records retain exact argv and working-directory bytes");
@@ -106,12 +112,12 @@ static void differential_test_processes(DifferentialTests* tests, const char* di
     }
     DifferentialArguments invalid = {0};
     differential_add(&invalid, "/no/such/buster-differential-test-tool");
-    const DifferentialProcess missing = differential_process(directory, "process-exec-error", &invalid, 100, 256, 256, 4096);
+    const DifferentialProcess missing = differential_process(directory, "process-exec-error", &invalid, BUSTER_DIFFERENTIAL_TIMEOUT_MS, 256, 256, 4096);
     differential_test_check(tests, missing.kind == 5 && missing.error_number == ENOENT && missing.cleanup_complete, "exec failure distinguished from program exit");
     DifferentialArguments diagnostic = {0};
     differential_add(&diagnostic, fixture);
     differential_add(&diagnostic, "--stderr-flood");
-    const DifferentialProcess noisy = differential_process(directory, "process-stderr-flood", &diagnostic, 100, 4096, 128, 4096);
+    const DifferentialProcess noisy = differential_process(directory, "process-stderr-flood", &diagnostic, BUSTER_DIFFERENTIAL_TIMEOUT_MS, 4096, 128, 4096);
     differential_test_check(tests, noisy.kind == 4 && noisy.truncated[1] && !noisy.truncated[0] && noisy.output_bytes[0] == 0 && noisy.output_bytes[1] > 128, "separate stderr limit");
     char path[PATH_MAX];
     struct stat metadata;
@@ -130,7 +136,7 @@ static void differential_test_processes(DifferentialTests* tests, const char* di
         DifferentialArguments arguments = {0};
         differential_add(&arguments, fixture);
         differential_add(&arguments, "--descriptors");
-        const DifferentialProcess checked = differential_process(directory, "process-closed-stdio", &arguments, 100, 256, 256, 4096);
+        const DifferentialProcess checked = differential_process(directory, "process-closed-stdio", &arguments, BUSTER_DIFFERENTIAL_TIMEOUT_MS, 256, 256, 4096);
         const bool sent = differential_write(report[1], &checked, sizeof(checked));
         _exit(sent ? 0 : 1);
     }

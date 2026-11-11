@@ -414,7 +414,13 @@ the immediate form where the count is a constant, else `vmovd` of the count into
 the vector scratch register and the form by that xmm count. A select of all ones
 and zeros, a C comparison's expansion and a mask to a vector, is `vpmovm2b` to
 `vpmovm2q`, and a signed comparison less than a zero vector is `vpmovb2m` to
-`vpmovq2m` (#1840, its "Masks to vectors and back").
+`vpmovq2m` (#1840, its "Masks to vectors and back"). The integer lanes' minima, maxima and
+saturating sums and differences are its `lane_op`, one EVEX instruction of
+`BUSTER_TIER1_VECTOR_LANE_OP` (#1840, its "Lane operations").
+The permutes of two tables are its `permute2`, whose third operand is in the
+extra array (#1840, its "Permutes of two tables"), `BUSTER_TIER1_VECTOR_PERMUTE2`:
+`vpermt2*` into the first table's register, `vpermi2*` into the indices', or a
+move of the first table first.
 
 ### Inlining (#1282)
 
