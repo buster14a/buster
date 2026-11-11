@@ -101,8 +101,8 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "    printf(\"%d\\n\", 1.5);\n"
         "    return 0;\n"
         "}\n",
-        // The fallback: a part that holds a goto or a label can't be left out, so its body is left out whole; the other
-        // bodies keep their warnings, and their own errors' parts are left out alone.
+        // Parts that hold a goto or a label are left out too (#1447), so their bodies keep their warnings before and after
+        // them; the other bodies keep theirs, and their own errors' parts are left out alone.
         "struct S { int a; } s;\n"
         "int printf(const char *, ...);\n"
         "int fallback(int x)\n"
@@ -147,6 +147,19 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "struct S { int a; } s;\n"
         "int n(int x) { x = ({ if (x) goto out; s.b; }); out: return x; }\n"
         "int caller(int c) { int w; c = c; return n(1) + (c << 42); }\n",
+        // A part that holds a label address, a local label or a tag definition whose names aren't used outside it is left
+        // out too (#1447); a case label's statement expression keeps its switch whole, and a goto inside a loop keeps its
+        // body whole.
+        "int printf(const char *, ...);\n"
+        "struct S { int a; } s;\n"
+        "struct Q { int a; } q;\n"
+        "int address(int x) { x = x; void *p = &&l + s.b; l: printf(\"%s\", x); return x << 40; }\n"
+        "int local(int x) { x = x; x = ({ __label__ in; goto in; in: s.b; }); if (x = 2) x = 1; return x << 41; }\n"
+        "int tag(int x) { x = x; x = sizeof(struct R { int a; }) + s.b; printf(\"%s\", x); return x << 42; }\n"
+        "int cased(int x) { x = x; x = ({ switch (x) { case 1: s.b; } 0; }); return x << 44; }\n"
+        // A goto inside a loop keeps its part, whose jump -Wfor-loop-analysis looks for: its body is left out whole.
+        "void looped(int i, int n) { for (; i < n; ) { (void)({ goto out; s.b; }); } out:; }\n"
+        "int other(int y) { int w; y = y; return y; }\n",
         // An unused parameter whose left-out part names it only through a declaration of the same name, whose scope holds
         // the use (a block's, a for clause's, a statement expression's, a later declarator's, a prototype's), keeps
         // -Wunused-parameter after a walk-ending error (#1447); a use after the block's scope, a tag's and a label's name don't

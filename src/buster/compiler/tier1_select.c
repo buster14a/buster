@@ -212,6 +212,16 @@ typedef enum Tier1SelectRule
     // IrFunction.rows; its operands are the call's arguments, the node's effective uses, each in a register
     // (tier1_select_row_supported). Only the CFG consumer takes it.
     TIER1_RULE_ROW,
+    // An asm body (#1839), an IR body call's (IrCall.body): an asm statement's records, which the CFG consumer writes in
+    // the node's place (tier1_emit_cfg_asm) with no call, its operand block's base (BUSTER_TIER0_ASM_BLOCK) the frame's base
+    // register and its displacement the block's frame object's past it, the block being the IR_STACK_ADDR the call's one
+    // argument is, which no register holds: the node has no operand and no result. Its own branches are the function's,
+    // to its records or its end. The general registers it touches are its fixed registers (tier1_select_node_fixed): the
+    // values that live past it there are saved in their call-save rows around it, a callee-saved register's too, as a
+    // fixed rule's are, and so are the floating values in the xmm registers it touches, in their rows, as a call's are;
+    // the prologue saves the callee-saved ones it touches. `immediate` is the body's index in IrFunction.asm_bodies (tier1_select_asm_supported).
+    // Only the CFG consumer takes it.
+    TIER1_RULE_ASM,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -2331,6 +2341,14 @@ struct Tier1SelectPattern
     bool sign_result;
 };
 
+// The fixed registers of a node's pattern (#1839): an asm body's general registers it touches (TIER1_RULE_ASM), or its
+// rule's (tier1_select_fixed_registers).
+static uint32_t tier1_select_node_fixed(const IrFunction* function, const Tier1SelectPattern* pattern)
+{
+    const bool body = pattern->rule == TIER1_RULE_ASM && pattern->immediate < function->asm_body_count;
+    return body ? function->asm_bodies[pattern->immediate].touched & 0xffffu : tier1_select_fixed_registers(pattern->rule);
+}
+
 typedef struct Tier1SelectPlan Tier1SelectPlan;
 struct Tier1SelectPlan
 {
@@ -3326,11 +3344,31 @@ static uint32_t tier1_select_call_staging_slots(const IrFunction* function, cons
 
 // Whether `node` calls a function (#141): an IR_CALL of a symbol or an IR_CALL_INDIRECT, which the consumers' calls take
 // (saves around it, argument moves, the outgoing area), not an IR row call (IrCall.row), which runs a machine row in
-// place of a callee (TIER1_RULE_ROW) and saves nothing around it.
+// place of a callee (TIER1_RULE_ROW) and saves nothing around it, nor a body call (IrCall.body, #1839), which runs an
+// asm body there (TIER1_RULE_ASM).
 static bool tier1_select_function_call(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
-    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0);
+    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0);
+}
+
+// Whether `node` is a body call (#1839, IrCall.body), whose asm body the CFG consumer writes in its place.
+static bool tier1_select_body_call(const IrFunction* function, uint32_t node)
+{
+    return node < function->instruction_count && function->op[node] == IR_CALL && function->calls[function->b[node]].body != 0;
+}
+
+// Whether the CFG consumer writes a body call's asm body (#1839, TIER1_RULE_ASM): its block, where it has one, an
+// IR_STACK_ADDR of a frame object, whose place in the frame its records' block base becomes, and none of the registers
+// that hold the frame (rsp, rbp, r15) among those it touches, as the producer has them (tier0_asm_bodies_check).
+static bool tier1_select_asm_supported(const IrFunction* function, uint32_t node)
+{
+    const IrCall* call = tier1_select_body_call(function, node) ? &function->calls[function->b[node]] : 0;
+    const IrAsmBody* body = call != 0 && call->body <= function->asm_body_count ? &function->asm_bodies[call->body - 1] : 0;
+    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    const uint32_t frame = (1u << X86_REGISTER_RSP) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R15);
+    return body != 0 && call->argument_count <= 1 && (call->argument_count == 0 || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR)) &&
+           (body->touched & frame) == 0;
 }
 
 // Which of a machine row's operands its records write (#141, a bit per operand), through a field that names the operand's
@@ -3563,7 +3601,8 @@ static bool tier1_select_row_supported(const IrFunction* function, uint32_t node
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
     // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
-    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT) && function->calls[function->b[node]].row == 0;
+    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT) && function->calls[function->b[node]].row == 0 &&
+                     function->calls[function->b[node]].body == 0;
     if (supported)
     {
         const IrCall call = function->calls[function->b[node]];
@@ -5209,6 +5248,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
+    else if (op == IR_CALL && function->calls[b].body != 0 && tier1_select_asm_supported(function, node))
+    {
+        // An asm body (#1839): its records in the node's place, its operand block the frame object its argument addresses.
+        base.rule = TIER1_RULE_ASM;
+        base.immediate = function->calls[b].body - 1;
+        base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (op == IR_CALL && function->calls[b].row != 0 && tier1_select_row_supported(function, node))
     {
         // A machine row (#141): its records, its operands' moves and its result's.
@@ -5591,7 +5638,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     {
         const uint32_t op = function->op[node];
         const bool row_call = op == IR_CALL && function->calls[function->b[node]].row != 0;
-        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !(row_call ? tier1_select_row_supported(function, node) : tier1_select_call_supported(function, node))))
+        const bool body_call = tier1_select_body_call(function, node);
+        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) &&
+                                !(row_call ? tier1_select_row_supported(function, node) : body_call ? tier1_select_asm_supported(function, node) : tier1_select_call_supported(function, node))))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }

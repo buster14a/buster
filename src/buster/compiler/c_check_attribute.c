@@ -5876,6 +5876,7 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
 }
 
 #include "c_check_cpu_dispatch.c"
+#include "c_check_target_versions.c"
 
 // clang's check of each attribute's subject (#147, its generated diagAppertainsToDecl, c_check_attribute_subjects.inc):
 // a declaration that is none of `subjects`' kinds an attribute's row names gets clang's warning that the attribute only
@@ -8009,10 +8010,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             valid = check_input_thread_attribute(reader, attribute, declaration, type);
         }
-        else if (kept && attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && attribute->argument_count == 0)
+        else if (kept && attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES)
         {
-            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_TARGET_CLONES_DEFAULT, 0);
-            valid = false;
+            // Its strings' versions (#1838, c_check_target_versions.c).
+            valid = check_input_target_clones(reader, attributes, attribute);
         }
         else if (kept && attribute->kind == CHECK_ATTRIBUTE_SELECTANY && (declaration & (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION)) != 0 &&
                  (declaration & BUSTER_CHECK_SUBJECT_EXTERNAL_OBJECT) == 0)

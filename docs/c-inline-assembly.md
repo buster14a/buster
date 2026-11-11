@@ -7,9 +7,10 @@ assembly" item). `c_check_program_asm.c` plans each statement, `assembler.c`'s
 A statement of plain register, memory and constant operands is placed in its
 caller, as one of Tier 0's machine operations (#1059: "Placed in the caller",
 below); most others are placed in their caller as an asm body, the helper's
-loads, template and stores in the call's place (#1839: "Asm bodies", below);
-the rest, templates of labels and branches, of directives and every statement
-under `--tier1`, are ordinary calls of a helper. A naked function's statements
+loads, template and stores in the call's place (#1839: "Asm bodies", below),
+and under `--tier1` every statement placed in its caller is one; the rest,
+templates of named labels and references, of directives and asm goto, are
+ordinary calls of a helper. A naked function's statements
 are its whole code instead, and the names templates define and refer to become
 symbols of the unit's object or executable.
 
@@ -129,13 +130,15 @@ exact helper: nothing changes for it.
 The template's rsp is its function's, but no placed template names it: rsp is
 no operand's register and no literal is placed. A placed statement changes
 neither the frame nor its unwind entry, which `unwind_tier0_frame` reads from
-the function's records as it reads Tier 0's own. Placement is Tier 0's alone:
+the function's records as it reads Tier 0's own. A row is Tier 0's alone:
 Tier 1's IR has no operation for a placed statement's row (`ir_simd_typed_row`
-decodes only the vector and mask rows of the x86 builtins), so a lowering the IR
-takes keeps every statement's helper (`CheckProgramOptions.asm_helpers`): the
-C driver's `--tier1` and the IR's source tools (`test-ir-source`,
-`test-tier1-cfg-source`), whose functions call it as before. `--helper-report`
-counts each placed statement as the `asm` family's direct form.
+decodes only the vector and mask rows of the x86 builtins), so the C driver's
+`--tier1` places such a statement as an asm body instead
+(`CheckProgramOptions.asm_bodies`, "Asm bodies" below), which Tier 1 takes, and
+the IR's source tools (`test-ir-source`, `test-tier1-cfg-source`), whose text
+form has no syntax for a body either, keep every statement's helper
+(`CheckProgramOptions.asm_helpers`). `--helper-report` counts each placed
+statement as the `asm` family's direct form.
 
 ## Asm bodies (#1839)
 
@@ -199,6 +202,22 @@ or control flow (a push, a call, a return, a jump or branch but the template's
 own to its labels), as `unwind_tier0_frame` refuses in a body, and one that
 writes rsp, rbp or r15, which hold the frame.
 
+A template that returns leaves its function, as clang's leaves its own (the
+owner's decision; a helper's return would leave the helper, which is refused by
+name). Its `ret`, and each record before it on a straight path to it (no branch
+among them, no label after the record), run only on the way out. Their effects
+on the stack, rbp and control stay out of the checks above, and what they write
+stays out of the touched set, since no later code of the function runs after
+them. `movl $7, %eax; leave; ret` returns 7 from its function. A function with
+such a body (`Tier0AsmBody.leaves`) keeps no local and no value in a
+callee-saved register, as one that calls `__builtin_setjmp` keeps none, so that
+the way out leaves the caller's registers as clang -O0's does, but for those the
+template writes. `--verify`'s frame verifier doesn't read its frame events, as
+it doesn't read a naked function's. With `-fno-omit-frame-pointer`, Tier 0's
+frame is rbp's and `leave; ret` returns to the caller, as from clang -O0's
+frame; without it, the template meets Tier 0's frame, which differs from clang's
+as any template that reads the frame does.
+
 What differs from the helper: the template's rsp is its function's, as clang's
 is, and the statement costs no call, return, pushes or block address.
 
@@ -209,6 +228,25 @@ loops of one statement each, against the same compiler's helpers
   registers 39% and cpuid 2%;
 - rdtsc and x87 `fsqrt`, dominated by their own latency, are level;
 - `-c` of `main.c` is unchanged (2.197 s → 2.189 s).
+
+Tier 1 takes asm bodies too (#1839, the owner's decision in
+[#1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
+item 2), and the C driver's `--tier1` places every statement it places in its
+caller as one, none as a row (`CheckProgramOptions.asm_bodies`), so that Tier 1's
+code runs the statements in their places, as Tier 0's does. The lowering to the IR
+makes the body's `CALL` a body call ([the IR guide](ir.md)'s "Asm bodies"): an
+opaque call of the operand block's address, which every pass takes as an unknown
+callee's of an escaped object, so that the block's stores stay before it and no
+access moves across it. Tier 1's selection makes it `TIER1_RULE_ASM` and its CFG
+consumer writes its records in place ([the selection guide](tier1-selection.md)'s
+"Asm bodies"): the values live past it in the registers it touches saved into
+their rows around it, its block's base the frame's base register, its branches
+the function's, and the callee-saved registers it touches pushed by the prologue.
+A function whose body returns (`Tier0AsmBody.leaves`) is still Tier 0's
+(`ir_lower`'s `IR_ERROR_UNSUPPORTED`, which `--tier1` falls back from), as one
+that calls `__builtin_setjmp` is. A template that names an opmask register keeps its helper
+under `--tier1` (`check_asm_names_opmask`): Tier 1's CFG consumer saves no mask
+value around a body, as it saves them around the helper's call.
 `--helper-report` counts each body as the `asm` family's direct form. The
 interpreter (`interpret-c`) refuses a function with a body, as it doesn't run
 machine code.
@@ -726,9 +764,11 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - a label in a template of no instructions, which would be a place in its
   function's code;
 - a template that returns before any branch (`ret`, `rep ret`, a `leave` and
-  `ret`), which would leave the helper's frame reserved; a template that jumps
-  over its return, as a called snippet's label does, stays admitted. The
-  assembler takes these instructions in `.s` files and file-scope assembly;
+  `ret`) and keeps its helper (a named label's, a directive's), which would leave
+  the helper's frame reserved; one that is an asm body returns from its caller
+  (#1839, above), and a template that jumps over its return, as a called
+  snippet's label does, stays admitted. The assembler takes these instructions
+  in `.s` files and file-scope assembly;
 - in a naked function, statements other than `asm` statements, which clang
   rejects, operands other than integer constants, and a body of no
   instructions.
@@ -903,11 +943,25 @@ has the commands, the logs and the default path's numbers against main.
   symbols, its undefined `.globl` declaration and `.set` absolute are left out,
   and its `.hidden` label has its visibility as clang's object gives it.
 - `test-checker-driver` reads a placed statement's instructions from its
-  function's own records in `-c`'s object, with no call, by both paths, and
-  `--tier1`'s calls of the statements' helpers in Tier 1's code of the function;
+  function's own records in `-c`'s object, with no call, by both paths and with
+  `--tier1` (its asm bodies, #1839, the function not refused);
   and runs an executable whose callee between two placed statements counts its
   stack by glibc's `backtrace` through the function's unwind entry, one frame
-  more than main's, by both paths and with `--tier1`.
+  more than main's, by both paths and with `--tier1`. Its asm bodies' fixture
+  (#1839, `c_check_tier1_driver_test.c`) compiles by `--tier1 --verify`, every
+  function Tier 1's, by both paths with and without rematerialization: `cpuid` in
+  a loop of eight live values and in always_inline wrappers beside `rdtsc`'s,
+  musl's syscall wrappers' shapes (r10, r8 and r9 explicit register variables),
+  the x87's `fsqrt` and fprem's loop, flag outputs, a template's own loop, a
+  bswap and an lfence, callee-saved clobbers in a loop of values live across a
+  call, xmm clobbers beside live floating values and rsp's alignment, against
+  clang -O0's build; and reads `tier1_cpuid`'s `cpuid`s in its own records, no
+  call, and rbx pushed by its prologue. Its returning templates
+  (#1839, `c_check_frame_pointer_driver_test.c`) build `leave; ret` on a branch
+  of the function and on the template's own branch with
+  `-fno-omit-frame-pointer`, by both paths under `--verify`, and link them with
+  clang's harness. The output must be clang's build's, the caller's rbx kept
+  through a template's return.
 - `test-tier0` checks which general-purpose forms a row takes and refuses.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the
   branch columns, the references, each refusal, and the arenas after a failure.
@@ -917,10 +971,11 @@ has the commands, the logs and the default path's numbers against main.
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
 templates of named labels (a symbol at the label's record) or references to
-names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name), templates that return, templates
-that take directives, forms of unknown effects outside `check_asm_implicit`, and
-Tier 1, whose IR has no operation for an asm body or a row it doesn't decode,
-so that its lowering keeps the helpers.
+names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name),
+templates that return but keep a helper for another reason (refused by name), templates
+that take directives, and forms of unknown effects outside `check_asm_implicit`.
+Under `--tier1`, a function with a template that returns is Tier 0's, and the
+code's certificate (`--verify`) leaves a function with an asm body uncertified.
 
 What the lowering still refuses of what GCC and clang take:
 
@@ -928,9 +983,8 @@ What the lowering still refuses of what GCC and clang take:
   tables), whose exits a helper has no address for;
 
 - labels in templates of no instructions (a place in the caller's code);
-- a template that returns, which clang places in its function's own code; the
-  helper design refuses it by name, until #1839 places such templates in their
-  callers;
+- a template that returns and keeps its helper for another of the reasons
+  above (a named label, a directive), which the helper design refuses by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
 - the matcher's gaps: MMX's `movq`, `lock xchg`, `ffreep`, and the

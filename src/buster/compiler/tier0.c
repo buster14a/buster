@@ -448,6 +448,11 @@ struct Tier0AsmBody
     const uint32_t* branches;
     const uint32_t* targets;
     uint32_t branch_count;
+    // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
+    // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
+    // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
+    // out leaves them as its caller had them but for the ones the template writes.
+    bool leaves;
 };
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
@@ -987,12 +992,30 @@ static int32_t tier0_integer_depth_count(bool realigned, bool moves)
     return BUSTER_TIER0_INTEGER_DEPTHS - (realigned ? 1 : 0) - (moves ? 1 : 0);
 }
 
-// The integer depths a function that calls __builtin_setjmp may reach (Tier0Function.returns_twice): the caller-saved
-// registers' alone, whose values its calls save in the frame and reload after, a return of setjmp's second time
-// included; any other function's `count`.
+// Whether one of a function's asm bodies returns from it (#1839, Tier0AsmBody.leaves).
+static bool tier0_asm_leaves(const Tier0Function* function)
+{
+    bool leaves = false;
+    for (uint32_t b = 0; !leaves && b < function->asm_body_count && function->asm_bodies != 0; b += 1)
+    {
+        leaves = function->asm_bodies[b].leaves;
+    }
+    return leaves;
+}
+
+// Whether a function keeps its callee-saved registers free of its own values: one that calls __builtin_setjmp
+// (Tier0Function.returns_twice), and one with an asm body whose template returns (#1839, Tier0AsmBody.leaves).
+static bool tier0_leaves_callee_saved(const Tier0Function* function)
+{
+    return function->returns_twice || tier0_asm_leaves(function);
+}
+
+// The integer depths a function that keeps its callee-saved registers free (tier0_leaves_callee_saved) may reach: the
+// caller-saved registers' alone, whose values its calls save in the frame and reload after, a return of setjmp's second
+// time included; any other function's `count`.
 static int32_t tier0_returns_twice_depths(const Tier0Function* function, int32_t count)
 {
-    return function->returns_twice && count > BUSTER_TIER0_CALLER_SAVED_DEPTHS ? BUSTER_TIER0_CALLER_SAVED_DEPTHS : count;
+    return tier0_leaves_callee_saved(function) && count > BUSTER_TIER0_CALLER_SAVED_DEPTHS ? BUSTER_TIER0_CALLER_SAVED_DEPTHS : count;
 }
 
 // The callee-saved registers, in the order the prologue pushes them and homes take them. r15, a realigned frame's base
@@ -4372,10 +4395,12 @@ static bool tier0_value_object(const Tier0Function* function, uint64_t local, ui
 // Whether a frame that neither moves rsp nor is realigned keeps a frame pointer all the same (#177): where the options
 // ask for one (Tier0Function.frame_pointer), every frame's, or with the leaf rule one whose function `calls`; and an
 // eh_return function's (#148, Tier0Function.eh_return), from which its unwinding finds the CFA; and a preserving
-// function's (#147, Tier0Function.preserve_general), whose pushes past rbp's are then no transitions of its unwind tables.
+// function's (#147, Tier0Function.preserve_general), whose pushes past rbp's are then no transitions of its unwind tables;
+// and the frame of a function with an asm body whose template returns (#1839, tier0_asm_leaves), a `leave; ret` that
+// restores rsp from rbp.
 static bool tier0_kept_pointer(const Tier0Function* function, bool calls)
 {
-    return function->eh_return || tier0_preserving(function) || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL ||
+    return function->eh_return || tier0_preserving(function) || tier0_asm_leaves(function) || function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL ||
            (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
 }
 
@@ -4755,9 +4780,11 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
         }
     }
     // A frame pointer's rbp is no home either, nor a realigned frame's base, r15, nor in a function that calls
-    // __builtin_setjmp (Tier0Function.returns_twice) any callee-saved register, which its longjmp doesn't restore.
+    // __builtin_setjmp (Tier0Function.returns_twice) any callee-saved register, which its longjmp doesn't restore, nor
+    // in one whose asm body returns (Tier0AsmBody.leaves), whose way out doesn't (tier0_leaves_callee_saved).
     uint32_t taken = frame->clobbers | arrivals | 1u << X86_REGISTER_RSP | (frame->pointer ? 1u << X86_REGISTER_RBP : 0) | (frame->based ? 1u << X86_REGISTER_R15 : 0);
-    for (uint32_t c = 0; function->returns_twice && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    const bool kept_free = tier0_leaves_callee_saved(function);
+    for (uint32_t c = 0; kept_free && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         taken |= 1u << tier0_callee_saved[c];
     }
