@@ -73,6 +73,11 @@ typedef enum IrSimdOperation
     // unsigned range, into the result's low bytes, zeros past them.
     IR_SIMD_EXTEND,
     IR_SIMD_TRUNCATE,
+    // A shift of each integer lane by one scalar count (#1840, ir.c's BUSTER_IR_INTRINSIC_SHIFT), b's low 32 bits read
+    // unsigned (b a scalar, its shape none), the lanes' bytes' log2 and the shift in the action's `index`: a left or
+    // logical right shift by the lane's bits or more is 0, an arithmetic one every bit the sign, as vpsllw to vpsraq
+    // compute them by a count in an xmm register.
+    IR_SIMD_SHIFT,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -216,7 +221,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         valid = action->operation == IR_SIMD_COMPARE || action->predicate == IR_SIMD_EQ;
         valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT || action->operation == IR_SIMD_PERMUTE ||
                           action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
-                          action->operation == IR_SIMD_TRUNCATE);
+                          action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -271,6 +276,10 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                         (extend ? result > source && mode <= 1 && lanes * (8u << source) <= ir_simd_bits(a) :
                                   result < source && mode <= 2 && ir_simd_bits(type) == (bits > 128 ? bits : 128));
             } break;
+            case IR_SIMD_SHIFT:
+                valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index & 3) != 0 &&
+                        ((action->index >> 2) & 3) <= 2 && (action->index >> 4) == 0;
+                break;
             case IR_SIMD_SHUFFLE_LANES:
                 valid = valid && a == type && b == type && c == IR_SIMD_NONE && ((type == IR_SIMD_V8I32 && action->index < 4) || type == IR_SIMD_V16I32);
                 break;
@@ -544,6 +553,21 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                 value = raw > high ? high : raw;
             }
             ir_simd_lane_write(&staged, result, lane, result == 64 ? value : value & ((UINT64_C(1) << result) - 1));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_SHIFT)
+    {
+        // Each lane by the scalar count, by the lane operations' own shifts (ir_simd_integer_operation), which give 0 or the
+        // sign past the lane's bits.
+        static const uint8_t shifts[3] = { IR_SIMD_SHL, IR_SIMD_LSHR, IR_SIMD_ASHR };
+        valid = values[1] != NULL;
+        const uint32_t lane_bits = 8u << (action->index & 3);
+        const uint32_t lanes = ir_simd_bits(action->result) / lane_bits;
+        const uint64_t count = valid ? values[1]->words[0] & UINT32_MAX : 0;
+        for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
+        {
+            const uint64_t a = ir_simd_lane_read(values[0], lane_bits, lane);
+            ir_simd_lane_write(&staged, lane_bits, lane, ir_simd_integer_operation((IrSimdOperation)shifts[(action->index >> 2) & 3], a, count, lane_bits));
         }
     }
     else if (valid && action->operation >= IR_SIMD_PERMUTE && action->operation <= IR_SIMD_SHUFFLE_LANES)
