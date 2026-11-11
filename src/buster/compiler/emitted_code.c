@@ -81,6 +81,11 @@ struct EmittedCode
     // First records by label index; UINT32_MAX is an absent label, not an indirect control-flow target.
     uint32_t* label_records;
     uint32_t label_count;
+    // The asm bodies' labels (#1839, Tier0Code.asm_label_records): each one's first record (the count for the end) and
+    // its name, the front end's index (CheckProgramAsms.names).
+    const uint32_t* asm_label_records;
+    const uint32_t* asm_label_names;
+    uint32_t asm_label_count;
     const Tier0Home* local_homes;
     uint32_t local_count;
     const EmittedLocalRange* local_ranges;
@@ -378,6 +383,9 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
         .reference_count = code->reference_count,
         .label_records = code->label_records,
         .label_count = code->label_count,
+        .asm_label_records = code->asm_label_records,
+        .asm_label_names = code->asm_label_names,
+        .asm_label_count = code->asm_label_count,
         .assembly = assembly,
         .error = (uint32_t)code->error,
         .node = code->node,
