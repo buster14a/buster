@@ -293,12 +293,6 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
     return passed;
 }
 
-// check_request_scan_match of `argument`, looked up.
-static bool check_request_scan(CheckRequestScan* scan, const char* argument)
-{
-    return check_request_scan_match(scan, argument, c_option_find(argument));
-}
-
 // What the request scanned into `scan` asks for that the driver doesn't implement: code generation's options, with the
 // object and linkage options' when `emits` (-c, or a link), which the driver reports before a usage error; then, with
 // `options` (null before they are parsed), its instrumentation and its position-independent code when `emits`, its

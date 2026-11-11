@@ -237,7 +237,7 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         for (uint32_t i = 0; i < count; i += 1)
         {
             const bool valued = i + 1 < count && pp_option_takes_value(options[i]);
-            passed += valued ? 2 : check_request_scan(&scan, options[i]) ? 1 : 0;
+            passed += valued ? 2 : check_request_scan_match(&scan, options[i], c_option_find(options[i])) ? 1 : 0;
             i += valued ? 1 : 0;
         }
         Arena arena = arena_reserve(UINT64_C(1) << 24);
