@@ -284,6 +284,8 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         // An atomic access aligned below its size (#1059): x86 makes only a naturally aligned one single-copy atomic.
         { "function (ptr) -> i64 {\nb0:\n%0 = param.ptr 0\n%1 = load.i64 %0 align=1 atomic seq_cst\n%2 = ret.void %1\n}\n", IR_PARSE_VERIFY },
         { "function (ptr, i32) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i32 1\n%2 = store.void %0, %1 align=2 atomic release\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
+        // A segment override (#1447) is a load's or a store's alone.
+        { "function (ptr) -> void {\nb0:\n%0 = param.ptr 0\n%1 = load.i32 %0 align=4 fs gs\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
         { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=1 add seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
         // A compare-exchange without its desired value, an exchange with one, and a desired value of another type.
         { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=2 cas seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
@@ -696,6 +698,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/hello.ir",
                 "tests/ir/fences.ir",
                 "tests/ir/atomics.ir",
+                "tests/ir/segments.ir",
                 "tests/ir/wide.ir",
                 "tests/ir/intrinsics.ir",
                 "tests/ir/bit-intrinsics.ir",
