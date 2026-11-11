@@ -9727,7 +9727,38 @@ enables, which this checker doesn't all give.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
+- **A failed static assertion's details** (#2171, `check_semantic_assert`).
+  - **The failing conjunct.** An `&&`'s first conjunct that fails is the
+    requirement, reported at its start, as clang's `findFailedBooleanCondition`
+    finds it: `K == 3 && 1`'s `'K == 3'`.
+  - **The note.** clang's `DiagnoseStaticAssertDetails` adds "expression
+    evaluates to" at the operator of a failed binary condition, except `||`.
+    It needs a side that isn't a literal through unary operators (clang's
+    `UsefulToPrintExpr`), and isn't a boolean value compared with C23's
+    `true` or `false` (`isKnownToHaveBooleanValue`).
+  - **The sides' values** are printed with their implicit conversions
+    skipped (`check_semantic_assert_value`, `ConvertAPValueToString`):
+    - a bool as `true` or `false`;
+    - a plain char as clang's character literal, then its code unit and
+      value (`'\n' (0x0A, 10)`, `'<U+0001>'`, `'<0xFF>'`);
+    - another integer in decimal, to 128 bits;
+    - a float, a double or a long double as llvm's `APFloat::toString`
+      spells it (`check_semantic_assert_floating`: `100`, `0.5`,
+      `0.10000000000000001`, `1.0E+10`).
+  - **The requirement's number literals** print as clang's StmtPrinter
+    prints them (`check_semantic_number_literal`):
+    - an integer's value and its type's suffix (`1u`'s `1U`,
+      `0x7fffffffffffffffLL`'s `9223372036854775807LL`);
+    - a floating one's APFloat spelling, with a `.` where that is all
+      digits, and its `F` or `L` (`2.0`'s `2.`, `1.5f`'s `1.5F`);
+    - a C23 `(_Bool)` cast's `(bool)`.
+
+  Their fixtures are in `c_check_type_sugar_driver_test.c`.
 - **Differences left.**
+  - A static assertion's side of a complex, vector, pointer or `__float128`
+    value gets no note, as clang's gives one for some of them. A number
+    literal of another type (`_BitInt`'s `wb`, `__int128`'s) prints as
+    written.
   - A cast inside a variable array's bound prints its builtin type keywords
     as clang's TypePrinter does (`int[(unsigned)n]` is `'int[(unsigned int)n]'`,
     `check_semantic_builtin_spelling`), but other type names as written: a
