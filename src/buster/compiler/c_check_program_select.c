@@ -835,6 +835,19 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 definition_flags[definition - 1] |= BUSTER_C_LOWERING_ALIAS_TARGET;
             }
         }
+        // `#pragma weak A = T`'s T whose A the unit never declares (#1849, CheckInputSymbolPragma.alias_target): the alias
+        // check_program_define_pragma_aliases makes is at its definition, as an alias attribute's is at its base's.
+        const CheckInputSymbolPragmas* weak_aliases = input->symbol_pragmas;
+        for (uint32_t i = 0; valid && weak_aliases != NULL && i < weak_aliases->count; i += 1)
+        {
+            const uint32_t target = weak_aliases->records[i].alias_target;
+            const uint32_t object = target < input->token_count ? input->objects[target] : 0;
+            const uint32_t definition = object != 0 && object < objects ? object_definitions[object] : 0;
+            if (definition != 0)
+            {
+                definition_flags[definition - 1] |= BUSTER_C_LOWERING_ALIAS_TARGET;
+            }
+        }
         // A static function multiversioned by target strings whose resolver the unit emits (#1838): clang emits each
         // version, which the resolver reaches though no reference names its object (references reach R).
         for (uint32_t g = 0; valid && g < full->target_group_count; g += 1)

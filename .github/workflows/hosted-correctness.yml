@@ -574,15 +574,16 @@ jobs:
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
-        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
-        # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. It comes
+        # from the mirror in the run's offline inputs, with no network (#2275), as the 9700X's comes from its private
+        # cache: Git's pack protocol checks it again (fetch-c-testsuite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
       - name: Fetch SQLite's sources at their pinned commit
         # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
-        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
-        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, from the run's offline inputs
+        # as c-testsuite's above (fetch-sqlite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
