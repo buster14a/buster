@@ -1131,6 +1131,9 @@ static void arena_discard_huge(Arena* arena)
     arena_discard_to(arena, 0, true);
 }
 
+// Whether arena_static_base_pages has advised .bss, written only after its advice, so that the write is a base page's.
+static bool arena_static_advised;
+
 static void arena_static_base_pages(void)
 {
     // The linker's bounds of .bss; its first page may hold .data's last bytes, which are file-backed.
@@ -1138,9 +1141,10 @@ static void arena_static_base_pages(void)
     extern char _end[];
     const uintptr_t begin = ((uintptr_t)__bss_start + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
     const uintptr_t end = ((uintptr_t)_end + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
-    if (end > begin)
+    if (!arena_static_advised && end > begin)
     {
         madvise((void*)begin, end - begin, MADV_NOHUGEPAGE);
+        arena_static_advised = true;
     }
 }
 

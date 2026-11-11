@@ -2524,6 +2524,13 @@ extern int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
 #endif
 static int main_driver(int argc, char** argv)
 {
+    // A source command's .bss in base pages (arena_static_base_pages) before its first write: arena_page_policy's
+    // variables are statics, and their page, written before the advice, took a 2 MB huge page with transparent huge pages
+    // `always` (#1444), one of an empty file's two.
+    if (argc >= 2 && argv[1][0] == '-')
+    {
+        arena_static_base_pages();
+    }
     // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
     arena_page_policy(getenv("BUSTER_HUGE_PAGES"));
 #if BUSTER_SANITIZER_RESOURCES
