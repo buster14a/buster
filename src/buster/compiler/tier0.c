@@ -456,6 +456,9 @@ struct Tier0AsmBody
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
     // out leaves them as its caller had them but for the ones the template writes.
     bool leaves;
+    // Whether it moves an input into rsp before its template (#1846: rsp's explicit register variable), as clang's code
+    // does: the frame is then the program's to keep, which the frame verifier doesn't read (tier0_asm_stack).
+    bool stack;
 };
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
@@ -1004,6 +1007,17 @@ static bool tier0_asm_leaves(const Tier0Function* function)
         leaves = function->asm_bodies[b].leaves;
     }
     return leaves;
+}
+
+// Whether one of a function's asm bodies moves an input into rsp (#1846, Tier0AsmBody.stack).
+static __attribute__((unused)) bool tier0_asm_stack(const Tier0Function* function)
+{
+    bool stack = false;
+    for (uint32_t b = 0; !stack && b < function->asm_body_count && function->asm_bodies != 0; b += 1)
+    {
+        stack = function->asm_bodies[b].stack;
+    }
+    return stack;
 }
 
 // Whether a function keeps its callee-saved registers free of its own values: one that calls __builtin_setjmp

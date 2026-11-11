@@ -418,10 +418,22 @@ A statement of a high byte's or an XMM16-up variable is an asm body (#1839) that
 loads its operands from its block by those names, as the helper does, rather
 than take them as its call's arguments (`check_asm_inline_passes`).
 
-rsp stays refused: clang's code moves the variable's value into rsp before the
-template (an uninitialized local's garbage), where a helper's rsp is its own;
-the Linux kernel's idiom, a global register variable in rsp, is a declaration
-the checker doesn't take yet.
+rsp (`"rsp"`, `"esp"` or `"sp"`, #1846, the owner's decision on #1447) is placed
+as clang's code places it: an output is read from rsp after the template, by
+the variable's width (`movw %sp`), even after a template of no instructions
+(`asm("" : "=r"(sp))` reads rsp, as clang's does); an input's value is moved
+into rsp before the template, after every other load and at the variable's
+width (a `short`'s keeps rsp's other bits, as clang's `movw %ax, %sp` does), and
+the template names it `%rsp` (`%esp`, `%sp`); an input beside an rsp output that
+isn't early-clobbered or `+` shares it. An input that isn't rsp's own value
+leaves the frame as clang's code leaves it: broken (an uninitialized local's
+`"r"(sp)` is garbage there too, and clang's build crashes). Such a statement is
+always an asm body (#1839), whose records load the input themselves, never a
+helper, whose rsp would be its own: a template that takes directives, or one
+that keeps a helper for another reason, refuses it by name. A function with a
+body that moves a value into rsp (`Tier0AsmBody.stack`) leaves its frame to the
+program, as one whose template returns does: `--verify` doesn't read its frame
+events. (`spl` isn't a register variable's name for clang, which rejects it.)
 
 The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
@@ -856,8 +868,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector in a template of no instructions that doesn't refer to it;
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
-  (rsp, which is the helper's own, APX's r16 to r31, st(2) to st(7), YMM's and
-  ZMM's), in XMM16 to
+  (APX's r16 to r31, st(2) to st(7), YMM's and ZMM's), in rsp in a statement
+  that keeps a helper (a template that takes directives among them), in XMM16 to
   XMM31 without AVX-512F, in a high byte in a template that takes directives,
   as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
   types than a general register's or an XMM register's (an integer in an XMM
@@ -1121,6 +1133,5 @@ What the lowering still refuses of what GCC and clang take:
 - the matcher's gaps: the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
-- explicit register variables in rsp (clang's code moves the variable's value
-  into it, a local's garbage where it has none), and in YMM's and ZMM's
-  registers and st(2) up.
+- explicit register variables in rsp in statements that keep a helper (a
+  template that takes directives), and in YMM's and ZMM's registers and st(2) up.

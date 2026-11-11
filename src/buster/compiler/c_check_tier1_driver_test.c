@@ -2881,7 +2881,8 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // register variables) on system calls whose results don't vary, the x87's fsqrt on `+t` and fprem's loop with the
 // status word in %ax, flag outputs, a template's own loop (`1: decl; jnz 1b`), a bswap and an lfence (Tier 0's rows,
 // asm bodies under --tier1), callee-saved clobbers inside a loop of live values across a call, xmm clobbers beside live
-// floating values, and rsp's alignment at the template. Clang -O0's build is its oracle.
+// floating values, rsp's alignment at the template, and rsp's explicit register variable read and moved back (#1846).
+// Clang -O0's build is its oracle.
 static const char check_test_tier1_asm_source[] =
     "int printf(const char* format, ...);\n"
     "static inline __attribute__((always_inline)) unsigned long tier1_rdtsc(void)\n"
@@ -2993,6 +2994,16 @@ static const char check_test_tier1_asm_source[] =
     "    __asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));\n"
     "    return (int)(sp & 15);\n"
     "}\n"
+    "static int tier1_stack(void)\n"
+    "{\n"
+    "    register unsigned long sp __asm__(\"rsp\");\n"
+    "    __asm__(\"\" : \"=r\"(sp));\n"
+    "    unsigned long before = sp;\n"
+    "    __asm__ volatile(\"\" : \"+r\"(sp));\n"
+    "    unsigned long r;\n"
+    "    __asm__(\"mov %1, %0\" : \"=r\"(r) : \"r\"(sp));\n"
+    "    return sp == before && r == before && (sp & 7) == 0;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    printf(\"cpuid %u\\n\", tier1_cpuid(7, 1, 2, 3, 4, 5, 6, 7));\n"
@@ -3002,6 +3013,7 @@ static const char check_test_tier1_asm_source[] =
     "    printf(\"count %d swap %u\\n\", tier1_count(10), tier1_swap(0x01020304u, 5));\n"
     "    printf(\"saved %ld\\n\", tier1_callee_saved(9));\n"
     "    printf(\"vectors %.3f aligned %d\\n\", tier1_vectors(1.25, 4), tier1_aligned());\n"
+    "    printf(\"stack %d\\n\", tier1_stack());\n"
     "    return 0;\n"
     "}\n";
 

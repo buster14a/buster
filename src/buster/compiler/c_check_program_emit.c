@@ -1612,8 +1612,9 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                     tier0_inline_code(&compiled, function, &inlined, lane->scratch);
                 }
                 // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
-                // read, as it doesn't a naked function's.
-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources, naked != 0 || tier0_asm_leaves(source),
+                // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
+                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources,
+                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source),
                                                    lane->scratch);
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
