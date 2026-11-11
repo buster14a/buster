@@ -825,6 +825,130 @@ The tests:
 Rotates (`vprold` and the rest by an immediate) stay machine rows: the
 compiler's own units have one.
 
+## Lane operations (#1840)
+
+One more binary kind of `intrinsic`, `lane_op` (`BUSTER_IR_INTRINSIC_LANE_OP`),
+computes what the IR's opcodes lack on two vectors' integer lanes:
+
+```text
+%6 = intrinsic.v16i32 %3, %3 lane_op 29
+```
+
+- a and b are of the result's type.
+- `flags` hold the lanes' bytes' log2 (bits 0 and 1: bytes to quadwords) and
+  the operation (bits 2 to 4): the unsigned (0) and signed (1) minimum, the
+  unsigned (2) and signed (3) maximum, and, of bytes and words alone, the
+  unsigned (4) and signed (5) saturating sum and the unsigned (6) and signed (7)
+  saturating difference a − b.
+
+`ir_lane_op_flags_valid` is the verifier's rule. The model's `IR_SIMD_LANE_OP`
+computes each lane, and the interpreter, SCCP, GVN and LICM take it as they
+take the shifts.
+
+`ir_simd_typed_lane_op` decodes clang's `__builtin_elementwise_min`, `_max`,
+`_add_sat` and `_sub_sat` of integer vectors, which clang's headers'
+`_mm512_min_epu8` to `_mm512_subs_epi16` call. Their rows are one record of
+`vpminub` to `vpmaxsq` or `vpaddusb` to `vpsubsw`, VECTOR(0) (vvvv) and
+VECTOR(1) (rm) into VECTOR(0). The target needs the form's features (BW for
+bytes and words), AVX512F's and VL's below 64 bytes. Tier 1 selects the form
+back (`BUSTER_TIER1_VECTOR_LANE_OP`), from the table the decoder shares
+(`ir_simd_lane_op_forms`). Their 72 register forms had no Zen 5 row; they were
+measured on the 9700X: 2 cycles of latency, the minima and maxima of bytes to
+doublewords 4 per cycle and the others 2
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
+buster-performance#388). The reductions (`__builtin_reduce_min` and the rest,
+several records) stay machine rows.
+
+The producer's forms (`check_vector_elementwise_forms`) moved to
+`c_check_program_vector_convert.c` with the conversions' row, so that the
+backend unit's tests read them.
+
+Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
+#1972's sources (`2461071`), against the masks' conversions:
+
+| Unit | Rows before | Rows after | Records |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 596 | 541 | 543,612 both |
+| `main_unit_backend.c` | 784 | 752 | 1,541,683 both |
+
+The tests:
+
+- `test-ir`: both verifiers admit `lane_op` at each vector width, for every
+  flags byte below 64 and a second operand of the result's type or another
+  width's, exactly where operation, lanes and operands agree (72 forms). The
+  model is checked against C's minimum, maximum and clamped sum and difference
+  of each lane, on random vectors with extreme lanes.
+- `test-ir-parse` and `test-ir-optimize`: the text, and SCCP's folds of two
+  constant vectors by both paths.
+- `test-ir-simd`: every form the producer has decodes (72: minima and maxima
+  of 4 element sizes, both signs, 3 widths; saturations of bytes and words),
+  checked against flags and features written out. Each row is refused without
+  each feature it needs and under 6 changes.
+- `test-tier1-masks`: each of the 72 rows runs as a program's only row, through
+  both lowering paths, the interpreter at every stage and Tier 1 natively,
+  against C's operations on inputs with lanes at the saturations' edges.
+
+## Masks to vectors and back (#1840)
+
+The masks' conversions to vectors and back need no new operation:
+
+- `ir_simd_typed_mask_vector` decodes the MASK_VECTOR rules' rows
+  (`__builtin_ia32_cvtmask2b` to `_cvtmask2q`: `vpmovm2b` to `vpmovm2q` of
+  MASK(0) into VECTOR(0)) as the IR's `vselect` of the mask, all ones and zeros,
+  at the elements' lanes.
+- It decodes the VECTOR_MASK rules' rows (`__builtin_ia32_cvtb2mask` to
+  `_cvtq2mask`: `vpmovb2m` to `vpmovq2m` of VECTOR(0) into MASK_RESULT) as the
+  IR's `vcmp lt` of the signed lanes and a zero vector: the mask of the lanes'
+  sign bits.
+
+Both rows must be register-direct and undecorated, as the opmask conversion
+leaves them, with a mask of a bit per lane. The target needs the forms'
+features (BW for bytes and words, DQ for doublewords and quadwords), AVX512F's,
+VL's below 64 bytes and the mask's moves (DQ for a byte's, BW for 32 and 64
+lanes').
+
+Tier 1 matches the two shapes back to the single instructions
+(`BUSTER_TIER1_VECTOR_MASK_EXPAND` and `_SIGN_MASK`,
+`tier1_select_mask_vector`). The candidate comes first, since the bottom-up
+path takes its rule's first, and reads neither constant, so neither is
+materialized where nothing else uses it:
+
+- a `vselect` whose true operand is a vector constant of every bit and whose
+  false one is zeros is `vpmovm2b` to `vpmovm2q` at its lanes (a float's are a
+  doubleword's bits, a double's a quadword's). This includes the expansion of
+  every C comparison of vectors, which was `vpblendm` of two materialized
+  constants;
+- a `vcmp lt` of signed integer lanes and a zero vector is `vpmovb2m` to
+  `vpmovq2m`.
+
+Their doublewords' and quadwords' forms are AVX512DQ's, which every vector
+comparison of the front end needs already. At a target without it, the
+emission's form check sends the function to Tier 0. The 12 `vpmov*2m` register
+forms had no Zen 5 row; on the 9700X they measured 3, 4 and 6 cycles of latency
+at 16, 32 and 64 bytes, 2 per cycle
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
+buster-performance#388).
+
+Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
+#1972's sources (`2461071`), against the shifts' change:
+
+| Unit | Rows before | Records before | Rows after | Records after |
+| --- | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 628 | 543,620 | 596 | 543,612 |
+| `main_unit_backend.c` | 792 | 1,541,683 | 784 | 1,541,683 |
+
+No mask conversion stays a machine row (there were 32 and 8).
+
+The tests:
+
+- `test-ir-simd`: decodes, by the real producer, every MASK_VECTOR and
+  VECTOR_MASK rule's row (12 each), checked against lanes and features written
+  out. Each is refused without each feature it needs and under 6 changes.
+- `test-tier1-masks`: each of the 24 rules runs as a program's only row: a mask
+  from an input word into a vector, or a vector into a mask stored zero-extended.
+  Each goes through both lowering paths, the interpreter at every stage and Tier
+  1's native code, against a model from Intel's manual.
+
 ## Lanes: the vectors' element types (#141)
 
 The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
@@ -911,8 +1035,8 @@ take but the target refuses stays refused. So the decoders' refusals above are
 now each a machine row, or a refusal by class or target: `test-ir-simd`'s
 mutations of the `_k*` and BMI rows check that none decodes as the front end's
 operation, and that the decoder of its family refuses it. `test-ir-simd` also
-decodes a saturating byte addition's, a masked store's of no result and a shift's
-of a count from a general register as machine rows, with their classes and exactly their
+decodes a byte average's, a masked store's of no result and a shift's of a 64-bit
+count from a general register as machine rows, with their classes and exactly their
 features, each refused without each feature it needs.
 
 Consumers classify vectors with `ir_function_has_vectors`, 64

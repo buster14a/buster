@@ -98,7 +98,9 @@ static void check_test_symbol_pragmas(CheckTest* test)
         { "#pragma redefine_extname f exported_f\n#pragma redefine_extname f ignored_f\nint f(void){return 7;}\n", true, false, "exported_f" },
         { "#pragma redefine_extname missing exported_f\nint f;\n", true, false, NULL },
         { "_Pragma(\"weak f\")\nint f;\n", true, true, NULL },
-        { "#pragma weak f = g\nint g(void){return 7;}\n", false, false, NULL },
+        // clang's clone of g's declaration under f (#1849), which the emission makes: f has no declaration of its own.
+        { "#pragma weak f = g\nint g(void){return 7;}\n", true, false, NULL },
+        { "#pragma weak f = g\nint g(void);\n", false, false, NULL },
         { "#pragma weak missing\nint f;\n", true, false, NULL },
         { "#pragma weak f\nstatic int f;\n", true, false, NULL },
         { "#pragma redefine_extname f exported_f\nstatic int f;\n", true, false, NULL },

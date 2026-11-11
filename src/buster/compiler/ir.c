@@ -35,15 +35,17 @@
 #define BUSTER_IR_ATOMIC 2
 #define BUSTER_IR_ORDER_SHIFT 2
 #define BUSTER_IR_ORDER (7u << BUSTER_IR_ORDER_SHIFT)
-// A load's or a store's segment override (#1447): FS (clang's address space 257, __seg_fs) or GS (256, __seg_gs), numbered
-// as the typed stream's (BUSTER_TYPED_SEGMENT_FS, _GS) and the encoder's overrides are (form + segment * X86_FORM_COUNT).
+// A load's or a store's segment override (#1447): FS (clang's address space 257, __seg_fs), GS (256, __seg_gs) or SS (258,
+// whose base 64-bit mode ignores but whose 36 clang emits), numbered as the typed stream's (BUSTER_TYPED_SEGMENT_FS, _GS,
+// _SS) and the encoder's overrides are (form + segment * X86_FORM_COUNT).
 // Its address is an offset from the segment's base, not a flat address: no pass relates it to another access's, so such
 // an access is observable (BUSTER_IR_OBSERVABLE), kept as it is and where it is, and no load folds into its consumer.
-// 3 is none. An atomic read/modify/write's operation has these bits; a function with one in a segment stays Tier 0's.
+// An atomic read/modify/write's operation has these bits; a function with one in a segment stays Tier 0's.
 #define BUSTER_IR_SEGMENT_SHIFT 5
 #define BUSTER_IR_SEGMENT (3u << BUSTER_IR_SEGMENT_SHIFT)
 #define BUSTER_IR_SEGMENT_FS 1u
 #define BUSTER_IR_SEGMENT_GS 2u
+#define BUSTER_IR_SEGMENT_SS 3u
 #define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_SEGMENT)
 // The accesses every pass keeps as they are and where they are: a volatile one, an atomic one and one in a segment.
 #define BUSTER_IR_OBSERVABLE (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_SEGMENT)
@@ -252,7 +254,13 @@ typedef enum IrOp
 // an xmm register's low quadword, which the x86 builtins' shifts by an int move there by vmovd. A count that is a
 // constant is the immediate form's (tier1_select.c).
 #define BUSTER_IR_INTRINSIC_SHIFT 24u
-#define BUSTER_IR_INTRINSIC_COUNT 25u
+// A binary operation of two vectors' integer lanes that the IR's own opcodes lack (#1840), of a and b of the result's
+// type: its flags the lanes' bytes' log2 in bits 0 and 1 (0 to 3: bytes to quadwords) and the operation in bits 2 to 4:
+// the unsigned (0) and signed (1) minimum, the unsigned (2) and signed (3) maximum, and of bytes and words alone the
+// unsigned (4) and signed (5) saturating sum, and the unsigned (6) and signed (7) saturating difference a - b
+// (vpminub to vpmaxsq, vpaddusb to vpsubsw: clang's __builtin_elementwise_min, _max, _add_sat and _sub_sat).
+#define BUSTER_IR_INTRINSIC_LANE_OP 25u
+#define BUSTER_IR_INTRINSIC_COUNT 26u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -784,6 +792,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "extend",
     "truncate",
     "shift",
+    "lane_op",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -812,8 +821,7 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 {
     const uint32_t order = (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
     const uint32_t orders = op == IR_LOAD ? 0x27u : 0x29u;
-    return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && (flags & BUSTER_IR_SEGMENT) != BUSTER_IR_SEGMENT &&
-           ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
+    return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
@@ -1348,6 +1356,14 @@ static bool ir_shift_flags_valid(uint32_t flags)
     const uint32_t lanes = flags & 3;
     const uint32_t shift = (flags >> 2) & 3;
     return lanes != 0 && shift <= 2 && (flags >> 4) == 0;
+}
+
+// Whether a lane operation's flags (#1840, BUSTER_IR_INTRINSIC_LANE_OP) are valid: a minimum or a maximum of any integer
+// lanes, a saturating sum or difference of bytes or words.
+static bool ir_lane_op_flags_valid(uint32_t flags)
+{
+    const uint32_t operation = (flags >> 2) & 7;
+    return (flags >> 5) == 0 && (operation < 4 || (flags & 3) <= 1);
 }
 
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
@@ -1912,6 +1928,17 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     else
                     {
                         valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_permute_flags_valid(c, type, part);
+                    }
+                }
+                else if (c == BUSTER_IR_INTRINSIC_LANE_OP)
+                {
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else
+                    {
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_lane_op_flags_valid(part);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_SHIFT)
@@ -3316,7 +3343,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             // A width change's part (#1840), its immediate.
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
-                                c == BUSTER_IR_INTRINSIC_SHIFT)
+                                c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }
@@ -3344,7 +3371,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             const uint32_t segment = (f->flags[i] & BUSTER_IR_SEGMENT) >> BUSTER_IR_SEGMENT_SHIFT;
                             if (segment != 0)
                             {
-                                fprintf(output, " %s", segment == BUSTER_IR_SEGMENT_FS ? "fs" : segment == BUSTER_IR_SEGMENT_GS ? "gs" : "invalid");
+                                fprintf(output, " %s", segment == BUSTER_IR_SEGMENT_FS ? "fs" : segment == BUSTER_IR_SEGMENT_GS ? "gs" : "ss");
                             }
                         }
                     } break;

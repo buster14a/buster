@@ -761,6 +761,11 @@ struct TypeNames
     const uint64_t* bound_ids;
     const String8* bound_texts;
     uint32_t bound_count;
+    // Optional (#1447): the macros of type sugar's MACRO nodes (c_types_sugar.c), by the attribute list's first token,
+    // which only the caller's expansion history resolves (`'MS void (*)(void)'`).
+    const uint32_t* sugar_macro_tokens;
+    const String8* sugar_macro_texts;
+    uint32_t sugar_macro_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
@@ -772,6 +777,9 @@ struct TypeNames
 // #1447): an a.k.a.'s or a macro's (`intel_ocl_bicc`, and swiftasynccall without its space), where the attribute a
 // declaration wrote prints by its AttributedType (`inteloclbicc`).
 #define BUSTER_TYPE_PRINT_CANONICAL_CC 0x04
+// BUSTER_TYPE_PRINT_INSIDE_CC prints no function's calling convention, as clang's TypePrinter doesn't inside a convention's
+// AttributedType (InsideCCAttribute), which spells it itself (type_sugar_print). no_caller_saved_registers' bit still prints.
+#define BUSTER_TYPE_PRINT_INSIDE_CC 0x08
 
 // At most how many bytes type_initialize pushes from its arena for `capacity`, and how many the index arena needs to
 // grow to the largest index those types can use.
@@ -6920,7 +6928,8 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         // clang's printFunctionAfter: the convention, then no_caller_saved_registers' bit beside another (#1447).
         const TypeFunctionABI abi = type_function_convention(table, frame.type);
         const bool canonical = (printer->options & BUSTER_TYPE_PRINT_CANONICAL_CC) != 0;
-        if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]) && abi != TYPE_FUNCTION_ABI_SYSV)
+        const bool inside = (printer->options & BUSTER_TYPE_PRINT_INSIDE_CC) != 0;
+        if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]) && abi != TYPE_FUNCTION_ABI_SYSV && !inside)
         {
             type_print_text(printer, canonical && abi == TYPE_FUNCTION_ABI_SWIFT_ASYNC ? "__attribute__((" : " __attribute__((");
             type_print_text(printer, canonical && abi == TYPE_FUNCTION_ABI_INTEL_OCL ? "intel_ocl_bicc" : spellings[abi]);
@@ -6989,6 +6998,8 @@ static String8 type_print(const TypeTable* table, Arena* arena, TypeId type, Str
     scratch_end(scratch);
     return result;
 }
+
+#include "c_types_sugar.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Deferred bodies (#113)

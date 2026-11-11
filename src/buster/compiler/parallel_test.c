@@ -1518,6 +1518,37 @@ static void parallel_test_shards(ParallelTest* test)
         parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), scheduled_cases[i].expected);
         test->arena.length = 0;
     }
+    // Shard 1's once-only steps (`#: first-shard 50`) start it 50 s late: long goes to shard 2, where it would end at
+    // 60 s against shard 1's 110 s; then w1 to shard 1 (60 s, against 70 s behind w1 on shard 2), w2 to shard 1 too
+    // (70 s each way; shard 1's commands cost less so far) and w3 to shard 2 (70 s against 80 s).
+    static const ParallelTestShard first_cases[] = {
+        {
+            "1/2",
+            true,
+            "parallel: shard 1 of 2, 2 of 4 commands, at most 4 CPUs at once\n"
+            "== w1 [8 CPUs]: passed in * s, * s of CPU\nw1\n"
+            "== w2 [8 CPUs]: passed in * s, * s of CPU\nw2\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/2",
+            true,
+            "parallel: shard 2 of 2, 2 of 4 commands, at most 4 CPUs at once\n"
+            "== w3 [8 CPUs]: passed in * s, * s of CPU\nw3\n"
+            "== long: passed in * s, * s of CPU\nlong\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+    };
+    for (uint64_t i = 0; i < sizeof(first_cases) / sizeof(first_cases[0]); i += 1)
+    {
+        const bool written = scheduled_ready && parallel_test_write(costs, parallel_test_string("#: runner-cpus 4\n#: first-shard 50.0 \n40 w1 [8 CPUs]\n40 w2 [8 CPUs]\n40 w3 [8 CPUs]\n60 long\n"));
+        char* arguments[] = { "compiler", "parallel", "--jobs", "4", "--shard", (char*)first_cases[i].shard, "--costs", costs, list, 0 };
+        const int status = written ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
+        char name[128];
+        snprintf(name, sizeof(name), "shards, %s by schedule, shard 1 later by its once-only steps", first_cases[i].shard);
+        parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), first_cases[i].expected);
+        test->arena.length = 0;
+    }
 #define BUSTER_PARALLEL_TEST_COST(literal, message) \
     {                                            \
         .text = literal,                         \
@@ -1531,6 +1562,11 @@ static void parallel_test_shards(ParallelTest* test)
         BUSTER_PARALLEL_TEST_COST("#: runner-cpus 4x\n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
         BUSTER_PARALLEL_TEST_COST("#: runner-cpus \n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
         BUSTER_PARALLEL_TEST_COST("#: runner-cpus 4\n\n#: runner-cpus 4\n", "3: a runner's CPUs that an earlier line gives"),
+        BUSTER_PARALLEL_TEST_COST("#: first-shard \n", "1: a first shard's time that isn't SECONDS"),
+        BUSTER_PARALLEL_TEST_COST("#: first-shard 1.5s\n", "1: a first shard's time that isn't SECONDS"),
+        BUSTER_PARALLEL_TEST_COST("#: first-shard -1\n", "1: a first shard's time that isn't SECONDS"),
+        BUSTER_PARALLEL_TEST_COST("#: first-shard 99999999999999999999\n", "1: a first shard's time that isn't SECONDS"),
+        BUSTER_PARALLEL_TEST_COST("#: first-shard 1\n#: first-shard 1\n", "2: a first shard's time that an earlier line gives"),
     };
 #undef BUSTER_PARALLEL_TEST_COST
     for (uint64_t i = 0; i < sizeof(runner_cases) / sizeof(runner_cases[0]); i += 1)
