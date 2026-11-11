@@ -689,6 +689,32 @@ static uint32_t check_input_vla_scale(CheckInputReader* reader, uint32_t token, 
     return node;
 }
 
+// The bounds a cast evaluates before its operand (#2321, clang's EmitVariablyModifiedType of its type): the variable
+// array bounds of its type name, from its `(` (`first`) to its `)` (`token`), outermost first through pointers and arrays,
+// their captured nodes (check_input_vla_capture) sequenced as ((bound, bound), bound). BUSTER_CHECK_NONE if it has none.
+static uint32_t check_input_vla_cast_bounds(CheckInputReader* reader, uint32_t first, uint32_t token, TypeId type)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool valid = true;
+    for (uint32_t depth = 0; valid && type != 0 && depth < reader->types->types.count; depth += 1)
+    {
+        type = type_strip_aligned(reader->types, type);
+        const uint8_t kind = type_kind(reader->types, type);
+        const uint64_t extent = kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? reader->types->types.extent[type_index(type)] : 0;
+        const uint32_t identity = extent >= (uint64_t)first + 2 && extent <= token ? reader->vla_bounds[extent - 1] : 0;
+        const CheckInputVla* vla = identity != 0 && identity <= reader->output->vla_count ? &reader->output->vlas[identity - 1] : NULL;
+        const uint32_t bound = vla != NULL && vla->declaration == BUSTER_CHECK_NONE && vla->evaluated ? vla->bound_node : BUSTER_CHECK_NONE;
+        if (bound != BUSTER_CHECK_NONE)
+        {
+            result = result == BUSTER_CHECK_NONE ? bound : check_input_add(reader, CHECK_OP_COMMA, token, result, bound, BUSTER_CHECK_NONE);
+            valid = result != BUSTER_CHECK_NONE;
+        }
+        valid = valid && (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ATOMIC || type_kind_is_array(kind));
+        type = valid ? type_element(reader->types, type) : 0;
+    }
+    return result;
+}
+
 typedef struct CheckVlaSizePart CheckVlaSizePart;
 struct CheckVlaSizePart
 {
@@ -726,7 +752,10 @@ static uint32_t check_input_vla_size(CheckInputReader* reader, uint32_t token, T
             if (valid)
             {
                 const CheckInputVla* vla = &reader->output->vlas[identity - 1];
-                const bool inline_bound = vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin > token && vla->bound_end <= reader->ends[token];
+                // (An expression operand's bound, a cast's, its evaluation already took, #2321: its size reads the
+                // extent stored then, as clang's getVLASize reads the size its cast's EmitVariablyModifiedType kept.)
+                const bool inline_bound = operand == BUSTER_CHECK_NONE && vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin > token &&
+                                          vla->bound_end <= reader->ends[token];
                 if (!inline_bound && reader->vla_sizes[identity - 1] != BUSTER_CHECK_NONE)
                 {
                     result = reader->vla_sizes[identity - 1];

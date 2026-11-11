@@ -14279,9 +14279,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             }
         }
     }
-    const uint32_t a = first;
-    const uint32_t b = a != BUSTER_CHECK_NONE ? reader->value_next[a] : BUSTER_CHECK_NONE;
+    uint32_t a = first;
+    uint32_t b = a != BUSTER_CHECK_NONE ? reader->value_next[a] : BUSTER_CHECK_NONE;
     const uint32_t c = b != BUSTER_CHECK_NONE ? reader->value_next[b] : BUSTER_CHECK_NONE;
+    // A cast's type name's captured variable array bound, evaluated before it (#2321), or none.
+    uint32_t vla_bound = BUSTER_CHECK_NONE;
     if (evaluated_specifier && a != BUSTER_CHECK_NONE)
     {
         // The operand's value is the declaration's runtime side effect. Its graph token is the operand's own, so
@@ -14560,8 +14562,23 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     else if (role == PARSE_ROLE_CLOSE_CAST)
     {
-        supported = count == 1 && reader->query_types[token] != 0;
+        // A cast to a variably modified type evaluates its type name's bound first (#2321, clang's EmitVariablyModifiedType
+        // before the cast's operand), the bound captured as the first operand (check_input_vla_capture): the cast of the
+        // second then follows it as a comma's right operand.
+        uint32_t operand = a;
+        uint32_t bounds = 0;
+        while (operand != BUSTER_CHECK_NONE && graph->ops[operand] == CHECK_OP_VLA_BOUND && reader->value_next[operand] != BUSTER_CHECK_NONE)
+        {
+            operand = reader->value_next[operand];
+            bounds += 1;
+        }
+        const bool bounded = bounds != 0 && bounds + 1 == count;
+        supported = (count == 1 || bounded) && reader->query_types[token] != 0;
         op = CHECK_OP_CAST;
+        vla_bound = bounded ? check_input_vla_cast_bounds(reader, reader->first_child[token], token, reader->query_types[token]) : BUSTER_CHECK_NONE;
+        supported = supported && (!bounded || vla_bound != BUSTER_CHECK_NONE);
+        a = bounded ? operand : a;
+        b = bounded ? BUSTER_CHECK_NONE : b;
     }
     else if (role == PARSE_ROLE_CLOSE_SIZEOF)
     {
@@ -15049,6 +15066,12 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     node = proven;
                 }
             }
+        }
+        if (vla_bound != BUSTER_CHECK_NONE)
+        {
+            // Its type name's bounds, then the cast.
+            const uint32_t sequenced = check_input_add(reader, CHECK_OP_COMMA, token, vla_bound, node, BUSTER_CHECK_NONE);
+            node = sequenced != BUSTER_CHECK_NONE ? sequenced : node;
         }
         reader->output->token_nodes[token] = node;
         if (role != PARSE_ROLE_CLOSE_CONDITION && role != PARSE_ROLE_RETURN)

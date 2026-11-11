@@ -3514,7 +3514,9 @@ static void check_common_emit_run(CheckCommonEmission* emission)
             }
             case BUSTER_CHECK_EMIT_COMMA_TAIL:
             {
-                if (node < graph->count && check_common_emit_evaluated(emission, node) && (emission->emitted[node] & BUSTER_CHECK_EMITTED_COMMA_MARKER) == 0)
+                // (A cast's comma before it of its type name's bounds, #2321, has no source comma.)
+                if (node < graph->count && check_common_emit_evaluated(emission, node) && (emission->emitted[node] & BUSTER_CHECK_EMITTED_COMMA_MARKER) == 0 &&
+                    !(graph->tokens[node] < emission->parser->tokens.count && emission->parser->tree.roles[graph->tokens[node]] == PARSE_ROLE_CLOSE_CAST))
                 {
                     check_common_comma_marker(emission, node);
                 }
