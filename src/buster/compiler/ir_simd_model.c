@@ -52,6 +52,12 @@ typedef enum IrSimdOperation
     IR_SIMD_FSUB,
     IR_SIMD_FMUL,
     IR_SIMD_FDIV,
+    // The width changes (#1840), bits moved whole, no lanes read: the `index`th part of a, of the result's width, a wider
+    // vector (extract); a in the result's low bits and zeros past them (widen); and a with its `index`th part of b's width
+    // replaced by b, a narrower vector (insert).
+    IR_SIMD_EXTRACT,
+    IR_SIMD_WIDEN,
+    IR_SIMD_INSERT,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -99,6 +105,9 @@ struct IrSimdAction
     IrSimdShape operands[3];
     IrSimdPredicate predicate;
     IrSimdLane lane;
+    // A width change's part (#1840: IR_SIMD_EXTRACT's and IR_SIMD_INSERT's), in units of the narrower vector; 0 for the
+    // other operations.
+    uint8_t index;
     bool volatile_memory;
 };
 
@@ -190,6 +199,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         const IrSimdShape type = action->result;
         const IrSimdLane lane = action->lane;
         valid = action->operation == IR_SIMD_COMPARE || action->predicate == IR_SIMD_EQ;
+        valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -216,6 +226,15 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_COMPARE: valid = valid && ir_simd_vector(a) && a == b && c == IR_SIMD_NONE && type == ir_simd_lane_mask(a, lane); break;
             case IR_SIMD_SELECT: valid = valid && ir_simd_vector(type) && a == ir_simd_lane_mask(type, lane) && b == type && c == type; break;
             case IR_SIMD_STORE: valid = valid && type == IR_SIMD_NONE && a != IR_SIMD_NONE && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
+            case IR_SIMD_EXTRACT:
+                valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && ir_simd_bits(type) < ir_simd_bits(a) && action->index < ir_simd_bits(a) / ir_simd_bits(type) &&
+                        b == IR_SIMD_NONE && c == IR_SIMD_NONE;
+                break;
+            case IR_SIMD_WIDEN: valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && ir_simd_bits(a) < ir_simd_bits(type) && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
+            case IR_SIMD_INSERT:
+                valid = valid && ir_simd_vector(type) && a == type && ir_simd_vector(b) && ir_simd_bits(b) < ir_simd_bits(type) &&
+                        action->index < ir_simd_bits(type) / ir_simd_bits(b) && c == IR_SIMD_NONE;
+                break;
             default: valid = false; break;
         }
     }
@@ -440,6 +459,21 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         memory->reads += store ? 0 : bytes;
         memory->writes += store ? bytes : 0;
         memory->volatile_accesses += action->volatile_memory ? bytes : 0;
+    }
+    else if (valid && (action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_WIDEN || action->operation == IR_SIMD_INSERT))
+    {
+        // Whole 64-bit words: every vector is 2, 4 or 8 of them.
+        const uint32_t result_words = ir_simd_bits(action->result) / 64;
+        const uint32_t part_words = ir_simd_bits(action->operation == IR_SIMD_INSERT ? action->operands[1] : action->operation == IR_SIMD_EXTRACT ? action->result : action->operands[0]) / 64;
+        const uint32_t first = action->index * part_words;
+        for (uint32_t word = 0; word < result_words; word += 1)
+        {
+            const bool inserted = action->operation == IR_SIMD_INSERT && word >= first && word < first + part_words;
+            staged.words[word] = action->operation == IR_SIMD_EXTRACT ? values[0]->words[first + word] :
+                                 action->operation == IR_SIMD_WIDEN   ? (word < part_words ? values[0]->words[word] : 0) :
+                                 inserted                             ? values[1]->words[word - first] :
+                                                                        values[0]->words[word];
+        }
     }
     else if (valid)
     {

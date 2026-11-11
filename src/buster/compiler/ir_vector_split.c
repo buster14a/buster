@@ -472,6 +472,7 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
                 .passed_count = function->passed_count,
                 .vector_constant_count = work.vector_constant,
                 .row_count = function->row_count,
+                .asm_body_count = function->asm_body_count,
             };
             check.error = ir_create(output, &sizes, &split);
         }
@@ -541,6 +542,10 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
             if (function->row_count != 0)
             {
                 memcpy(split.rows, function->rows, (uint64_t)function->row_count * sizeof(Tier0Operation));
+            }
+            if (function->asm_body_count != 0)
+            {
+                memcpy(split.asm_bodies, function->asm_bodies, (uint64_t)function->asm_body_count * sizeof(IrAsmBody));
             }
             const uint64_t instructions = work.instruction;
             work.output = &split;

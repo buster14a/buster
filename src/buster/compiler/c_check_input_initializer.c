@@ -151,8 +151,18 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     const uint32_t range = reader->designator_ranges[token];
     int64_t index = 0;
     int64_t high = 0;
+    // Its undeclared names are clang's errors at each one (#1447, check_constant_name), which end the walk; clang drops the
+    // initializer list there.
+    const uint32_t named = reader->constant_named;
+    CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+    reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
+    reader->constant_failure = &failure;
     bool valid = check_input_constant(reader, token + 1, range, &index) && index >= 0;
+    reader->constant_names = valid && range != close ? CHECK_CONSTANT_NAMES_REPORT : CHECK_CONSTANT_NAMES_NONE;
+    reader->constant_failure = valid && range != close ? &failure : NULL;
     valid = valid && (range == close || (check_input_constant(reader, range + 1, close, &high) && high >= index));
+    reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+    reader->constant_failure = NULL;
     if (valid)
     {
         check_input_rare_claim(reader, &reader->designator_indices[token]);
@@ -173,9 +183,10 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
             check_input_sparse_mark(reader, close, true);
         }
     }
-    else
+    else if (reader->constant_named == named || reader->output->report_count == 0)
     {
-        check_input_report(reader, token + 1, CHECK_INPUT_DECLARATION);
+        // Its failure's error in clang's words (#1447).
+        check_input_constant_failure_report(reader, &failure, token + 1, token + 1);
     }
     return valid;
 }

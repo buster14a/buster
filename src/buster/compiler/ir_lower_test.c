@@ -1466,6 +1466,127 @@ static void ir_lower_test_chain(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// An aggregate of no size passed on the stack (#1879): a record of a flexible array member alone is MEMORY, and clang
+// passes it byval in an 8-byte slot, its value (its address, argument_sizes 0) in no register, before a long in rdi.
+// A call without records would place the address by its class in rdi, so the IR keeps the call's records
+// (ir_typed_aggregate_call), the slot's and rdi's. A seventh long on the stack, all six general registers taken before
+// it, is where its class puts it, and that call keeps none.
+static void ir_lower_test_empty_stack(IrLowerTestTally* tally)
+{
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint64_t values[] = {
+        4096,
+        7,
+        0,
+        0,
+    };
+    const uint8_t argument_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+    };
+    const uint32_t argument_sizes[] = {
+        0,
+        0,
+    };
+    const AbiLocation locations[] = {
+        { .stack_offset = 0, .registers = { BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_STACK },
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+    };
+    const AbiCall call = { .stack_bytes = 8, .integer_registers = 1, .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } } };
+    const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } };
+    const SymbolId target = 2;
+    const uint32_t first = 0;
+    const uint32_t count = 2;
+    const uint8_t variadic = 0;
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .result = result,
+        .call_targets = &target,
+        .call_first = &first,
+        .call_argument_counts = &count,
+        .call_variadic = &variadic,
+        .calls = &call,
+        .argument_locations = locations,
+        .argument_classes = argument_classes,
+        .argument_sizes = argument_sizes,
+        .call_count = 1,
+        .argument_count = 2,
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    IrFunction lowered = { 0 };
+    if (ir_lower_test_lower(tally, &function, IR_I64, 3, &output, &twin_output, &scratch, &lowered, 0, 0))
+    {
+        const IrCall* lowered_call = lowered.call_count == 1 ? &lowered.calls[0] : 0;
+        const IrPassed* passed = lowered_call != 0 && lowered_call->abi != 0 ? &lowered.passed[lowered.abi_calls[lowered_call->abi - 1].passed] : 0;
+        const bool recorded = passed != 0 && passed[0].location.kind == BUSTER_ABI_LOCATION_STACK && passed[0].size == 0 &&
+                              passed[1].location.kind == BUSTER_ABI_LOCATION_REGISTERS && passed[1].location.registers[0] == BUSTER_ABI_RDI;
+        ir_lower_test_expect(tally, recorded, "a call of an aggregate of no size on the stack keeps its records in the IR", 0, 0);
+    }
+    // Seven longs: rdi to r9, then the stack.
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    uint8_t long_kinds[9];
+    uint8_t long_classes[9];
+    uint64_t long_values[9];
+    uint8_t long_arguments[7];
+    uint32_t long_sizes[7];
+    AbiLocation long_locations[7];
+    for (uint32_t a = 0; a < 7; a += 1)
+    {
+        long_kinds[a] = BUSTER_TYPED_CONST;
+        long_classes[a] = BUSTER_TYPED_CLASS_I64;
+        long_values[a] = a;
+        long_arguments[a] = BUSTER_TYPED_CLASS_I64;
+        long_sizes[a] = 0;
+        long_locations[a] = a < BUSTER_ABI_INTEGER_ARGUMENTS
+                                ? (AbiLocation){ .registers = { abi_integer_arguments[a], BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS }
+                                : (AbiLocation){ .stack_offset = 0, .registers = { BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_STACK };
+    }
+    long_kinds[7] = BUSTER_TYPED_CALL;
+    long_classes[7] = BUSTER_TYPED_CLASS_I64;
+    long_values[7] = 0;
+    long_kinds[8] = BUSTER_TYPED_RETURN;
+    long_classes[8] = BUSTER_TYPED_CLASS_I64;
+    long_values[8] = 0;
+    const uint32_t long_count = 7;
+    const AbiCall long_call = { .stack_bytes = 8, .integer_registers = 6, .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .result = call.result };
+    Tier0Function longs = function;
+    longs.kinds = long_kinds;
+    longs.classes = long_classes;
+    longs.values = long_values;
+    longs.count = 9;
+    longs.call_argument_counts = &long_count;
+    longs.calls = &long_call;
+    longs.argument_locations = long_locations;
+    longs.argument_classes = long_arguments;
+    longs.argument_sizes = long_sizes;
+    longs.argument_count = 7;
+    IrFunction long_lowered = { 0 };
+    if (ir_lower_test_lower(tally, &longs, IR_I64, 3, &output, &twin_output, &scratch, &long_lowered, 0, 1))
+    {
+        ir_lower_test_expect(tally, long_lowered.call_count == 1 && long_lowered.calls[0].abi == 0, "a seventh long on the stack keeps no records", 0, 1);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&scratch);
+}
+
 static void ir_lower_test_fixtures(IrLowerTestTally* tally)
 {
     // 10 + (outer ? (inner ? 20 : 30) : 40), preserving the outer value at both joins.
@@ -4328,6 +4449,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_aggregates(&tally);
         ir_lower_test_ignored_scan(&tally);
         ir_lower_test_chain(&tally);
+        ir_lower_test_empty_stack(&tally);
         ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);
