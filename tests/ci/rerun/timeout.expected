@@ -1,0 +1,5 @@
+decision	keep
+jobs	3	stopped	3	setup	0	keep	2
+job	keep	timeout	cancelled	Sleep past the job's timeout	timeout
+job	cancelled	fail-fast	cancelled	Fail or sleep	matrix (slow)
+job	keep	outside-setup	failure	Fail or sleep	matrix (fail)

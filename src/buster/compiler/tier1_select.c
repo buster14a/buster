@@ -677,7 +677,7 @@ struct Tier1SelectHoles
     bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
-    // A load's or a store's segment override (#1447, BUSTER_IR_SEGMENT's FS or GS), which its access's record takes
+    // A load's or a store's segment override (#1447, BUSTER_IR_SEGMENT's FS, GS or SS), which its access's record takes
     // (tier1_select_segment), or 0.
     uint8_t segment;
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
@@ -1645,7 +1645,9 @@ static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1Selec
 // A load's or a store's segment override (#1447, Tier1SelectHoles.segment) on its access's records: each with a memory
 // operand, as Tier 0's tier0_apply_segments gives its own (form + segment * X86_FORM_COUNT, the encoder's form with the
 // override). A load's, a store's or an xchg's expansion has one such record, the access; its other records are moves of
-// registers. A RIP-relative operand takes it too: `%gs:sym(%rip)` is clang's access of a global in the segment.
+// registers. A RIP-relative operand takes it too: `%gs:sym(%rip)` is clang's access of a global in the segment. A form
+// without SS's (x86_form_has_segment: APX's EVEX forms, which no access's pattern selects) becomes NONE, which the
+// target's validation refuses, rather than an access without its override.
 static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
 {
     for (uint32_t r = 0; r < records->count; r += 1)
@@ -1653,7 +1655,7 @@ static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
         X86Instruction* record = &records->records[r];
         if ((record->mode & BUSTER_X86_MODE_MEMORY) != 0 && record->form < X86_FORM_COUNT)
         {
-            record->form = (uint16_t)(record->form + segment * X86_FORM_COUNT);
+            record->form = x86_form_has_segment(record->form, segment) ? (uint16_t)(record->form + segment * X86_FORM_COUNT) : (uint16_t)X86_FORM_NONE;
         }
     }
 }

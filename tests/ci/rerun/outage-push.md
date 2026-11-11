@@ -1,0 +1,11 @@
+- `Install official Clang 23.1.4 and test tools` (5 jobs). Setup: a setup step.
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Build the compiler once for the row's shards`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130566734712) (failure)
+  - [`Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130566735942) (failure)
+  - [`Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130566735985) (failure)
+  - [`Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130566736022) (failure)
+  - [`Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130566736120) (failure)
+- `Require this row's compiler product` (4 jobs). Follows setup: its row's compiler build stopped in setup.
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130571533010) (failure)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130571533033) (failure)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130571533062) (failure)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/43033518877/job/130571533478) (failure)

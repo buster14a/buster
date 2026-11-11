@@ -1,0 +1,6 @@
+- `Sleep past the job's timeout` (1 job). Not setup: its timeout stopped it outside setup.
+  - [`timeout`](https://github.com/buster14a/buster/actions/runs/43042106174/job/130596329405) (cancelled)
+- `Fail or sleep` (1 job). Cancelled: fail-fast cancelled it after another job failed.
+  - [`matrix (slow)`](https://github.com/buster14a/buster/actions/runs/43042106174/job/130596329769) (cancelled)
+- `Fail or sleep` (1 job). Not setup: not a setup step.
+  - [`matrix (fail)`](https://github.com/buster14a/buster/actions/runs/43042106174/job/130596329812) (failure)

@@ -1,0 +1,12 @@
+- `Build the external Clang pragma oracle and the compiler` (5 jobs). Not setup: not a setup step.
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360250) (cancelled)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360299) (cancelled)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360333) (cancelled)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360383) (cancelled)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360458) (failure)
+- `Install official Clang 23.1.4 and test tools` (3 jobs). Setup: a setup step.
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360278) (cancelled)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360363) (cancelled)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127560360375) (cancelled)
+- `Require hosted and native correctness before successful qualification` (1 job). Follows setup: a job it needs stopped in setup.
+  - [`Build and execute on Ryzen 7 9700X`](https://github.com/buster14a/buster/actions/runs/42117119356/job/127561140347) (failure)

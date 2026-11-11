@@ -1,0 +1,4 @@
+- No step (1 job). Not setup: not a GitHub-hosted job.
+  - [`Native tests and benchmarks on Benchpress (Ryzen 7 9700X)`](https://github.com/buster14a/buster/actions/runs/42617067650/job/129178515826) (failure)
+- `Require hosted and native correctness before successful qualification` (1 job). Not setup: no job of the run stopped in setup.
+  - [`Build and execute on Ryzen 7 9700X`](https://github.com/buster14a/buster/actions/runs/42617067650/job/129205402741) (failure)

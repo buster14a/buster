@@ -574,15 +574,16 @@ jobs:
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
-        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
-        # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. It comes
+        # from the mirror in the run's offline inputs, with no network (#2275), as the 9700X's comes from its private
+        # cache: Git's pack protocol checks it again (fetch-c-testsuite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
       - name: Fetch SQLite's sources at their pinned commit
         # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
-        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
-        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, from the run's offline inputs
+        # as c-testsuite's above (fetch-sqlite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
@@ -713,13 +714,15 @@ jobs:
           retention-days: 14
 
   # SQLite's whole Tcl test suite (#146): every script of its `full` permutation, through testfixture built by clang -O0,
-  # Tier 0 and --tier1 from this row's shared compiler (test-sqlite-testfixture; docs/commands/c-testsuite.md). Pull
-  # requests run the inventory's pinned subset; this job runs on main's pushes and the nightly runs, beside the plain
-  # portable row's shards, with its runner's 4 CPUs to itself. Its name must not end like a shard's (tools/ci/nightly.c).
+  # Tier 0 and --tier1 from this row's shared compiler (test-sqlite-testfixture; docs/commands/c-testsuite.md). Every
+  # row, pull requests' too, runs the inventory's pinned subset; this job runs on the nightly and dispatched runs alone,
+  # beside the plain portable row's shards, with its runner's 4 CPUs to itself. Main's pushes skip it (#2334): it took
+  # 27 to 41 of a push run's 96 to 112 runner-minutes, at 25 to 37 pushes an hour. Its name must not end like a shard's
+  # (tools/ci/nightly.c).
   sqlite-full:
     name: SQLite's full Tcl suite by both tiers against clang's (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }})
     needs: compiler
-    if: ${{ !cancelled() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' }}
     runs-on: ubuntu-26.04
     # About 9 minutes a build on a 4-CPU runner, three builds.
     timeout-minutes: 120

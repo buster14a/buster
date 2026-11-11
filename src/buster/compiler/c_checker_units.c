@@ -190,6 +190,29 @@ static bool check_units_discard_huge(CheckUnitsLane* lane)
     return result;
 }
 
+// The first of `link`'s section groups that the units' selection can't key, or 0 for none: a group is selected by its
+// signature, which must be a nonlocal symbol defined in one of its members, as selectany's definition is and as the
+// file-scope assembly's symbol of a group's name (`.section .data.x,"awG",@progbits,x,comdat` with `.globl x` or
+// `.weak x` and `x:` in it) is (#1848). A local signature, a section's or a name no symbol has (which -c's object makes
+// a local symbol of, as clang's assembler does), has no global name for the units' exchange.
+static uint32_t check_units_group_unkept(const Link* link)
+{
+    uint32_t result = 0;
+    for (uint32_t g = 1; result == 0 && g < link->groups.count; g += 1)
+    {
+        // The C producer uses its selectany definition as the signature. Keep that stable symbol identity; the
+        // object's ordinary and relocation sections are the writer's consumer of the same LinkGroups metadata.
+        const LinkGroup group = link->groups.data[g];
+        const SymbolId signature = group.signature;
+        const AtomId defining = signature != 0 && signature < link->symbols.count ? link->symbols.atom[signature] : 0;
+        const bool keyed = signature != 0 && signature < link->symbols.count && defining != 0 && defining < link->atoms.count &&
+                           group.flags == BUSTER_LINK_GROUP_COMDAT && (link->symbols.flags[signature] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL &&
+                           link->groups.atom_groups[defining] == g;
+        result = keyed ? 0 : g;
+    }
+    return result;
+}
+
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
 // `kept`: its tables, names and atoms' bytes into its arenas, with each record's id as it was; and marks its undefined
 // global symbols that `program`'s declarations in a system header gave (check_driver_system_declared's rule). With
@@ -219,17 +242,7 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
     kept->system = result ? BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint8_t, symbols) : NULL;
     result = result && kept->system != NULL;
     const bool grouped = link->groups.count != 0;
-    for (uint32_t g = 1; result && g < link->groups.count; g += 1)
-    {
-        // The C producer uses its selectany definition as the signature. Keep that stable symbol identity; the
-        // object's ordinary and relocation sections are the writer's consumer of the same LinkGroups metadata.
-        const LinkGroup group = link->groups.data[g];
-        const SymbolId signature = group.signature;
-        const AtomId defining = signature != 0 && signature < symbols ? link->symbols.atom[signature] : 0;
-        result = signature != 0 && signature < symbols && defining != 0 && defining < atoms &&
-                 group.flags == BUSTER_LINK_GROUP_COMDAT && (link->symbols.flags[signature] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL &&
-                 link->groups.atom_groups[defining] == g;
-    }
+    result = result && check_units_group_unkept(link) == 0;
     kept->comdat_signature = result && grouped ? BUSTER_ARENA_PUSH_ARRAY(kept->arena, SymbolId, atoms) : NULL;
     result = result && (!grouped || kept->comdat_signature != NULL);
     for (AtomId a = 0; result && grouped && a < atoms; a += 1)
