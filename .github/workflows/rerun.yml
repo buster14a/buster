@@ -1,0 +1,71 @@
+name: Re-run hosted setup failures
+
+# A run of the workflow that runs the hosted correctness rows (9700x.yml, which calls hosted-correctness.yml) that fails
+# in its first attempt only because jobs stopped in setup, before any test ran, is re-run once: its failed jobs, by
+# rerun-failed-jobs (#2276; docs/commands/ci.md, "Setup failures re-run once"). tools/ci/rerun.c decides from the run's
+# jobs and steps and an explicit allowlist of setup steps; tools/ci/rerun.sh fetches them, requests the re-run and
+# notes it in this run's summary and on the pull request or the commit. A test failure, a build failure or a timeout
+# outside setup is never re-run. A second attempt is never re-run automatically, whatever stopped it. Its --self-test
+# checks that this trigger watches every workflow that calls hosted-correctness.yml, by name.
+#
+# workflow_run runs this file and the classifier as the default branch has them, with this repository's token, never a
+# pull request's code. Pull requests from forks and the nightly coordinator's dispatches (whose 9700X work it plans) are
+# left as they are.
+on:
+  workflow_run:
+    workflows: ["Tests and Zen 5 benchmarks"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+# One decision per run, whatever delivers its completion twice.
+concurrency:
+  group: buster-rerun-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    name: Re-run a run that stopped in setup, once
+    if: >-
+      github.repository_id == '1421805693' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt == 1 &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'pull_request') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      # The run's jobs, and the request to re-run its failed ones.
+      actions: write
+      # The cancelled jobs' annotations, which tell fail-fast from a timeout.
+      checks: read
+      # The note on a pushed commit.
+      contents: write
+      # The note on a pull request.
+      pull-requests: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the default branch's classifier
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Build the classifier and check its allowlist against the workflows
+        run: |
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/rerun.c -o "$RUNNER_TEMP/rerun"
+          "$RUNNER_TEMP/rerun" --self-test --root .
+
+      - name: Re-run the failed jobs if every job that stopped did so in setup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RERUN_TOOL: ${{ runner.temp }}/rerun
+          RERUN_RUN: ${{ github.event.workflow_run.id }}
+          RERUN_EVENT: ${{ github.event.workflow_run.event }}
+          RERUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RERUN_URL: ${{ github.event.workflow_run.html_url }}
+          RERUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RERUN_PULL_REQUEST: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: bash tools/ci/rerun.sh "$RERUN_RUN" "$RUNNER_TEMP/rerun-run"
