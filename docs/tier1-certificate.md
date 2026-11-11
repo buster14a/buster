@@ -602,6 +602,10 @@ The decoding:
   uses (`tier1_select_row_vectors`); two may share one where one is done with it
   before the other's first write, or in that record where the write is pure, the
   form's destination may be a source, and the record doesn't write the first.
+  Two operands' roles of one value (#1871: `_mm_packus_epi32(x, x)`, which
+  Tier 1 places in one register with its result's) may share one too where
+  each is named last before the other's first write, or in that record of a
+  form whose destination may be a source (`tier1_cert_emitted_row_reread`).
   VECTOR(0)'s early register, where the first operand is read in its own
   register up to the result's first write, must be that first write's, a pure
   one, in the claimed field; the fields naming VECTOR(0) before it read the

@@ -1321,9 +1321,28 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                     check_action_diagnose(&output->action, converted.diagnostic, 2 + i);
                 }
             }
-            // Into a scratch result: the calls' conversions take no slot of the four the call's own arguments have.
+            // Into a scratch result: the calls' conversions take no slot of the four the call's own arguments have. The
+            // rest convert as a call's arguments to its parameters (check_action_call, #1842): a complex value, an
+            // _Atomic parameter's operand type, and a transparent union's member, whose code the calls make
+            // (check_lower_dump_struct); the format as the other builtins' arguments.
             CheckBuiltinMiscResult scratch = { 0 };
-            check_builtin_misc_convert(table, input, &scratch, &argument, 0, parameters[i]);
+            const CheckAction context = { .node = input->node, .context = input->context };
+            if (i < rest)
+            {
+                const TypeId destination = check_action_kind(table, argument.type) != BUSTER_TYPE_KIND_ATOMIC ? type_conversion_operand(table, parameters[i]) :
+                                                                                                                 parameters[i];
+                CheckActionResult converted = { 0 };
+                const bool assignable = check_action_assignable(table, destination, &argument, &context, &converted) ||
+                                        (converted.diagnostic == CHECK_DIAG_NONE && check_action_transparent_parameter(table, destination, &argument, &context, &converted) != 0);
+                if (converted.diagnostic != CHECK_DIAG_NONE || !assignable)
+                {
+                    check_action_diagnose(&scratch.action, converted.diagnostic != CHECK_DIAG_NONE ? converted.diagnostic : CHECK_DIAG_INCOMPATIBLE, 0);
+                }
+            }
+            else
+            {
+                check_builtin_misc_convert(table, input, &scratch, &argument, 0, parameters[i]);
+            }
             if (scratch.action.diagnostic != CHECK_DIAG_NONE)
             {
                 check_action_diagnose(&output->action, scratch.action.diagnostic, i < rest ? 2 + i : 1);
