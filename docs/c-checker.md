@@ -5909,7 +5909,13 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. A divisor `-Wdivision-by-zero` reads
+`-Wdangling-else` and `-Wuninitialized`. A conditional's
+`-Wpointer-type-mismatch` and `-Wconditional-type-mismatch` (#2292,
+`check_driver_conditional_mismatch_message`) name its arms' types as clang's
+`checkConditionalPointerCompatibility` and `checkPointerIntegerMismatch` do,
+"pointer type mismatch ('int *' and 'long *')": each as written (a typedef's
+with its `aka`), an array's or a function's decayed, a GNU `?:`'s left arm its
+condition, at the `?`. A divisor `-Wdivision-by-zero` reads
 as clang's EvaluateAsInt does (`check_common_zero_divisor`): an integer
 constant, or, through integer casts, a const non-volatile object whose
 completed initializer's receipt (`CheckInput.const_values`) gives zero

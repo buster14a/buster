@@ -2510,6 +2510,50 @@ static const char* check_driver_pointer_wording(const TypeTable* types, uint32_t
            "converts between pointers to integer types with different sign";
 }
 
+// A conditional's -Wpointer-type-mismatch or -Wconditional-type-mismatch (#2292): clang's words name its arms' types as
+// written, "pointer type mismatch ('int *' and 'long *')", at the conditional's `?` (`*located`), as clang's
+// checkConditionalPointerCompatibility and checkPointerIntegerMismatch give them; a GNU `?:`'s left arm is its condition.
+// NULL where the conditional's arms aren't known, for the generic words.
+static const char* check_driver_conditional_mismatch_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                             const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning,
+                                                             uint32_t* located, Arena* scratch)
+{
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const bool conditional = types != NULL && graph != NULL && node < stream->count && graph->ops[node] == CHECK_OP_CONDITIONAL;
+    const uint32_t condition = conditional ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t left = conditional ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    const uint32_t right = conditional ? graph->operand2[node] : BUSTER_CHECK_NONE;
+    const char* result = NULL;
+    if (condition < stream->count && left < stream->count && right < stream->count)
+    {
+        String8 names[2] = { 0 };
+        const uint32_t arms[2] = { left, right };
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            // An arm's type after its lvalue conversion: an array's or a function's pointer, else as written.
+            const TypeId type = check_stream_type(stream, arms[i]);
+            const uint8_t kind = type_kind(types, type_strip_aligned(types, type));
+            const bool decays = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION;
+            const TypeId pointee = type_kind_is_array(kind) ? type_element(types, type_strip_aligned(types, type)) : type;
+            const TypeId decayed = decays ? type_find_pointer(types, pointee) : 0;
+            const uint32_t spelling = decays ? 0 : check_driver_pointer_spelling(parser, input, stream, types, arms[i]);
+            names[i] = check_driver_warning_type(parser, pp, input, types, spell, scratch, decayed != 0 ? decayed : type, spelling);
+        }
+        const char* words = warning == CHECK_WARNING_CONDITIONAL_POINTER_TYPES ? "pointer type mismatch" : "pointer/integer type mismatch in conditional expression";
+        result = names[0].length != 0 && names[1].length != 0 ?
+                 check_warning_text(scratch, "%s (%.*s and %.*s)", words, (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer) : NULL;
+        // At its `?`, the `:`'s child that opens it.
+        uint32_t question = graph->tokens[node];
+        while (question != 0 && !(parser->tokens.kinds[question] == PARSE_KIND_QUESTION && parser->tree.parents[question] == graph->tokens[node]))
+        {
+            question -= 1;
+        }
+        *located = result != NULL && parser->tokens.kinds[question] == PARSE_KIND_QUESTION ? question : *located;
+    }
+    return result;
+}
+
 static const char* check_driver_pointer_conversion_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                                            const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, uint32_t warning,
                                                            uint32_t* located, Arena* scratch)
@@ -4106,7 +4150,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     if (suffix != NULL)
                     {
                         uint32_t located = token;
-                        const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN || warning_flag == CHECK_WARNING_DISCARDED_QUALIFIERS ?
+                        const char* conditional = warning_flag == CHECK_WARNING_CONDITIONAL_POINTER_TYPES || warning_flag == CHECK_WARNING_CONDITIONAL_POINTER_INTEGER ?
+                                                  check_driver_conditional_mismatch_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
+                                                  NULL;
+                        const char* message = conditional != NULL ? conditional :
+                                              warning_flag == CHECK_WARNING_POINTER_SIGN || warning_flag == CHECK_WARNING_DISCARDED_QUALIFIERS ?
                                               check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
                                               (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                               check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
