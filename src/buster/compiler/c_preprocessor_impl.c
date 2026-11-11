@@ -143,6 +143,9 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
     }
 }
 
+// The line marker's note that a location in range `range` is in (#1954), defined below; the history's include stacks
+// read it.
+static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location);
 #include "buster/compiler/c_preprocessor_history_impl.c"
 
 // Room for `more` tokens in a stack, or a fatal error.
@@ -2223,6 +2226,26 @@ static void pp_diagnose_ucn_basic(Preprocessor* pp, uint32_t location, uint32_t 
     }
 }
 
+// How -pedantic's warnings of the preprocessor are given (#1447): as warnings under -pedantic, -Wpedantic,
+// -Wdelimited-escape-sequence-extension or -Weverything, errors under -pedantic-errors, the last of those and their -Wno-
+// forms deciding; PP_SEVERITY_NOTE for none. The command line's alone: the source's pragmas don't reach the lexer's raw
+// diagnostics.
+static PPSeverity pp_pedantic_severity(const Preprocessor* pp)
+{
+    PPSeverity result = PP_SEVERITY_NOTE;
+    bool errors = false;
+    for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
+    {
+        const char* option = pp->options.semantic_warning_options[i];
+        const bool on = strcmp(option, "-pedantic") == 0 || strcmp(option, "-Wpedantic") == 0 || strcmp(option, "-Wdelimited-escape-sequence-extension") == 0 ||
+                        strcmp(option, "-Weverything") == 0;
+        const bool off = strcmp(option, "-Wno-pedantic") == 0 || strcmp(option, "-Wno-delimited-escape-sequence-extension") == 0 || strcmp(option, "-Wno-everything") == 0;
+        errors |= strcmp(option, "-pedantic-errors") == 0;
+        result = on || strcmp(option, "-pedantic-errors") == 0 ? PP_SEVERITY_WARNING : off ? PP_SEVERITY_NOTE : result;
+    }
+    return result == PP_SEVERITY_WARNING && errors ? PP_SEVERITY_ERROR : result;
+}
+
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
 // `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
 // where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
@@ -2238,8 +2261,14 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
     {
         const uint32_t shown = length < sizeof(name) ? (uint32_t)length : (uint32_t)sizeof(name);
         uint32_t code_point = 0;
-        const bool exact = unicode_name_strict(name, shown, &code_point);
+        const bool exact = length < sizeof(name) && unicode_name_strict(name, shown, &code_point);
         bool found = exact;
+        const PPSeverity extension = exact ? pp_pedantic_severity(pp) : PP_SEVERITY_NOTE;
+        if (extension != PP_SEVERITY_NOTE)
+        {
+            // -pedantic's (#1447), at the backslash, before its character's error.
+            pp_diagnose(pp, extension, base + offset, "named escape sequences are a Clang extension");
+        }
         if (!exact)
         {
             UnicodeNameDiagnosis diagnosis;
@@ -2329,7 +2358,17 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     break;
                 }
                 case BUSTER_PP_NAMED_UCN_ERROR:
+                case BUSTER_PP_NAMED_UCN_EXTENSION:
                     pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset);
+                    break;
+                case BUSTER_PP_NAMED_UCN_INCOMPLETE:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete universal character name; treating as '\\' followed by identifier");
+                    break;
+                case BUSTER_PP_NAMED_UCN_EMPTY:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "empty delimited universal character name; treating as '\\' 'N' '{' '}'");
+                    break;
+                case BUSTER_PP_NAMED_UCN_UNTERMINATED:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete delimited universal character name; treating as '\\' 'N' '{' identifier");
                     break;
                 case C_RAW_STRING_OK:
                     break;
@@ -9447,13 +9486,13 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
     bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
     bool reported = false;
     bool counted_error = false;
-    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, NULL, &counted_error) : 0;
+    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, false, NULL, &counted_error) : 0;
     if (escapes != 0)
     {
         Scratch scratch = scratch_begin(0);
         CheckEscapeDiagnostic* diagnostics = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length));
         bool had_error = false;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, false, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckEscapeDiagnostic* diagnostic = diagnostics + i;
@@ -9608,9 +9647,24 @@ static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location)
     return record != 0 && record->file != BUSTER_PP_NONE ? record->base + pp_start_with_splices(record->bytes, location - record->base, pp->options.trigraphs) : location;
 }
 
+// The line note in effect at `location` in `range` (the latest one at or before it), or BUSTER_PP_NONE.
+static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    for (uint32_t i = range != BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : BUSTER_PP_NONE; i != BUSTER_PP_NONE && pp->line_directives[i].location <= location;
+         i = pp->line_directives[i].next_in_range)
+    {
+        result = i;
+    }
+    return result;
+}
+
 // Adds a line note to a range, from `location` on (PPLineDirective): `name` null keeps the presumed name, the name of
 // the range's latest note, and `system` BUSTER_PP_NONE keeps the system level (that note's, else the inclusion's).
-static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system)
+// `entry` is a line marker's 1 (a file entered) or 2 (one left), else 0, which set its include location as clang's
+// LineTableInfo::AddLineNote does (#1954): 1 the place right before the note, 2 the one in effect where the latest
+// note's file was entered, and 0 the latest note's.
+static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system, uint32_t entry)
 {
     PPRange* record = &pp->ranges[range];
     const uint32_t latest = record->last_line_directive;
@@ -9619,6 +9673,9 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
         const uint32_t index = pp->line_directive_count;
         const bool inherits = name == 0 && latest != BUSTER_PP_NONE;
         const uint8_t level = latest != BUSTER_PP_NONE ? pp->line_directives[latest].system : record->system;
+        const uint32_t kept = latest != BUSTER_PP_NONE ? pp->line_directives[latest].include_location : BUSTER_PP_NONE;
+        const uint32_t outer = entry == 2 && kept != BUSTER_PP_NONE ? pp_line_note_at(pp, range, kept) : BUSTER_PP_NONE;
+        const uint32_t include = entry == 1 ? location - 1 : entry == 2 ? (outer != BUSTER_PP_NONE ? pp->line_directives[outer].include_location : BUSTER_PP_NONE) : kept;
         pp->line_directives[index] = (PPLineDirective){
             .range = range,
             .location = location,
@@ -9626,6 +9683,7 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
             .name = inherits ? pp->line_directives[latest].name : name,
             .name_length = inherits ? pp->line_directives[latest].name_length : name_length,
             .next_in_range = BUSTER_PP_NONE,
+            .include_location = include,
             .system = system == BUSTER_PP_NONE ? level : (uint8_t)system,
         };
         pp->line_directive_count += 1;
@@ -9760,7 +9818,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         const uint32_t note = pp_find_range(pp, place) == context->range ? place : location + 1;
         const uint32_t physical = pp_line_of(pp, context->range, note, 0) + 1;
         // A #line without a name keeps the presumed one.
-        pp_add_line_note(pp, context->range, note, (int64_t)number - (int64_t)physical, name, name_length, system);
+        pp_add_line_note(pp, context->range, note, (int64_t)number - (int64_t)physical, name, name_length, system, entered ? 1u : left ? 2u : 0u);
         pp->file_change_token = pp->output.count;
         pp->file_change_location = pp_directive_resume(pp, context, d);
     }
@@ -10559,7 +10617,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
                 const uint32_t next = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
                 const uint32_t at = from_operator ? next : pp_directive_resume(pp, context, context->next_directive - 1);
                 const uint32_t latest = range->last_line_directive;
-                pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE);
+                pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE, 0);
                 pp->file_change_token = pp->output.count;
                 pp->file_change_location = at;
             }

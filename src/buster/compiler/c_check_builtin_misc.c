@@ -1471,7 +1471,7 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     {
         // clang's void(void*) of custom checks (#148): a pointer as written (an array isn't one), to a complete object type
         // that isn't const ("read-only variable is not assignable"), whose padding bits its code zeroes
-        // (check_lower_padding). An incomplete pointee (void's among them) is clang's "variable has incomplete type".
+        // (c_check_program_padding.c). An incomplete pointee (void's among them) is clang's "variable has incomplete type".
         const TypeId written = type_strip_aligned(table, input->arguments[0].type);
         const TypeId pointee = check_action_kind(table, written) == BUSTER_TYPE_KIND_POINTER ? type_element(table, written) : 0;
         const uint8_t kind = pointee != 0 ? check_action_kind(table, pointee) : 0;

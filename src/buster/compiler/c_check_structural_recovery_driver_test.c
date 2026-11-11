@@ -129,6 +129,38 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "void f(int p, int q) { p = 1; q = 2; if (q + s.b) return; }\n"
         "void g(int p, int q) { p = 1; q = 2; s.b; }\n"
         "void h(int p) { p = 1; }\n",
+        // An error in a function definition outside its body (its parameters', its declarator's) leaves the definition out
+        // whole, with the bodies that name it; the other bodies keep their warnings, and a body's deferred warnings keep
+        // their place before a left-out declaration's error that follows it (#1447).
+        "int printf(const char *, ...);\n"
+        "int f(int x) { x = x; printf(\"%s\", x); return x << 40; }\n"
+        "int g(int a[-1]) { return 0; }\n"
+        "int h(int y) { int w; y = y; return y; }\n"
+        // (A body that calls the left-out definition is left out too; this one has no warning of its own to lose.)
+        "int calls(int c) { return g(&c); }\n"
+        "int (*p(void)[3])(int) { return 0; }\n"
+        "int k(int y) { int w; y = y; return y << 41; }\n"
+        "_Static_assert(0, \"nope\");\n"
+        "int m(int y) { int w; y = y; return y; }\n"
+        // A body's error the editor refuses (its part holds a goto) leaves that body out alone, not its definition: the
+        // bodies that call it keep their warnings.
+        "struct S { int a; } s;\n"
+        "int n(int x) { x = ({ if (x) goto out; s.b; }); out: return x; }\n"
+        "int caller(int c) { int w; c = c; return n(1) + (c << 42); }\n",
+        // A file-scope const object whose initializer has an error keeps its declaration, as clang's stays valid, so the
+        // bodies that use it keep their warnings (#1447).
+        "int printf(const char *, ...);\n"
+        "struct P { int a; int b; };\n"
+        "static const int s = undeclared;\n"
+        "const int c = undeclared + 1, e = 2;\n"
+        "const struct P p = { undeclared, 2 };\n"
+        "const double d = undeclared;\n"
+        "int g(int z) { int w; z = z; printf(\"%s\", z); return z + s + c + e + p.a + (int)d; }\n"
+        "int h(int z) { int v; z = z; return z << 40; }\n"
+        // A fixed-size const array's and a const pointer's (#1447, review of #1956).
+        "static const int a[2] = { undeclared, 1 };\n"
+        "int *const cp = &undeclared2;\n"
+        "int k(int x) { int w; x = x; printf(\"%s\", x); return x + a[1] + *cp; }\n",
         // A part that holds a label address, a local label or a tag definition whose names aren't used outside it is left
         // out too (#1447); a case label's statement expression keeps its switch whole, and a goto inside a loop keeps its
         // body whole.

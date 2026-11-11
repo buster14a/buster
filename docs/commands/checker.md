@@ -239,12 +239,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
   The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
   original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
-  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
-  in such a statement expression, which need the evaluation facts themselves; the input reader's
-  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
-  `sizeof`'s comma operands, which clang warns of when it evaluates them; and three forms the checker refuses: a statement expression in a variable-array
-  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
-  expression as `_Generic`'s controlling expression.
+  controls and a value that decays from a variable array. For `-Wuninitialized`, a statement
+  expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
+  on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
+  and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
+  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
+  reads outside a deferred typeof region. And a statement expression in a chosen `_Generic` arm
+  (`_Generic(1, int: ({ u; }))`), whose statements the selection's token range marks unselected, so that
+  `-Wuninitialized` reads none of them (#2023).
   `-Wunevaluated-expression` (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr,
   `check_warning_graph_operand`) is on by default, under `-Wunused-value`: the expression operand of a sizeof or an
   alignof of no variable array type, and a `_Generic`'s controlling expression, that has a side effect as

@@ -1904,19 +1904,29 @@ object p points to, as clang's `PaddingClearer` does.
   - an atomic type's bits past its value's;
   - a vector's past its elements (a bool ext vector's past one bit each).
 
-  `check_lower_padding` walks the type with an explicit stack and sets each
-  held bit in a bitmap of the object's.
+  `check_lower_padding_entries` (`c_check_program_padding.c`) walks the
+  element's type with an explicit stack before the function lanes run, once a
+  call, each held piece an interval of bits; an inner array's first element is
+  walked and its intervals copied for the others, or merged into one where the
+  element has no padding (#1842). The intervals are sorted and merged.
 - **Stores.** A byte with no bit held is a zero, in runs stored 8, 4, 2 and 1
   bytes at a time. A byte with some is its load ANDed with their mask. An
   array's elements, through arrays of arrays, are cleared in a loop by their
   element's stores. A variable length array is left as it is, as clang's code
-  leaves it.
-- **Limits.** An element past 4 KiB, or one whose stores pass a builtin's
-  entries (about 40 runs or bytes), is refused by name.
-- **Difference.** Clang's walk doesn't look through a typedef of an array
-  type (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps such
-  an array's padding. The type table here has no typedef sugar, so the
-  padding is cleared.
+  leaves it. Where an element's stores would pass about 460 of a builtin's
+  entries (some 40 runs), its entries (offset, bytes and mask, 8 bytes each)
+  are a read-only pool of the unit's, which the recipe's loop reads
+  (`cbuiltin_misc_lower_padding_table`): the same bytes cleared, by a few
+  dozen typed entries whatever the element's size (#1842).
+- **Limits.** An element past 4 GiB, a type nested more than 64 levels, or
+  an element of more than 1,048,576 intervals or entries is refused by name.
+- **Difference.** Clang's walk doesn't look through an array type's sugar
+  (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps the padding
+  of an array of a typedef's type, of `typeof`'s, or that a pointer declared
+  with parentheses points to (`struct S (*p)[2]`, `ParenType` sugar), and of
+  such an array member; a complex typedef's padding is cleared (`getAs`). The
+  type table here has no sugar, so the padding is cleared (#1842 asks which
+  way to take).
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.
@@ -3261,7 +3271,7 @@ program links without libm as clang's does; but a declaration with an asm
 label, which clang's code calls by its label, `check_program_call_extreme`;
 `-fno-builtin` and `-fno-builtin-NAME` keep the call, and
 `test-checker-driver`'s library runs check all three; a definition's
-`no_builtin` is #1958's): `__builtin_elementwise_maxnum`'s
+`no_builtin` keeps it too, below): `__builtin_elementwise_maxnum`'s
 rows and its kin's
 (`check_vector_floating_scalar_row`), which glibc's functions would not match.
 clang's code of `llvm.maxnum` and `llvm.minnum` gives its first operand of two
@@ -3308,7 +3318,17 @@ no C library has. Each is a builtin of the unit unless `-fno-builtin`,
 and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. The list is pinned to Clang 23.1.4's official build, CI's
+answers by. In a function whose definition has clang's `no_builtin`
+attribute (#1958), with no arguments or with a string naming the function
+(`no_builtin("strlen")`), a call of the unit's declaration of one is that
+declaration's call, as clang's code makes it (`EmitDirectCallee`'s
+`no-builtin-NAME` and `no-builtins`): no fold, no inline `fmax` and no inline
+`<stdbit.h>` function (`check_input_no_builtin`, which the reader asks where it
+marks such a call); a string clang warns names no builtin (`"*"`) covers
+nothing, and the `__builtin_` forms are builtins still. clang's constant
+contexts still fold such a call (its evaluator doesn't read the attribute),
+which this doesn't in the function's own static initializers. The list is
+pinned to Clang 23.1.4's official build, CI's
 reference: its GNU rows include `strlcat` and `strlcpy`, as every upstream 23.x
 release's do (the `llvmorg-23.1.4` and `llvmorg-23.1.5` tags' `Builtins.td` and
 `release/23.x` keep them). Debian's and Ubuntu's clang packages, apt.llvm.org's
