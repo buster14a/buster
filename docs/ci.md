@@ -505,8 +505,11 @@ packs it with its identity (`hosted-product.sh pack`) and publishes it as
 `vector-product-OOPT-ATTEMPT-CONFIGURATION-SHA256`, kept 7 days, before its own
 suite. The configuration's other items build nothing. After their own setup
 (the checkout, the hosted toolchain, the detectors' proofs, the corpus) they
-wait for it (`vector-draw.sh product`, polling every 10 s), in the attempt its
-holder last ran in, download it by that name and install it by the SHA-256 the
+wait for it (`vector-draw.sh product`, polling every 30 s and backing off as
+the draws do), in the attempt its holder last ran in (in a rerun of the failed
+jobs that didn't rerun the holder, the latest earlier attempt's: the API lists
+such a job with the rerun's number, #2276), download it by that name and
+install it by the SHA-256 the
 name holds (`hosted-product.sh install`), as a portable row's shard does. Every
 item's suite, item 1's too, skips the inventory's ownership heading on the
 product's record of its pass (`BUSTER_PRODUCT`, which the install exports, and

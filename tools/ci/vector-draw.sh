@@ -184,11 +184,17 @@ assigning_attempt()
 }
 
 # This attempt's jobs, `RUN_ATTEMPT STATUS CONCLUSION NAME` each (tab-separated, `none` for a job not yet concluded):
-# those it reran with it, the others with the attempt they last ran in.
+# those it reran with its number, the others with `earlier`. The API lists a job the attempt didn't rerun with the
+# attempt's number too, and only its start, before the attempt's, tells it apart (collector_runs, #2276).
 attempt_jobs()
 {
+    local start='0'
+    if [ "$attempt" -gt 1 ]; then
+        start=$(gh api "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" --jq '.run_started_at') || return 1
+        [[ "$start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || return 1
+    fi
     gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100" \
-        --jq '.jobs[] | "\(.run_attempt)\t\(.status)\t\(if (.conclusion // "") == "" then "none" else .conclusion end)\t\(.name)"'
+        --jq ".jobs[] | \"\\(if (.started_at // \"9\") >= \"$start\" then .run_attempt else \"earlier\" end)\\t\\(.status)\\t\\(if (.conclusion // \"\") == \"\" then \"none\" else .conclusion end)\\t\\(.name)\""
 }
 
 # Whether draw $1's collector runs in this attempt: always in the first; in a later one, only when the attempt reran
@@ -390,8 +396,9 @@ product()
             fi
         done
         if [ -n "$holder" ]; then
-            # The attempt the holder last ran in, as this attempt's jobs list it, whose product it is: the first's in the
-            # first attempt, whose jobs are read every 6th poll alone, for the holder's end; a rerun's, every poll.
+            # The attempt the holder last ran in, whose product it is: the first in the first attempt, whose jobs are read
+            # every 6th poll alone, for the holder's end; in a rerun, read every poll, this one if it reran the holder,
+            # else the latest earlier attempt with a product.
             job="Vector draw ${holder% *}, candidate ${holder#* } $row"
             run_attempt=1
             status=unknown
@@ -410,6 +417,11 @@ product()
                     # Its uploads end before it does: list them again after its status.
                     names=$(artifact_names) || names=''
                 fi
+            fi
+            if [ "$run_attempt" = earlier ]; then
+                # Carried over from an earlier attempt: its product is the latest attempt's before this one.
+                run_attempt=$(grep -oE "^$product_prefix-[0-9]+-$configuration-[0-9a-f]{64}\$" <<< "$names" | sed -E "s/^$product_prefix-([0-9]+)-.*/\\1/" |
+                    awk -v now="$attempt" '$1 < now && $1 > best { best = $1 } END { print best + 0 }')
             fi
             found=$(grep -E "^$product_prefix-$run_attempt-$configuration-[0-9a-f]{64}\$" <<< "$names" || true)
             [ "$(grep -c . <<< "$found" || true)" -le 1 ] || die "attempt $run_attempt has $(grep -c . <<< "$found") products of $configuration: $(tr '\n' ' ' <<< "$found")"
