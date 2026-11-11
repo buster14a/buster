@@ -1375,6 +1375,29 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "FOLD(q_);FOLD(a##k);}\n"
           "int tested(int n){unsigned h=2166136261u;S(sb,1,8)S(v16qu,2,8)S(ub32,3,8)S(sb64,4,8)S(uw,5,16)S(v4si,6,32)S(sq4,7,64)S(sd32,8,32)return (int)h;}\n"
         },
+        // Saturating sums and differences of 32- and 64-bit elements, element by element at every target (#2216): of 8 to 128
+        // bytes and an odd length, at the extremes; and the integer elementwise builtins of scalars, of each width and
+        // signedness, plain char's too: add_sat, sub_sat, abs, max, min, popcount, bitreverse, clzg and ctzg with their
+        // fallbacks, fshl and fshr.
+        { "baseline-integer-elements",
+          "typedef unsigned ud8 __attribute__((vector_size(32),aligned(16)));typedef long long sq8 __attribute__((vector_size(64),aligned(16)));"
+          "typedef int sd2 __attribute__((vector_size(8)));typedef int sd32 __attribute__((vector_size(128),aligned(16)));"
+          "typedef unsigned long long ux3 __attribute__((ext_vector_type(3)));\n"
+          "#define V(T,k) {T a,b;fill(&a,sizeof(T),n+k);fill(&b,sizeof(T),n+k+50);a[0]=(__typeof__(a[0]))(1ull<<(8*sizeof(a[0])-1));b[0]=a[0];"
+          "a[1]=(__typeof__(a[0]))-1;b[1]=1;a[sizeof(T)/sizeof(a[0])-1]=(__typeof__(a[0]))~a[0];b[sizeof(T)/sizeof(a[0])-1]=(__typeof__(a[0]))~a[0];"
+          "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_sub_sat(a,b),__builtin_elementwise_sub_sat(b,a)};FOLD(q_);}\n"
+          "#define S(T,k) {T a=(T)((unsigned long long)n*0x9e3779b97f4a7c15ull>>k),b=(T)(1ull<<(8*sizeof(T)-1)),c=(T)-1;"
+          "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_add_sat(b,b),__builtin_elementwise_add_sat(c,a),__builtin_elementwise_sub_sat(a,c),"
+          "__builtin_elementwise_sub_sat(b,a),__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,c),__builtin_elementwise_popcount(a),"
+          "__builtin_elementwise_bitreverse(a),__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg((T)(a&~a),c),__builtin_elementwise_ctzg(b),"
+          "__builtin_elementwise_fshl(a,c,(T)k),__builtin_elementwise_fshr(a,b,(T)(k*3))};FOLD(q_);}\n"
+          "#define A(T,k) S(T,k) {T a=(T)((unsigned long long)n*0x9e37ull>>k),b=(T)(1ull<<(8*sizeof(T)-1));"
+          "T q_[]={__builtin_elementwise_abs(a),__builtin_elementwise_abs(b),__builtin_elementwise_abs((T)-a)};FOLD(q_);}\n"
+          "int tested(int n){unsigned h=2166136261u;V(v4si,1)V(ud8,2)V(v2di,3)V(sq8,4)V(sd2,5)V(sd32,7)\n"
+          "{ux3 a={~0ull,1ull<<63,(unsigned long long)n},b={1,1ull<<63,7};ux3 s=__builtin_elementwise_add_sat(a,b),d=__builtin_elementwise_sub_sat(b,a);"
+          "unsigned long long o[]={s[0],s[1],s[2],d[0],d[1],d[2]};FOLD(o);}\n"
+          "A(signed char,1)S(unsigned char,2)A(short,3)S(unsigned short,4)A(int,5)S(unsigned,6)A(long long,7)S(unsigned long,8)S(char,9)return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
