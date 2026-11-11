@@ -3265,7 +3265,7 @@ What the lowering covers past scalars (#145's programs):
     Every symbol, with its binding, type and definedness, must be clang's; the
     scalar and vector objects must be the same bytes; and every mix of the
     objects linked by cc, the direct path's executables and `-g`'s objects must
-    run as clang's build. It then runs the resolvers over 21 models of libgcc's
+    run as clang's build. It then runs the resolvers over 24 models of libgcc's
     CPU model, which the fixture defines: `target`'s versions by their values,
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
@@ -3273,9 +3273,14 @@ What the lowering covers past scalars (#145's programs):
   - *Differences from clang's code.* A `target_clones` body is compiled once,
     with the unit's features, where clang compiles a copy per version (each is
     valid there). The resolver is `.text`'s, not a COMDAT section's, and has no
-    unwind entry. An `arch=` that names a vendor or a CPU type, or a processor
-    of no key feature with a priority, which clang's `getFMVPriority` leaves
-    undefined, is refused by name.
+    unwind entry.
+  - *`arch=` beyond `__builtin_cpu_is`'s names.* An `arch=` processor that
+    `__builtin_cpu_is` doesn't name (`corei7-avx`, `skx`: aliases of
+    `-march`'s) is clang's `EmitX86CpuIs` default, a test of the model's
+    vendor against 0. A processor whose key feature has no priority (`knm`,
+    the one Sema takes) has none in clang's `getFMVPriority` either, where
+    `getFeaturePriority` is unreachable. clang 23's build sorts it above every
+    other version, and so does the checker. The models' test covers both.
 - **`cpu_specific` and `cpu_dispatch` (#1447).** clang's CPU multiversioning,
   checked as clang 23's Sema checks it (`c_check_cpu_dispatch.c`, after the
   #839 checks) and emitted as its code generation emits it

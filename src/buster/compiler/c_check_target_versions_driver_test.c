@@ -601,13 +601,27 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         "void* resolve_d(void) __asm__(\"d.resolver\");\n"
         "int d0(void) __asm__(\"d.avx2.0\");\nint d1(void) __asm__(\"d.sse4.2.1\");\nint d3(void) __asm__(\"d.default.3\");\n"
         "int (*address_d)(void) = d;\n"
+        // arch= of a processor of no priority (knm, sorted first), and target_clones' of one __builtin_cpu_is doesn't name
+        // (skx, a test of the vendor against 0).
+        "__attribute__((target(\"default\"))) int h(void) { return 0; }\n"
+        "__attribute__((target(\"arch=knm\"))) int h(void) { return 1; }\n"
+        "__attribute__((target(\"arch=atom\"))) int h(void) { return 2; }\n"
+        "__attribute__((target(\"avx2\"))) int h(void) { return 3; }\n"
+        "__attribute__((target_clones(\"arch=skx\", \"arch=knm\", \"sse4.2\", \"default\"))) int e(void);\n"
+        "void* resolve_e(void) __asm__(\"e.resolver\");\n"
+        "int e0(void) __asm__(\"e.arch_skx.0\");\nint e1(void) __asm__(\"e.arch_knm.1\");\nint e2(void) __asm__(\"e.sse4.2.2\");\n"
+        "int e3(void) __asm__(\"e.default.3\");\n"
+        "int (*address_e)(void) = e;\n"
         "int main(void)\n{\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
         "    int index = -1;\n    for (int i = 0; i < 8; i += 1) { index = versions[i] == chosen ? i : index; }\n"
         "    void* chosen_d = resolve_d();\n    int index_d = chosen_d == (void*)d0 ? 0 : chosen_d == (void*)d1 ? 1 : chosen_d == (void*)d3 ? 3 : -1;\n"
-        "    printf(\"%d %d %d\\n\", f(), index, index_d);\n    return 0;\n}\n";
+        "    void* chosen_e = resolve_e();\n"
+        "    int index_e = chosen_e == (void*)e0 ? 0 : chosen_e == (void*)e1 ? 1 : chosen_e == (void*)e2 ? 2 : chosen_e == (void*)e3 ? 3 : -1;\n"
+        "    printf(\"%d %d %d %d %d\\n\", f(), index, index_d, h(), index_e);\n    return 0;\n}\n";
     static const char clones[] =
         "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n"
-        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n";
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n"
+        "__attribute__((target_clones(\"arch=skx\", \"arch=knm\", \"sse4.2\", \"default\"))) int e(void) { return 3; }\n";
     char path[PATH_MAX];
     char clones_path[PATH_MAX];
     char clones_object[PATH_MAX];
@@ -641,6 +655,10 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         { 2, 3, 30, 0, 0, 0, 0 },
         { 0, 0, 0, 0x80u, 0, 0, 0 },
         { 0, 0, 0, 0x20000u, 0, 0, 0 },
+        // knm, Intel's type 11, with and without avx2 and sse4.2.
+        { 1, 11, 0, 0, 0, 0, 0 },
+        { 1, 11, 0, 0x500u, 0, 0, 0 },
+        { 1, 0, 0, 0x500u, 0, 0, 0 },
     };
     for (uint32_t m = 0; written && m < BUSTER_ARRAY_LENGTH(models); m += 1)
     {
