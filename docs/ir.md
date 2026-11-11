@@ -132,6 +132,8 @@ column comparisons deterministic.
 | `address` | `a:ptr`, optional `b:i64`, `c` indexes `addresses` |
 | `load` | `a:ptr`; result is the loaded type |
 | `store` | `a:ptr`, `b` is the stored value; result is `void` |
+| `masked_load` | `a:ptr`, `b` the mask of the lanes in flags (integer lanes alone), `c` the passthrough of the vector result's type; alignment a load's. A lane whose bit is clear is the passthrough's and is never read ([masked loads and stores](ir-simd.md#masked-loads-and-stores-1840)) |
+| `masked_store` | `a:ptr`, `b` the stored vector, `c` the mask of the lanes in flags; result is `void`. A lane whose bit is clear is never written |
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |
@@ -273,8 +275,9 @@ The builder has two twins (#1634). The scalar one, `ir_uses_validated_scalar`,
 decodes each operand through `ir_operand`. The vector one, `ir_uses_validated`,
 decodes 16 instructions at a time (`ir_uses_batch`):
 
-- One byte permute of the opcode tables gives every instruction's `a`, `b` and
-  `c` masks. One compare per column finds the optional operands that are present.
+- One two-register byte permute (`vpermi2b`) of the opcode tables, 128 entries
+  each since the masked loads and stores took opcodes 64 and 65 (#1840), gives
+  every instruction's `a`, `b` and `c` masks. One compare per column finds the optional operands that are present.
 - `pdep` spreads the three column masks into one 48-bit mask. Bit `3 * lane +
   column` is set where that instruction has that operand, so ascending bits run
   in `ir_operand`'s order: instruction by instruction, then `a`, `b`, `c`.
@@ -577,8 +580,8 @@ memory order, any of the six, since the locked access is a full barrier, and its
 operation (`BUSTER_IR_RMW_OPERATION`'s bits): `BUSTER_IR_RMW_EXCHANGE`,
 `BUSTER_IR_RMW_ADD` or `BUSTER_IR_RMW_COMPARE`, whose `b` is the expected value
 and `c` the desired one, of the result's type, an optional value the others
-have none of (`ir_optional_table`), since the IR's 64 operations leave no room
-for another; printed `rmw.iN %p, %v align=N xchg|add ORDER` and
+have none of (`ir_optional_table`), since the IR's 64 operations left no room
+for another then; printed `rmw.iN %p, %v align=N xchg|add ORDER` and
 `rmw.iN %p, %e, %d align=N cas ORDER`) returns the object's old value and leaves
 the operand (an exchange), the sum (an addition), or the desired value where the
 old one is the expected one and the old one where it isn't (a compare-exchange,
@@ -622,7 +625,7 @@ against clang.
 
 `intrinsic` keeps its operation in `c` (`BUSTER_IR_INTRINSIC_*`): `mulhu`,
 `pdep`, `pext`, `bzhi`, `bextr` and the unary scalar `splat`, one opcode since the opcode tables'
-byte-permute register holds 64 and was full, the 128-bit integers' `mulhu`
+byte-permute register held 64 and was full (two registers' 128 since #1840), the 128-bit integers' `mulhu`
 before it the opcode's. The text names the operation after the operands, as a
 comparison's predicate (`%2 = intrinsic.i64 %0, %1 pdep`). Both verifiers check
 it by its own rule (`IR_RULE_INTRINSIC`, deferred by the batch verifier): the
@@ -694,7 +697,7 @@ The typed stream compiles C's vector operators and every vector builtin as X86
 rows (`Tier0Operation`, #717): records whose registers are Tier 0's roles. The
 operators' arithmetic, shifts and comparisons at every element type are the IR's
 own operations of their lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes"); the IR
-has no operation per builtin (its opcode tables hold 64 opcodes, and the builtins
+has no operation per builtin (its opcode tables hold 128 opcodes, and the builtins
 number in the hundreds), nor for a splat of a scalar or a shuffle, so any other
 such row is the IR's machine row, which
 a row call runs: an `IR_CALL` whose descriptor names the row (`IrCall.row`, 1 plus

@@ -64,6 +64,29 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
 {
     static const char* const programs[][2] = {
         {
+            // Masked memory builtins of vectors no register size holds (#2216): 2-lane vectors of bytes and words and a
+            // 3-lane one of dwords, element by element at AVX-512 targets too (check_lower_masked_elements), under every
+            // mask; the lanes past a cleared bit read their pass-through element or write nothing.
+            "vector-narrow-masked",
+            "typedef signed char c2 __attribute__((ext_vector_type(2)));typedef unsigned char u2 __attribute__((ext_vector_type(2)));"
+            "typedef short s2 __attribute__((ext_vector_type(2)));typedef int i3 __attribute__((ext_vector_type(3)));typedef int x2 __attribute__((ext_vector_type(2)));"
+            "typedef _Bool b2 __attribute__((ext_vector_type(2)));typedef _Bool b3 __attribute__((ext_vector_type(3)));\n"
+            "static c2 gather_c(b2 k,x2 i,signed char*p,c2 w){return __builtin_masked_gather(k,i,p,w);}\n"
+            "static s2 gather_s(b2 k,x2 i,short*p,s2 w){return __builtin_masked_gather(k,i,p,w);}\n"
+            "static void scatter_s(b2 k,x2 i,s2 v,short*p){__builtin_masked_scatter(k,i,v,p);}\n"
+            "int tested(int n){unsigned h=2166136261u;for(int m=0;m<8;m++){b2 k={(m^n)&1,((m^n)>>1)&1};b3 k3={m&1,(m>>1)&1,(m>>2)&1};"
+            "signed char cb[4]={11,-22,(signed char)n,-44};unsigned char ub[4]={200,100,50,25};short sb[4]={1000,-2000,(short)(n*7),-4000};int ib[4]={7,8,9,n};"
+            "c2 w={5,6};u2 uw={7,8};s2 sw={9,10};i3 iw={1,2,3};"
+            "c2 e1=__builtin_masked_expand_load(k,cb,w);u2 e2=__builtin_masked_expand_load(k,ub,uw);s2 e3=__builtin_masked_expand_load(k,sb,sw);"
+            "i3 e4=__builtin_masked_expand_load(k3,ib,iw);c2 l1=__builtin_masked_load(k,cb,w);s2 l3=__builtin_masked_load(k,sb,sw);"
+            "signed char o1[4]={0};unsigned char o2[4]={0};short o3[4]={0};int o4[4]={0};short o5[4]={0};short o6[8]={0};"
+            "__builtin_masked_compress_store(k,(c2){-1,(signed char)n},o1);__builtin_masked_compress_store(k,(u2){250,251},o2);"
+            "__builtin_masked_compress_store(k,(s2){-3,-4},o3);__builtin_masked_compress_store(k3,(i3){-5,n,-7},o4);__builtin_masked_store(k,(s2){77,88},o5);"
+            "x2 idx={2,0};c2 g1=gather_c(k,idx,cb,w);s2 g2=gather_s(k,idx,sb,sw);scatter_s(k,idx,(s2){5,6},o6);"
+            "signed char a[]={e1[0],e1[1],l1[0],l1[1],g1[0],g1[1]};unsigned char b[]={e2[0],e2[1]};short c[]={e3[0],e3[1],l3[0],l3[1],g2[0],g2[1]};"
+            "int d[]={e4[0],e4[1],e4[2]};FOLD(a);FOLD(b);FOLD(c);FOLD(d);FOLD(o1);FOLD(o2);FOLD(o3);FOLD(o4);FOLD(o5);FOLD(o6);}return (int)h;}",
+        },
+        {
             // The same elementwise rows on transport pieces, with exact 1/2-byte accesses and wider operands than
             // any hardware register. The per-lane BMI2/PCLMUL paths also take these address-valued vectors.
             "vector-transport-elementwise",
@@ -914,20 +937,19 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of bf16 elements without AVX10.2", 0 },
         { "znver5", "void tested(v4sfu* p){v4sf v={1};__builtin_nontemporal_store(v,p);}", "nontemporal vector builtins at underaligned addresses", 1 },
         { "znver5", "void tested(int* p,int v){__builtin_nontemporal_store(v,p);}", "nontemporal builtins of scalars", 0 },
-        { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
           "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
-        { "znver5", "int tested(int n){v4ss a={n},b={1};v4ss c=__builtin_elementwise_sub_sat(a,b);return c[0];}",
-          "saturating vector arithmetic of 32- and 64-bit elements", 3 },
         { "znver5", "int tested(int n){v4sf a={(float)n},b={1};v4sf c=__builtin_elementwise_max(a,b);return (int)c[0];}",
           "elementwise vector builtins of floating elements", 3 },
         { "x86-64-v3", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
         { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
+        // The integer elementwise builtins of scalars that clang's code computes by instructions of their own: clmul's,
+        // pdep's and pext's (the others are element sequences, check_lower_integer_elements), and those of 128-bit integers.
         { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "elementwise builtins of scalars", 0 },
-        { "znver5", "int tested(int n){return __builtin_elementwise_ctzg(n);}", "elementwise builtins of scalars", 0 },
+        { "znver5", "__int128 tested(__int128 n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
         { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_floor(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sin(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },

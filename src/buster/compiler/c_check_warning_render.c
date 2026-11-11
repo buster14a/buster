@@ -1139,6 +1139,271 @@ static String8 check_driver_sugar_type(const Parser* parser, Preprocessor* pp, c
     return result;
 }
 
+// The typedefs by place of one declaration's types (#1447 item 5, TypeNames.alias_order), as clang's sugar keeps a
+// parameter's: entry k of `order` the alias of the k-th specifier sequence type_print prints, in the order a C declaration
+// writes them (the declaration's own specifiers, then each nested parameter's), UINT32_MAX for none.
+#define BUSTER_CHECK_DRIVER_PLACES 32u
+typedef struct CheckDriverPlaces CheckDriverPlaces;
+struct CheckDriverPlaces
+{
+    TypeId types[BUSTER_CHECK_DRIVER_PLACES];
+    uint32_t covered[BUSTER_CHECK_DRIVER_PLACES];
+    String8 names[BUSTER_CHECK_DRIVER_PLACES];
+    uint32_t count;
+    uint32_t order[BUSTER_CHECK_DRIVER_PLACES];
+    uint32_t order_count;
+    // Whether a parameter's specifiers name a typedef (an order entry past the first has an alias).
+    bool parameter;
+    bool valid;
+};
+
+// The typedef declaration a specifier token names, or BUSTER_CHECK_NONE.
+static uint32_t check_driver_place_typedef(const Parser* parser, const CheckInput* input, uint32_t t)
+{
+    const bool identifier = t < parser->tokens.count && t < input->token_count && parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER;
+    const uint32_t resolved = identifier ? input->declarations[t] : BUSTER_CHECK_NONE;
+    const bool named = resolved != t && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+    return named ? resolved : BUSTER_CHECK_NONE;
+}
+
+// Whether token `t` starts a parameter's specifiers: a type keyword, a tag, a qualifier, a storage class, _Atomic, typeof,
+// _Alignas, an attribute or a typedef's name.
+static bool check_driver_place_starts(const Parser* parser, const CheckInput* input, uint32_t t)
+{
+    const uint8_t kind = t < parser->tokens.count ? parser->tokens.kinds[t] : PARSE_KIND_END;
+    return kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STORAGE ||
+           kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATTRIBUTE ||
+           check_driver_place_typedef(parser, input, t) != BUSTER_CHECK_NONE;
+}
+
+// A qualifier keyword's qualifier (const, volatile, restrict and their underscored forms), or 0.
+static uint32_t check_driver_place_qualifier(const Parser* parser, Preprocessor* pp, uint32_t t)
+{
+    const uint32_t identifier = parser->tokens.kinds[t] == PARSE_KIND_QUALIFIER ? parser->tokens.names[t] : 0;
+    const char* spelling = identifier != 0 ? (const char*)intern_bytes(pp->table, identifier) : "";
+    return strstr(spelling, "const") != NULL ? BUSTER_TYPE_CONST : strstr(spelling, "volatile") != NULL ? BUSTER_TYPE_VOLATILE :
+           strstr(spelling, "restrict") != NULL ? BUSTER_TYPE_RESTRICT : 0;
+}
+
+// The tokens of declaration `name`'s own declarator and specifiers: a parameter's from the `(` or `,` before it, any other
+// from its declaration's start (whose siblings' declarators the walk drops), to the `,`, `;`, `=` or body after it, or
+// its parameter list's `)`. A grouping parenthesis around it is crossed.
+static void check_driver_place_extent(const Parser* parser, uint32_t name, uint32_t* begin, uint32_t* end)
+{
+    const uint32_t start = check_input_declaration_begin(parser, name);
+    uint32_t depth = 0;
+    uint32_t comma = BUSTER_CHECK_NONE;
+    uint32_t list = BUSTER_CHECK_NONE;
+    for (uint32_t t = name; t > start && list == BUSTER_CHECK_NONE;)
+    {
+        t -= 1;
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint8_t role = parser->tree.roles[t];
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        list = opener && depth == 0 && role == PARSE_ROLE_OPEN_FUNCTION ? t : list;
+        comma = kind == PARSE_KIND_COMMA && depth == 0 && comma == BUSTER_CHECK_NONE ? t : comma;
+        depth = closer ? depth + 1 : opener && depth != 0 ? depth - 1 : depth;
+    }
+    *begin = list == BUSTER_CHECK_NONE ? start : (comma != BUSTER_CHECK_NONE ? comma : list) + 1;
+    depth = 0;
+    uint32_t t = name + 1;
+    for (bool scanning = true; scanning && t < parser->tokens.count;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint8_t role = parser->tree.roles[t];
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || (kind == PARSE_KIND_L_BRACE && role != PARSE_ROLE_OPEN_BODY);
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool ends = depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_EQUAL || role == PARSE_ROLE_OPEN_BODY ||
+                                         (closer && role != PARSE_ROLE_CLOSE_GROUP));
+        scanning = !ends;
+        depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+        t += scanning ? 1 : 0;
+    }
+    *end = t;
+}
+
+// The places of declaration `name` (CheckDriverPlaces), as __builtin_dump_struct's printer reads them
+// (check_lower_dump_places): a parameter list's `(` opens one place per parameter (a `(void)` and `...` none), any other
+// `(` groups, but an attribute's, _Alignas's and typeof's, whose tokens are skipped; a record body is skipped; a `,`
+// outside every parenthesis starts a sibling declarator, whose places aren't this one's. Invalid where it holds more than
+// the room.
+static void check_driver_places(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, uint32_t name,
+                                CheckDriverPlaces* places)
+{
+    uint8_t groups[BUSTER_CHECK_DRIVER_PLACES];
+    uint32_t lists[BUSTER_CHECK_DRIVER_PLACES];
+    uint32_t group_depth = 0;
+    uint32_t list_depth = 0;
+    uint32_t braces = 0;
+    uint32_t skipped = 0;
+    uint32_t top = 0;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    *places = (CheckDriverPlaces){ .order = { UINT32_MAX }, .order_count = 1 };
+    places->valid = name < parser->tokens.count && name < input->token_count && input->declarations != NULL && input->declaration_kinds != NULL &&
+                    input->declared_types != NULL;
+    if (places->valid)
+    {
+        check_driver_place_extent(parser, name, &begin, &end);
+    }
+    for (uint32_t t = begin; places->valid && t < end && t < input->token_count; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const uint8_t previous = t > begin ? parser->tokens.kinds[t - 1] : PARSE_KIND_END;
+        if (braces != 0 || kind == PARSE_KIND_L_BRACE)
+        {
+            braces = kind == PARSE_KIND_L_BRACE ? braces + 1 : kind == PARSE_KIND_R_BRACE ? braces - 1 : braces;
+        }
+        else if (skipped != 0 || (kind == PARSE_KIND_L_PAREN && (previous == PARSE_KIND_ATTRIBUTE || previous == PARSE_KIND_ALIGNAS || previous == PARSE_KIND_TYPEOF)))
+        {
+            skipped = kind == PARSE_KIND_L_PAREN ? skipped + 1 : kind == PARSE_KIND_R_PAREN ? skipped - 1 : skipped;
+        }
+        else if (kind == PARSE_KIND_L_PAREN)
+        {
+            const uint32_t identifier = t + 1 < end ? parser->tokens.names[t + 1] : 0;
+            const bool none = t + 2 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_TYPE && parser->tokens.kinds[t + 2] == PARSE_KIND_R_PAREN &&
+                              intern_length(pp->table, identifier) == 4 && memcmp(intern_bytes(pp->table, identifier), "void", 4) == 0;
+            const bool list = previous != PARSE_KIND_ATOMIC && !none && check_driver_place_starts(parser, input, t + 1);
+            places->valid = group_depth < BUSTER_CHECK_DRIVER_PLACES &&
+                            (!list || (list_depth < BUSTER_CHECK_DRIVER_PLACES && places->order_count < BUSTER_CHECK_DRIVER_PLACES));
+            if (places->valid)
+            {
+                groups[group_depth++] = list;
+            }
+            if (places->valid && list)
+            {
+                lists[list_depth++] = top;
+                top = places->order_count;
+                places->order[places->order_count++] = UINT32_MAX;
+            }
+        }
+        else if (kind == PARSE_KIND_R_PAREN && group_depth != 0)
+        {
+            group_depth -= 1;
+            if (groups[group_depth] && list_depth != 0)
+            {
+                top = lists[--list_depth];
+            }
+        }
+        else if (kind == PARSE_KIND_COMMA && group_depth == 0)
+        {
+            // A sibling declarator's: its places are dropped, the shared specifiers' kept.
+            places->order_count = 1;
+            top = 0;
+        }
+        else if (kind == PARSE_KIND_COMMA && groups[group_depth - 1])
+        {
+            places->valid = places->order_count < BUSTER_CHECK_DRIVER_PLACES;
+            top = places->order_count;
+            places->order[places->valid ? places->order_count++ : 0] = UINT32_MAX;
+        }
+        else if (kind == PARSE_KIND_ELLIPSIS && top == places->order_count - 1 && places->order[top] == UINT32_MAX)
+        {
+            // `...` is no parameter's specifiers.
+            places->order_count -= 1;
+            top = UINT32_MAX;
+        }
+        else if (top < places->order_count && places->order[top] == UINT32_MAX && check_driver_place_typedef(parser, input, t) != BUSTER_CHECK_NONE)
+        {
+            // Its typedef's type, unqualified, under the qualifiers it covers: its own, but those the declaration writes
+            // beside it (`const J`), which print before its name.
+            const uint32_t resolved = check_driver_place_typedef(parser, input, t);
+            uint32_t written = 0;
+            for (uint32_t k = t; k > begin && (parser->tokens.kinds[k - 1] == PARSE_KIND_QUALIFIER || parser->tokens.kinds[k - 1] == PARSE_KIND_STORAGE); k -= 1)
+            {
+                written |= check_driver_place_qualifier(parser, pp, k - 1);
+            }
+            for (uint32_t k = t + 1; k < end && parser->tokens.kinds[k] == PARSE_KIND_QUALIFIER; k += 1)
+            {
+                written |= check_driver_place_qualifier(parser, pp, k);
+            }
+            const TypeId declared = type_strip_aligned(types, input->declared_types[resolved]);
+            const uint32_t identifier = parser->tokens.names[t];
+            places->valid = places->count < BUSTER_CHECK_DRIVER_PLACES && type_is_valid(types, declared);
+            if (places->valid)
+            {
+                places->types[places->count] = type_unqualified(declared);
+                places->covered[places->count] = type_qualifiers(declared) & ~written;
+                places->names[places->count] = (String8){ .pointer = (char*)intern_bytes(pp->table, identifier), .length = intern_length(pp->table, identifier) };
+                places->parameter |= top != 0;
+                places->order[top] = places->count++;
+            }
+        }
+    }
+}
+
+// A warning operand's type as declaration `name` writes it where a parameter's specifiers name a typedef (#1447 item 5),
+// with clang's a.k.a. of the type without them: `'void (*)(I)' (aka 'void (*)(int)')`. Empty where none does, or the
+// places don't match the specifiers the printer prints (a level the declaration doesn't spell), where the caller prints
+// the type as before.
+static String8 check_driver_placed_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, CheckWarningSpelling* spell,
+                                        Arena* scratch, TypeId type, uint32_t name)
+{
+    String8 result = { 0 };
+    CheckDriverPlaces places = { 0 };
+    const bool candidate = name < input->token_count && type != 0 && type_is_valid(types, type);
+    if (candidate)
+    {
+        check_driver_places(parser, pp, input, types, name, &places);
+    }
+    if (candidate && places.valid && places.parameter && check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+    {
+        uint64_t bound_ids[BUSTER_CHECK_DRIVER_VLA_BOUNDS];
+        String8 bound_texts[BUSTER_CHECK_DRIVER_VLA_BOUNDS];
+        uint32_t printed = UINT32_MAX;
+        TypeNames names = {
+            .bytes = spell->bytes,
+            .lengths = spell->lengths,
+            .count = spell->count,
+            .anonymous = spell->anonymous,
+            .anonymous_count = spell->anonymous_count,
+            .bound_ids = bound_ids,
+            .bound_texts = bound_texts,
+            .bound_count = check_driver_vla_bounds(parser, pp, types, type, bound_ids, bound_texts, scratch),
+            .space_macro_spaces = spell->space_macro_spaces,
+            .space_macro_texts = spell->space_macro_texts,
+            .space_macro_count = spell->space_macro_count,
+        };
+        const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+        // The a.k.a. drops the typedefs and a macro's name, as desugarForDiagnostic does.
+        TypeNames plain = names;
+        plain.space_macro_count = 0;
+        const String8 canonical = type_print(types, scratch, type, (String8){ 0 }, &plain, options);
+        names.alias_types = places.types;
+        names.alias_names = places.names;
+        names.alias_covered = places.covered;
+        names.alias_count = places.count;
+        names.alias_order = places.order;
+        names.alias_order_count = places.order_count;
+        names.alias_order_printed = &printed;
+        const String8 sugared = type_print(types, scratch, type, (String8){ 0 }, &names, options);
+        const bool differs = sugared.length != canonical.length || memcmp(sugared.pointer, canonical.pointer, sugared.length) != 0;
+        const char* text = printed == places.order_count && sugared.length != 0 && canonical.length != 0 && differs ?
+                           check_warning_text(scratch, "'%.*s' (aka '%.*s')", (int)sugared.length, sugared.pointer, (int)canonical.length, canonical.pointer) : NULL;
+        result = text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
+    }
+    return result;
+}
+
+// The declaration a warning operand names (#1447 item 5), through conversions, addresses, indirections and subscripts:
+// its declared name's token, or BUSTER_CHECK_NONE.
+static uint32_t check_driver_operand_declaration(const CheckInput* input, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool walking = input->declarations != NULL;
+    for (uint32_t steps = 0; walking && node < graph->count && steps < 16; steps += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t token = graph->tokens[node];
+        result = op == CHECK_OP_VALUE && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+        walking = op == CHECK_OP_CONVERT || op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT;
+        node = walking ? graph->operand0[node] : node;
+    }
+    return result;
+}
+
 // A warning operand's type (check_driver_warning_type), as its sugar writes it where it has some and no typedef or typeof
 // spelling (check_driver_sugar_type).
 static String8 check_driver_warning_type_sugared(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -1828,6 +2093,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE:
         case CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN:
         case CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE:
+        case CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -1945,6 +2211,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                             "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'flatten'" :
                                         event->kind == CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE ?
                                             "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'noinline'" :
+                                        event->kind == CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT ? "conflicting attributes '%.*s%s%.*s' are ignored" :
                                         event->kind == CHECK_WARNING_EVENT_NO_CALLS ?
                                             "'%.*s%s%.*s' attribute is ignored because there exists no call expression inside the statement" :
                                         "'%.*s%s%.*s' attribute ignored",
@@ -2023,6 +2290,28 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TENTATIVE_ARRAY:
             result = "tentative array definition assumed to have one element";
             break;
+        case CHECK_WARNING_EVENT_DEFAULT_CONST_INIT:
+        {
+            // The object's type as declared, with its typedef (#2168): 'volatile CI[2]' (aka 'const volatile int[2]').
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            const bool field = event->id == CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE;
+            const bool unsafe = event->id != CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR;
+            // An unsafe one says it is incompatible with C++ too where -Wc++-compat is on there, as clang's words select
+            // by its fake diagnostic's policy.
+            const CheckWarningEvent compatibility = {
+                .id = CHECK_WARNING_ID_CXX_COMPAT,
+                .kind = event->kind,
+                .token = event->token,
+                .source = event->source,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+            };
+            const bool incompatible = unsafe && check_driver_warning_severity(pp, input, &compatibility) != CHECK_WARNING_IGNORE;
+            result = type.length != 0 ? check_warning_text(scratch, "default initialization of an object of type %.*s%s %s%s", (int)type.length, type.pointer,
+                                                           field ? " with const member" : "", unsafe ? "leaves the object uninitialized" : "is incompatible with C++",
+                                                           incompatible ? " and is incompatible with C++" : "") :
+                     NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_UNUSED_RESULT:
         {
             static const char* const messages[] =
@@ -2118,6 +2407,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_CONST_MEMBER:
+            result = check_warning_text(scratch, "member '%.*s' declared 'const' here", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
             result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);

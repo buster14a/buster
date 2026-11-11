@@ -441,7 +441,8 @@ static BranchSizingCheck branch_sizing_validate_branches(const X86Instruction* r
     const __m512i first_form = _mm512_set1_epi32(X86_FORM_JMP_REL8);
     const __m512i window = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_FORM_WINDOW);
     const __m512i form_words = _mm512_load_si512(branch_sizing_form_words);
-    const uint8_t* forms = (const uint8_t*)records + __builtin_offsetof(X86Instruction, form);
+    // An emission without instructions has no records (null); the gathers then take no lanes.
+    const uint8_t* forms = records != 0 ? (const uint8_t*)records + __builtin_offsetof(X86Instruction, form) : 0;
     // The vector before's branch records: its last lane is the branch before this vector's first.
     __m512i previous = zero;
     for (uint64_t k = 0; result.error == BRANCH_SIZING_OK && k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
@@ -559,7 +560,8 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
     const __m512i jump_form = _mm512_set1_epi32(X86_FORM_JMP_REL8);
     const __m512i jump_growth = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_JMP_GROWTH);
     const __m512i condition_growth = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_JCC_GROWTH);
-    const uint8_t* forms = (const uint8_t*)records + __builtin_offsetof(X86Instruction, form);
+    // An emission without instructions has no records (null); the gathers then take no lanes.
+    const uint8_t* forms = records != 0 ? (const uint8_t*)records + __builtin_offsetof(X86Instruction, form) : 0;
     uint32_t* prefix = columns->prefix[0];
     __m512i carry = zero;
     __mmask16 grown = 0;

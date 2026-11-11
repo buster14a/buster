@@ -792,6 +792,47 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_AES, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->lane_move != 0)
+    {
+        // One lane of a vector or its lanes' sign bits (#1840), its flags the lane: an extraction's I32 or I64 narrowed to
+        // the row's integer, and an insertion's integer widened to its I32 first.
+        const uint32_t kind = operation->lane_move - 1u;
+        const uint32_t size = operation->immediate & 3;
+        const IrType scalar = size == 3 ? IR_I64 : IR_I32;
+        if (kind == BUSTER_IR_INTRINSIC_LANE_INSERT)
+        {
+            const IrType given = (IrType)ir_typed_types[operation->operand_classes[1]];
+            const uint32_t inserted = given == scalar ? operands[1] : ir_typed_emit(sink, IR_ZEXT, scalar, operands[1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], inserted, kind, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        }
+        else
+        {
+            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : scalar;
+            value = ir_typed_emit(sink, IR_INTRINSIC, produced, operands[0], BUSTER_IR_NONE, kind, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+            if (type != produced)
+            {
+                value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            }
+        }
+    }
+    else if (operation->masked_memory != 0)
+    {
+        // A masked load or store (#1840) of the vector at the address, the first operand, under the third, the mask: a
+        // load's passthrough the second operand, a store's vector the second. Under the typed stream's mask of every lane
+        // it is the plain load or store of the whole vector, which reads or writes every lane anyway.
+        const bool store = operation->masked_memory == 2;
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const IrOp op = unmasked ? (store ? IR_STORE : IR_LOAD) : store ? IR_MASKED_STORE : IR_MASKED_LOAD;
+        const uint32_t b = store ? operands[1] : unmasked ? BUSTER_IR_NONE : operands[2];
+        const uint32_t c = unmasked ? BUSTER_IR_NONE : store ? operands[2] : operands[1];
+        value = ir_typed_emit(sink, op, type, address, b, c, operation->immediate);
+        if (!unmasked)
+        {
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else if (operation->compress != 0)
     {
         // A compress or an expand (#1840) of the first operand under the third, the mask, merged into the second, the
@@ -892,15 +933,16 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     return value;
 }
 
-// Whether entry `i`, a comparison into a mask alone (#1623), has a writemask of every lane: a constant whose bits for
-// the lanes are all set, converted to the mask, just before it, as the comparison intrinsics' rows without a mask
-// operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
+// Whether entry `i`, a comparison into a mask alone (#1623), or a masked extract, truncation, load or store (#1840), has a
+// writemask of every lane: a constant whose bits for the lanes are all set, converted to the mask, just before it, as
+// the comparison intrinsics' rows without a mask operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides
+// it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
     // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
-    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
-                           operation->merge_mask   ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
-                                                     0;
+    const uint32_t lanes = operation->compare_mask                                    ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+                           operation->merge_mask || operation->masked_memory != 0 ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
+                                                                                     0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
     return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
            input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;

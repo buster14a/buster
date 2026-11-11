@@ -1154,6 +1154,105 @@ static const CheckDriverDefaultWarningFixture check_driver_static_assert_fixture
         .notes = 3,
         .c23 = true,
     },
+    {
+        // A static assertion among a structure's or a union's members (#2264), which declares none: checked as a block's,
+        // a failing one's details too, and the members around it kept.
+        .name = "static assertions among members",
+        .source = "struct S { int a; _Static_assert(1, \"\"); int b; };\n"
+                  "struct T { _Static_assert(sizeof(int) == 4, \"x\"); int c; union { _Static_assert(1, \"y\"); int d; }; };\n"
+                  "union U { _Static_assert(1, \"u\"); int a; float b; };\n"
+                  "struct V { int a; _Static_assert(sizeof(int) == 3, \"fails\"); char b : 2; };\n"
+                  "struct X { int a; _Static_assert(1, \"\"); };\n"
+                  "int z = sizeof(struct S) + sizeof(struct T) + sizeof(union U) + sizeof(struct V) + sizeof(struct X);\n"
+                  "void f(struct S *s) { s->b = s->a; }\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "C23 static assertions among members",
+        .source = "struct S { int a; static_assert(1); int b; static_assert(sizeof(int) == 4, \"m\"); };\n"
+                  "struct W { static_assert(1); };\n"
+                  "int z = sizeof(struct S);\n",
+        .c23 = true,
+    },
+};
+
+// A parameter's typedef in a printed type (#1447 item 5, check_driver_placed_type): the declaration's own specifiers' and
+// each nested parameter's typedef by place, with clang's a.k.a. of the type without them, for an object, a function, its
+// address, an array's element, a typedef's use, a call's parameter, an initialized, assigned or passed target.
+static const CheckDriverDefaultWarningFixture check_driver_parameter_typedef_fixtures[] =
+{
+    {
+        .name = "parameters' typedefs",
+        .source = "typedef int I;\n"
+                  "typedef I J;\n"
+                  "typedef void (*F)(I);\n"
+                  "void f(I x);\n"
+                  "void g(void (*cb)(I), J (*h)(I, J));\n"
+                  "void use(void)\n"
+                  "{\n"
+                  "    int *p;\n"
+                  "    void (*q)(I) = 0;\n"
+                  "    F r = 0;\n"
+                  "    p = q;\n"
+                  "    p = r;\n"
+                  "    p = f;\n"
+                  "    p = &f;\n"
+                  "    p = g;\n"
+                  "    int (*s)(I*, J) = 0;\n"
+                  "    p = s;\n"
+                  "    I a[2];\n"
+                  "    p = &a;\n"
+                  "}\n",
+        .errors = 7,
+    },
+    {
+        .name = "parameters' typedefs by place",
+        .source = "typedef int I;\n"
+                  "typedef I J;\n"
+                  "typedef const int CI;\n"
+                  "typedef void (*F)(I);\n"
+                  "typedef void G(I);\n"
+                  "struct S { int x; };\n"
+                  "typedef struct S T;\n"
+                  "void take(void (*cb)(I));\n"
+                  "void takef(F f);\n"
+                  "void h(I a, ...);\n"
+                  "void k(void);\n"
+                  "int (*a)(I), (*b)(J *, T);\n"
+                  "G *gp;\n"
+                  "I (*ret)(I);\n"
+                  "void (*arr[2])(I);\n"
+                  "void (*pp)(CI *, I);\n"
+                  "void (*kr)();\n"
+                  "void use(int n, int *ip)\n"
+                  "{\n"
+                  "    void (*q)(I) = ip;\n"
+                  "    int *p;\n"
+                  "    p = h;\n"
+                  "    p = a;\n"
+                  "    p = b;\n"
+                  "    p = gp;\n"
+                  "    p = ret;\n"
+                  "    p = arr;\n"
+                  "    p = arr[0];\n"
+                  "    p = *arr;\n"
+                  "    p = pp;\n"
+                  "    q = ip;\n"
+                  "    take(ip);\n"
+                  "    takef(ip);\n"
+                  "    p = take;\n"
+                  "    p = k;\n"
+                  "    p = kr;\n"
+                  "    void (*vla)(int (*)[2], I) = 0;\n"
+                  "    p = vla;\n"
+                  "    void (*na)(I, J (*)(T)) = 0;\n"
+                  "    p = na;\n"
+                  "    p = &na;\n"
+                  "}\n",
+        .errors = 19,
+        .notes = 2,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -1167,4 +1266,6 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_size_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_size_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_parameter_typedef_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_parameter_typedef_fixtures));
 }

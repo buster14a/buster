@@ -376,7 +376,10 @@ static void check_mangle_type(CheckMangle* writer, TypeId original)
 
 // Output owns the returned spelling (and the source's lazy nominal catalog), scratch only the worklists. A failure
 // leaves spelling empty and frees its temporary work; the emission owner rolls back output together with its link.
-static CheckMangleStatus check_mangle_name(CheckMangleSource* source, TypeId function, uint32_t identifier, Arena* scratch, String8* spelling)
+// The name of function `identifier` of type `function`, declared at `declaration` (UINT32_MAX for none): with its
+// enable_if conditions (#1447), `Ua9enable_ifI`, each one's argument (CheckCondition.mangled), `E`, after the name, as
+// clang mangles an overloadable function's; a condition without one is unsupported.
+static CheckMangleStatus check_mangle_name(CheckMangleSource* source, TypeId function, uint32_t identifier, uint32_t declaration, Arena* scratch, String8* spelling)
 {
     *spelling = (String8){ 0 };
     const uint64_t mark = scratch->length;
@@ -397,6 +400,21 @@ static CheckMangleStatus check_mangle_name(CheckMangleSource* source, TypeId fun
         check_mangle_text(&writer, source->internal ? "_ZL" : "_Z");
         check_mangle_number(&writer, length, 10);
         check_mangle_bytes(&writer, intern_bytes(source->identifiers, identifier), length);
+        const CheckConditionTable* conditions = source->input != NULL ? &source->input->graph.conditions : NULL;
+        const CheckConditionDeclaration* entry = conditions != NULL && conditions->declaration_count != 0 ? check_condition_find(conditions, declaration) : NULL;
+        bool enabled = false;
+        for (uint32_t i = 0; entry != NULL && i < entry->count; i += 1)
+        {
+            const CheckCondition* condition = conditions->conditions + entry->conditions[i];
+            if (condition->kind == CHECK_CONDITION_ENABLE)
+            {
+                check_mangle_text(&writer, enabled ? "" : "Ua9enable_ifI");
+                enabled = true;
+                writer.status = condition->mangled != NULL ? writer.status : CHECK_MANGLE_UNSUPPORTED;
+                check_mangle_bytes(&writer, condition->mangled != NULL ? condition->mangled : "", condition->mangled_length);
+            }
+        }
+        check_mangle_text(&writer, enabled ? "E" : "");
         check_mangle_parameters(&writer, type_strip_aligned(types, function), true);
     }
     while (writer.status == CHECK_MANGLE_OK && writer.task_count != 0)
