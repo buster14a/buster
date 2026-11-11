@@ -170,6 +170,114 @@ static void check_test_driver_symbols(CheckTest* test, const char* clang, const 
     unlink(strong_object);
 }
 
+// A weak attribute or `#pragma weak` after a use (#1849), as clang's code generation binds each symbol: an undefined
+// object's by the declaration its first emitted reference names (an eager body's or static data's before the weak one
+// leaves it global; a deferred body's or data's, emitted at the unit's end, sees a pragma on the declaration it names),
+// a defined one's weak, and a tentative one's by its last tentative definition. Each symbol's binding must be clang's,
+// with and without -fcommon, by both paths, whose objects must be the same bytes, and they must link with the
+// definitions of the undefined names and run as clang's. A unit whose deferred references disagree is refused by name.
+static void check_test_driver_weak_late(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "void f(void);\nextern int v;\nint *pv = &v;\nvoid g(void) { f(); }\nvoid f(void) __attribute__((weak));\nextern int v __attribute__((weak));\n"
+        "void h(void);\nvoid k(void) { h(); }\nvoid h(void) __attribute__((weak));\nvoid h(void) {}\n"
+        "extern int w;\nint *pw = &w;\nextern int w __attribute__((weak));\nint w = 3;\n"
+        "extern int u;\nint gu(void) { return u; }\nextern int u __attribute__((weak));\nint u;\n"
+        "void m(void);\nvoid (*pm)(void) = m;\nvoid m(void) __attribute__((weak));\n"
+        "void a(void);\nstatic void s(void) { a(); }\nvoid a(void) __attribute__((weak));\nvoid g2(void) { s(); }\n"
+        "void d(void);\nvoid g5(void) { (void)sizeof(d()); }\nvoid d(void) __attribute__((weak));\nvoid g6(void) { d(); }\n"
+        "void e(void);\nstatic void s3(void) { e(); }\nvoid e(void) __attribute__((weak));\nvoid g3(void) { e(); s3(); }\n"
+        "int t1;\nextern int t1 __attribute__((weak));\nint t2;\nextern int t2 __attribute__((weak));\nint t2;\n"
+        "int t3;\nextern int t3;\n#pragma weak t3\nint t4;\n#pragma weak t4\n"
+        "void p1(void);\nvoid gp1(void) { p1(); }\n#pragma weak p1\n"
+        "void p2(void);\nstatic void sp2(void) { p2(); }\n#pragma weak p2\nvoid gp2(void) { sp2(); }\n"
+        "void p3(void);\nstatic void sp3(void) { p3(); }\nvoid p3(void);\n#pragma weak p3\nvoid gp3(void) { sp3(); }\n"
+        "extern int r;\nstatic int *pr = &r;\nextern int r __attribute__((weak));\nint *gr(void) { return pr; }\n"
+        "void q(void);\nvoid gq(void) { static void (*sq)(void) = q; sq(); }\nvoid q(void) __attribute__((weak));\n"
+        "void b(void);\nvoid gb(void)\n{\n    b();\n#pragma weak b\n}\n"
+        "void early(void) __attribute__((weak));\nvoid ge(void) { early(); }\n"
+        "void ta(void) {}\nvoid fa(void);\nvoid gfa(void) { fa(); }\nvoid fa(void) __attribute__((weak, alias(\"ta\")));\n"
+        "int printf(const char*, ...);\n"
+        "int main(void) { g(); k(); g2(); g6(); g3(); gp1(); gp2(); gp3(); gq(); gb(); ge(); gfa(); return printf(\" %d\\n\", *pv + *pw + gu() + *gr() + t1 + t2 + t3 + t4 + (pm != 0)) < 0; }\n";
+    static const char definitions[] =
+        "#include <stdio.h>\nint v = 1;\nint r = 2;\n"
+        "void f(void) { putchar('f'); }\nvoid m(void) { putchar('m'); }\nvoid a(void) { putchar('a'); }\nvoid d(void) { putchar('d'); }\n"
+        "void e(void) { putchar('e'); }\nvoid p1(void) { putchar('1'); }\nvoid p2(void) { putchar('2'); }\nvoid p3(void) { putchar('3'); }\n"
+        "void q(void) { putchar('q'); }\nvoid b(void) { putchar('b'); }\nvoid early(void) { putchar('y'); }\n";
+    static const char* const names[] = { "f", "v", "h", "w", "u", "m", "a", "d", "e", "t1", "t2", "t3", "t4", "p1", "p2", "p3", "r", "q", "b", "early", "fa" };
+    static const char refused[] = "void c(void);\nstatic void u(void) { c(); }\nvoid c(void) __attribute__((weak));\nstatic void (*pc)(void) = c;\n"
+                                  "void g4(void) { pc(); u(); }\n";
+    char path[512];
+    char defined_path[512];
+    char defined_object[512];
+    char refused_path[512];
+    char refused_object[512];
+    snprintf(path, sizeof(path), "%s/weak-late.c", directory);
+    snprintf(defined_path, sizeof(defined_path), "%s/weak-late-definitions.c", directory);
+    snprintf(defined_object, sizeof(defined_object), "%s/weak-late-definitions.o", directory);
+    snprintf(refused_path, sizeof(refused_path), "%s/weak-late-refused.c", directory);
+    snprintf(refused_object, sizeof(refused_object), "%s/weak-late-refused.o", directory);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1) && parse_test_write(defined_path, definitions, sizeof(definitions) - 1) &&
+                         parse_test_write(refused_path, refused, sizeof(refused) - 1);
+    check_test_expect(test, written, "the late weak declarations' fixtures are written");
+    char* text = NULL;
+    char* const define_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-c", defined_path, "-o", defined_object, NULL };
+    const bool defined = written && check_test_driver_spawn(define_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, defined, "the late weak declarations' definitions compile through clang");
+    for (uint32_t common = 0; written && common < 2; common += 1)
+    {
+        char objects[3][512];
+        char programs[3][512];
+        char captured[3][128] = { { 0 } };
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            snprintf(objects[p], sizeof(objects[p]), "%s/weak-late-%u-%u.o", directory, common, p);
+            snprintf(programs[p], sizeof(programs[p]), "%s/weak-late-%u-%u", directory, common, p);
+            char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", common != 0 ? "-fcommon" : "-fno-common", "-c", path, "-o", objects[p],
+                                  p == 2 ? "--scalar" : NULL, NULL };
+            const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+            check_test_expect(test, compiled, "late weak declarations compile through clang and both checker paths");
+            for (uint32_t n = 0; compiled && p != 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+            {
+                uint16_t ours = UINT16_MAX;
+                uint16_t theirs = UINT16_MAX - 1;
+                char description[160];
+                snprintf(description, sizeof(description), "a late weak declaration leaves %s's binding clang's (%s), by the %s path", names[n],
+                         common != 0 ? "-fcommon" : "-fno-common", p == 1 ? "vector" : "scalar");
+                check_test_expect(test, check_test_visibility_symbol(objects[p], names[n], &ours) && check_test_visibility_symbol(objects[0], names[n], &theirs) &&
+                                       ours == theirs, description);
+            }
+            char* const link[] = { (char*)clang, objects[p], defined_object, "-o", programs[p], NULL };
+            const bool linked = compiled && defined && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "late weak declarations' objects link and run");
+        }
+        check_test_expect(test, check_test_driver_same_files(objects[1], objects[2]), "late weak declarations' scalar and vector objects match byte for byte");
+        check_test_expect(test, strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0, "late weak declarations' programs run as clang's");
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            unlink(objects[p]);
+            unlink(programs[p]);
+        }
+    }
+    for (uint32_t p = 0; written && p < 2; p += 1)
+    {
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-c", refused_path, "-o", refused_object, p == 1 ? "--scalar" : NULL, NULL };
+        const int status = check_test_driver_spawn(arguments, &text);
+        check_test_expect(test, status != 0 && text != NULL && strstr(text, "a weak declaration after a use that only code clang emits at the unit's end makes") != NULL,
+                          "deferred references that disagree on a late weak declaration are refused by name");
+        free(text);
+        text = NULL;
+    }
+    unlink(path);
+    unlink(defined_path);
+    unlink(defined_object);
+    unlink(refused_path);
+    unlink(refused_object);
+}
+
 // A template's symbols in -c's object (#812): its `.L` and numeric labels are the assembler's temporary symbols, which
 // the object leaves out; an undefined `.globl` declaration and a `.set`/`.equ` absolute are the template's alone, which
 // the object leaves out too (clang writes them, as GLOBAL UND and LOCAL ABS); and a `.hidden` label keeps its visibility.

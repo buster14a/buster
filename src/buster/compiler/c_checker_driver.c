@@ -4406,10 +4406,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                         intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
-                                 input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                                 input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
                         {
-                            // A label's errors name it, as clang's do; a redefinition's with its note at the first.
-                            const uint32_t name = parser->tokens.names[token];
+                            // A label's errors name it, as clang's do (at the report's own token, which an undeclared label's
+                            // order key, its scope's closing brace, isn't); a redefinition's with its note at the first.
+                            const uint32_t name = parser->tokens.names[located];
                             const CheckInputMessage label = input->reports[index].message;
                             const uint32_t previous = input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ? input->reports[index].note_token : count;
                             const PPOutputDiagnosticNote note = {

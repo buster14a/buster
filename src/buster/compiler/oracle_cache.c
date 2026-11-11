@@ -1107,6 +1107,17 @@ struct OracleRun
     OracleLooks looks;
     bool checking;
     OracleKey checked;
+    // Through the process's clang server (oracle_serve, --- Served runs ---): whether the run's result is the server's,
+    // or with --differential whether the server's is beside the child's or the entry's, which oracle_run_finish
+    // compares; whether the server answered, and its wait status, output and errors.
+    bool served;
+    bool comparing;
+    bool answered;
+    int served_status;
+    char* served_output;
+    uint64_t served_output_length;
+    char* served_errors;
+    uint64_t served_errors_length;
 };
 
 // Nanoseconds on the monotonic clock.
@@ -2693,6 +2704,14 @@ static void oracle_run_reset(OracleRun* run)
     run->looks = (OracleLooks){ 0 };
     run->checking = false;
     run->checked = (OracleKey){ 0 };
+    run->served = false;
+    run->comparing = false;
+    run->answered = false;
+    run->served_status = 0;
+    run->served_output = 0;
+    run->served_output_length = 0;
+    run->served_errors = 0;
+    run->served_errors_length = 0;
 }
 
 // --- Entries ---
@@ -3354,30 +3373,18 @@ static bool oracle_run_probes(OracleRun* run, bool times, OracleRecords* probes)
     return result;
 }
 
-// After a run that ran: what it looked at and wrote, and its entry written (its variant's, oracle_entry_variant); in
-// check mode compared first with the entry it would have taken (OracleRun.checked). A traced run (a compiler's) is kept
-// only if its tracing missed nothing. False if that entry is stale, with a line on the errors naming it.
-static bool oracle_run_keep(OracleRun* run)
+// In check mode, after a run: what of the entry it would have taken (OracleRun.checked, found before it ran) differs from
+// its result and the files it wrote (`files`, run->file_count of them), or null where it found none or that entry holds
+// what the run gave. A stale entry is counted, named on the errors with the run, and removed: the run's own entry,
+// written next, may be another variant, which wouldn't replace it (a file it names apart each time, by its pid, is
+// among what it looked at).
+static const char* oracle_run_stale(OracleRun* run, const OracleFile* files)
 {
-    OracleRecords probes = { 0 };
-    bool keep = !run->dependencies || (run->listener >= 0 && !run->untraced);
-    const uint32_t flags = keep && run->dependencies && !oracle_tool_epoch(run) ? BUSTER_ORACLE_TIMES : 0;
-    keep = keep && (!run->dependencies || oracle_run_probes(run, (flags & BUSTER_ORACLE_TIMES) != 0, &probes));
-    OracleFile files[BUSTER_ORACLE_FILES];
-    for (uint32_t f = 0; f < run->file_count; f += 1)
-    {
-        char path[BUSTER_ORACLE_PATH_BYTES];
-        struct stat status;
-        files[f] = (OracleFile){ 0 };
-        keep = keep && oracle_run_path(run, run->files[f], path, sizeof(path));
-        files[f].present = keep && lstat(path, &status) == 0;
-        keep = keep && (!files[f].present || (S_ISREG(status.st_mode) && oracle_buffer_file(&files[f].bytes, path)));
-    }
     const char* differs = 0;
     OracleEntry entry;
     char checked[BUSTER_ORACLE_PATH_BYTES + 160];
     oracle_entry_path(run->cache, run->key, run->checked, checked, sizeof(checked));
-    if (keep && run->checking && oracle_entry_read(checked, run->key, &entry))
+    if (run->checking && oracle_entry_read(checked, run->key, &entry))
     {
         if (oracle_entry_fits(&entry, run))
         {
@@ -3395,10 +3402,31 @@ static bool oracle_run_keep(OracleRun* run)
         }
         fprintf(stderr, "%s%s\n", run->input != 0 ? " < " : "", run->input != 0 ? run->input : "");
         oracle_count(&run->cache->counts->stale);
-        // Removed: the run's own entry, written next, may be another variant, which wouldn't replace it (a file it
-        // names apart each time, by its pid, is among what it looked at).
         unlink(checked);
     }
+    return differs;
+}
+
+// After a run that ran: what it looked at and wrote, and its entry written (its variant's, oracle_entry_variant); in
+// check mode compared first with the entry it would have taken (oracle_run_stale). A traced run (a compiler's) is kept
+// only if its tracing missed nothing. False if that entry is stale, with a line on the errors naming it.
+static bool oracle_run_keep(OracleRun* run)
+{
+    OracleRecords probes = { 0 };
+    bool keep = !run->dependencies || (run->listener >= 0 && !run->untraced);
+    const uint32_t flags = keep && run->dependencies && !oracle_tool_epoch(run) ? BUSTER_ORACLE_TIMES : 0;
+    keep = keep && (!run->dependencies || oracle_run_probes(run, (flags & BUSTER_ORACLE_TIMES) != 0, &probes));
+    OracleFile files[BUSTER_ORACLE_FILES];
+    for (uint32_t f = 0; f < run->file_count; f += 1)
+    {
+        char path[BUSTER_ORACLE_PATH_BYTES];
+        struct stat status;
+        files[f] = (OracleFile){ 0 };
+        keep = keep && oracle_run_path(run, run->files[f], path, sizeof(path));
+        files[f].present = keep && lstat(path, &status) == 0;
+        keep = keep && (!files[f].present || (S_ISREG(status.st_mode) && oracle_buffer_file(&files[f].bytes, path)));
+    }
+    const char* differs = keep ? oracle_run_stale(run, files) : 0;
     const bool written = keep && oracle_entry_write(run, &probes, flags, files, oracle_entry_variant(run, &probes, flags));
     oracle_count(written ? &run->cache->counts->run : &run->cache->counts->unkept);
     for (uint32_t f = 0; f < run->file_count; f += 1)
@@ -3892,14 +3920,510 @@ static OracleTake oracle_run_take(OracleRun* run)
     return written ? ORACLE_TAKE_TAKEN : restored && !touched ? ORACLE_TAKE_MISSED : ORACLE_TAKE_FAILED;
 }
 
+// --- Served runs ---
+//
+// A clang that stays up (tools/clang-server, #2071) runs each clang command line it is sent through clang's own driver,
+// with its cc1 job in its own process, in the request's working directory with exactly its environment and standard
+// input, and replies with the run's exit status and the streams it captured (clang_server.cpp's header comment has the
+// protocol). A run then costs about 1.2 ms rather than a process's start: about 10 ms of a 12 ms `clang -E`, more under
+// the cache's tracing. OracleServer is its client, which test-checker-driver's --clang-server shares: a server a process
+// starts as it first needs it (oracle_server_start), on a socket (send's MSG_NOSIGNAL: a server that ended fails a
+// request rather than raising SIGPIPE), that only that process uses: a forked child closes its copy of the socket,
+// which leaves its parent's server as it was, and starts its own. A request the server can't answer (a crash in clang
+// ends it) stops it, and the next request starts another, at most BUSTER_ORACLE_SERVER_STARTS times in a process.
+//
+// A test given --clang-server sends the oracle runs of its clang (oracle_serve, by argument 0's name) to the server
+// where they fit: no files the run writes, no time limit (the server can't stop a run), and the server's clang
+// libraries the clang's release (`clang -dumpversion`, checked once). A served run keeps the cache's contract by not
+// entering it: the server isn't traced, so its result can't be an entry, whose every dependency a later take checks. In
+// use mode a run takes an entry as before, and where none fits is served rather than run, writing none; in check mode it
+// is served and compared with the entry it would have taken, stale where that differs, as a run is; with the cache off
+// it is served. With --differential each such run also runs as before (taken, or run, traced and kept): that result is
+// the run's, and a difference from the server's fails the test (oracle_serve_end).
+
+// How many times a process starts its server, and how many differences a test prints.
+#define BUSTER_ORACLE_SERVER_STARTS 4
+#define BUSTER_ORACLE_SERVER_SHOWN 8
+
+typedef struct OracleServer OracleServer;
+struct OracleServer
+{
+    // The server's executable (its user's), then its process, the process that started it, its socket (or -1), how many
+    // times that process started it, and its clang libraries' release (CLANG_VERSION_STRING; empty until it answered).
+    const char* path;
+    pid_t pid;
+    pid_t owner;
+    int socket;
+    uint32_t starts;
+    char version[64];
+};
+
+// Sends all `size` bytes of `data` on the server's socket: false if it can't, the server having ended.
+static bool oracle_server_send(int socket, const void* data, size_t size)
+{
+    const char* at = data;
+    bool complete = true;
+    while (complete && size != 0)
+    {
+        const ssize_t sent = send(socket, at, size, MSG_NOSIGNAL);
+        complete = sent > 0 || (sent < 0 && errno == EINTR);
+        if (sent > 0)
+        {
+            at += sent;
+            size -= (size_t)sent;
+        }
+    }
+    return complete;
+}
+
+// Receives all `size` bytes into `data`: false at the end of the server's replies.
+static bool oracle_server_receive(int socket, void* data, size_t size)
+{
+    char* at = data;
+    bool complete = true;
+    while (complete && size != 0)
+    {
+        const ssize_t got = read(socket, at, size);
+        complete = got > 0 || (got < 0 && errno == EINTR);
+        if (got > 0)
+        {
+            at += got;
+            size -= (size_t)got;
+        }
+    }
+    return complete;
+}
+
+// One of the protocol's strings: its length, then its bytes.
+static bool oracle_server_send_text(int socket, const char* text)
+{
+    const size_t length = strlen(text);
+    const uint32_t prefix = (uint32_t)length;
+    return length <= UINT32_MAX && oracle_server_send(socket, &prefix, sizeof(prefix)) && oracle_server_send(socket, text, length);
+}
+
+// Ends the process's server: its socket closed and its process killed and waited for. A forked child's copy of its
+// parent's socket is only closed, which leaves the parent's server as it is.
+static void oracle_server_stop(OracleServer* server)
+{
+    const bool own = server->socket >= 0 && server->owner == getpid();
+    if (server->socket >= 0)
+    {
+        close(server->socket);
+    }
+    if (own && server->pid > 0)
+    {
+        int status = 0;
+        pid_t waited = -1;
+        kill(server->pid, SIGKILL);
+        do
+        {
+            waited = waitpid(server->pid, &status, 0);
+        }
+        while (waited < 0 && errno == EINTR);
+    }
+    server->socket = -1;
+    server->pid = 0;
+}
+
+// Starts the process's server if it isn't running, at most BUSTER_ORACLE_SERVER_STARTS times: the server's process with
+// one end of a socket pair as its standard input and output and no other descriptor of this process's but its standard
+// error, then its first answer, the release of its clang libraries (a request of no arguments). A forked child's copy
+// of its parent's server isn't its own: it closes that (oracle_server_stop) and starts one. Whether the server runs.
+static bool oracle_server_start(OracleServer* server)
+{
+    if (server->socket >= 0 && server->owner != getpid())
+    {
+        oracle_server_stop(server);
+        server->starts = 0;
+    }
+    if (server->path != 0 && server->socket < 0 && server->starts < BUSTER_ORACLE_SERVER_STARTS)
+    {
+        int sockets[2] = { -1, -1 };
+        server->starts += 1;
+        server->owner = getpid();
+        server->version[0] = 0;
+        const bool paired = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0;
+        fflush(0);
+        const pid_t pid = paired ? fork() : -1;
+        if (pid == 0)
+        {
+            if (dup2(sockets[1], STDIN_FILENO) >= 0 && dup2(sockets[1], STDOUT_FILENO) >= 0 && syscall(SYS_close_range, 3u, ~0u, 0u) == 0)
+            {
+                char* const arguments[] = { (char*)server->path, 0 };
+                execv(server->path, arguments);
+            }
+            _exit(127);
+        }
+        if (sockets[1] >= 0)
+        {
+            close(sockets[1]);
+        }
+        server->pid = pid > 0 ? pid : 0;
+        server->socket = pid > 0 ? sockets[0] : -1;
+        if (pid <= 0 && sockets[0] >= 0)
+        {
+            close(sockets[0]);
+        }
+        const uint32_t header[3] = { 0, 2, 0 };
+        int32_t status = -1;
+        uint32_t length = 0;
+        const bool answered = server->socket >= 0 && oracle_server_send(server->socket, header, sizeof(header)) &&
+                              oracle_server_receive(server->socket, &status, sizeof(status)) && oracle_server_receive(server->socket, &length, sizeof(length)) &&
+                              status == 0 && length != 0 && length < sizeof(server->version) && oracle_server_receive(server->socket, server->version, length);
+        server->version[answered ? length : 0] = 0;
+        if (!answered)
+        {
+            oracle_server_stop(server);
+        }
+    }
+    return server->socket >= 0 && server->owner == getpid();
+}
+
+// One run through the server: `arguments` (argument 0 the clang's name, as execvp finds it) in `directory`, an absolute
+// path, with exactly `environment`, its standard input `input` (an absolute path, or null: /dev/null), and the streams
+// in `streams` (1: standard output, 2: standard error, 3: both) captured into *output and *errors (malloc's, each with a
+// NUL after its bytes, or null where not captured; the caller frees them). The run's exit status (the low 8 bits a
+// clang process's would have), or -1 if the server couldn't take it: it couldn't start, or it ended without a reply
+// (a crash in clang ends it), when it is stopped and the next request starts another.
+static int oracle_server_run(OracleServer* server, char* const* arguments, char* const* environment, const char* directory, const char* input, uint32_t streams,
+                             char** output, uint64_t* output_length, char** errors, uint64_t* errors_length)
+{
+    *output = 0;
+    *output_length = 0;
+    *errors = 0;
+    *errors_length = 0;
+    uint32_t count = 0;
+    while (arguments[count] != 0)
+    {
+        count += 1;
+    }
+    uint32_t variables = 0;
+    while (environment[variables] != 0)
+    {
+        variables += 1;
+    }
+    const uint32_t header[3] = { count, streams | (input != 0 ? 4u : 0u), variables };
+    const bool started = oracle_server_start(server);
+    bool sent = started && oracle_server_send(server->socket, header, sizeof(header)) && oracle_server_send_text(server->socket, directory);
+    sent = sent && (input == 0 || oracle_server_send_text(server->socket, input));
+    for (uint32_t i = 0; sent && i < count; i += 1)
+    {
+        sent = oracle_server_send_text(server->socket, arguments[i]);
+    }
+    for (uint32_t i = 0; sent && i < variables; i += 1)
+    {
+        sent = oracle_server_send_text(server->socket, environment[i]);
+    }
+    int32_t status = -1;
+    bool received = sent && oracle_server_receive(server->socket, &status, sizeof(status));
+    char** const texts[2] = { output, errors };
+    uint64_t* const lengths[2] = { output_length, errors_length };
+    for (uint32_t c = 0; c < 2; c += 1)
+    {
+        uint32_t length = 0;
+        const bool captured = (streams & (1u << c)) != 0;
+        received = received && (!captured || oracle_server_receive(server->socket, &length, sizeof(length)));
+        *texts[c] = received && captured ? malloc((size_t)length + 1) : 0;
+        received = received && (!captured || (*texts[c] != 0 && oracle_server_receive(server->socket, *texts[c], length)));
+        if (*texts[c] != 0)
+        {
+            (*texts[c])[received ? length : 0] = 0;
+        }
+        *lengths[c] = received ? length : 0;
+    }
+    if (!received)
+    {
+        free(*output);
+        free(*errors);
+        *output = 0;
+        *errors = 0;
+        *output_length = 0;
+        *errors_length = 0;
+    }
+    if (started && !received)
+    {
+        oracle_server_stop(server);
+    }
+    return received ? status & 0xff : -1;
+}
+
+// What a process's served runs did, in shared memory so that a test's forked parts add to them: runs whose result was
+// the server's, runs that ran both ways (--differential) and how many of those differed, runs that fit but that the
+// server couldn't take, which ran as children, and the server's answers.
+typedef struct OracleServeCounts OracleServeCounts;
+struct OracleServeCounts
+{
+    uint64_t served;
+    uint64_t compared;
+    uint64_t differences;
+    uint64_t unserved;
+    uint64_t answers;
+};
+
+// The process's clang server for its oracle runs (oracle_serve): the server, the clang it stands for (argument 0's name),
+// --differential, whether its release was checked against the clang's and whether they differ, and its counts.
+typedef struct OracleServing OracleServing;
+struct OracleServing
+{
+    OracleServer server;
+    const char* tool;
+    bool differential;
+    bool released;
+    bool mismatched;
+    char release[64];
+    OracleServeCounts* counts;
+    OracleServeCounts own;
+};
+
+static OracleServing oracle_serving = {
+    .server = {
+        .socket = -1,
+    },
+    .counts = &oracle_serving.own,
+};
+
+// Sends the process's oracle runs of `tool` (argument 0's name) to the clang server `path` (null: none), with
+// `differential` each also run as before and compared, its counts from zero: before the test's runs and the processes
+// it forks. A server it had before is stopped. Unused in the units without such a test.
+static __attribute__((unused)) void oracle_serve(const char* path, const char* tool, bool differential)
+{
+    OracleServing* serving = &oracle_serving;
+    oracle_server_stop(&serving->server);
+    if (serving->counts != &serving->own)
+    {
+        munmap(serving->counts, sizeof(OracleServeCounts));
+    }
+    *serving = (OracleServing){
+        .server = {
+            .path = path,
+            .socket = -1,
+        },
+        .tool = tool,
+        .differential = differential,
+    };
+    void* shared = path != 0 ? mmap(0, sizeof(OracleServeCounts), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    serving->counts = shared != MAP_FAILED ? shared : &serving->own;
+}
+
+// The first line `tool -dumpversion` prints, its release ("23.1.6"), into `release`: false if it can't run.
+static bool oracle_tool_release(const char* tool, char* release, size_t capacity)
+{
+    int pipes[2] = { -1, -1 };
+    const bool piped = pipe(pipes) == 0 && fcntl(pipes[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(pipes[1], F_SETFD, FD_CLOEXEC) == 0;
+    fflush(0);
+    const pid_t pid = piped ? fork() : -1;
+    if (pid == 0)
+    {
+        const int empty = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (empty >= 0 && dup2(empty, STDIN_FILENO) >= 0 && dup2(pipes[1], STDOUT_FILENO) >= 0 && dup2(empty, STDERR_FILENO) >= 0)
+        {
+            char* const arguments[] = { (char*)tool, "-dumpversion", 0 };
+            execvp(tool, arguments);
+        }
+        _exit(127);
+    }
+    if (pipes[1] >= 0)
+    {
+        close(pipes[1]);
+    }
+    size_t length = 0;
+    ssize_t got = 1;
+    while (pid > 0 && length + 1 < capacity && (got > 0 || (got < 0 && errno == EINTR)))
+    {
+        got = read(pipes[0], release + length, capacity - 1 - length);
+        length += got > 0 ? (size_t)got : 0;
+    }
+    if (pipes[0] >= 0)
+    {
+        close(pipes[0]);
+    }
+    int status = 0;
+    pid_t waited = pid > 0 ? -1 : 0;
+    while (pid > 0 && waited < 0)
+    {
+        waited = waitpid(pid, &status, 0);
+        waited = waited < 0 && errno != EINTR ? 0 : waited;
+    }
+    release[length < capacity ? length : 0] = 0;
+    release[strcspn(release, "\n")] = 0;
+    return pid > 0 && waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && release[0] != 0;
+}
+
+// Whether the process's server can take a run: it runs (oracle_server_start) and, checked once, its clang libraries are
+// the clang's release. One that isn't takes no runs, and the test fails (oracle_serve_end).
+static bool oracle_serve_ready(void)
+{
+    OracleServing* serving = &oracle_serving;
+    const bool started = !serving->mismatched && oracle_server_start(&serving->server);
+    if (started && !serving->released)
+    {
+        serving->released = true;
+        serving->mismatched = !oracle_tool_release(serving->tool, serving->release, sizeof(serving->release)) || strcmp(serving->release, serving->server.version) != 0;
+        if (serving->mismatched)
+        {
+            fprintf(stderr, "clang server: %s's clang libraries are %s, and %s is %s: its runs run as children\n", serving->server.path, serving->server.version,
+                    serving->tool, serving->release[0] != 0 ? serving->release : "a release that -dumpversion doesn't give");
+        }
+    }
+    return started && !serving->mismatched;
+}
+
+// Whether a clang command line runs in the server as in a clang process: not one that clang's main reads before its
+// driver, which the server doesn't (a response file's `@`, a -cc1 tool's first argument); nor one that reports its
+// process's statistics or times (-fproc-stat-report, -ftime-report, -ftime-trace), which would be the server's process's
+// and differ between any two runs anyway; nor one whose environment sets what clang's main reads for the driver's
+// debugging outputs and overrides (CC_PRINT_*, CC_LOG_DIAGNOSTICS*, CCC_*) or to spawn its cc1 job.
+static bool oracle_server_fits(char* const* arguments, char* const* environment)
+{
+    bool fits = arguments[0] != 0 && (arguments[1] == 0 || strncmp(arguments[1], "-cc1", 4) != 0);
+    for (uint32_t a = 1; fits && arguments[a] != 0; a += 1)
+    {
+        const char* argument = arguments[a];
+        fits = argument[0] != '@' && strncmp(argument, "-fproc-stat-report", 18) != 0 && strncmp(argument, "-ftime-report", 13) != 0 &&
+               strncmp(argument, "-ftime-trace", 12) != 0;
+    }
+    for (uint32_t v = 0; fits && environment[v] != 0; v += 1)
+    {
+        const char* variable = environment[v];
+        fits = strncmp(variable, "CC_PRINT_", 9) != 0 && strncmp(variable, "CC_LOG_DIAGNOSTICS", 18) != 0 && strncmp(variable, "CCC_", 4) != 0 &&
+               strncmp(variable, "CLANG_SPAWN_CC1=", 16) != 0;
+    }
+    return fits;
+}
+
+// Whether the run goes to the process's clang server: one of its clang's runs that writes no file of its own, has no
+// time limit, and that the server runs as a clang process would (oracle_server_fits).
+static bool oracle_run_servable(const OracleRun* run)
+{
+    const OracleServing* serving = &oracle_serving;
+    const bool named = serving->server.path != 0 && serving->tool != 0 && !serving->mismatched && run->arguments != 0 && run->arguments[0] != 0 &&
+                       strcmp(run->arguments[0], serving->tool) == 0 && run->file_count == 0 && run->timeout == 0;
+    return named && oracle_server_fits(run->arguments, run->environment != 0 ? run->environment : environ);
+}
+
+// The run through the server, with its directory and input as its child would find them (each from this process's
+// directory), its result into its served fields (OracleRun.answered, served_status a wait status): false if the server
+// couldn't take it.
+static bool oracle_run_serve(OracleRun* run)
+{
+    char here[BUSTER_ORACLE_PATH_BYTES];
+    char directory[BUSTER_ORACLE_PATH_BYTES];
+    char input[BUSTER_ORACLE_PATH_BYTES];
+    const bool placed = getcwd(here, sizeof(here)) != 0;
+    const int directory_length = !placed                      ? -1
+                                 : run->directory == 0        ? snprintf(directory, sizeof(directory), "%s", here)
+                                 : run->directory[0] == '/'   ? snprintf(directory, sizeof(directory), "%s", run->directory)
+                                                              : snprintf(directory, sizeof(directory), "%s/%s", here, run->directory);
+    const bool reads = run->input != 0 && strcmp(run->input, "/dev/null") != 0;
+    const int input_length = !reads ? 0 : run->input[0] == '/' ? snprintf(input, sizeof(input), "%s", run->input) : snprintf(input, sizeof(input), "%s/%s", here, run->input);
+    const bool ready = directory_length > 0 && (size_t)directory_length < sizeof(directory) && input_length >= 0 && (size_t)input_length < sizeof(input) &&
+                       oracle_serve_ready();
+    char* const* environment = run->environment != 0 ? run->environment : environ;
+    const int status = ready ? oracle_server_run(&oracle_serving.server, run->arguments, environment, directory, reads ? input : 0, 3, &run->served_output,
+                                                 &run->served_output_length, &run->served_errors, &run->served_errors_length)
+                             : -1;
+    run->answered = status >= 0;
+    run->served_status = run->answered ? status << 8 : -1;
+    if (run->answered)
+    {
+        oracle_count(&oracle_serving.counts->answers);
+    }
+    return run->answered;
+}
+
+// The first byte at which two texts differ.
+static uint64_t oracle_first_difference(const char* text, uint64_t length, const char* other, uint64_t other_length)
+{
+    uint64_t at = 0;
+    while (at < length && at < other_length && text[at] == other[at])
+    {
+        at += 1;
+    }
+    return at;
+}
+
+// After a run that ran both ways (--differential): its result (its child's, or its entry's) against the server's,
+// counted, and a difference printed (the first BUSTER_ORACLE_SERVER_SHOWN): the statuses and, of the first stream that
+// differs, the bytes around its first difference. The served result is freed.
+static void oracle_run_compare_served(OracleRun* run, bool finished)
+{
+    OracleServeCounts* counts = oracle_serving.counts;
+    const bool same_output = run->output_length == run->served_output_length && (run->output_length == 0 || memcmp(run->output, run->served_output, run->output_length) == 0);
+    const bool same_errors = run->errors_length == run->served_errors_length && (run->errors_length == 0 || memcmp(run->errors, run->served_errors, run->errors_length) == 0);
+    const bool same = finished && run->answered && run->status == run->served_status && same_output && same_errors;
+    oracle_count(&counts->compared);
+    if (!same)
+    {
+        const uint64_t shown = __atomic_add_fetch(&counts->differences, 1, __ATOMIC_RELAXED);
+        if (shown <= BUSTER_ORACLE_SERVER_SHOWN)
+        {
+            fprintf(stderr, "clang server: a run differs (%s):", run->purpose != 0 ? run->purpose : "");
+            for (uint32_t a = 0; run->arguments[a] != 0; a += 1)
+            {
+                fprintf(stderr, " %s", run->arguments[a]);
+            }
+            fprintf(stderr, "%s%s\n  run: %s, wait status %d; served: %s, wait status %d\n", run->input != 0 ? " < " : "", run->input != 0 ? run->input : "",
+                    finished ? "finished" : "failed", run->status, run->answered ? "answered" : "no answer", run->served_status);
+            const char* names[2] = { "standard output", "errors" };
+            const char* texts[2] = { run->output, run->errors };
+            const uint64_t lengths[2] = { run->output_length, run->errors_length };
+            const char* served[2] = { run->served_output, run->served_errors };
+            const uint64_t served_lengths[2] = { run->served_output_length, run->served_errors_length };
+            const bool differs[2] = { !same_output, !same_errors };
+            for (uint32_t c = 0; finished && run->answered && c < 2; c += 1)
+            {
+                if (differs[c])
+                {
+                    const uint64_t at = oracle_first_difference(texts[c], lengths[c], served[c], served_lengths[c]);
+                    const uint64_t from = at > 120 ? at - 120 : 0;
+                    const int run_shown = (int)((lengths[c] - from) < 240 ? lengths[c] - from : 240);
+                    const int served_shown = (int)((served_lengths[c] - from) < 240 ? served_lengths[c] - from : 240);
+                    fprintf(stderr, "  %s: %llu and %llu bytes, first differing at byte %llu:\n  run:    %.*s\n  served: %.*s\n", names[c], (unsigned long long)lengths[c],
+                            (unsigned long long)served_lengths[c], (unsigned long long)at, run_shown, texts[c] + from, served_shown, served[c] + from);
+                }
+            }
+        }
+    }
+    free(run->served_output);
+    free(run->served_errors);
+    run->served_output = 0;
+    run->served_errors = 0;
+}
+
+// The test's line of what its clang server did, if it has one: its release and runs served, compared and differing, and
+// those that fit but ran as children; then the server stopped. False if a run differed, the server's clang isn't the
+// clang's release, or runs needed the server and it answered none. Unused in the units without such a test.
+static __attribute__((unused)) bool oracle_serve_end(const char* test)
+{
+    OracleServing* serving = &oracle_serving;
+    const OracleServeCounts* counts = serving->counts;
+    const uint64_t served = __atomic_load_n(&counts->served, __ATOMIC_RELAXED);
+    const uint64_t compared = __atomic_load_n(&counts->compared, __ATOMIC_RELAXED);
+    const uint64_t differences = __atomic_load_n(&counts->differences, __ATOMIC_RELAXED);
+    const uint64_t unserved = __atomic_load_n(&counts->unserved, __ATOMIC_RELAXED);
+    const uint64_t answers = __atomic_load_n(&counts->answers, __ATOMIC_RELAXED);
+    const bool answered = served + compared + unserved == 0 || answers != 0;
+    if (serving->server.path != 0)
+    {
+        printf("%s: clang server (%s, clang %s%s): %llu runs served, %llu run both ways, %llu differ, %llu not served\n", test, serving->server.path,
+               serving->server.version[0] != 0 ? serving->server.version : "?", serving->differential ? ", differential" : "", (unsigned long long)served,
+               (unsigned long long)compared, (unsigned long long)differences, (unsigned long long)unserved);
+    }
+    oracle_server_stop(&serving->server);
+    return differences == 0 && !serving->mismatched && answered;
+}
+
 // Starts a run: in use mode takes its entry if it can (OracleRun.taken), in check mode finds the entry it would have
 // taken (OracleRun.checked), and otherwise starts its tool, traced if it is a compiler's run the cache may keep and
-// this process traces fewer than BUSTER_ORACLE_TRACED runs (else it isn't kept). False if the tool can't start, or a
-// take changed the run's files and couldn't put them back (ORACLE_TAKE_FAILED), when the tool doesn't start;
-// oracle_run_finish then finishes it all the same.
+// this process traces fewer than BUSTER_ORACLE_TRACED runs (else it isn't kept). A run the process's clang server takes
+// (oracle_run_servable) is served there instead of starting its tool, and isn't kept, or with --differential is served
+// as well. False if the tool can't start, or a take changed the run's files and couldn't put them back
+// (ORACLE_TAKE_FAILED), when the tool doesn't start; oracle_run_finish then finishes it all the same.
 static bool oracle_run_start(OracleRun* run)
 {
     oracle_run_reset(run);
+    const bool servable = oracle_run_servable(run);
     run->keyed = oracle_run_key(run);
     const OracleTake take = run->keyed && run->cache->mode == ORACLE_MODE_USE ? oracle_run_take(run) : ORACLE_TAKE_MISSED;
     run->taken = take == ORACLE_TAKE_TAKEN;
@@ -3909,27 +4433,52 @@ static bool oracle_run_start(OracleRun* run)
         run->checking = oracle_entry_find(run, &entry, &run->checked);
         oracle_entry_release(&entry);
     }
+    const bool serves = servable && !oracle_serving.differential && take == ORACLE_TAKE_MISSED;
+    run->comparing = servable && oracle_serving.differential && take != ORACLE_TAKE_FAILED;
+    run->served = serves && oracle_run_serve(run);
+    if (run->comparing)
+    {
+        oracle_run_serve(run);
+    }
+    if (serves && !run->served)
+    {
+        oracle_count(&oracle_serving.counts->unserved);
+    }
     oracle_traced_own();
     const bool room = oracle_traced_count < BUSTER_ORACLE_TRACED;
     if (run->taken)
     {
         oracle_count(&run->cache->counts->taken);
     }
-    else if (oracle_cache_active(run->cache) && (!run->keyed || (run->dependencies && !room)))
+    else if (!run->served && oracle_cache_active(run->cache) && (!run->keyed || (run->dependencies && !room)))
     {
         oracle_count(&run->cache->counts->unkept);
         run->keyed = false;
     }
-    return run->taken || (take == ORACLE_TAKE_MISSED && oracle_run_spawn(run, run->keyed && run->dependencies));
+    return run->taken || run->served || (take == ORACLE_TAKE_MISSED && oracle_run_spawn(run, run->keyed && run->dependencies));
 }
 
-// Finishes a run: waits for its tool (oracle_run_wait), reads what it wrote, and keeps its entry. False if the tool
-// didn't start or can't be waited for, was killed for its time, its output can't be read, or (in check mode) its entry
-// is stale; the result is the tool's.
+// Finishes a run: waits for its tool (oracle_run_wait), reads what it wrote, and keeps its entry. A served run's result
+// is the server's, which in check mode the entry it would have taken must hold (oracle_run_stale), and which writes no
+// entry. With --differential, the run's result is compared with the server's (oracle_run_compare_served). False if the
+// tool didn't start or can't be waited for, was killed for its time, its output can't be read, or (in check mode) its
+// entry is stale; the result is the tool's.
 static bool oracle_run_finish(OracleRun* run)
 {
     bool result = run->taken;
-    if (!run->taken)
+    if (run->served)
+    {
+        run->status = run->served_status;
+        run->output = run->served_output;
+        run->output_length = run->served_output_length;
+        run->errors = run->served_errors;
+        run->errors_length = run->served_errors_length;
+        run->served_output = 0;
+        run->served_errors = 0;
+        oracle_count(&oracle_serving.counts->served);
+        result = !run->keyed || oracle_run_stale(run, 0) == 0;
+    }
+    else if (!run->taken)
     {
         result = oracle_run_end(run);
         if (run->keyed && !result)
@@ -3937,6 +4486,10 @@ static bool oracle_run_finish(OracleRun* run)
             oracle_count(&run->cache->counts->unkept);
         }
         result = result && (!run->keyed || oracle_run_keep(run));
+    }
+    if (run->comparing)
+    {
+        oracle_run_compare_served(run, run->output != 0 && run->errors != 0);
     }
     oracle_run_close(run);
     return result;
