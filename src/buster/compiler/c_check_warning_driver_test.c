@@ -695,6 +695,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "duplicate specifiers in operand type names",
+        .source = "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+                  "_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+                  "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1; }\n",
+        .warnings = 7,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },

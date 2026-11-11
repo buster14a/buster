@@ -4218,7 +4218,13 @@ errors included. Its extent runs from the scope's `{` to its `}`, from a
 for initializer's opening parenthesis through the whole loop statement, or,
 for a function body, from the definition's start, since clang's
 `ActOnStartOfFunctionDef` handles the definition's declarator inside the
-body's scope. Unused parameters are still warned. A per-token prefix count of
+body's scope. What clang gives as it parses, before that, doesn't count there
+(`check_driver_error_scoped`, #1835): a specifier's error, a parameter's
+attribute's, and an attribute's argument that must be a string literal. A
+rejected unit's rounds also read past an error outside every body that keeps
+its declaration valid (a dropped attribute's or specifier's), which their
+reading recovers again, so the later bodies keep their warnings. Unused
+parameters are still warned. A per-token prefix count of
 the unit's error reports answers each scope's question in constant time, and
 only a unit with errors builds it.
 
@@ -4734,7 +4740,8 @@ Error-free lists never reach this. The semantic-recovery fixtures cover each
 kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
 `typeof`, an `_Atomic` and an enum's base. They also cover a repeated
 `_Complex`'s warning, "duplicate 'complex' declaration specifier" in clang's
-words. The operand readers give no duplicate-specifier warning (#1836).
+words. The operand readers warn a repeated specifier as the declaration
+reader does (#1836).
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
@@ -8956,6 +8963,13 @@ enables, which this checker doesn't all give.
 - **Vector typedefs' a.k.a.** Clang's desugaring stops at a vector type's own
   typedef: a typedef of `v4si` prints `'w4si' (aka 'v4si')`, and `v4si` itself
   `'v4si' (vector of 4 'int' values)` (`check_driver_warning_type_at`).
+- **A typeof's sugar** (#1837). A declaration whose base a `typeof(...)` spells
+  prints it as clang's `TypePrinter` does: `'typeof(long) *' (aka 'long *')`,
+  with a typedef name as written (`typeof(L)`), a nested typeof's own sugar,
+  and `typeof (x)` for an expression that is one name
+  (`check_input_typeof_spelling`, `check_driver_typeof_text`). Another
+  expression operand, and a type name that holds a typedef name, print no
+  sugar.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that

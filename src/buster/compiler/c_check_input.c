@@ -2523,6 +2523,60 @@ static uint32_t check_input_typedef_spelling(const CheckInput* input, const Pars
     return result;
 }
 
+// Whether `name` is a typeof keyword's: C23's, GNU's or their unqualified forms (_BitInt shares their parser kind).
+static bool check_input_typeof_name(uint32_t name)
+{
+    return name == C_NAME_TYPEOF || name == C_NAME_GNU_TYPEOF || name == C_NAME_GNU_TYPEOF2 || name == C_NAME_TYPEOF_UNQUAL ||
+           name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2;
+}
+
+// A declaration's typeof specifier for its warning spelling (#1837): the keyword of the `typeof(...)` that spells its
+// base, scanning back from `declaration` as check_input_typedef_spelling does, which clang prints as that sugar
+// (`'typeof(long) *' (aka 'long *')`); else 0. A typedef name met first is the base's (check_input_typedef_spelling's).
+static uint32_t check_input_typeof_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t result = 0;
+    bool found = declaration < input->token_count;
+    for (uint32_t token = declaration; found && result == 0 && token > 0;)
+    {
+        token -= 1;
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint8_t role = parser->tree.roles[token];
+        if (role == PARSE_ROLE_CLOSE_SPECIFIER)
+        {
+            // A typeof's, an _Atomic's or a _BitInt's group: its `(` follows its keyword.
+            uint32_t open = token;
+            while (open > 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
+            {
+                open -= 1;
+            }
+            const bool typeof_group = open > 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_TYPEOF && check_input_typeof_name(parser->tokens.names[open - 1]);
+            result = typeof_group ? open - 1 : 0;
+            found = false;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER)
+        {
+            const uint32_t resolved = input->declarations != 0 ? input->declarations[token] : 0;
+            found = !(resolved != 0 && resolved != token && resolved < input->token_count && input->declaration_kinds != 0 &&
+                      input->declaration_kinds[resolved] == C_BINDING_TYPEDEF);
+        }
+        else
+        {
+            found = kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE &&
+                    kind != PARSE_KIND_COLON && kind != PARSE_KIND_TYPE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM &&
+                    role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
+        }
+    }
+    return result;
+}
+
+// A warning operand's specifier spelling (#992, #1837): its declaration's typeof specifier, else its typedef's.
+static uint32_t check_input_specifier_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    const uint32_t spelled = check_input_typeof_spelling(input, parser, declaration);
+    return spelled != 0 ? spelled : check_input_typedef_spelling(input, parser, declaration);
+}
+
 // The printed type and its typedef specifier's declaration for a warning operand that names `token`'s
 // declaration (#992): its declared type as written, with the qualifiers a conversion's type strips, and the
 // typedef's declaration or 0. `fallback` is the operand's own (converted) type where `token` names nothing, and
@@ -2546,9 +2600,9 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
         result = declared;
         // A declarationless token is still a scan start: an initializer's `=` reads its declaration's
         // specifiers backward as the name's own token does.
-        *spelling = check_input_typedef_spelling(input, parser,
-                                                 declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
-                                                 declaration : token);
+        *spelling = check_input_specifier_spelling(input, parser,
+                                                   declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
+                                                   declaration : token);
     }
     return result;
 }
@@ -2581,7 +2635,7 @@ static uint32_t check_input_token_type_spelling(const CheckInput* input, const P
     }
     else
     {
-        result = token < input->token_count && input->declarations != 0 ? check_input_typedef_spelling(input, parser, input->declarations[token]) : 0;
+        result = token < input->token_count && input->declarations != 0 ? check_input_specifier_spelling(input, parser, input->declarations[token]) : 0;
     }
     return result;
 }
@@ -3904,6 +3958,7 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     uint32_t skip = BUSTER_CHECK_NONE;
     bool skip_complex = false;
     bool attributed = false;
+    bool complex_seen = false;
     bool attempt = true;
     while (attempt)
     {
@@ -3914,13 +3969,19 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         integer_seen = false;
         base = 0;
         valid = colon + 1 < end;
+        complex_seen = false;
         for (uint32_t i = colon + 1; valid && i < end; i += 1)
         {
             const uint32_t name = parser->tokens.names[i];
             const uint8_t kind = parser->tokens.kinds[i];
             if (i == skip || (skip_complex && check_declspec_complex_name(name)))
             {
-                // (Dropped.)
+                // (Dropped; a repeated _Complex still warns, as clang's DeclSpec gives it before the list's end, #1836.)
+                if (skip_complex && check_declspec_complex_name(name) && complex_seen)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_COMPLEX_C99);
+                }
+                complex_seen |= check_declspec_complex_name(name);
             }
             else if (check_input_read_qualifier(reader, i, &qualifiers))
             {
@@ -3948,10 +4009,19 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
             }
             else if (name == C_NAME_SHORT)
             {
+                // A repeated specifier warns as check_input_specifiers' does (#1836), once a token whichever reading.
+                if (shorts != 0)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_SHORT);
+                }
                 shorts += 1;
             }
             else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
             {
+                if (signedness == (name == C_NAME_UNSIGNED ? 2u : 1u))
+                {
+                    check_input_duplicate_specifier(reader, i, name == C_NAME_UNSIGNED ? C_NAME_UNSIGNED : C_NAME_SIGNED);
+                }
                 valid = signedness == 0 || signedness == (name == C_NAME_UNSIGNED ? 2u : 1u);
                 signedness = name == C_NAME_UNSIGNED ? 2 : 1;
             }
