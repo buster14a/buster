@@ -547,6 +547,68 @@ static uint32_t check_semantic_member_token(const Parser* parser, const CheckInp
     return result;
 }
 
+// The typedef that spells the subobject an initializer's value converts to (#1447): from the initialized object's type
+// (`object`, declared at `declaration`, whose specifiers spell its own elements), down by `offset` bits through arrays'
+// elements and records' members to a level of type `target`, each member's declarator spelling it in turn
+// (check_semantic_member_token): `struct S s = { .lp = c }`'s member `LP lp` is 'LP'. A union's member is the first of
+// the target's type. 0 where the walk doesn't reach the target. A diagnostic's cold walk.
+static uint32_t check_semantic_subobject_spelling(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId object,
+                                                  uint32_t declaration, uint64_t offset, TypeId target)
+{
+    const TypeId wanted = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+    uint32_t spelling = declaration < input->token_count ? check_input_specifier_spelling(input, parser, declaration) : 0;
+    TypeId level = object;
+    bool reached = false;
+    bool walking = wanted != 0 && type_is_valid(types, object);
+    for (uint32_t depth = 0; walking && depth < 32; depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        reached = bare == wanted && offset == 0;
+        walking = !reached;
+        if (walking && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
+        {
+            const TypeId element = type_element(types, bare);
+            const uint64_t bits = type_size(types, element) * 8;
+            walking = bits != 0;
+            offset = bits != 0 ? offset % bits : offset;
+            level = element;
+        }
+        else if (walking && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
+        {
+            const uint32_t tag = types->types.index[type_index(bare)];
+            const uint32_t begin = tag < types->tags.count ? types->tags.member_begin[tag] : 0;
+            const uint32_t count = tag < types->tags.count ? types->tags.member_count[tag] : 0;
+            uint32_t found = 0;
+            for (uint32_t m = begin; m < begin + count; m += 1)
+            {
+                const TypeId member_type = types->members.type[m];
+                const uint64_t start = types->members.offset[m];
+                const uint64_t width = (types->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 ? types->members.bit_width[m] : type_size(types, member_type) * 8;
+                const bool holds = start <= offset && offset - start < (width != 0 ? width : 1);
+                const bool exact = holds && type_unqualified(type_strip_aligned(types, member_type)) == wanted && offset == start;
+                found = found == 0 && holds && (kind == BUSTER_TYPE_KIND_STRUCT || exact) ? m : found;
+                found = kind == BUSTER_TYPE_KIND_UNION && exact && found == 0 ? m : found;
+            }
+            // (A union none of whose members is the target's type: its first that holds the offset.)
+            for (uint32_t m = begin; found == 0 && kind == BUSTER_TYPE_KIND_UNION && m < begin + count; m += 1)
+            {
+                found = types->members.offset[m] <= offset ? m : 0;
+            }
+            const uint32_t declarator = found != 0 ? check_semantic_member_token(parser, input, types, found) : BUSTER_CHECK_NONE;
+            spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : 0;
+            walking = found != 0;
+            offset -= found != 0 ? types->members.offset[found] : 0;
+            level = found != 0 ? types->members.type[found] : level;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return reached ? spelling : 0;
+}
+
 // The member a `.` or `->` node (`node`) selects (#1447), a TypeMembers index found through anonymous members as the
 // action's lookup finds it, by the name after the operator and its record operand's type; 0 for none.
 static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node)

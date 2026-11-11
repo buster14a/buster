@@ -9453,6 +9453,13 @@ enables, which this checker doesn't all give.
   function's own parameter list, as the conversion notes find it, a function
   pointer object's (through `*`), its typedef'd function type's
   (`F *gp`), and a member's (`s.m(…)`).
+  A conversion's target keeps the typedef its declaration writes where it is
+  a call's parameter (`check_input_call_parameter_spelling`) or an
+  initializer's member or element (`check_semantic_subobject_spelling`, by the
+  subobject's offset from the initialized object, through arrays and member
+  declarators; a union's member is the first of the target's type), in
+  `-Wimplicit-enum-enum-cast` and in a failed initializer conversion's error:
+  `struct S s = { .lp = c }`'s "initializing 'LP' (aka 'long *')".
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
@@ -9463,6 +9470,9 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
+  - An initializer subobject's null pointer warning (`{ .lp = 1-1 }`) prints
+    its target canonically: the initializer walk that gives it keeps neither
+    the declaration nor its subobject's member.
   - A call into a redeclared function prints its parameters' sugar from the
     declaration the call sees, where clang's composite type keeps the first
     declaration's (`void c(N *q); void c(NP q);`'s call prints `'NP'`, clang

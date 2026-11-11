@@ -2788,6 +2788,29 @@ static uint32_t check_input_declarator_parameter_spelling(const Parser* parser, 
     return parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
 }
 
+// c_check_semantic_diagnostic.c's: a member access's member declarator (#1447).
+static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+static uint32_t check_semantic_member_token(const Parser* parser, const CheckInput* input, const TypeTable* types, uint32_t member);
+
+// The typedef of argument `argument`'s parameter in the call node `call` (#1100): its callee's name's
+// (check_input_parameter_spelling), through a function pointer's dereferences, or a member's declarator's.
+static uint32_t check_input_call_parameter_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                    uint32_t call, uint32_t argument)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t callee = call < graph->count ? graph->operand0[call] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; steps < 8 && callee < graph->count && graph->ops[callee] == CHECK_OP_DEREFERENCE; steps += 1)
+    {
+        callee = graph->operand0[callee];
+    }
+    const bool named = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE;
+    const bool member = callee < graph->count && (graph->ops[callee] == CHECK_OP_MEMBER || graph->ops[callee] == CHECK_OP_ARROW);
+    const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, callee) : 0;
+    const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+    return named ? check_input_parameter_spelling(parser, input, graph->tokens[callee], argument) :
+           declarator < input->token_count ? check_input_declarator_parameter_spelling(parser, input, declarator, argument) : 0;
+}
+
 // A null pointer constant warning, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
 // shows (the declaration's written type, qualifiers kept) and `spelling` its typedef specifier's declaration,
 // or BUSTER_CHECK_NONE for `__size_t`, or 0 for no sugar.
