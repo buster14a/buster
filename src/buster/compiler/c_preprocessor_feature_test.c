@@ -23,7 +23,7 @@ static bool pp_test_source_feature_matrix(void)
         { "gnu::section", 1 }, { "gnu::visibility", 1 }, { "clang::ext_vector_type", 1 },
         { "gnu::cleanup", 1 }, { "gnu::constructor", 1 }, { "gnu::destructor", 1 }, { "gnu::weak", 1 }, { "clang::overloadable", 1 },
         { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 }, { "gnu::retain", 1 }, { "gnu::common", 1 }, { "gnu::nocommon", 1 },
-        { "nodiscard", 0 },
+        { "nodiscard", 202003 },
         { "maybe_unused", 202106 },
         { "deprecated", 201904 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },

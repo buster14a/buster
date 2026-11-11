@@ -112,7 +112,7 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
     }
     else if (input->argument_count != 3)
     {
-        check_action_diagnose(&output->builtin.action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->builtin.action, input->argument_count, 3, 3);
     }
     else
     {

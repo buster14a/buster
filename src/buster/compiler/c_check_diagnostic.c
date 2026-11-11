@@ -162,6 +162,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
+    [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
+    [CHECK_WARNING_ID_PRAGMA_PACK] = { "-Wpragma-pack", "-Wpragmas", "unterminated '#pragma pack (push, ...)' at end of file" },
+    [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = { NULL, NULL, "value of #pragma pack(show)" },
     // (#1447: its ID assigned past the ones other pull requests take, which their rows fill.)
     [CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE] = { "-Wswift-name-attribute", NULL, "'swift_name' attribute has invalid identifier for the base name" },
 };
@@ -387,6 +390,25 @@ static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t
     return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
 }
 
+// The name a reader's K&R record's severity and words read: a call's callee's (check_input_kr_call), else its token.
+static uint32_t check_diagnostic_kr_name(const CheckInputKrDiagnostic* diagnostic)
+{
+    return diagnostic->warning != CHECK_WARNING_KR_DEFINITION && diagnostic->body != BUSTER_CHECK_NONE ? diagnostic->body : diagnostic->token;
+}
+
+// Where clang reports a call's K&R warning (#1994, Sema::BuildResolvedCallExpr and ConvertArgumentsForCall): passing
+// arguments without a prototype at the call's `(`, a known definition's too few or too many at its `)`, the node's token.
+static uint32_t check_diagnostic_kr_call_place(const CheckInput* input, const Parser* parser, uint32_t node, uint32_t warning)
+{
+    const uint32_t close = input->graph.tokens[node];
+    uint32_t open = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && close < parser->tokens.count ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    return open != 0 ? open : close;
+}
+
 static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
 {
     const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
@@ -564,7 +586,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     {
         const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
         const uint32_t at = diagnostic.token;
-        if (at < first && check_diagnostic_kr_severity(input, at, diagnostic.warning) >= CHECK_WARNING_ERROR)
+        if (at < first && check_diagnostic_kr_severity(input, check_diagnostic_kr_name(&diagnostic), diagnostic.warning) >= CHECK_WARNING_ERROR)
         {
             first = at;
         }
