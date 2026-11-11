@@ -424,17 +424,30 @@ static void pp_diagnostic_place(Preprocessor* pp, PPDiagnostic* diagnostic, uint
     }
 }
 
+// Where the file `location` is presumed in was included, as clang's PresumedLoc::getIncludeLoc gives it (#1954): a line
+// marker's (PPLineDirective.include_location) in effect there, else its range's inclusion's; BUSTER_PP_NONE for none.
+static uint32_t pp_presumed_include(const Preprocessor* pp, uint32_t location)
+{
+    const uint32_t range = location != BUSTER_PP_NONE ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const uint32_t note = range != BUSTER_PP_NONE && pp->ranges[range].first_line_directive != BUSTER_PP_NONE ? pp_line_note_at(pp, range, location) : BUSTER_PP_NONE;
+    const uint32_t marked = note != BUSTER_PP_NONE ? pp->line_directives[note].include_location : BUSTER_PP_NONE;
+    const bool included = range != BUSTER_PP_NONE && pp->ranges[range].parent != BUSTER_PP_NONE;
+    return marked != BUSTER_PP_NONE ? marked : included ? pp->ranges[range].include_location : BUSTER_PP_NONE;
+}
+
+// The include stack before a diagnostic at `location`, printed when its include location differs from the last one's, as
+// clang's DiagnosticRenderer::emitIncludeStack compares them (Preprocessor.diagnostic_include_range keeps the last one).
 static void pp_diagnostic_includes(Preprocessor* pp, PPDiagnostic* diagnostic, uint32_t location)
 {
     uint32_t chain[BUSTER_PP_MAX_INCLUDE_DEPTH + 1];
     uint32_t count = 0;
-    uint32_t range = pp_find_range(pp, location);
-    const bool changed = range != pp->diagnostic_include_range;
-    pp->diagnostic_include_range = range;
-    while (changed && range != BUSTER_PP_NONE && pp->ranges[range].parent != BUSTER_PP_NONE && count < BUSTER_ARRAY_LENGTH(chain))
+    uint32_t include = pp_presumed_include(pp, location);
+    const bool changed = include != pp->diagnostic_include_range;
+    pp->diagnostic_include_range = include;
+    while (changed && include != BUSTER_PP_NONE && count < BUSTER_ARRAY_LENGTH(chain))
     {
-        chain[count++] = pp->ranges[range].include_location;
-        range = pp->ranges[range].parent;
+        chain[count++] = include;
+        include = pp_presumed_include(pp, include);
     }
     for (uint32_t i = count; i > 0; i -= 1)
     {
@@ -476,7 +489,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             // Forwarding alone is silent. If the substituted token is itself subsequently expanded, Clang also
             // shows the parameter through which the macro name arrived (CALL(F), where CALL(f) expands to f()).
             const PPSubstitution* substitution = &pp->substitutions[index];
-            if (count != 0)
+            if (count != 0 || pp->diagnostic_arguments)
             {
                 notes[count++] = (PPDiagnosticSource)
                 {
@@ -517,7 +530,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     {
         // Clang omits include stacks for attached notes, but their source still makes the next primary's
         // include context change. A note in another header therefore causes that next prefix to repeat.
-        pp->diagnostic_include_range = pp_find_range(pp, location);
+        pp->diagnostic_include_range = pp_presumed_include(pp, location);
     }
     else
     {
@@ -614,6 +627,7 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 .source_notes = owned_notes,
                 .source_note_count = note_count,
                 .severity = (uint8_t)severity,
+                .arguments = pp->diagnostic_arguments,
             };
             if (note_bytes != 0)
             {
@@ -765,6 +779,8 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                     const bool owner_fatal = owner->fatal;
                     owner->fatal = pp->fatal;
                     owner->diagnostic_include_range = pp->diagnostic_include_range;
+                    const bool owner_arguments = owner->diagnostic_arguments;
+                    owner->diagnostic_arguments = record->arguments;
                     const PPDiagnosticNote note = {
                         .location = record->note_location,
                         .message = record->note_message,
@@ -778,6 +794,7 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                         pp_render_message(owner, PP_SEVERITY_NOTE, source->location, source->origin, NULL, "%s", source->message);
                     }
                     pp->diagnostic_include_range = owner->diagnostic_include_range;
+                    owner->diagnostic_arguments = owner_arguments;
                     owner->fatal = owner_fatal;
                 }
             }

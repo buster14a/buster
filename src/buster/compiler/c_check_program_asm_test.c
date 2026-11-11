@@ -1053,9 +1053,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
     check_test_program_boundary_reason(test, "int tested(int n){int r;__asm__(\"movl %1, %0\" : \"=r\"(r) : \"N\"((unsigned char)255));return r+n;}",
                                        "asm-n-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
-    // Flag outputs (#147): named in the template, of an object no integer store covers, and with another alternative.
-    check_test_program_boundary_reason(test, "int tested(int n){int z;__asm__(\"testl %1, %1 # %0\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
-                                       "asm-flag-output-named", true, false, 0, 0, "inline assembly flag outputs named in their templates");
+    // Flag outputs named in their templates (#1846), as the register the condition is set into after them, by each
+    // modifier, and written there before it is: run against clang's build.
+    check_test_program_source(test,
+        "static int zero_named(int n){int z;__asm__(\"testl %1, %1 # %0 %b0 %w0 %k0 %q0\" : \"=@ccz\"(z) : \"r\"(n));return z;}"
+        "static _Bool carry_named(unsigned long v){_Bool c;__asm__(\"btq $3, %1\\n\\tsetc %b0\" : \"=@ccc\"(c) : \"r\"(v));return c;}"
+        "static long sign_named(long v){long s;int t;__asm__(\"testq %2, %2\\n\\tsets %b0\\n\\tmovl $7, %1\" : \"=@ccs\"(s), \"=r\"(t) : \"r\"(v));return s*100+t;}"
+        "int tested(int n){return zero_named(n)+carry_named((unsigned long)n*3)*2+(int)sign_named((long)n-5)*4;}",
+        "asm-flag-output-named", clang);
+    // Flag outputs (#147): of an object no integer store covers, and with another alternative.
     check_test_program_boundary_reason(test, "struct three{char c[3];};int tested(int n){struct three z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z.c[0];}",
                                        "asm-flag-output-size", true, false, 0, 0, "inline assembly flag outputs of this size");
     check_test_program_boundary_reason(test, "int tested(int n){int z;__asm__(\"testl %1, %1\" : \"=r@ccz\"(z) : \"r\"(n));return z;}",

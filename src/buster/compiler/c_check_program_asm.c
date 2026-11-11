@@ -48,11 +48,11 @@
 // rare (main.c's units have 58), and docs/c-inline-assembly.md ("Why it is scalar") measures what one costs a compile.
 //
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
-// target, flag outputs named in their templates, of a size no integer store covers or with other alternatives, f's x87
-// registers, the vector register classes and the other letters it doesn't place (A, p, Y but Yk, the floating
-// constants), MMX operands with a modifier, beside x87 ones or in templates that take directives, opmask operands with
-// a modifier, in templates that take directives or without their moves' features, x87 operands and
-// clobbers off the stack's top, symbolic immediates and constants outside their
+// target, flag outputs of a size no integer store covers or with other alternatives, f's x87 registers, the vector
+// register classes and the other letters it doesn't place (A, p, Y but Yk, the floating constants), MMX operands with a
+// modifier, beside x87 ones or in templates that take directives, opmask operands with a modifier, in templates that
+// take directives or without their moves' features, x87 operands and clobbers off the stack's top, symbolic immediates
+// and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
 // (rsp, a high byte, APX's and the other classes') and as memory inputs, clobbers of an operand's register, APX's
@@ -136,6 +136,9 @@ struct CheckAsmPlace
     bool read;
     // A flag output's _Atomic object, which its value is exchanged into (check_asm_helper_code).
     bool atomic;
+    // The general register a flag output's name prints (#1846): the one its setcc writes after the template
+    // (check_asm_helper_code's stores[1]), as clang prints the register its code sets the condition into.
+    uint8_t named;
     // An x87 input whose depth another input's value takes (#1846: two operands at one depth, clang's one register),
     // which the helper doesn't load.
     bool shadowed;
@@ -614,6 +617,10 @@ static void check_asm_emit_number(Arena* scratch, int64_t value, bool* valid)
 static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, uint8_t modifier, bool* valid)
 {
     const char* refused = NULL;
+    // A flag output prints as the register its setcc writes after the template, 32 bits wide as clang's (an i32 vreg's)
+    // whatever its object (#1846): `%0` is `%ecx`, `%b0` `%cl`. Its value there is the template's to ignore, as in clang's.
+    const CheckAsmPlace named = { .kind = BUSTER_CHECK_ASM_GENERAL, .reg = place->named, .size = 4 };
+    place = place->kind == BUSTER_CHECK_ASM_FLAG ? &named : place;
     if (place->kind == BUSTER_CHECK_ASM_GENERAL)
     {
         const uint32_t size = modifier == 'b' ? 1 : modifier == 'w' ? 2 : modifier == 'k' ? 4 : modifier == 'q' || modifier == 'V' || modifier == 'a' || modifier == 'A' ? 8 : place->size;
@@ -667,11 +674,6 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
     {
         // Its register, which it hasn't.
         refused = "inline assembly operands of this type in their constraint's registers";
-    }
-    else if (place->kind == BUSTER_CHECK_ASM_FLAG)
-    {
-        // clang prints the register its code sets the condition into after the template, which means nothing in it.
-        refused = "inline assembly flag outputs named in their templates";
     }
     else if (place->kind == BUSTER_CHECK_ASM_X87)
     {
@@ -2474,6 +2476,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         stores[i] = reg >= 0 ? (uint8_t)reg : X86_REGISTER_RAX;
         reason = reg < 0 ? "inline assembly operands past the registers left" : NULL;
         taken |= reg >= 0 ? 1u << reg : 0;
+    }
+    // A flag output's name is the register its setcc writes (check_asm_helper_code).
+    for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
+    {
+        places[k].named = places[k].kind == BUSTER_CHECK_ASM_FLAG ? stores[1] : 0;
     }
     // An asm goto's exit register (check_asm_helper_code): none an output's or a store's, which the tail reads after it is set.
     uint8_t exit = X86_REGISTER_RAX;

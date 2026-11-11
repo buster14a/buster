@@ -646,6 +646,9 @@ at the target's forms, by both of the checker's paths:
   (`check_vector_baseline_shift_by`, #1834): `psll`, `psrl` and `psra` of words, dwords and qwords, a qword's arithmetic
   one the logical one xor its sign bit shifted alike less that, and bytes' through words: masked by `0xff` shifted
   alike for a left or logical right shift, unpacked into words' high bytes, shifted and packed for an arithmetic one.
+  The generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without AVX-512) run on
+  pieces of the registers' width through memory, as a transport vector's do (`check_lower_vector_wide`, #1834):
+  shuffles element by element, conversions and elementwise builtins each piece's row.
   The integers' `__builtin_elementwise_min` and `_max` without SSE4.1's (or AVX-512's qword) instructions are a
   compare's blend (`check_vector_baseline_extremes`, #1834): the mask `pcmpgt` of a and b (of b and a for a minimum),
   unsigned elements' biased by their sign bits first (a constant operand, `xorps`), then `pand`, `pandn` and `por`;
@@ -659,9 +662,8 @@ at the target's forms, by both of the checker's paths:
   and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
   8- or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
-  without AVX-512, minimum and maximum of qwords without SSE4.2, conversions of vectors wider than the target's
-  registers, and the scalars' IEEE maxima and minima (`maximum` and `minimum`) without AVX, which need more records than
-  a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
+  without AVX-512, minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
+  and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
   without SSE4.1 its `ceilf` ... `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of
   the value plus the largest value below 0.5 of its sign). copysign and canonicalize are SSE's sequences, maxnum,
