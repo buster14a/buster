@@ -8133,9 +8133,15 @@ arguments against the function. The checker now gives these as clang does.
 
   What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
   the others), which slide from a declaration to its specifiers with clang's
-  deprecation warning, are refused by name; clang names a type whose space a
-  macro wrote by the macro (MacroQualifiedType: `'AS1 int *'`), where the
-  attribute is spelled out here, and spells a group's leading space where it was
+  deprecation warning, are refused by name. Clang names a type by the macro
+  that wrote its space (MacroQualifiedType: `'AS1 int *'`), declaration by
+  declaration. Here a space prints by its macro only where one macro writes it
+  throughout the unit (`check_driver_space_macros`, #1447). Its attribute is
+  spelled out in three cases: a space the unit writes both ways or with two
+  macros (`address_space(1u)` is space 1 written directly), every space where
+  an operand isn't an integer constant (`address_space(1+0)`), and
+  `__builtin_dump_struct`'s output. Clang spells a group's leading
+  space where it was
   written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
   collection qualifier inside a function's level is refused by name, and the
   specifiers' one that moves to a pointer whose chunk has another is
@@ -9072,6 +9078,10 @@ enables, which this checker doesn't all give.
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  A target address space that one macro writes throughout the unit prints by
+  that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
+  `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.
+  An a.k.a. spells the space out.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
