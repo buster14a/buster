@@ -2885,10 +2885,15 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
     const TypeFunctionABI before = type_function_abi_kind(types, reader->declared_types[previous]);
     const bool explicit_now = reader->output->explicit_abis != NULL && reader->output->explicit_abis[token] != 0;
     const bool explicit_first = reader->output->explicit_abis != NULL && reader->output->explicit_abis[first] != 0;
-    const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now != before && now != TYPE_FUNCTION_ABI_INVALID &&
+    // Conventions compare without no_caller_saved_registers' bit beside them (#1447), which is checked after them.
+    const TypeFunctionABI now_base = now == TYPE_FUNCTION_ABI_INVALID ? now : (TypeFunctionABI)(now & ~TYPE_FUNCTION_ABI_KEEPS_REGISTERS);
+    const TypeFunctionABI before_base = before == TYPE_FUNCTION_ABI_INVALID ? before : (TypeFunctionABI)(before & ~TYPE_FUNCTION_ABI_KEEPS_REGISTERS);
+    const bool now_keeps = now != TYPE_FUNCTION_ABI_INVALID && (now & TYPE_FUNCTION_ABI_KEEPS_REGISTERS) != 0;
+    const bool before_keeps = before != TYPE_FUNCTION_ABI_INVALID && (before & TYPE_FUNCTION_ABI_KEEPS_REGISTERS) != 0;
+    const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now_base != before_base && now != TYPE_FUNCTION_ABI_INVALID &&
                          before != TYPE_FUNCTION_ABI_INVALID && now != TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before != TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
-    const uint32_t saved = message == CHECK_INPUT_CONFLICTING_TYPES && !changed && now == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before == TYPE_FUNCTION_ABI_SYSV ?
-                           check_input_no_caller_saved_written(reader->output, token) : 0;
+    const bool added = (now == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before == TYPE_FUNCTION_ABI_SYSV) || (now_keeps && !before_keeps && now_base == before_base);
+    const uint32_t saved = message == CHECK_INPUT_CONFLICTING_TYPES && !changed && added ? check_input_no_caller_saved_written(reader->output, token) : 0;
     if (changed || saved != 0)
     {
         const uint32_t count = reader->output->report_count;
@@ -2897,7 +2902,7 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
         {
             CheckInputReport* report = reader->output->reports + count;
             report->subject = previous + 1;
-            report->detail = saved != 0 ? saved : check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
+            report->detail = saved != 0 ? saved : check_input_abi_call(now_base) | check_input_abi_call(before_base) << 8 | (explicit_first ? 1u << 16 : 0);
             report->note_token = saved != 0 ? previous : first;
             report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
         }
@@ -8138,7 +8143,7 @@ static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId 
                                          outside.calling_convention;
         }
         const TypeFunctionABI requested = check_input_attribute_requested_abi(&outside);
-        const TypeFunctionABI convention = !inside ? type_function_abi_kind(reader->types, wrapped) :
+        const TypeFunctionABI convention = !inside ? type_function_convention(reader->types, wrapped) :
                                            requested == TYPE_FUNCTION_ABI_INVALID ? TYPE_FUNCTION_ABI_SYSV : requested;
         valid = wrapped == 0 || type_kind(reader->types, wrapped) != BUSTER_TYPE_KIND_FUNCTION ||
                 check_input_swift_parameters_as(reader, wrapped, convention, reader->declarator_swift_places, reader->declarator_swift_tokens,
@@ -8146,7 +8151,7 @@ static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId 
     }
     reader->declarator_swift_wrapped = false;
     const uint32_t name = reader->declarator_no_prototype;
-    const TypeFunctionABI convention = is_function ? type_function_abi_kind(reader->types, function) : TYPE_FUNCTION_ABI_SYSV;
+    const TypeFunctionABI convention = is_function ? type_function_convention(reader->types, function) : TYPE_FUNCTION_ABI_SYSV;
     const bool unvariadic = convention == TYPE_FUNCTION_ABI_VECTOR || convention == TYPE_FUNCTION_ABI_REG || convention == TYPE_FUNCTION_ABI_SWIFT ||
                             convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
     if (valid && unvariadic && !is_typedef && name != BUSTER_CHECK_NONE && (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
@@ -10625,8 +10630,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, uint32_t old, bool overload)
 {
     const TypeId type = reader->declared_types[token];
-    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && (reader->output->explicit_abis == NULL || reader->output->explicit_abis[token] == 0) &&
-        type_function_abi_kind(reader->types, type) == TYPE_FUNCTION_ABI_SYSV)
+    const TypeFunctionABI written = type_function_abi_kind(reader->types, type);
+    const bool unannotated = (reader->output->explicit_abis == NULL || reader->output->explicit_abis[token] == 0) && written == TYPE_FUNCTION_ABI_SYSV;
+    // A redeclaration of another convention than System V's without no_caller_saved_registers inherits the bit beside it
+    // (#1447, clang's MergeFunctionDecl's withNoCallerSavedRegs).
+    const bool bare = written != TYPE_FUNCTION_ABI_INVALID && written != TYPE_FUNCTION_ABI_SYSV && written != TYPE_FUNCTION_ABI_NO_CALLER_SAVED &&
+                      (written & TYPE_FUNCTION_ABI_KEEPS_REGISTERS) == 0;
+    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && (unannotated || bare))
     {
         const uint32_t name = reader->parser->tokens.names[token];
         TypeId previous = 0;
@@ -10643,7 +10653,11 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         {
             previous = reader->linked_types[name];
         }
-        const TypeFunctionABI abi = previous != 0 ? type_function_abi_kind(reader->types, previous) : TYPE_FUNCTION_ABI_SYSV;
+        const TypeFunctionABI found = previous != 0 ? type_function_abi_kind(reader->types, previous) : TYPE_FUNCTION_ABI_SYSV;
+        // (A bare one's: its own convention with the earlier one's bit, where they are one convention.)
+        const TypeFunctionABI abi = !bare ? found :
+                                    found != TYPE_FUNCTION_ABI_INVALID && found == (TypeFunctionABI)(written | TYPE_FUNCTION_ABI_KEEPS_REGISTERS) ? found :
+                                    TYPE_FUNCTION_ABI_SYSV;
         if (abi != TYPE_FUNCTION_ABI_SYSV && abi != TYPE_FUNCTION_ABI_INVALID)
         {
             uint32_t count = 0;

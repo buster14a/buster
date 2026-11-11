@@ -8404,8 +8404,16 @@ arguments against the function. The checker now gives these as clang does.
   clang's function type bit, a System V function's type whose callee keeps
   every register. Its count is checked before its subject, as clang's type
   processing does. On a tag it is nothing; elsewhere it gets the function
-  types' warning. With `sysv_abi` or `cdecl` it is the same type. With
-  another convention, which clang also takes, it is refused by name.
+  types' warning. With `sysv_abi` or `cdecl` it is the same type. Beside
+  another convention it is clang's bit beside that one (#1447,
+  `CHECK_CALL_KEEPS_REGISTERS`, `TYPE_FUNCTION_ABI_KEEPS_REGISTERS`): printed
+  after the convention (`'void (void) __attribute__((ms_abi))
+  __attribute__((no_caller_saved_registers))'`), part of the type's identity,
+  inherited by a redeclaration that names the convention alone, and clang's
+  "function declared with 'no_caller_saved_registers' attribute was previously
+  declared without" where a redeclaration adds it. Where it stands between two
+  conventions of their own (`ms_abi, no_caller_saved_registers, sysv_abi`),
+  clang 23 gives no conflict error, which the checker gives as without it.
 
   x86's `interrupt` has its own rule (`CHECK_ATTRIBUTE_INTERRUPT`), clang's
   `handleAnyX86InterruptAttr` on x86-64. Its subjects are functions and
