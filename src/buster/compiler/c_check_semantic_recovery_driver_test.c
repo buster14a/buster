@@ -779,6 +779,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // Any name that stays undeclared before an operand (#2255): clang's "use of undeclared identifier", its expression
+        // invalid and its rest skipped as a keyword's typo's is, and the unit goes on. Before C23, `u8'a'` is the name `u8`
+        // and a character constant.
+        "/* gnu17 only */\n_Static_assert(u8'a' == 0, \"20\");\n_Static_assert('a' == 0, \"next\");\nint x = u8'b';\n"
+        "int f(void) { int y = u8'c'; return y + u8 'd' + 1; }\nint z = 1 / 0;\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        "int x = nosuch 5;\nint f(int a) { return (zzz a) + 1; }\nvoid h(int a) { a = yyy \"s\" + 2; www 1, a; }\n_Static_assert(0, \"after\");\n"
+        "int y = 1 / 0;\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
         // A block item's GNU attributes before a name that a correction takes as a value (#1447, check_driver_typo_tail):
         // clang's typo error, then "expected identifier or '('" there, the item skipped; the body's unused variable is quiet.
         "int counter;\nvoid f(int n)\n{\n    int value;\n    __attribute__((unused)) valu = 1;\n"
