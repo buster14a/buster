@@ -299,6 +299,11 @@ typedef enum CheckDiagnostic
     // A signed _BitInt past 128 bits as one of mul_overflow's operands or its destination (#1447): clang's
     // "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits", at that argument.
     CHECK_DIAG_OVERFLOW_BIT_INT,
+    // A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete there (#1842's 3d,
+    // clang's BoundsSafetyCheckUseOfCountAttrPtr and its assignment's check): "cannot use 'b->p' with '__counted_by'
+    // attributed type ...", at the member's expression, or at an assignment to it "cannot assign to 'B::p' ...", worded
+    // with its two notes by c_check_semantic_diagnostic.c (check_graph_counted_uses).
+    CHECK_DIAG_COUNTED_INCOMPLETE,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
