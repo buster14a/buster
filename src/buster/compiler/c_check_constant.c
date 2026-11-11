@@ -1322,7 +1322,8 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
 }
 
 // Mark only declarator syntax. Array-bound expressions remain ordinary expression nodes and can themselves
-// contain casts/type queries; the increasing source-order pass will refine each nested type range afterward.
+// contain casts/type queries; the increasing source-order pass will refine each nested type range afterward. A C23
+// attribute list's `[[` is no bound (#2293): its arguments stay the type's syntax, as GNU lists' do.
 static void check_constant_mark_type(CheckConstantInput* input, uint32_t first, uint32_t end)
 {
     const Parser* parser = input->reader->parser;
@@ -1332,7 +1333,12 @@ static void check_constant_mark_type(CheckConstantInput* input, uint32_t first, 
     }
     for (uint32_t token = first; token < end; token += 1)
     {
-        if (parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE)
+        if (parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE && token + 1 < end && parser->tokens.kinds[token + 1] == PARSE_KIND_L_SQUARE)
+        {
+            const uint32_t close = parser->tree.parents[token];
+            token = close > token && close < end ? close : token;
+        }
+        else if (parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE)
         {
             const uint32_t close = parser->tree.parents[token];
             if (close > token && close < end)
@@ -4415,7 +4421,13 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
                 const uint32_t type_end = reader->builtins[close] == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, first, close, PARSE_KIND_COMMA) : close;
                 for (uint32_t item = first; valid && item < type_end; item += 1)
                 {
-                    if (parser->tokens.kinds[item] == PARSE_KIND_L_SQUARE)
+                    // (A C23 attribute list's `[[` is no bound, #2293: check_constant_type reads it.)
+                    if (parser->tokens.kinds[item] == PARSE_KIND_L_SQUARE && item + 1 < type_end && parser->tokens.kinds[item + 1] == PARSE_KIND_L_SQUARE)
+                    {
+                        const uint32_t finish = parser->tree.parents[item];
+                        item = finish > item && finish < type_end ? finish : item;
+                    }
+                    else if (parser->tokens.kinds[item] == PARSE_KIND_L_SQUARE)
                     {
                         const uint32_t finish = parser->tree.parents[item];
                         valid = finish > item && finish < type_end;
