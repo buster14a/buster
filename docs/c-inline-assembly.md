@@ -525,10 +525,16 @@ size, as SSE2 is every target's here. The check follows an operand's own
 (`check_asm_operand_checks` without `whole`) and precedes its tie's, and the
 statement's first error alone is given, as clang returns there.
 
+A constraint's or a clobber's error drops its statement, and checking goes on
+past it as clang's `ActOnGCCAsmStmt` returns there (#2369): the error is
+recovered (`check_input_recover_reports` in `check_input_asm_statement`), and
+the statement is no asm statement of the unit's. A later syntax error's
+repaired view keeps it, the statement's `)` being the original's
+(`check_repair_input_report`).
+
 Differences left: a `target` attribute on an earlier declaration alone, not
 the definition, doesn't widen an operand's limit, where clang's
-`getFunctionFeatureMap` reads the inherited attribute; an asm statement's
-constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369).
+`getFunctionFeatureMap` reads the inherited attribute.
 
 An asm label on a block-scope object of automatic storage (none or `auto`,
 C23's inferred `auto` and `constexpr` too), not `register`, is clang's
