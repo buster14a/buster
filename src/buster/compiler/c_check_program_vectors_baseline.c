@@ -795,10 +795,12 @@ static void check_vector_baseline_dwords(CheckVectorBaseline* context, const Che
 //     each vector with the constant's indices (the other's elements zeroed by their top bits), ORed;
 //   - with AVX, a 32-byte vector of two 16-byte ones by VINSERTF128, one's high half by VEXTRACTF128, and with AVX2 a
 //     shuffle of 32-byte vectors' dwords by VPERMD's of each and VPBLENDD's of the two.
-// Others are refused by name, as clang -O0 computes them in sequences no row takes.
+// Others are refused by name, as clang -O0 computes them in sequences no row takes; `elementwise` says the caller runs
+// them element by element instead (shuffles of bytes and words without SSSE3, of 32 bytes of them without AVX-512, of
+// 32 bytes without AVX2: #1834).
 static const char* check_vector_baseline_shuffle_row(const X86Target* target, uint32_t element, uint32_t in_lanes, uint32_t in_bytes, uint32_t out_lanes,
                                                      uint32_t out_bytes, const uint32_t* indices, uint8_t constant_role, Tier0Operation* row,
-                                                     uint8_t* constant, uint32_t* constant_bytes)
+                                                     uint8_t* constant, uint32_t* constant_bytes, bool* elementwise)
 {
     const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
     const bool avx2 = (target->features & BUSTER_X86_FEATURE(AVX2)) != 0;
@@ -812,6 +814,7 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
     CheckVectorBaseline context = { row, 16, avx, true };
     CheckVectorBaselineShuffle plan = { .element = element, .lanes = out_lanes };
     *constant_bytes = 0;
+    *elementwise = false;
     for (uint32_t i = 0; i < out_lanes && i < BUSTER_CHECK_BASE_LANES; i += 1)
     {
         const uint32_t k = indices[i];
@@ -917,6 +920,7 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
     else if (wide > 16)
     {
         reason = !avx2 ? "vector shuffles of 32-byte vectors without AVX2" : "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512";
+        *elementwise = true;
     }
     else if (plan.element == 8)
     {
@@ -1032,6 +1036,7 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
         else
         {
             reason = plan.element == 1 ? "vector shuffles of 8-bit elements without SSSE3" : "vector shuffles of 16-bit elements without SSSE3";
+            *elementwise = true;
         }
     }
     const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;

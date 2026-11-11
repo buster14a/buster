@@ -89,6 +89,8 @@ struct CheckVectorShuffle
     uint64_t second[8];
     bool reads_b;
     bool permutes;
+    // Whether no row of the target's sequences takes it and it runs element by element instead (#1834).
+    bool elementwise;
 };
 
 // The row of __builtin_shufflevector(a, b, indices...) of vectors of `source`'s type into one of `result`'s, its
@@ -140,7 +142,7 @@ static const char* check_vector_shuffle_row(const TypeTable* types, const X86Tar
         uint8_t constant[64] = { 0 };
         uint32_t constant_bytes = 0;
         reason = check_vector_baseline_shuffle_row(target, in.element, in.lanes, in.bytes, out.lanes, out.bytes, indices, BUSTER_TIER0_ROLE_VECTOR(operands), row,
-                                                   constant, &constant_bytes);
+                                                   constant, &constant_bytes, &plan->elementwise);
         plan->permutes = constant_bytes != 0;
         if (constant_bytes != 0)
         {

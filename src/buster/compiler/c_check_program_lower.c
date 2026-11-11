@@ -12042,8 +12042,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const bool fused = narrow && check_lower_vector_of(writer, result) != 0;
         const TypeId operand = fused ? stream->argument_conversions[graph->argument_offsets[a]].type : source;
         // Of transport vectors, or into one (#137), element by element: its entries are its own.
-        const bool transport = !fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0 ||
-                                          check_lower_vector_wide(writer, source) || check_lower_vector_wide(writer, result));
+        bool transport = !fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                                    check_lower_vector_wide(writer, source) || check_lower_vector_wide(writer, result));
         if (transport)
         {
             check_lower_transport_shuffle(writer, node);
@@ -12064,6 +12064,15 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         else
         {
             reason = check_vector_shuffle_row(types, target, source, result, indices, b_effects, rows, &plan);
+            if (reason != NULL && plan.elementwise)
+            {
+                // A shuffle no row of the target's sequences takes (bytes and words without SSSE3, 32-byte ones of them
+                // without AVX-512 or of any element without AVX2) runs element by element through memory, as a wide
+                // vector's does (#1834).
+                reason = NULL;
+                transport = true;
+                check_lower_transport_shuffle(writer, node);
+            }
         }
         if (reason == NULL && !transport)
         {
