@@ -397,7 +397,8 @@ static void check_init_listless_drop(CheckInput* input, const Parser* parser, co
         for (uint32_t u = 0; candidate && !undeclared && u < input->report_count; u += 1)
         {
             const CheckInputReport* name = input->reports + u;
-            undeclared = name->message == CHECK_INPUT_UNDECLARED && name->token >= report->value && name->token < report->completion &&
+            undeclared = (name->message == CHECK_INPUT_UNDECLARED || name->message == CHECK_INPUT_INVALID_USE || name->message == CHECK_INPUT_AMBIGUOUS) &&
+                         name->token >= report->value && name->token < report->completion &&
                          check_init_undeclared_poisons(parser, (uint32_t)report->value, name->token);
         }
         // No node is no evidence: a rejected unit's retained graph ends at its first missing name, so a later valid
