@@ -187,6 +187,16 @@ static const uint16_t ir_simd_expand_forms[4][3] = {
     { X86_FORM_VPEXPANDQ_X_XM128, X86_FORM_VPEXPANDQ_Y_YM256, X86_FORM_VPEXPANDQ_Z_ZM512 },
 };
 static const uint16_t ir_simd_whole_moves[3] = { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 };
+// The AES rounds (#1840, BUSTER_IR_INTRINSIC_AES), by round (0 vaesenc, 1 vaesenclast) and width: the EVEX forms, and
+// the VEX forms at 16 and 32 bytes (X86_FORM_NONE at 64), the state in reg's vvvv and the round key in rm.
+static const uint16_t ir_simd_aes_forms[2][3] = {
+    { X86_FORM_VAESENC_X_X_XM128_EVEX, X86_FORM_VAESENC_Y_Y_YM256_EVEX, X86_FORM_VAESENC_Z_Z_ZM512 },
+    { X86_FORM_VAESENCLAST_X_X_XM128_EVEX, X86_FORM_VAESENCLAST_Y_Y_YM256_EVEX, X86_FORM_VAESENCLAST_Z_Z_ZM512 },
+};
+static const uint16_t ir_simd_aes_vex_forms[2][3] = {
+    { X86_FORM_VAESENC_X_X_XM128, X86_FORM_VAESENC_Y_Y_YM256, X86_FORM_NONE },
+    { X86_FORM_VAESENCLAST_X_X_XM128, X86_FORM_VAESENCLAST_Y_Y_YM256, X86_FORM_NONE },
+};
 // vpermi2b to vpermi2q, the same permutes whose destination is the indices, the first table in vvvv and the second in rm
 // (Tier 1's where the destination's register holds the indices).
 static const uint16_t ir_simd_permute2_index_forms[4][3] = {

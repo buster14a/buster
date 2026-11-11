@@ -93,6 +93,9 @@ typedef enum IrSimdOperation
     // past them; and a's lanes from lane 0 at the set bits' lanes, c's at the others.
     IR_SIMD_COMPRESS,
     IR_SIMD_EXPAND,
+    // An AES round of each 16-byte lane (#1840, ir.c's BUSTER_IR_INTRINSIC_AES): ShiftRows, SubBytes and MixColumns of a
+    // (the last round, the action's `index` 1, without MixColumns), then b xor'ed: vaesenc and vaesenclast.
+    IR_SIMD_AES,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -238,7 +241,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
                           action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT ||
                           action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
-                          action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND);
+                          action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -277,6 +280,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_PERMUTE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
             case IR_SIMD_PERMUTE2: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && action->index <= 3; break;
             case IR_SIMD_TERNLOG: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type; break;
+            case IR_SIMD_AES: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 1; break;
             case IR_SIMD_COMPRESS:
             case IR_SIMD_EXPAND:
             {
@@ -480,6 +484,46 @@ static uint64_t ir_simd_integer_operation(IrSimdOperation operation, uint64_t a,
     return result & mask;
 }
 
+// AES's arithmetic in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1 (FIPS 197, #1840): a byte's product by 2 (xtime), and its
+// S-box entry, the affine map of its multiplicative inverse (0's inverse 0), computed rather than tabulated.
+static uint8_t ir_simd_aes_double(uint8_t value)
+{
+    return (uint8_t)((uint32_t)value << 1 ^ ((value & 0x80) != 0 ? 0x1b : 0));
+}
+
+static uint8_t ir_simd_aes_multiply(uint8_t a, uint8_t b)
+{
+    uint8_t product = 0;
+    uint8_t factor = a;
+    for (uint32_t bit = 0; bit < 8; bit += 1)
+    {
+        product ^= (b >> bit & 1) != 0 ? factor : 0;
+        factor = ir_simd_aes_double(factor);
+    }
+    return product;
+}
+
+static uint8_t ir_simd_aes_sbox(uint8_t value)
+{
+    // The inverse as value^254, by squaring and multiplying.
+    uint8_t inverse = 1;
+    uint8_t power = value;
+    for (uint32_t bit = 1; bit < 8; bit += 1)
+    {
+        power = ir_simd_aes_multiply(power, power);
+        inverse = ir_simd_aes_multiply(inverse, power);
+    }
+    inverse = value == 0 ? 0 : inverse;
+    uint8_t result = 0x63;
+    for (uint32_t bit = 0; bit < 8; bit += 1)
+    {
+        const uint32_t sum = (uint32_t)(inverse >> bit) ^ (uint32_t)(inverse >> ((bit + 4) % 8)) ^ (uint32_t)(inverse >> ((bit + 5) % 8)) ^
+                             (uint32_t)(inverse >> ((bit + 6) % 8)) ^ (uint32_t)(inverse >> ((bit + 7) % 8));
+        result ^= (uint8_t)((sum & 1) << bit);
+    }
+    return result;
+}
+
 // Success commits one complete result/effect. Failure changes neither output nor memory/counters. Inputs may
 // alias the result; a local staging value prevents cross-lane feedback. Memory addresses are bounded offsets,
 // never arbitrary host pointers. Memory storage is disjoint from the value views and their pointer slice. This
@@ -621,6 +665,39 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         {
             const uint64_t a = ir_simd_lane_read(values[0], lane_bits, lane);
             ir_simd_lane_write(&staged, lane_bits, lane, ir_simd_integer_operation((IrSimdOperation)shifts[(action->index >> 2) & 3], a, count, lane_bits));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_AES)
+    {
+        // FIPS 197 on x86's layout, byte i of a 16-byte lane row i % 4 of column i / 4: ShiftRows moves byte 5 to 1 and the
+        // like, SubBytes takes each byte's S-box entry (ir_simd_aes_sbox), MixColumns each column's product by 2, 3, 1, 1.
+        static const uint8_t rows[16] = { 0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11 };
+        const uint8_t* a = (const uint8_t*)values[0]->words;
+        const uint8_t* b = (const uint8_t*)values[1]->words;
+        uint8_t* out = (uint8_t*)staged.words;
+        const uint32_t bytes = ir_simd_bits(action->result) / 8;
+        for (uint32_t lane = 0; lane < bytes; lane += 16)
+        {
+            uint8_t state[16];
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                state[i] = ir_simd_aes_sbox(a[lane + rows[i]]);
+            }
+            for (uint32_t column = 0; action->index == 0 && column < 4; column += 1)
+            {
+                const uint8_t* c = state + column * 4;
+                const uint8_t mixed[4] = {
+                    (uint8_t)(ir_simd_aes_double(c[0]) ^ ir_simd_aes_double(c[1]) ^ c[1] ^ c[2] ^ c[3]),
+                    (uint8_t)(c[0] ^ ir_simd_aes_double(c[1]) ^ ir_simd_aes_double(c[2]) ^ c[2] ^ c[3]),
+                    (uint8_t)(c[0] ^ c[1] ^ ir_simd_aes_double(c[2]) ^ ir_simd_aes_double(c[3]) ^ c[3]),
+                    (uint8_t)(ir_simd_aes_double(c[0]) ^ c[0] ^ c[1] ^ c[2] ^ ir_simd_aes_double(c[3])),
+                };
+                memcpy(state + column * 4, mixed, 4);
+            }
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                out[lane + i] = (uint8_t)(state[i] ^ b[lane + i]);
+            }
         }
     }
     else if (valid && (action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND))

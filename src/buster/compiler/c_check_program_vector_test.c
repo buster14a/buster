@@ -511,18 +511,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
         uint32_t initializations;
     } refused[] = {
         {
-            "vector-multiply-bytes",
-            "typedef char v16qi __attribute__((vector_size(16)));int tested(int n){v16qi a={(char)n},b={2};a=a*b;return a[0];}",
-            "vector multiplication of 8-bit elements",
-            2,
-        },
-        {
-            "vector-shift-bytes",
-            "typedef unsigned char v16qu __attribute__((vector_size(16)));int tested(int n){v16qu a={(unsigned char)n},b={1};a=a<<b;return a[0];}",
-            "vector shifts of 8-bit elements",
-            2,
-        },
-        {
             // Vectors passed by their bytes (#137, check_lower_transport_type) compute as clang -O0's code does
             // (c_check_program_transport.c), but where clang's own code doesn't, and as the ordinary vectors refuse.
             "vector-of-bool-element-update",
@@ -1240,6 +1228,22 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
           "return (int)h;}\n"
         },
+        // _mm_maskmoveu_si128 and _mm_maskmove_si64 without AVX-512BW (#2240), byte by byte: random masks, none and every
+        // byte selected, at every offset of a buffer, and _mm_maskmove_si64 at a page's end before an inaccessible one (its
+        // header backs the 16-byte store up there; MASKMOVDQU itself may fault on bytes it doesn't store, so
+        // _mm_maskmoveu_si128 isn't tested there).
+        { "baseline-maskmove",
+          "#include <immintrin.h>\n"
+          "#include <sys/mman.h>\n"
+          "int tested(int n){unsigned h=2166136261u;char buf[64];\n"
+          "char*page=mmap(0,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);mprotect(page+4096,4096,PROT_NONE);\n"
+          "for(int k=0;k<8;k++){__m128i d,m;fill(&d,16,n*3+k);fill(&m,16,n*5+k);if(k==0)m=_mm_setzero_si128();if(k==1)m=_mm_set1_epi8(-1);\n"
+          "fill(buf,64,n+k);_mm_maskmoveu_si128(d,m,buf+k);h=fold(h,buf,64);\n"
+          "__m64 e,q;fill(&e,8,n*7+k);fill(&q,8,n*11+k);fill(buf,64,n+k+1);_mm_maskmove_si64(e,q,buf+k*3);h=fold(h,buf,64);\n"
+          "char*edge=page+4096-8;for(int i=0;i<8;i++)edge[i]=(char)(i+n);\n"
+          "_mm_maskmove_si64(e,_mm_set1_pi8(-1),page+4096-8);h=fold(h,page+4096-8,8);}\n"
+          "munmap(page,8192);return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
@@ -1359,6 +1363,17 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "{T q_[]={a##k/b##k,a##k%b##k,a##k/(__typeof__(a##k[0]))7,a##k%(__typeof__(a##k[0]))5};a##k/=b##k;FOLD(q_);FOLD(a##k);}\n"
           "int tested(int n){unsigned h=2166136261u;D(sb8,1)D(v16qu,2)D(uw,3)D(v4si,4)D(ud8,5)D(v2di,6)D(sq8,7)D(sd32,8)\n"
           "e3 c={(short)n,-7,300},d={3,(short)(n|1),-9};e3 r[]={c/d,c%d};short o[]={r[0][0],r[0][1],r[0][2],r[1][0],r[1][1],r[1][2]};FOLD(o);return (int)h;}\n"
+        },
+        // Products and shifts no row takes, element by element (#2216): bytes' at every target, and shifts by a vector's
+        // counts without AVX2; of 8 to 128 bytes, by vectors, splats and constants, and in place.
+        { "baseline-lanewise-operators",
+          "typedef signed char sb __attribute__((vector_size(16)));typedef unsigned char ub32 __attribute__((vector_size(32),aligned(16)));"
+          "typedef signed char sb64 __attribute__((vector_size(64),aligned(16)));typedef unsigned short uw __attribute__((vector_size(16)));"
+          "typedef long long sq4 __attribute__((vector_size(32),aligned(16)));typedef int sd32 __attribute__((vector_size(128),aligned(16)));\n"
+          "#define S(T,k,bits) T a##k,b##k;fill(&a##k,sizeof(T),n+k);fill(&b##k,sizeof(T),n+k+50);"
+          "{T c_=b##k&(__typeof__(b##k[0]))(bits-1);T q_[]={a##k*b##k,a##k<<c_,a##k>>c_,a##k<<(n&(bits-1)),a##k>>3,a##k*(__typeof__(a##k[0]))n};a##k*=b##k;a##k<<=c_;"
+          "FOLD(q_);FOLD(a##k);}\n"
+          "int tested(int n){unsigned h=2166136261u;S(sb,1,8)S(v16qu,2,8)S(ub32,3,8)S(sb64,4,8)S(uw,5,16)S(v4si,6,32)S(sq4,7,64)S(sd32,8,32)return (int)h;}\n"
         },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.

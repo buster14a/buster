@@ -166,10 +166,13 @@ enum
     // An object whose tentative definitions leave it an array of unknown bound at the unit's end (#2238, clang's
     // ActOnEndOfTranslationUnit): -Wtentative-definition-array, on by default.
     CHECK_WARNING_ID_TENTATIVE_ARRAY = 129,
+    // swift_name's and swift_async_name's Swift name that doesn't fit its declaration (#1447, clang's SemaSwift::DiagnoseName):
+    // -Wswift-name-attribute, on by default. (Its ID past the ones other pull requests take.)
+    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 130,
     // A generic selection's association of array type or of a qualified type, which its controlling expression's lvalue
     // conversion never selects (#1447, clang's CreateGenericSelectionExpr): -Wunreachable-code-generic-assoc, on by
     // default, under -Wunreachable-code.
-    CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC = 130,
+    CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC = 131,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -472,12 +475,36 @@ typedef enum CheckWarningEventKind
     // non-standard escape character '\c'" at its backslash, payload.name the character and payload.data the backslash's
     // offset in the token.
     CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE,
+    // swift_name's and swift_async_name's warnings (#1447, check_input_attribute_swift_name), at the name's string literal:
+    // payload.data's low five bits the message (BUSTER_CHECK_SWIFT_NAME_*), then the expected and the given parameter
+    // counts in 13 bits each. Its K&R function's is -Wignored-attributes', the others -Wswift-name-attribute's.
+    CHECK_WARNING_EVENT_SWIFT_NAME,
     // A generic association that is never selected (#1447, check_generic_unreachable): at its type name's first token
     // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
     // array's, 1 for a qualified one's.
     CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_SWIFT_NAME's messages (#1447), as clang's SemaSwift words them.
+#define BUSTER_CHECK_SWIFT_NAME_FUNCTION 0u
+#define BUSTER_CHECK_SWIFT_NAME_BASE 1u
+#define BUSTER_CHECK_SWIFT_NAME_CONTEXT 2u
+#define BUSTER_CHECK_SWIFT_NAME_PARAMETER 3u
+#define BUSTER_CHECK_SWIFT_NAME_DECLARATION 4u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_ACCESSOR 5u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_PARAMETER 6u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_SELF 7u
+#define BUSTER_CHECK_SWIFT_NAME_MISSING_PARAMETERS 8u
+#define BUSTER_CHECK_SWIFT_NAME_SETTER 9u
+#define BUSTER_CHECK_SWIFT_NAME_SELVES 10u
+#define BUSTER_CHECK_SWIFT_NAME_GETTER 11u
+#define BUSTER_CHECK_SWIFT_NAME_NO_NEW_VALUE 12u
+#define BUSTER_CHECK_SWIFT_NAME_NEW_VALUES 13u
+#define BUSTER_CHECK_SWIFT_NAME_GETTER_NEW_VALUE 14u
+#define BUSTER_CHECK_SWIFT_NAME_COUNT 15u
+#define BUSTER_CHECK_SWIFT_NAME_NO_PARAMETERS 16u
+#define BUSTER_CHECK_SWIFT_NAME_PROTOTYPE 17u
 
 // CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload (#1838): `name` the version's first byte in its string's decoded text (it
 // ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with

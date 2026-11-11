@@ -8441,7 +8441,58 @@ arguments against the function. The checker now gives these as clang does.
     block parameter, which C hasn't, so its error-parameter checks never
     apply.) A first argument that is no identifier, on which clang 23 crashes
     (its handler reads it as an identifier), is refused by name.
-    `c_check_swift_attribute_driver_test.c` compares their units as above.
+    `c_check_swift_attribute_driver_test.c` compares their units as above;
+  - Swift's names, `swift_name` and `swift_async_name` (#1447,
+    `check_input_attribute_swift_name`), whose string must fit the
+    declaration as clang's SemaSwift::DiagnoseName checks it, or its
+    -Wswift-name-attribute warning (`CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE`)
+    at the string, which ignores the attribute. A function's is a Swift
+    function name (`check_input_swift_function_name`): an optional
+    `getter:` or `setter:`, a base name with an optional context of
+    `.`-joined identifiers, and parenthesized labels each ending in `:`, with
+    clang's rules for `self:`, `newValue:` and `subscript`; its count of
+    labels must be the function's parameters' (an async name's one fewer,
+    and a function of none is its own warning), more only for a
+    single-parameter `init` of a function of none, fewer only where pointers
+    to unqualified pointees, possible out parameters, make up the rest ("too
+    few/many parameters in the signature ... (expected N; got M)"). A
+    function without a prototype is -Wignored-attributes' "only applies to
+    non-K&R-style functions". A variable's, a tag's, a member's, a typedef's
+    or an enumerator's is an identifier with an optional context; a label's
+    "cannot be applied to this declaration";
+  - `swift_error` (#1447, `check_input_attribute_swift_error`): its
+    convention, as written, `none`, `nonnull_error`, `null_result`,
+    `zero_result` or `nonzero_result` (another identifier's warning ignores
+    it); every one but `none` needs an error parameter, a pointer to a
+    pointer to CFError, which clang takes to be the first struct bridged to
+    `NSError` (`objc_bridge` or `objc_bridge_mutable`) that a check met, and
+    then that struct alone (`CheckInputReader.cf_error`, so a body's lane
+    refuses `swift_error`); `null_result` a function returning a pointer, and
+    the two zero conventions one returning an integer, an enumeration or
+    `bool`, each clang's error at the attribute. A first argument of no
+    identifier, on which clang 23 crashes, is refused by name.
+    `c_check_swift_name_driver_test.c` compares their units as above;
+  - `cfi_salt("S")` (#1447, `check_input_attribute_salt`), a prototype's
+    type's: the salt's text, interned (`intern_find_or_add`), is part of the
+    function type's identity, in its info word's bits from
+    `BUSTER_TYPE_FUNCTION_SALT_SHIFT` (`type_function_salt`), so two
+    prototypes that differ by their salt alone are different and
+    incompatible types (`type_compatible`: redeclarations' "conflicting
+    types", assignments' and initializers'
+    -Wincompatible-function-pointer-types, `_Generic`), and print alike, as
+    clang prints no salt. A type made again from another keeps its salt
+    (`type_function_like`, `type_function_extended_abi`). The list's last
+    salt applies, to the first function inside the declarator's pointers,
+    arrays and wrappers, as a calling convention does; an empty one is none.
+    A function without a prototype is clang's "only applies to non-K&R-style
+    functions". Where no function takes it, it is the function types'
+    warning ("only applies to function types; type here is T"), and its
+    subjects' error too, unless it follows the declarator's name (clang drops
+    it there) or is C23's, a type's alone; a C23 one where a declaration's
+    attributes are is "cannot be applied to a declaration", as the function
+    effects' are, after a declarator's name too. A body's lane refuses it,
+    since its salt is interned. `c_check_cfi_salt_driver_test.c` compares
+    its units as above.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -8732,9 +8783,25 @@ arguments against the function. The checker now gives these as clang does.
     `objc_gc(strong)` on a pointer make a garbage-collection qualifier that
     changes the type (`int *__weak`, which redeclarations, `_Generic` and the
     types' spellings see): the type table's extended qualifier (#1447, "The
-    type qualifiers' attributes" below). Both attributes' C23 spellings, which
-    apply to other types than GNU's (clang 23 crashes on
-    `[[clang::objc_gc(weak)]]`), are refused by name.
+    type qualifiers' attributes" below). A parameter's qualifier isn't its
+    function type's, as clang's canonical parameter types are unqualified.
+    `objc_ownership(weak)` is named `__weak` on a pointer alone; on another
+    type clang's first test names the attribute.
+    Both attributes' C23 spellings (#1447) apply where they are written: after
+    the specifiers, a pointer or a function's or array's suffix, to that type
+    alone, never moving outward (its warning naming that type); before a
+    declaration or after a declarator's name (`CheckInputAttribute.objc_declaration`)
+    as GNU's after a declarator, objc_gc's there sliding with
+    -Wdeprecated-attributes' "applying attribute 'clang::objc_gc' to a
+    declaration is deprecated" after the type's warnings, and after a
+    typedef's name "cannot be applied to a declaration". On a declaration of no
+    declarator, objc_gc's is "cannot be applied to a declaration" and
+    objc_ownership's "only applies to variables" at the `;`. clang 23 runs out
+    of memory on `[[clang::objc_gc(weak)]]` (or `strong`) before a
+    declaration, after its deprecation warning; the checker gives that
+    warning and applies it as after the declarator's name.
+    `c_check_objc_c23_driver_test.c` compares their units with clang's in
+    GNU C17 and C23 by both paths.
   - `diagnose_as_builtin` (`check_input_attribute_diagnose_builtin`,
     `c_check_attribute_checks_input.c`), clang's handleDiagnoseAsBuiltinAttr:
     its first argument names a builtin function, as getBuiltinID finds one: a
@@ -9175,9 +9242,8 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_emit_patchable`, both tiers' code) is the [object writer
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
-  The rest stay refused by name, where they apply: `format_matches`,
-  `cfi_salt`, `swift_name`, `swift_async_name` and `swift_error` in either
-  syntax, and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  The rest stay refused by name, where they apply: `format_matches` in either
+  syntax. Recognizing their
   names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
@@ -9390,6 +9456,14 @@ arguments against the function. The checker now gives these as clang does.
   declaration's later uses and the initializer's other elements are checked as
   clang checks them, by both paths. Differences left: without a `]` before the
   next `;` (`int z[1, 2;`) nothing is resumed, where clang reads on.
+- **A GNU attribute list's item that isn't a name** (#1447). After
+  `__attribute__((unused, __clang__::x))`'s "expected ')'" (`__clang__` is
+  the macro 1), clang's ParseGNUAttributes skips to the list's `)` and goes
+  on with the declaration: the view drops the tokens from the error to that
+  `)` (`ParseDiagnostic.resume_delete`), so the list's earlier attributes and
+  the unit's later declarations are checked, by both paths. Differences left:
+  the warnings a rejected unit drops still drop (`-Wdeprecated-declarations`
+  among them), and the caret display's "expanded from macro '__clang__'" note.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original
@@ -9552,14 +9626,15 @@ arguments against the function. The checker now gives these as clang does.
     power of 2") goes on to the later declarations, as clang does ("Semantic
     error recovery", #1447). Another checker error still ends what is
     published; a unit's later parse errors are printed.
-  - The checks-only attributes (#1447): objc_gc's and objc_ownership's C23
-    spellings are refused (see above). A `_Generic` association's type in a
-    body is read as a cast's (`check_input_selection_type_name`), with its
-    attributes' warnings; one the constant reader reads (a file-scope
-    initializer's) gives none. A `typeof`'s or `sizeof`'s type name that
-    starts with a GNU attribute is read as one (`check_constant_type_start`),
-    with its attributes' type warnings ("'aligned' attribute ignored when
-    parsing type"). As everywhere, a
+  - The checks-only attributes (#1447): a C23 attribute in a cast in a
+    file-scope `_Generic`'s controlling expression (`objc_gc`'s,
+    `address_space`'s) is "invalid or unsupported declaration". A `_Generic`
+    association's type in a body is read as a cast's
+    (`check_input_selection_type_name`), with its attributes' warnings; one
+    the constant reader reads (a file-scope initializer's) gives none. A
+    `typeof`'s or `sizeof`'s type name that starts with a GNU attribute is
+    read as one (`check_constant_type_start`), with its attributes' type
+    warnings ("'aligned' attribute ignored when parsing type"). As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
