@@ -74,7 +74,8 @@ static uint32_t check_input_generic_undeclared(CheckInputReader* reader, const C
     const String8 generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
     const bool custom = check_input_attribute_equal(generic_name, "availability") || check_input_attribute_equal(generic_name, "external_source_symbol") ||
                         check_input_attribute_equal(generic_name, "type_tag_for_datatype") ||
-                        check_input_attribute_equal(generic_name, "objc_bridge_related");
+                        check_input_attribute_equal(generic_name, "objc_bridge_related") || check_input_attribute_equal(generic_name, "swift_newtype") ||
+                        check_input_attribute_equal(generic_name, "swift_wrapper");
     const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept && !custom;
     const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(generic_name) : NULL;
     const uint32_t flags = row != NULL ? row->flags : 0;
@@ -102,6 +103,14 @@ static uint32_t check_input_generic_undeclared(CheckInputReader* reader, const C
         {
             const bool named = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
             undeclared = named && !check_input_thread_name(reader, in_scope, frames, depth, members, member_count, token) ? token : BUSTER_CHECK_NONE;
+            // An undeclared library function's name: clang's lookup of it declares the function implicitly, with its
+            // diagnostic, as an expression's elsewhere does (check_input_implicit_function): diagnose_as_builtin's builtin
+            // then takes that declaration (check_input_attribute_diagnose_builtin).
+            if (undeclared != BUSTER_CHECK_NONE)
+            {
+                check_input_implicit_function(reader, token);
+                undeclared = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) != 0 ? BUSTER_CHECK_NONE : undeclared;
+            }
         }
         argument = stop + 1;
     }
