@@ -8434,8 +8434,7 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
                           kind == CHECK_ATTRIBUTE_ALIAS ||
                           kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_ASM_LABEL ||
                           kind == CHECK_ATTRIBUTE_CALLING_CONVENTION || kind == CHECK_ATTRIBUTE_NORETURN || kind == CHECK_ATTRIBUTE_OVERLOADABLE ||
-                          kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
-                          kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_CLEANUP || kind == CHECK_ATTRIBUTE_FALLTHROUGH ||
+                          kind == CHECK_ATTRIBUTE_CLEANUP || kind == CHECK_ATTRIBUTE_FALLTHROUGH ||
                           kind == CHECK_ATTRIBUTE_UNSEQUENCED || kind == CHECK_ATTRIBUTE_REPRODUCIBLE || kind == CHECK_ATTRIBUTE_NULLABILITY ||
                           kind == CHECK_ATTRIBUTE_REGPARM || kind == CHECK_ATTRIBUTE_MUSTTAIL || kind == CHECK_ATTRIBUTE_NOMERGE ||
                           kind == CHECK_ATTRIBUTE_SUPPRESS ||
@@ -8546,12 +8545,14 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
 // retain, gnu_inline and unscoped standard noreturn; and on the serial path any other declaration attribute that the
 // definition and the declarations before it lack the kind of (check_input_attribute_after_kind, #147), whose layout
 // it then no longer changes. Earlier accepted attributes remain in their declaration records. A specifier's list is
-// each declarator's: one declarator's is copied before its records are marked.
-static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible)
+// each declarator's: one declarator's is copied before its records are marked. A `redefinition` (a second definition of
+// the entity, of a compatible type) is checked too, before its error (#1920): clang merges its attributes when it
+// declares it (mergeDeclAttributes) and reports the redefinition at its body or initializer.
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible, bool redefinition)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
     const bool after = attributes != 0 && reader->definition_origins != NULL && reader->definition_origins[previous] &&
-                       !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+                       (redefinition || !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED));
     bool late = false;
     // A body on a lane: what the earlier declarations' attributes decide, which the lane can't read (other lanes' columns
     // hold them), and what its own decide for later declarations, which it can't publish to them, is source order's
@@ -8633,7 +8634,8 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                     .token = attribute->name_token,
                     .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                     .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                    .completion = point,
+                    // (A redefinition's comes before its error, at the declaration's name: at the attribute.)
+                    .completion = redefinition ? attribute->name_token : point,
                     .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 };
                 const CheckWarningNote note = {

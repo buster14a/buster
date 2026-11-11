@@ -204,6 +204,46 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "int main(void) { return f(); }\n",
         "__attribute__((target(\"default\"))) int f(void);\n"
         "__attribute__((target(\"no-apxf\"))) int f(void);\n",
+        // Attributes after a definition (#1920): a redefinition's, warned before its error, of target's, a plain one's and
+        // an object's; a redeclaration's of target, target_clones, cpu_specific and cpu_dispatch; a version's redefinition
+        // and redeclaration.
+        "int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 0; }\n"
+        "int g(void) { return 1; }\n"
+        "__attribute__((noinline)) int g(void) { return 0; }\n"
+        "int h(void) { return 1; }\n"
+        "__attribute__((aligned(16), cold)) int h(void) { return 0; }\n"
+        "__attribute__((noinline)) int w(void) { return 1; }\n"
+        "__attribute__((noinline)) int w(void) { return 2; }\n"
+        "int x = 1;\n"
+        "__attribute__((aligned(16))) int x = 2;\n"
+        "int y = 1;\n"
+        "__attribute__((weak)) int y = 2;\n"
+        "int v(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int v(void) { return 2; }\n"
+        "int t(void) { return 1; }\n"
+        "long t(void) { return 2; }\n",
+        "int u(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int u(void) { return 2; }\n",
+        "int a(void) { return 1; }\n"
+        "__attribute__((cpu_specific(generic))) int a(void);\n"
+        "int b(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int b(void);\n"
+        "int c(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int c(void);\n"
+        "__attribute__((target(\"avx2\"))) int d(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int d(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int e(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int e(void);\n"
+        "int g(void) { return 1; }\n"
+        "__attribute__((cpu_dispatch(generic))) int g(void);\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"), used)) int f(void);\n"
+        "__attribute__((target(\"avx2\"), used)) int f(void) { return 2; }\n",
+        // A version refused for its attribute isn't merged: no warning (#1920).
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"), cold)) int f(void) { return 1; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
