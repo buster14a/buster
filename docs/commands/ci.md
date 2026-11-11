@@ -211,6 +211,44 @@ there at a time, so everything takes one lock:
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
+## Hosted inputs
+
+Each run's `prepare-hosted-tools` job acquires every external input its hosted
+jobs read, once, and hands it to them. The jobs set up from that handoff alone.
+Their setup reaches only GitHub's checkout, cache and artifact services, so an
+Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
+
+- **Release inputs:** LLVM, CMake, Ninja, mold and wild, pinned by
+  `tools/ci/hosted-tools.lock` (`tools/ci/hosted-release.sh`). They come from
+  the `hosted-inputs-v1-…` cache, else the run's artifact `ARTIFACT-NAME`.
+- **Offline inputs:** `tools/ci/hosted-offline.sh`'s bundle, the run's
+  companion artifact `ARTIFACT-NAME-offline`. It holds:
+  - the apt closure of `setup-hosted.sh`'s packages, resolved on the
+    preparation's runner image, with a manifest of every package and version;
+  - the baseline runtime's 4 `.deb`s and the corpus (`downloads/DIGEST`);
+  - bare mirrors of c-testsuite and SQLite at `refs/pinned/COMMIT`.
+
+  The preparation keeps them in two caches. `hosted-apt-v1-…` is keyed by the
+  package list and the image (`ImageOS`, `ImageVersion`). `hosted-ci-v1-…` is
+  keyed by the scripts that pin the rest. On a hit it contacts no external
+  host. On a miss it fetches each input once, with retries, and checks it as
+  the jobs read it.
+- **Consumers:** the `.github/actions/hosted-tools` action downloads the
+  companion artifact and checks its manifest. It then sets `BUSTER_CI_CACHE`
+  and `BUSTER_CI_OFFLINE=1`, so `setup-hosted.sh` installs with
+  `apt-get --no-download` and no package lists, and the fetch scripts read the
+  bundle alone. A missing file or a bad hash fails the step; nothing is
+  fetched again.
+- **Summaries:** each job's step summary lists the installed package versions,
+  and the preparation's lists every input's source.
+- **Image rollouts:** a shard on another image installs the same `.deb`s and
+  warns where the image's own packages differ.
+
+Run `bash tests/ci/hosted-offline.sh` after changing any of these scripts. It
+is network-free, and the preparation job runs it. `hosted-inputs-drill.yml`
+runs a shard's setup, and a warm preparation, with those hosts down. Details,
+failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-inputs-2275).
+
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
