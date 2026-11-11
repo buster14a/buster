@@ -1435,7 +1435,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     break;
                 }
                 default:
-                    if (ir_vector_type(type) || op == IR_VCMP)
+                    // A vector's lane or its lanes' sign bits (#1840): a scalar the model computes from a vector.
+                    if (ir_vector_type(type) || op == IR_VCMP ||
+                        (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK)))
                     {
                         result.status = ir_interpreter_simd_operation(frame, i, &wide_value);
                         value.low = wide_value.words[0];
