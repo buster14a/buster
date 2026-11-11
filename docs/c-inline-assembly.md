@@ -655,13 +655,56 @@ the GOT for an extern variable, as clang's code does). A `.comm` of a name the
 unit doesn't declare is the template's own common symbol. Both are
 `BUSTER_LINK_SYMBOL_COMMON` symbols of their own atoms, as C's commons are,
 which `-c`'s object writes `SHN_COMMON` and the direct path and the units' merge
-place as they place C's. A label or `.comm` of a name the unit defines, a
-tentative definition's too, stays refused ("inline assembly labels named as the
-unit's symbols"), with or without `-fcommon`: clang 23 has no coherent object
-for it. Without `-fcommon` its object makes C's `.bss` definition a common of
-C's size at the template's alignment, dropping an initializer's bytes; with
-`-fcommon` a `.comm` of C's size and alignment is the one common, and another
-size or alignment is a backend crash ("redeclared as different type").
+place as they place C's.
+
+A template's name of a symbol the unit defines is what clang 23's assembler
+makes of it (#1848, `check_program_emit_asm_symbols`):
+
+- A `.comm` of an external variable the unit defines (`int x = 1;`, a tentative
+  `int x;` without `-fcommon`, `char x[32];`, `_Alignas(32) int x;`), in a
+  file-scope or a statement template, before or after the definition, makes the
+  name clang's common symbol: one `SHN_COMMON` symbol of the C definition's size
+  at the `.comm`'s alignment (`.comm x,8,8` makes 8, `.comm x,64,16` 16), the
+  `.comm`'s own size ignored. The definition's bytes stay in their section
+  (`.data`, `.bss`) without a symbol (`int x = 7; int y = 3;` keeps `.data`'s 8
+  bytes, `y` at 4), and C's references, a static pointer's relocation among them,
+  are the common's, so the linked program reads the common's zeros, not the
+  initializer. The static data defines the symbol at C's atom as usual; the
+  template's common atom is recorded instead of defining it
+  (`CheckProgramCode.commoned_symbols`, `check_program_emit_asm_unit`), and
+  `check_program_sections` then moves the symbol to that atom, sized as C's, of
+  the common type, on `-c`, the direct path and both checker paths alike.
+  Refused by name: a C common symbol's `.comm` (`int x;` under `-fcommon`, or the
+  common attribute), since clang's backend crashes for another size or alignment
+  ("Symbol: x redeclared as different type") and keeps the one common for the same
+  (buster refuses both); a function's (clang keeps its code without its symbol and
+  makes a `FUNC` common); a static (clang reports a zero-filled one's "changed
+  binding to STB_LOCAL" and makes an initialized one a global common), weak
+  (clang warns and makes it a weak common), thread-local (a `TLS` common), alias's
+  or selectany definition's; and a read-only one's (`const int x = 1;`), whose
+  reads clang's code folds to the initializer where the program would read the
+  common's zeros. Without an alignment operand, the assembler aligns a `.comm` as
+  GNU as does (the size's power of two up to 16) where clang's integrated
+  assembler takes 1; the fixtures give one.
+- A file-scope label of an external, non-weak definition (`int x = 1;` with
+  `asm(".globl x\nx: .long 2")`, `int f(void)` with `f: ret`, `int x;` with a
+  `.data` label), without a binding directive but `.globl`, is clang's
+  assembler error, as clang prints it, without a source location, at `-c` and
+  the direct path but not at `-fsyntax-only` (`CheckProgramRedefined`,
+  `check_driver_emission_failed`): `error: symbol 'x' is already defined`, once
+  for a function's or a common symbol's definition (`int x;` under `-fcommon`)
+  and twice for another variable's, as clang streams the module's assembly
+  before its definitions. Refused by name ("inline assembly labels named as the
+  unit's symbols", or "... as several of the unit's definitions"), where clang's
+  output depends on what buster doesn't model: labels of several definitions
+  (clang reports them in its module's emission order, functions first), a
+  statement template's label (clang reports an earlier function's at the
+  template, with a note, and a later one's without a location), a static
+  definition's (clang emits none for an unused one, and the label stands), an
+  `.lcomm`'s or a `.local`/`.weak` label's (clang adds "x changed binding to
+  STB_GLOBAL"), a weak definition's (clang adds a binding warning) and an
+  absolute (`.set`) symbol's (which clang takes, the C definition keeping the
+  name).
 `test-checker-driver --asm-definitions-only`
 (`c_check_asm_definition_driver_test.c`) compares each fixture's `-c` symbols
 and data relocations with clang 23's, on both paths, and runs the objects

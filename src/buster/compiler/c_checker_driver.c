@@ -7133,7 +7133,16 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
 static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp, const CheckProgramCode* code)
 {
     char message[256];
-    if (code->tier1_failure.category != CHECK_TIER1_UNATTEMPTED)
+    if (code->redefined.lines != 0)
+    {
+        // A file-scope label of a C definition's name (#1848, CheckProgramRedefined): clang's assembler errors, without a
+        // source location, as many as clang prints.
+        for (uint32_t line = 0; line < code->redefined.lines; line += 1)
+        {
+            fprintf(stderr, "error: symbol '%.*s' is already defined\n", (int)code->redefined.length, code->redefined.name);
+        }
+    }
+    else if (code->tier1_failure.category != CHECK_TIER1_UNATTEMPTED)
     {
         check_tier1_diagnostic(message, sizeof(message), &code->tier1_failure);
     }
@@ -7161,7 +7170,10 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     {
         snprintf(message, sizeof(message), "internal compiler error: the checked program could not be emitted");
     }
-    check_driver_diagnose(parser, pp, code->token, message);
+    if (code->redefined.lines == 0)
+    {
+        check_driver_diagnose(parser, pp, code->token, message);
+    }
 }
 
 // Writes the checked program's object at `output_path`, its functions compiled on `lanes` (check_program_emit_lanes).
