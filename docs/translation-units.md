@@ -333,6 +333,16 @@ them, so a unit's object is the same bytes whichever lane compiles it and
 after whichever units. `test-check-units` checks it: each unit's object of a
 command of several units is its object alone, at every lane count.
 
+**What they don't share yet (#2531).** A header's declarations are read again
+by every unit that includes it: on the 9700X at `ecaf57b5`, musl's 1,336 units
+as one command read 297,004 file-scope declarations of 5,156 distinct texts,
+and reading them is 32% of the command's cycles.
+[Attested declarations](attested-declarations.md) is the design for that: a
+declaration that an earlier unit of the lane read without a diagnostic, and
+that the unit's own code doesn't reach by name, isn't read again. It has the
+ranking of what else a command's units pay per unit (the kernel's page
+cycle, the preprocessor, the asm matcher's index of #2532).
+
 ### One cache for all the lanes, measured
 
 #152's design shares one file cache and one intern table between all the
