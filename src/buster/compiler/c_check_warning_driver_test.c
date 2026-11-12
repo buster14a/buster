@@ -1127,6 +1127,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wno-underlying-cv-qualifier-ignored" },
     },
     {
+        // An enum's fixed base in a declaration with a declarator (#2213): clang's -Welaborated-enum-base, an error by default,
+        // at the `:`, after which the declaration is an elaborated reference: a new name declared with the base (a later
+        // body's "previously declared with fixed underlying type"), a visible enum's base ignored; the base's own warnings.
+        .name = "an enum base with a declarator",
+        .source = "enum P : unsigned const long volatile x;\nvoid f(void) { enum S : volatile char s; s = 1; (void)s; }\nenum Q : short q1, q2;\n"
+                  "enum Q { QA = 1 };\n_Static_assert(sizeof(q1) == 2, \"\");\nenum E : int;\nvoid g(void) { enum E : short y; (void)y; }\n"
+                  "enum F { FA };\nenum F : int z;\ntypedef enum T : char TT;\n_Static_assert(sizeof(TT) == 1, \"\");\n",
+        .warnings = 2,
+        .errors = 7,
+        .notes = 1,
+    },
+    {
+        .name = "an enum base with a declarator demoted",
+        .source = "enum P : unsigned const long volatile x;\nvoid f(void) { enum S : volatile char s; s = 1; (void)s; }\nenum Q : short q1, q2;\n"
+                  "enum Q { QA = 1 };\n_Static_assert(sizeof(q1) == 2, \"\");\nenum E : int;\nvoid g(void) { enum E : short y; (void)y; }\n"
+                  "enum F { FA };\nenum F : int z;\ntypedef enum T : char TT;\n_Static_assert(sizeof(TT) == 1, \"\");\n",
+        .options = { "-Wno-error=elaborated-enum-base", "-Werror=underlying-cv-qualifier-ignored" },
+        .warnings = 6,
+        .errors = 3,
+        .notes = 1,
+    },
+    {
+        .name = "an enum base with a declarator ignored",
+        .source = "enum P : unsigned const long volatile x;\nvoid f(void) { enum S : volatile char s; s = 1; (void)s; }\nenum Q : short q1, q2;\n"
+                  "enum Q { QA = 1 };\n_Static_assert(sizeof(q1) == 2, \"\");\nenum E : int;\nvoid g(void) { enum E : short y; (void)y; }\n"
+                  "enum F { FA };\nenum F : int z;\ntypedef enum T : char TT;\n_Static_assert(sizeof(TT) == 1, \"\");\n",
+        .options = { "-Wno-elaborated-enum-base", "-w" },
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "an enum base with a declarator under -w",
+        .source = "enum P : unsigned const long volatile x;\nvoid f(void) { enum S : volatile char s; s = 1; (void)s; }\nenum Q : short q1, q2;\n"
+                  "enum Q { QA = 1 };\n_Static_assert(sizeof(q1) == 2, \"\");\nenum E : int;\nvoid g(void) { enum E : short y; (void)y; }\n"
+                  "enum F { FA };\nenum F : int z;\ntypedef enum T : char TT;\n_Static_assert(sizeof(TT) == 1, \"\");\n",
+        .options = { "-w" },
+        .errors = 7,
+        .notes = 1,
+    },
+    {
         // An object left an array of unknown bound by its tentative definitions (#2238): clang's
         // -Wtentative-definition-array once per object, at its last tentative definition, in the order of its first one,
         // before the unit's unused warnings; none for a defined or completed one, an extern one, or under the pragma.

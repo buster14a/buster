@@ -44,7 +44,8 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     bool errors = false;
     const CheckWarningCommandLine command = group != UINT32_MAX ?
         check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
-        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0,
+                                   (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0);
     CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
     if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
     {
@@ -58,8 +59,10 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     }
     else if (group == UINT32_MAX)
     {
-        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+        // -w leaves an error by default that no option demoted (BUSTER_CHECK_WARNING_DEFAULT_ERROR, #2213).
+        const bool kept = (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0 && command.mapped >= CHECK_WARNING_ERROR;
+        severity = (command.quiet && !kept) || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, kept ? command.mapped : command.severity);
     }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
@@ -2756,7 +2759,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                 // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
                 const uint32_t group = check_driver_warning_group(event);
                 const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
-                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const bool default_error = (group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0) ||
+                                           (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0;
                 const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
