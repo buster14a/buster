@@ -1382,24 +1382,32 @@ is k0.
 ## Asm bodies (#1839)
 
 A body call ([the IR guide](ir.md)'s "Asm bodies") is `TIER1_RULE_ASM`, its
-`immediate` the body's index, of no operand and no result: its block argument is
-the `stack_addr` of a frame object, which no register holds (the node has no
-effective use, so the address is computed only where something else reads it).
-The selector takes a body whose block is a `stack_addr` and which touches none of
-rsp, rbp and r15 (`tier1_select_asm_supported`), as the producer has them. Like a
-row call it is no call of a function's: no argument moves, no outgoing area. Only
-the CFG consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's
-definition phase:
+`immediate` the body's index, of no result: its block argument is the
+`stack_addr` of a frame object, which no register holds (no effective use, so the
+address is computed only where something else reads it), and its register
+operands (#2144, `IrAsmBody.passed`) are its effective uses, each in a register of
+its class, as a row call's operands are (`tier1_select_asm_skipped` leaves the
+block out). The selector takes a body whose block is a `stack_addr`, which touches
+none of rsp, rbp and r15, and whose register operands are an `i32`'s, an `i64`'s
+or a `ptr`'s in a general register but the scratch r11, or a `float`'s or a
+`double`'s in xmm0 to xmm14, each register once (`tier1_select_asm_supported`).
+Like a row call it is no call of a function's: no outgoing area. Only the CFG
+consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's definition
+phase:
 
 1. the stores of the values that live past the node in the general registers the
    body touches into their call-save rows, a callee-saved register's among them
    (rbx for `cpuid`, where a value crosses a call there), and of the floating
    values in the xmm registers it touches into theirs, as a call saves them;
-2. the body's records, each that addresses the operand block
+2. its register operands' moves into their own registers
+   (`tier1_emit_cfg_asm_operands`), from where they are at its use phase: one
+   parallel move per class through that class's scratch register, as a call's
+   arguments' (`tier1_emit_call`);
+3. the body's records, each that addresses the operand block
    (`BUSTER_TIER0_ASM_BLOCK`) addressing the block's frame object from the frame's
    base register, its own branches the function's branches to their records (one
    to the body's end the first restore's), sized with the function's;
-3. the loads back.
+4. the loads back.
 
 The general registers it touches are its fixed registers
 (`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
@@ -1410,9 +1418,16 @@ are a call's. Its frame is a calling function's (rsp aligned at the template, no
 leaf frame), and the prologue saves the callee-saved registers it touches
 (`Tier1EmitPrepared.asm_callee`), as clang's saves `cpuid`'s rbx. The template's
 own records aren't bounded by the target's forms (as the assembler takes any
-instruction whatever `-march` says). The code's certificate (`--verify`) places
-and compares the body's records, its own branches among them, and kills the
-registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
+instruction whatever `-march` says). The values that cross a body are kept out
+of the general registers it touches where the allocation can
+(`tier1_emit_cfg_callee`'s second allocation, which takes them for values that
+cross calls too): such a value may take a callee-saved register, which the
+prologue saves once, rather than a register the body would save and restore
+around itself each time it runs; a phi's web keeps out of every body's registers
+any member crosses. If that allocation fails, the first stands and the saves
+stay. The code's certificate (`--verify`) places and compares the body's records,
+its own branches among them, reads its register operands in their registers, and
+kills the registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
 bodies").
 
 Registers outside `touched` hold no value across the node: the allocator gives

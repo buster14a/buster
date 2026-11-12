@@ -3291,7 +3291,13 @@ What the lowering covers past scalars (#145's programs):
     operands' bits zero-extended to 32 or 64 bits, the result truncated to
     the scalar. A `_BitInt` scalar of up to 64 bits, of any width, takes the
     integer sequences of `check_lower_integer_elements` as a 1-, 2-, 4- or
-    8-byte scalar does, a funnel shift's count modulo a width no power of two. These expansions, ordered floating sums
+    8-byte scalar does, a funnel shift's count modulo a width no power of two.
+    `__int128` and `_BitInt`s of 65 to 128 bits take the same sequences in
+    Tier 0's 128-bit classes: their shift counts are U32 values, a constant
+    past 64 bits is built of its halves (`check_lower_sequence_halves`), a
+    `_BitInt`'s operands are masked by shifting up and back, and a funnel
+    count of a width no power of two is reduced modulo it through its 64-bit
+    halves, `(hi % w) * (2^64 % w) + lo % w`. These expansions, ordered floating sums
     and floating reduction trees are bounded to 1,024 elements and preserve
     the ordinary rows' element-type and target-feature refusals.
   - boolean elementwise builtins use packed bit operations at scalar and
@@ -3340,8 +3346,8 @@ What the lowering covers past scalars (#145's programs):
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 64 bits (`__int128` and `_BitInt` past 64 bits, #2410), and of scalars, pdep and pext
-  without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
+  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410), and of scalars, pdep, pext and clmul of more than 64
+  bits, pdep and pext without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
@@ -3479,10 +3485,15 @@ What the lowering covers past scalars (#145's programs):
     - Each copy has its switches' jump tables of its own, as clang's clones
       do (#2247): `check_lower_switch_tables` makes them per body, the copies'
       too, and `check_lower_table_of` finds a table by its body and control.
-    - A body with inline assembly or a label whose address it may take is
-      still compiled once, with the unit's features. Its versions' names are
-      symbols at that one code: those plans and label symbols are a body's
-      own. A group with a reference, or a
+    - Each copy's code takes its own symbols of the body's labels whose
+      addresses it takes (#2247, `check_program_target_number`,
+      `check_lower_label_symbol`). The last copy in the options' order keeps
+      the labels' own symbols, which the program's data reaches: clang's
+      block-scope static `static void* t[] = { &&a };` holds the last clone's
+      label addresses, since that clone is emitted last.
+    - A body with inline assembly is still compiled once, with the unit's
+      features. Its versions' names are symbols at that one code: those
+      plans are a body's own. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -4517,6 +4528,17 @@ take clang's words and places:
   binary expression". Other failures keep the generic error. A bound's
   failure before its first undeclared name is reported with it, in source
   order.
+- **A member access** whose base is no structure or union, anywhere else
+  (#2288, `check_semantic_constraint`'s member branch): clang's "member
+  reference base type 'int' is not a structure or union" at the operator,
+  with the operand's type as written for `.` (`'myint' (aka 'int')`) and the
+  pointee for `->`; `.` of a pointer to a record is "member reference type
+  'struct S *' is a pointer; did you mean to use '->'?" there, and `->` of no
+  pointer is "member reference type 'int' is not a pointer" at the member's
+  name. Clang goes on reading `.` of a pointer as `->`, so a member that
+  pointer's record lacks adds its "no member named" there; buster's
+  expression stays invalid and gives only the first. `->`'s pointee type
+  prints as its canonical type, not its typedef's.
 
 Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
@@ -4874,7 +4896,10 @@ do:
     compatible there unless one is unnamed and written in its definition: two
     named records, a struct and a union, or two typedefs' unnamed records are,
     as in clang. Such a pair is queued and compared member by member after the
-    definition's own members, breadth first.
+    definition's own members, breadth first. Two unnamed records written in
+    their definitions, one a struct and the other a union, are clang's error
+    at the second's record, noted "'' is a struct here" at the earlier one,
+    with no notes at the outer member (#1826, `CHECK_TAG_MISMATCH_KIND`).
   - The first difference is clang's "type 'struct S' has incompatible
     definitions", with its two notes at the differing members (name,
     bit-field, type, a member with no counterpart). An unnamed member's note
@@ -4884,7 +4909,10 @@ do:
     f.c:2:21)`, an anonymous member's `(anonymous at ...)`).
   - The errors are published where the second body ends, after what its
     members report. A member whose record is itself an incompatible
-    redefinition reads as an `int`, as clang's invalid declaration does.
+    redefinition reads as an `int` in its place, as clang's invalid
+    declaration does: the pointers, atomics and arrays around it stay
+    (`_Atomic(int) *`, #1826). A record after a specifier that heads its
+    subtree (`_Atomic struct T { ... }`) is found by its own keyword.
 
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.
@@ -10519,7 +10547,10 @@ enables, which this checker doesn't all give.
   is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared
   where its typedef holds them itself, as clang's `getUnqualifiedType` does
   (`CI`'s `'int'`). An array decays to a pointer to its qualified element
-  (`'const int *'`).
+  (`'const int *'`). An `_Atomic` argument is checked and printed as its value
+  type, which the lvalue conversion leaves (#2234,
+  `check_common_format_argument_type`): `%d` of an `_Atomic int` is quiet, and
+  `%s` of one is "the argument has type 'int'".
   A declaration's calling convention keeps clang's `AttributedType` where it
   is written, in a type sugar node of its own (`c_types_sugar.c`, made by
   `c_check_type_sugar_input.c`; `docs/c-types.md`'s "Type sugar"). A failed
