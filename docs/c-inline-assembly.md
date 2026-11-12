@@ -542,9 +542,10 @@ C23's inferred `auto` and `constexpr` too), not `register`, is clang's
 `warn_asm_label_on_auto_decl`, in no group: `-Werror` makes it an error, `-w`
 silences it), at the label's first string, X its decoded text
 (`check_input_asm_labels`, `CHECK_WARNING_ID_ASM_LABEL_ON_AUTO`). A static,
-extern, function or typedef label is not warned, as clang's. Left: an asm label
-in a `for` statement's declaration is a syntax error here, where clang takes it (#2419),
-and a block-scope `_Thread_local` object's error is "invalid or unsupported
+extern, function or typedef label is not warned, as clang's. A `for`
+statement's declarations take asm labels as a block's do (#2419: the scalar
+parser's declarator reads one in the for header's frame too). Left: a
+block-scope `_Thread_local` object's error is "invalid or unsupported
 declaration", not clang's (#2420).
 
 Such a variable has no object and no symbol (an initializer is ignored, as
