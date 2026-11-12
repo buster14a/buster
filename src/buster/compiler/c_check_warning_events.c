@@ -240,6 +240,9 @@ enum
     CHECK_WARNING_ID_UNUSED_LABEL = 155,
     // clang's -Wtautological-constant-out-of-range-compare (#2218), on by default, in -Wtautological-constant-compare.
     CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 156,
+    // A block-scope typedef that is never used (#2264, clang's emitAndClearUnusedLocalTypedefWarnings): -Wunused-local-typedef,
+    // off by default, under -Wunused and so -Wmost and -Wall.
+    CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF = 157,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -281,6 +284,9 @@ typedef enum CheckWarningEventKind
     // A label no goto or address names (#2264): "unused label 'l'" at its name, or a local label's at its `__label__`
     // list's, published as the function's body ends.
     CHECK_WARNING_EVENT_UNUSED_LABEL,
+    // A block-scope typedef no use names (#2264, -Wunused-local-typedef), at its name, completed at the unit's end: payload.name
+    // its name. Published after the unused file-scope declarations, under their gate (check_driver_unit_end_split).
+    CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF,
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,

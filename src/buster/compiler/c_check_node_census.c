@@ -327,6 +327,8 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_ASSIGN_ENUM] = NODE_CENSUS_WARNING_TESTED,
     // Its comparisons are the tautological test's: a constant outside its other operand's range (#2218).
     [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    // A typedef is a declaration's, no expression's (#2264).
+    [CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF] = NODE_CENSUS_WARNING_OUTSIDE,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning

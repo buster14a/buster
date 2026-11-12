@@ -206,6 +206,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_UNUSED_LABEL] = { "-Wunused-label", "-Wunused", "unused label" },
     [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = { "-Wtautological-constant-out-of-range-compare", "-Wtautological-constant-compare",
                                                              "result of comparison of constant is always true or false" },
+    [CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF] = { "-Wunused-local-typedef", "-Wunused", "unused typedef" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

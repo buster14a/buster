@@ -8246,6 +8246,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_chained_comparison_driver_test.c"
 #include "c_check_builtin_pointer_sign_driver_test.c"
 #include "c_check_shift_op_parentheses_driver_test.c"
+#include "c_check_unused_local_typedef_driver_test.c"
 #include "c_check_alignment_builtin_driver_test.c"
 #include "c_check_lvalue_cast_driver_test.c"
 #include "c_check_shift_sign_overflow_driver_test.c"
@@ -9211,6 +9212,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_chained_comparisons(&test, clang, executable, directory);
             check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);
             check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
+            check_test_driver_unused_local_typedef(&test, clang, executable, directory);
             check_test_driver_alignment_builtins(&test, clang, executable, directory);
             check_test_driver_lvalue_casts(&test, clang, executable, directory);
             check_test_driver_shift_sign_overflow(&test, clang, executable, directory);

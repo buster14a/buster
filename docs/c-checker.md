@@ -6309,6 +6309,17 @@ expression statement (not a statement expression's last), a `for` header's
 first or third clause, or a comma's left operand; a volatile variable's
 compound assignment and step read it. A parameter's is
 `-Wunused-but-set-parameter`'s (the `-Wuninitialized` pass's). `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+them. `-Wunused-local-typedef` (#2264, clang's
+`emitAndClearUnusedLocalTypedefWarnings`, off by default, `-Wunused`'s and so
+`-Wmost`'s and `-Wall`'s, GCC's `-Wunused-local-typedefs` too) is a block-scope
+typedef that nothing names: no binding use, and no later token of its block
+that resolves to it (a declaration's specifiers, which no use event holds).
+"unused typedef 'T'" at its name; a variable array's is too, whatever its
+bound's side effects. They come at the unit's end, after the unused
+file-scope declarations and under their gate (none once an error has been
+given before those), in source order, with those a macro wrote last, as
+clang's macro expansion locations follow its file locations
+(`check_driver_unit_end_class`). `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
 const object without an initializer, at its name, with its type as declared.
 - **Automatic storage:**
   - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
