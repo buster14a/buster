@@ -3871,7 +3871,10 @@ static bool check_input_attribute_recoverable(const CheckInputReport* report)
                            message == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS || message == CHECK_INPUT_ATTRIBUTE_EXCLUSION ||
                            message == CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING || message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                            message == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL || message == CHECK_INPUT_ATTRIBUTE_TYPES ||
-                           message == CHECK_INPUT_INTERRUPT_HANDLER || message == CHECK_INPUT_ALIAS_DEFINITION || message == CHECK_INPUT_IFUNC_DEFINITION;
+                           message == CHECK_INPUT_INTERRUPT_HANDLER ||
+                           // (Not beside a multiversioning attribute, whose check after it still names the alias: its report
+                           // is ordered after the function's name then, check_input_attribute_definition.)
+                           ((message == CHECK_INPUT_ALIAS_DEFINITION || message == CHECK_INPUT_IFUNC_DEFINITION) && report->sort == 0);
     const bool vector = message == CHECK_INPUT_VECTOR_ELEMENT || message == CHECK_INPUT_VECTOR_BIT_INT || message == CHECK_INPUT_VECTOR_CONSTANT ||
                         message == CHECK_INPUT_VECTOR_NEGATIVE || message == CHECK_INPUT_VECTOR_TOO_LARGE || message == CHECK_INPUT_VECTOR_ZERO ||
                         message == CHECK_INPUT_VECTOR_MULTIPLE;
