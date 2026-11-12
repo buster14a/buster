@@ -1215,6 +1215,77 @@ static uint64_t ir_test_fround_oracle(uint32_t flags, uint64_t a, uint64_t b)
     return result;
 }
 
+// The truncating conversions of lane 0 (#1840): both verifiers admit cvtt exactly of a V4I32 into the I32 or I64 its
+// flags' bit 1 names, at every flags byte; and the model gives x86's result, C's truncation where the range holds it
+// and the smallest integer for NaNs, infinities and values past the range, at the range's edges both sides.
+static void ir_test_cvtts(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    static const IrType sources[3] = { IR_V4I32, IR_V8I32, IR_F64 };
+    static const IrType results[3] = { IR_I32, IR_I64, IR_I16 };
+    uint32_t admitted_count = 0;
+    for (uint32_t flags = 0; flags < 256; flags += 1)
+    {
+        for (uint32_t source = 0; source < 3; source += 1)
+        {
+            for (uint32_t result = 0; result < 3; result += 1)
+            {
+                const bool admitted = flags <= 3 && source == 0 && result == ((flags & 2) != 0 ? 1u : 0u);
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "cvtt verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_UNDEF, sources[source], BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, results[result], 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_CVTT);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[1] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a truncating conversion is admitted exactly of a V4I32 into its flags' integer");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 4, "cvtt is admitted at each lane and result");
+    static const double values[] = { 0.0, -0.0, 0.5, -0.99, 1.75, -1.75, 2147483647.0, 2147483647.5, 2147483648.0, -2147483648.0, -2147483648.75, -2147483649.0,
+                                     0x1p62, 0x1.fffffffffffffp62, 0x1p63, -0x1p63, -0x1.0000000000001p63, 1e300, -1e300, INFINITY, -INFINITY, NAN };
+    bool exact = true;
+    for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(values); v += 1)
+    {
+        for (uint32_t flags = 0; flags < 4; flags += 1)
+        {
+            const bool wide = (flags & 2) != 0;
+            const bool is_double = (flags & 1) != 0;
+            const double x = is_double ? values[v] : (double)(float)values[v];
+            IrSimdValue a = {0};
+            if (is_double)
+            {
+                memcpy(&a.words[0], &x, sizeof(x));
+            }
+            else
+            {
+                const float single = (float)x;
+                uint32_t word = 0;
+                memcpy(&word, &single, sizeof(word));
+                a.words[0] = word;
+            }
+            // x86's integer indefinite past the range, written out with long double bounds.
+            const long double limit = wide ? 0x1p63L : 0x1p31L;
+            const bool fits = x == x && (long double)x > -limit - 1.0L && (long double)x < limit;
+            const uint64_t wanted = !fits ? (wide ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)) : wide ? (uint64_t)(int64_t)x : (uint64_t)(uint32_t)(int32_t)x;
+            const IrSimdValue* operands[3] = { &a, 0, 0 };
+            const IrSimdAction action = { .operation = IR_SIMD_CVTT, .result = IR_SIMD_NONE, .operands = { IR_SIMD_V4I32, IR_SIMD_NONE, IR_SIMD_NONE }, .index = (uint8_t)flags };
+            IrSimdValue got = {0};
+            exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && got.words[0] == wanted;
+        }
+    }
+    ir_test_expect(test, exact, "the model's truncating conversions are x86's");
+}
+
 // The floating operations at their own rounding (#1840): both verifiers admit fround exactly of two 64-byte vectors of its
 // type at every flags byte below 32; and the model gives C's operation in each rounding mode (ir_test_fround_oracle) on
 // lanes chosen so that the modes differ (random fractions, ties, overflow, underflow, zeros, infinities and NaNs), and
@@ -1606,6 +1677,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_masked_memory(test, output, scratch);
     ir_test_lane_moves(test, output, scratch);
     ir_test_frounds(test, output, scratch);
+    ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);

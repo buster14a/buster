@@ -1412,6 +1412,45 @@ The tests:
   interpreter at every stage and Tier 1 natively, against C in each rounding
   mode, so that the processor checks the model.
 
+## Truncating conversions of lane 0 (#1840)
+
+One more unary `intrinsic` kind, `cvtt` (`BUSTER_IR_INTRINSIC_CVTT`), converts a
+16-byte vector's lane 0 into an integer as x86 does:
+
+```text
+%4 = intrinsic.i64 %1 cvtt 3
+```
+
+- **Flags:** bit 0 makes the lane a double (else a float), bit 1 the result an
+  `i64` (else an `i32`), which the verifier checks against the type.
+- **Semantics:** rounded toward zero. A NaN or a value past the result's range
+  gives its smallest value, x86's integer indefinite, where C's `fptosi` (and
+  the interpreter's) would be undefined. So the builtins' rows can't be the
+  IR's `fptosi`.
+- **Model:** `IR_SIMD_CVTT`, a scalar result in word 0, as `lane_extract`'s.
+  SCCP leaves it overdefined, and GVN and LICM don't move it, as the lane moves.
+
+**Decoder** (`ir_simd_typed_cvtt`): `_mm_cvttss_si32` to `_mm_cvttsd_si64` are
+one record of `vcvttss2si` or `vcvttsd2si`'s EVEX form, INTEGER_RESULT in reg
+and VECTOR(0) in rm. **Tier 1** selects the same record into the general
+destination (`BUSTER_TIER1_VECTOR_CVTT`). The four EVEX forms had no Zen 5 row;
+they were measured on the 9700X.
+
+Machine rows: `main_unit_backend.c` 177 → 167, after the floating operations
+above.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `cvtt` exactly of a `v4i32` into its
+  flags' integer. The model gives x86's results at both ranges' edges, for
+  infinities and for NaNs, against bounds written out in long double.
+- **`test-ir-parse`:** `tests/ir/fround.ir`'s second function.
+- **`test-ir-simd`:** the four rows decode at exactly their features, refused
+  without AVX512F and under 5 changes.
+- **`test-tier1-masks`:** the four run through both lowering paths, the
+  interpreter and Tier 1 natively on values of every magnitude around both
+  ranges, infinities and NaNs.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

@@ -313,7 +313,12 @@ typedef enum IrOp
 // order). Each lane is x86's packed operation's, whatever MXCSR holds, and sets none of its flags: vaddps to vdivpd
 // with embedded rounding ({rn-sae} to {rz-sae}, _mm512_add_round_ps to _mm512_div_round_pd).
 #define BUSTER_IR_INTRINSIC_FROUND 34u
-#define BUSTER_IR_INTRINSIC_COUNT 35u
+// A truncating conversion of a 16-byte vector's lane 0 into an integer, x86's (#1840), unary: its flags' bit 0 the lane
+// a double (else a float) and bit 1 the result an I64 (else an I32), rounded toward zero; a NaN or a value past the result's range
+// gives its smallest value, x86's integer indefinite, where C's fptosi would be undefined (vcvttss2si, vcvttsd2si:
+// _mm_cvttss_si32 to _mm_cvttsd_si64).
+#define BUSTER_IR_INTRINSIC_CVTT 35u
+#define BUSTER_IR_INTRINSIC_COUNT 36u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -871,6 +876,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_insert",
     "movemask",
     "fround",
+    "cvtt",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2115,6 +2121,11 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     valid = b == BUSTER_IR_NONE && lanes != 0 &&
                             (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
                                                                     type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_CVTT)
+                {
+                    // A float's or a double's lane 0 of 16 bytes into an I32 or an I64.
+                    valid = b == BUSTER_IR_NONE && ta == IR_V4I32 && type == ((part & 2) != 0 ? IR_I64 : IR_I32) && part <= 3;
                 }
                 else if (c == BUSTER_IR_INTRINSIC_FROUND)
                 {
@@ -3595,7 +3606,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
                                 c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
-                                c == BUSTER_IR_INTRINSIC_FROUND)
+                                c == BUSTER_IR_INTRINSIC_FROUND || c == BUSTER_IR_INTRINSIC_CVTT)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

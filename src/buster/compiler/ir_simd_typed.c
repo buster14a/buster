@@ -136,8 +136,9 @@ struct IrSimdTypedOperation
     // (BUSTER_IR_INTRINSIC_LANE_EXTRACT, _LANE_INSERT or _MOVEMASK) plus one, 0 for any other row, its flags in `immediate`.
     uint8_t lane_move;
     // A floating operation at its own rounding (#1840, ir_simd_typed_fround): whether the row is one, its flags in
-    // `immediate`.
+    // `immediate`; and a truncating conversion of lane 0 (ir_simd_typed_cvtt), the same.
     bool fround;
+    bool cvtt;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1920,10 +1921,47 @@ static IrSimdTypedStatus ir_simd_typed_fround(const Tier0Operation* source, uint
     return status;
 }
 
+// A truncating conversion of lane 0 (#1840): a row of one 16-byte vector into an integer of 4 or 8 bytes, one record of
+// ir_simd_cvtt_forms' (vcvttss2si, vcvttsd2si), INTEGER_RESULT in reg and VECTOR(0) in rm, register-direct and
+// undecorated (the builtins' _mm_cvttss_si32 to _mm_cvttsd_si64 at _MM_FROUND_CUR_DIRECTION). Its features its form's
+// and the vector's moves. It is the IR's cvtt.
+static IrSimdTypedStatus ir_simd_typed_cvtt(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint32_t bytes = tier0_class_integer(source->result_class) ? tier0_class_bytes(source->result_class) : 0;
+    const bool shaped = source->operand_count == 1 && source->record_count == 1 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == 16 &&
+                        (bytes == 4 || bytes == 8);
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t lane = 0; shaped && lane < 2; lane += 1)
+    {
+        const X86Instruction expected = {
+            .form = ir_simd_cvtt_forms[lane][bytes == 8],
+            .reg = BUSTER_TIER0_ROLE_INTEGER_RESULT,
+            .rm = BUSTER_TIER0_ROLE_VECTOR(0),
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+        {
+            candidate.cvtt = true;
+            candidate.immediate = (uint8_t)(lane | (bytes == 8 ? 2u : 0u));
+            candidate.required_features = ir_typed_vector_moves(16, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.cvtt && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = IR_SIMD_V4I32;
+        candidate.operand_count = 1;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
 // comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, conversions and
 // shifts by a scalar count, lane operations, masks to vectors and back, masked loads and stores, one lane's moves and
-// floating operations at their own rounding (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
+// floating operations at their own rounding and truncating conversions of lane 0 (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
 // whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
 // vector, a width change, a permute, a conversion or a shift, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
@@ -2005,6 +2043,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_fround(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && tier0_class_integer(source->result_class))
+    {
+        status = ir_simd_typed_cvtt(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {

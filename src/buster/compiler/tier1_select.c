@@ -328,6 +328,9 @@ typedef enum Tier1SelectRule
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 24
+// A truncating conversion of values[0]'s lane 0 into the general destination (#1840): `immediate` the IR's flags, one
+// record of ir_simd_cvtt_forms'.
+#define BUSTER_TIER1_VECTOR_CVTT 25
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -2235,6 +2238,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
         {
             tier1_select_lane(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_CVTT)
+        {
+            const uint32_t flags = (uint32_t)holes->immediate;
+            tier1_select_append(&result, tier1_select_register_record(ir_simd_cvtt_forms[flags & 1][(flags >> 1) & 1], x, left));
         }
         else if (kind == BUSTER_TIER1_VECTOR_FROUND)
         {
@@ -6069,6 +6077,20 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.immediate = a;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (forest->vectors && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_CVTT && a < function->instruction_count)
+    {
+        // A truncating conversion of a vector's lane 0 into a general register (#1840).
+        base.rule = TIER1_RULE_VECTOR;
+        base.width = (uint8_t)tier1_select_vector_width(function->type[a]);
+        base.scale = BUSTER_TIER1_VECTOR_CVTT;
+        base.immediate = function->flags[node];
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        if (base.width == 16)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
     }
     else if (forest->vectors && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK) && a < function->instruction_count)
     {

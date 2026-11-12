@@ -8,3 +8,13 @@ b0:
   %5 = intrinsic.v16i32 %4, %3 fround 31
   %6 = ret.void %5
 }
+function (ptr) -> i64 {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = intrinsic.i32 %1 cvtt 0
+  %3 = intrinsic.i32 %1 cvtt 1
+  %4 = intrinsic.i64 %1 cvtt 2
+  %5 = intrinsic.i64 %1 cvtt 3
+  %6 = ret.void %5
+}

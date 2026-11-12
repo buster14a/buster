@@ -2039,6 +2039,58 @@ static void ir_simd_typed_test_frounds(IrTestTally* tally)
     printf("  IR SIMD rows: %u floating operations with embedded rounding decode to the IR's fround\n", decoded_rows);
 }
 
+// The truncating conversions of lane 0 (#1840): vcvttss2si and vcvttsd2si into 32 and 64 bits
+// (tier1_masks_test_cvtt_row) decode as the IR's cvtt of their lane and result at exactly AVX512F and the xmm register's
+// moves; refused without each and under 5 changes.
+static void ir_simd_typed_test_cvtts(IrTestTally* tally)
+{
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t flags = 0; tables && flags < 4; flags += 1)
+    {
+        const Tier0Operation row = tier1_masks_test_cvtt_row(flags);
+        const uint64_t expected = ir_typed_vector_moves(16, all) | (x86_target_requirement(row.records[0].form) & ~BUSTER_X86_TARGET_KNOWN);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.cvtt && !decoded.fround && decoded.immediate == flags && decoded.required_features == expected &&
+                        (expected & BUSTER_X86_FEATURE(AVX512F)) != 0;
+        ir_test_expect(tally, ok, "a truncating conversion is the IR's cvtt at exactly its features");
+        decoded_rows += ok;
+        static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL) };
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            // The moves at that target: AVX's VEX ones without AVX512VL (#1281).
+            const uint64_t records = x86_target_requirement(row.records[0].form) & ~BUSTER_X86_TARGET_KNOWN;
+            const bool required = ((records | ir_typed_vector_moves(16, all & ~features[f])) & features[f]) != 0;
+            ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.cvtt,
+                           "a truncating conversion without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 5; m += 1)
+        {
+            Tier0Operation changed = row;
+            switch (m)
+            {
+            case 0: changed.records[0].decorations = 0x60; break;
+            case 1: changed.records[0].mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: changed.result_class = (flags & 2) != 0 ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_I64; break;
+            case 3: changed.operand_bytes[0] = 32; break;
+            case 4: changed.records[0].rm = BUSTER_TIER0_ROLE_VECTOR(1); break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), "a changed truncating conversion's row is not the IR's cvtt");
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 4, "every truncating conversion decodes");
+    printf("  IR SIMD rows: %u truncating conversions of lane 0 decode to the IR's cvtt\n", decoded_rows);
+}
+
 // The AES rounds (#1840): vaesenc and vaesenclast, EVEX at each width and VEX at 16 and 32 bytes, VECTOR(0) the state
 // and VECTOR(1) the round key, decode as the IR's aes of their round at exactly their form's features; refused without
 // VAES and under 4 changes.
@@ -2310,6 +2362,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_masked_memory(tally);
     ir_simd_typed_test_lane_moves(tally);
     ir_simd_typed_test_frounds(tally);
+    ir_simd_typed_test_cvtts(tally);
     ir_simd_typed_test_aes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);

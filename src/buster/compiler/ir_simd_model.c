@@ -107,6 +107,10 @@ typedef enum IrSimdOperation
     // A floating operation of each lane at its own rounding, its exceptions suppressed (#1840, ir.c's
     // BUSTER_IR_INTRINSIC_FROUND), the action's `index` the IR's flags (ir_simd_float_rounded).
     IR_SIMD_FROUND,
+    // A truncating conversion of a's lane 0 into a scalar result (#1840, ir.c's BUSTER_IR_INTRINSIC_CVTT), the action's
+    // `index` bit 0 its lane a double, bit 1 its result 64 bits, x86's integer indefinite for a NaN or a value out of
+    // range: its value in words[0], zero-extended.
+    IR_SIMD_CVTT,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -254,7 +258,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
                           action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
                           action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
-                          action->operation == IR_SIMD_FROUND);
+                          action->operation == IR_SIMD_FROUND || action->operation == IR_SIMD_CVTT);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -302,6 +306,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                 valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
                         (uint32_t)(action->index >> 2) < ir_simd_bits(type) / (8u << (action->index & 3));
                 break;
+            case IR_SIMD_CVTT: valid = valid && type == IR_SIMD_NONE && a == IR_SIMD_V4I32 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3; break;
             case IR_SIMD_FROUND: valid = valid && type == IR_SIMD_V16I32 && a == type && b == type && c == IR_SIMD_NONE && action->index < 32; break;
             case IR_SIMD_MOVEMASK:
                 valid = valid && type == IR_SIMD_NONE && ir_simd_vector(a) && ir_simd_bits(a) <= 256 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3 &&
@@ -789,6 +794,15 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
             staged = *values[0];
             ir_simd_lane_write(&staged, lane_bits, lane, lane_bits == 64 ? values[1]->words[0] : values[1]->words[0] & ((UINT64_C(1) << lane_bits) - 1));
         }
+    }
+    else if (valid && action->operation == IR_SIMD_CVTT)
+    {
+        // Rounded toward zero where the result's range holds it: past (-2^(N-1) - 1, 2^(N-1)) and for a NaN, -2^(N-1).
+        const bool wide = (action->index & 2) != 0;
+        const double x = ir_simd_float_value(ir_simd_lane_read(values[0], (action->index & 1) != 0 ? 64 : 32, 0), (action->index & 1) != 0 ? 64 : 32);
+        const bool fits = wide ? x >= -0x1p63 && x < 0x1p63 : x > -2147483649.0 && x < 2147483648.0;
+        const int64_t truncated = fits ? (int64_t)x : wide ? INT64_MIN : INT32_MIN;
+        staged.words[0] = wide ? (uint64_t)truncated : (uint32_t)truncated;
     }
     else if (valid && action->operation == IR_SIMD_FROUND)
     {
