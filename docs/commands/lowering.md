@@ -215,14 +215,25 @@ pipeline made and timed. No compile takes its entries.
   (`node_machine_rows`), the lookups by direct rules that are their actions'
   own steps for the common case, and the rest by the action itself on the
   machine's records. **C** and **X** are the node templates' rules
-  (`c_check_program_templates.c`) read from the records. The machine's set is
-  the census's within the templates': calls, `&&`, `||`, `?:`, the increments
-  and the compound assignments are refused by code.
+  (`c_check_program_templates.c`) read from the records, and for the
+  increments and the compound assignments the lowering's own
+  (`check_lower_update`): an update's first row (the old value read, by name
+  or through its destination's kept address, and converted) follows its
+  destination's entries, and its second (the operation, the conversion back
+  and the store) follows its value's. T types an update of an arithmetic
+  destination by its computation's row and of a pointer by
+  `check_action_pointer_arithmetic`'s steps, the action taking the rest. The
+  machine's set is the census's within those: calls, `&&`, `||` and `?:` are
+  refused by code, and an update of a `long double`, a 128-bit integer or a
+  vector by template (the census refuses a bit-field's and an atomic's).
 - **The comparison**, for every expression the machine takes: each record's
   value (every field), its operands' conversions and a member's offset against
   the stream's, and its tape against the lowering's entries that the
   expression's tasks own (the inventory's log), a local's numbered by a map of
-  the body's that must stay one to one.
+  the body's that must stay one to one. A temporary (a postfix update's through
+  an address keeps the address and the old value in two) is numbered on the
+  tape in the order the tape first names it, and must be a local the body
+  hasn't met, the same one every time the expression names it.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps

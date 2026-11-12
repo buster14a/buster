@@ -706,7 +706,9 @@ takes it.
 
 The machine's set is the census's within the templates'. It refuses by code
 what the templates don't take: calls, `&&`, `||`, `?:`, the increments, the
-compound assignments. They are the next constructs, one a pull request.
+compound assignments. They are the next constructs, one a pull request. The
+increments and the compound assignments are the machine's now ("Increments and
+compound assignments", below).
 
 ### What it measured
 
@@ -800,6 +802,35 @@ sweeps' IPC. The levers, in order:
 2. **The context and template tables baked** in place of C's and X's branches.
 
 Coverage comes after: calls first.
+
+### Increments and compound assignments
+
+`++x`, `--x`, `x++`, `x--` and the ten compound assignments are the
+machine's codes. Their entries aren't one row after their operands': the
+lowering's `check_lower_update` reads the old value between the destination's
+entries and the value's, and computes and stores after the value's. So an
+update writes two rows, each of at most 8 entries:
+
+- **The first, after its destination's entries:** the old value, read by name
+  (`LOCAL` or `GLOBAL`, and a `DUP` for a postfix one) or through the address
+  the destination left (a `DUP` of it and a `LOAD`; a postfix one keeps the
+  address and the old value in two temporaries), then converted to the
+  computation's type. A destination read by name isn't evaluated, and writes
+  nothing of its own.
+- **The second, its own:** the operation (an increment's one, or an unsigned
+  division's or remainder's shift or mask by a power of two, as the tasks write
+  them), the result converted back to the destination's type, and the store.
+
+C marks the destination's record and keeps the update's plan, which X reads at
+both rows. A temporary is its number in the expression on the tape; the shadow
+matches it with a local the body hasn't met. In step 2 the splice gives it a
+local, as `check_lower_temporary` does. T types an update by
+`check_action_update`'s own steps: an arithmetic destination's by its
+computation's row of the transition table, a pointer's by
+`check_action_pointer_arithmetic`'s, and the rest by the action, which
+`--verify` checks the rules against. The machine refuses an update of a
+`long double`, a 128-bit integer, a vector, an atomic, a register variable or
+an object in a segment's space; the census refuses a bit-field's.
 
 ## Expected gains
 
