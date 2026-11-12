@@ -803,6 +803,57 @@ sweeps' IPC. The levers, in order:
 
 Coverage comes after: calls first.
 
+### The logical operators and the conditional: rows before and between operands
+
+`&&`, `||` and `?:` were refused by code: their entries come before and between
+their operands' (the risks' "rows' shape"), and X wrote each record's row after
+its operands. They are the machine's now (#2569):
+
+- **C** classifies them by `check_lower_logical`'s rules. A condition the
+  program knows (`check_program_runtime_truth`'s test, read from the condition's
+  record) numbers no label: its untaken operand isn't evaluated, and the
+  condition is evaluated for its effects alone. Otherwise the node numbers two
+  labels, its alternate and its end. `a ?: b`, whose condition the tasks keep in
+  a temporary, stays the tasks'.
+- **X** writes their entries that come before or between operands as a segment
+  after an operand's row, which a state bit of the operand's record names: the
+  condition's test and branch to the alternate after the condition's row, and a
+  conditional's jump to its end after its first arm's, with its alternate there.
+  The node's own row has the rest: a logical operator's test of its second
+  operand, its jump and its value at the alternate, then its end.
+- **The labels** are numbered from the expression's first, in the order the
+  tasks number them: the order they pop the records, a preorder. A labeled
+  record's rank is the number of labeled records that are its ancestors or lie
+  before its subtree's first record, so the numbering reads the labeled records
+  alone. Each label's place in the tape is kept: step 2's splice numbers them
+  from the function's count, and `check_lower_resolve_labels` gives the
+  branches their targets as it does today.
+- **T** types `&&` and `||` by `check_action_logic`'s steps for operands the
+  common conversions take, scalars without a fault, and `?:` by the action,
+  each the rule's twin under `--verify`.
+- **The comparison.** After `check_lower_resolve_labels` a branch's value is its
+  target's entry, not its label, so the inventory's log keeps each pop's next
+  label and each body's labels' entries. Each label of a taken expression must
+  be the lowering's of the same number counted from the expression's first, at
+  the same entry, and each branch's target that entry.
+
+On the 9700X, against main `0af27a30` (`--verify`, CPU 2, under the lock):
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, of the census-taken: main | 130,559 (50.2%) | 25,073 (41.0%) | 56,144 (46.7%) |
+| with `&&`, `\|\|` and `?:` | 154,280 (59.3%) | 29,595 (48.4%) | 65,775 (54.7%) |
+| refused by code: main, now | 49.3%, 40.2% | 55.9%, 48.4% | 48.5%, 39.7% |
+| labels compared, in taken expressions | 5,438 in 2,100 | 806 in 302 | 2,300 in 924 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+Numbering the labels from 1 instead of 0 makes every labeled expression differ,
+so the labels' comparison isn't vacuous. What the code refusal leaves on
+`sqlite3.c` is calls first: in 13,048 of its 16,538 expressions the first
+operator without a code is a call, and the increments and compound
+assignments are the rest. No `&&`, `||` or `?:` of `sqlite3.c` is refused by its
+template.
+
 ## Expected gains
 
 On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):
