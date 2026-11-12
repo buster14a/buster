@@ -607,6 +607,11 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_CONSTANT_DIVISION,
     // A jump's scope it enters (#1942): a statement expression's `(`, "jump enters a statement expression".
     CHECK_INPUT_NOTE_JUMP,
+    // A condition's cast clang's constant evaluation refuses (#2253, check_condition_cast): to void, "non-literal type 'void'
+    // cannot be used in a constant expression"; between an integer and a pointer, "this conversion is not allowed in a
+    // constant expression".
+    CHECK_INPUT_NOTE_CONSTANT_VOID,
+    CHECK_INPUT_NOTE_CONSTANT_CONVERSION,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
@@ -5191,7 +5196,29 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
         uint32_t cursor = token + 1;
         CheckInputAttributes* attributes = 0;
         reader->tag_attributes = true;
-        const bool valid = check_input_read_attributes(reader, &cursor, end, &attributes);
+        bool valid = check_input_read_attributes(reader, &cursor, end, &attributes);
+        // C23 lists between a struct's or a union's name and its body (#2268): clang's parser's "an attribute list cannot
+        // appear here" at the first, after which it reads them on as the tag's own (CheckMisplacedCXX11Attribute), with the
+        // ones before the name.
+        const Parser* parser = reader->parser;
+        const uint32_t list = valid && parser->tokens.kinds[token] == PARSE_KIND_STRUCT && cursor + 1 < end && parser->tokens.kinds[cursor] == PARSE_KIND_IDENTIFIER &&
+                              parser->tokens.kinds[cursor + 1] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, cursor + 1, end) ? cursor + 1 : BUSTER_CHECK_NONE;
+        uint32_t list_end = list;
+        while (list_end < end && parser->tokens.kinds[list_end] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, list_end, end))
+        {
+            list_end = parser->tree.parents[list_end] < end ? parser->tree.parents[list_end] + 1 : end;
+        }
+        if (list_end < end && parser->tokens.kinds[list_end] == PARSE_KIND_L_BRACE)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, list, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
+            valid = !reader->output->resource && check_input_recover_reports(reader, before);
+            uint32_t at = list;
+            reader->tag_name_list = true;
+            valid = valid && check_input_read_attributes(reader, &at, list_end, &attributes);
+            reader->tag_name_list = false;
+            memset(reader->ignored + list, 1, list_end - list);
+        }
         reader->tag_attributes = false;
         // Before the identity, which completes an enum with a fixed underlying type and its alignment attribute.
         check_input_set_attributes_at(reader->output, token, valid ? attributes : 0);
@@ -10278,10 +10305,13 @@ static TypeId check_input_auto_type_merged(const TypeTable* types, TypeId declar
         if (check_input_auto_type(stripped))
         {
             // The placeholder's const and volatile, and a restrict one's restrict (its marker's bit is the others' too), are
-            // the earlier type's; an _Atomic one is an atomic type (check_input_auto_type_refused), not modeled here.
+            // the earlier type's. A plain one takes an atomic type too, and an _Atomic one only an atomic type, whose value
+            // type it merges as clang's mergeTypes merges two atomic types' (#1844): `_Atomic int r; __auto_type r = 1;`
+            // is an `_Atomic int` (check_input_auto_type_refused refuses the others).
             const TypeId marker = stripped & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
             const uint32_t own = (qualifiers & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) | (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0);
-            result = own == type_qualifiers(prior) && marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC && type_kind(types, prior) != BUSTER_TYPE_KIND_ATOMIC ? previous : 0;
+            const bool atomic_match = marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC || type_kind(types, prior) == BUSTER_TYPE_KIND_ATOMIC;
+            result = own == type_qualifiers(prior) && atomic_match ? previous : 0;
             walking = false;
         }
         else if (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER && type_kind(types, prior) == BUSTER_TYPE_KIND_POINTER && qualifiers == type_qualifiers(prior))

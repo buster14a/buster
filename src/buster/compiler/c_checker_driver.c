@@ -2395,9 +2395,10 @@ static CBuiltinLibraryNamed check_driver_library_named(Preprocessor* pp, const T
 // C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
 // with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
 // and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
-// note naming the header that declares it, where its row has one.
+// note naming the header that declares it, where its row has one. `promoted` is "-Werror," where -Werror made the warning
+// before C99 an error, else "".
 static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
-                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
+                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, const char* promoted, Arena* scratch)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
     const uint64_t mark = scratch->length;
@@ -2428,7 +2429,8 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
     else
     {
         pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
-                                    "implicitly declaring library function '%.*s' with type %s [-Wimplicit-function-declaration]", (int)length, name, type);
+                                    "implicitly declaring library function '%.*s' with type %s [%s-Wimplicit-function-declaration]", (int)length, name, type,
+                                    promoted);
     }
 }
 
@@ -3091,6 +3093,14 @@ typedef enum CheckDriverConversion
     CHECK_DRIVER_CONVERSION_INCOMPATIBLE,
 } CheckDriverConversion;
 
+// A converted node's type as check_driver_conversion_kind takes it: an lvalue's atomic type is converted to its value's,
+// and an rvalue's is kept (a cast's, #2230).
+static TypeId check_driver_conversion_source(const TypeTable* types, const CheckStream* stream, uint32_t node)
+{
+    const TypeId type = check_stream_type(stream, node);
+    return check_stream_category(stream, node) == CHECK_RVALUE ? type : type_conversion_operand(types, type);
+}
+
 static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types, TypeId target, TypeId source)
 {
     const TypeId to = type_conversion_operand(types, target);
@@ -3103,7 +3113,10 @@ static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types
     const bool to_function = to_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, to))) == BUSTER_TYPE_KIND_FUNCTION;
     const bool from_function = from_kind == BUSTER_TYPE_KIND_FUNCTION ||
                                (from_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, from))) == BUSTER_TYPE_KIND_FUNCTION);
-    return to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
+    // An atomic rvalue, a cast's (#2230), converts to nothing but an atomic type, which clang words as incompatible.
+    const bool atomic = type_kind(types, type_unqualified(type_strip_aligned(types, source))) == BUSTER_TYPE_KIND_ATOMIC;
+    return atomic ? CHECK_DRIVER_CONVERSION_INCOMPATIBLE :
+           to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
            to_integer && from_pointer ? CHECK_DRIVER_CONVERSION_POINTER_INT :
            to_kind == BUSTER_TYPE_KIND_POINTER && from_pointer ? (to_function && from_function ? CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS : CHECK_DRIVER_CONVERSION_POINTERS) :
            CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
@@ -3149,7 +3162,7 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
     }
-    const TypeId value = source < stream->count ? check_stream_type(stream, source) : 0;
+    const TypeId value = source < stream->count ? check_driver_conversion_source(types, stream, source) : 0;
     const bool converted = incompatible && !void_return && value != 0 && target != 0 &&
                            check_driver_conversion_kind(types, target, value) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
     *converted_source = converted ? source : BUSTER_CHECK_NONE;
@@ -3498,7 +3511,7 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const String8 from = counted_from.length != 0 ? counted_from : designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
                              check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         check_driver_space_restore(spell, &scope);
-        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
+        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, check_driver_conversion_source(types, stream, source));
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
             "incompatible integer to pointer conversion ",
@@ -4268,12 +4281,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
                                                    severity == CHECK_WARNING_ERROR ? (default_error && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
+                    // A warning the policy made an error is clang's "-Werror," one; a default error has no prefix.
+                    const char* promoted = !default_error && severity >= CHECK_WARNING_ERROR ? "-Werror," : "";
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
+                        // Clang declares the builtin as its name is resolved, before the expression around it is built: where
+                        // the name completes with that expression (a value's `int *q = malloc;`, #2348), its error comes first.
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
-                                                      intern_length(pp->table, name), input->implicit_function_c99, scratch);
+                                                      intern_length(pp->table, name), input->implicit_function_c99, promoted, scratch);
+                        pp_diagnostic_suborder(pp, previous, 1);
                     }
                     else if (default_error)
                     {
@@ -4300,8 +4319,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     else
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
-                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [%s-Wimplicit-function-declaration]",
+                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name), promoted);
                     }
                 }
                 else
@@ -4504,7 +4523,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             else
                             {
-                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", (int)message.length, message.pointer);
+                                // An empty message is clang's "<no message provided>" (#2383).
+                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", message.length != 0 ? (int)message.length : 21,
+                                         message.length != 0 ? message.pointer : "<no message provided>");
                             }
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
@@ -5396,7 +5417,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 const String8 name = check_driver_attribute_spelling(parser, pp, report->note_token, false);
                                 snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)name.length, name.pointer);
                             }
-                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION;
+                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ||
+                                                  report->note_kind == CHECK_INPUT_NOTE_CONSTANT_VOID || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION;
                             const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ||
                                                   report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE || forward || function || constant) &&
                                                  report->note_token < count;
@@ -5405,6 +5427,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .message = forward || function ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE ? "conflicting attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ? "division by zero" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_VOID ? "non-literal type 'void' cannot be used in a constant expression" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION ? "this conversion is not allowed in a constant expression" :
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
                             // (A `,` or `=` clang's ExpectAndConsume expects just past the token before: past the identifier's end.)
@@ -10257,7 +10281,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     check_driver_initializer_message(failure.status);
                                 place = conversion != NULL ? place : outermost ? failure.failed_declaration : failure.token;
                                 const TypeId converted = conversion != NULL && failure.failed_source != 0 && failure.failed_source - 1 < stream.count ?
-                                    check_stream_type(&stream, failure.failed_source - 1) : 0;
+                                    check_driver_conversion_source(&types, &stream, failure.failed_source - 1) : 0;
                                 const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&
                                     check_driver_conversion_kind(&types, failure.failed_type, converted) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)

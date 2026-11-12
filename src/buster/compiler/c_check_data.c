@@ -203,7 +203,8 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
             const CheckValue checked_value = check_stream_value(stream, object->initializer);
             const CheckValue* value = &checked_value;
             const bool valid_type = type_is_valid(types, value->type);
-            const TypeId value_type = valid_type ? type_unqualified(type_strip_aligned(types, value->type)) : 0;
+            // An atomic cast's constant (#2230) is its value type's.
+            const TypeId value_type = valid_type ? type_conversion_operand(types, value->type) : 0;
             TypeAnswer compatible = value_type == base ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
             if (valid_type && pointer && value_type != base && type_kind(types, value_type) == BUSTER_TYPE_KIND_POINTER)
             {

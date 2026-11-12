@@ -2173,6 +2173,21 @@ static const char* check_semantic_control(Preprocessor* pp, const TypeTable* typ
             }
             result = check_warning_text(scratch, "duplicate case value '%s'", text + at);
         }
+        else if (failure->wide != NULL && check_wide_type(types, failure->type, &width, &sign))
+        {
+            // A _BitInt's past 128 bits (#2220): its limbs' decimal digits.
+            const CheckValue value = {
+                .type = failure->type,
+                .category = CHECK_RVALUE,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = failure->value,
+                .floating_storage = { (uint64_t)(uintptr_t)failure->wide, 0 },
+            };
+            const uint32_t capacity = width / 3 + 3;
+            char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, capacity + 1);
+            const uint32_t length = text != NULL ? check_wide_decimal(types, &value, text, capacity) : 0;
+            result = length != 0 ? check_warning_text(scratch, "duplicate case value '%.*s'", (int)length, text) : result;
+        }
     }
     return check_semantic_text(pp, result);
 }
