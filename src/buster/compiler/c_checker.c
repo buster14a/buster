@@ -555,6 +555,7 @@ struct CheckBuiltinAtomicEffect
     int8_t answers[2];
     uint64_t query_size;
     TypeId query_pointer;
+    TypeId space_target;
 };
 
 typedef struct CheckStream CheckStream;
@@ -2899,6 +2900,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .answers = { checked.answers[0], checked.answers[1] },
             .query_size = checked.query_size,
             .query_pointer = checked.query_pointer,
+            .space_target = checked.space_target,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_VECTOR)

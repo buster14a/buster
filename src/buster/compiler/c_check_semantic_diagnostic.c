@@ -1632,6 +1632,19 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         format = "passing %.*s to parameter of type %.*s changes address space of %spointer";
         check_semantic_parameter_note(parser, pp, input, callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE, argument, note, scratch);
     }
+    else if (op == CHECK_OP_BUILTIN_ATOMIC && graph->argument_tokens != NULL)
+    {
+        // A generic atomic builtin's value pointer in another address space than its object's (#2233): the pointer type its
+        // check converted it to (CheckBuiltinAtomicEffect.space_target), at the argument.
+        const uint32_t argument = stream->diagnostic_operands[node];
+        for (uint32_t i = 0; i < stream->atomic_count; i += 1)
+        {
+            to = stream->atomics[i].node == node ? stream->atomics[i].space_target : to;
+        }
+        from_node = argument < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + argument] : BUSTER_CHECK_NONE;
+        format = to != 0 ? "passing %.*s to parameter of type %.*s changes address space of %spointer" : NULL;
+        *location = to != 0 ? graph->argument_tokens[graph->argument_offsets[node] + argument] : token;
+    }
     if (format != NULL)
     {
         from = from_node < stream->count ? check_semantic_value_type(types, check_stream_type(stream, from_node), false) : 0;

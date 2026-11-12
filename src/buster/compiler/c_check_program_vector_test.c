@@ -659,10 +659,9 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "element access through volatile vectors" },
         // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
         // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
-        // which take another plan, are refused.
+        // which take another plan, are refused. (A generic exchange whose result pointer is in another space than the
+        // object's is clang's error, #2233: c_check_address_space_driver_test.c.)
         { "segment-atomic-generic-load", "int tested(int __seg_fs*p,int*r){__atomic_load(p,r,5);return *r;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-generic-exchange", "int tested(int __seg_gs*p,int*v,int*o){__atomic_exchange(p,v,o,5);return *o;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-sync-lock-release", "void tested(int __seg_gs*p){__sync_lock_release(p);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
