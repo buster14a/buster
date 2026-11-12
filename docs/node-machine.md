@@ -380,8 +380,9 @@ conjunction of cheap, conservative tests:
   system header's macro's tokens in a user's expression, isn't one: in a
   system header's macro the pipeline only suppresses diagnostics, so a taken
   expression is as silent there as its other tests make it, and the census
-  measured that it would refuse 6.5% of `sqlite3.c`'s nodes, more than the
-  silence budget, nearly all its `assert`s' `((void)0)` under `NDEBUG`.
+  measured that it would refuse 6.5% of `sqlite3.c`'s nodes and 7.7% of Lua's,
+  more than the silence budget, nearly all `assert`s' `((void)0)` under
+  `NDEBUG`.
 - **Regions.** A diagnostic pragma, a floating-point pragma or a statement
   attribute in the body refuses the body's expressions.
 
@@ -550,34 +551,34 @@ brace initializers (18.5%), `static` locals (15.5%).
 is step 0: the pipeline as it is, every full expression the tasks lowered read
 again from the finished graph, stream and parser's tree by the set's tests and
 the silence tests, each silence test only where a warning it stands for is
-enabled in the unit. No machine runs. On the 9700X at @COMMIT@ (counts, not
-times; [the record](@RECORD@)):
+enabled in the unit. No machine runs. On the 9700X at `eb62e20f` (counts, not
+times; [the record](https://github.com/buster14a/buster-performance/tree/151aeb6ce57582f20419567675862274a59f5cf1/docs/measurements/node-machine-census-2524-2026-11-12)):
 
 | | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
 | --- | ---: | ---: | ---: |
-| evaluated nodes, in full expressions | @S_NODES@ in @S_EXPR@ | @L_NODES@ in @L_EXPR@ | @M_NODES@ in @M_EXPR@ |
-| nodes in expressions the set takes (gate: 85%, 75%, 75%) | @S_SET@ | @L_SET@ | @M_SET@ |
-| nodes the silence tests then refuse (gate: under 3%) | @S_SIL@ | @L_SIL@ | @M_SIL@ |
-| nodes taken | @S_TAKEN@ | @L_TAKEN@ | @M_TAKEN@ |
-| bodies taken whole, and their share of the nodes | @S_BODIES@ | @L_BODIES@ | @M_BODIES@ |
+| evaluated nodes, in full expressions | 266,707 in 52,368 | 67,358 in 11,562 | 131,092 in 26,502 |
+| nodes in expressions the set takes (gate: 85%, 75%, 75%) | 97.54% | 90.89% | 93.03% |
+| nodes the silence tests then refuse (gate: under 3%) | 0.00% | 0.02% | 1.24% |
+| nodes taken | 97.54% | 90.87% | 91.79% |
+| bodies taken whole, and their share of the nodes | 87.6%, 60.2% | 78.7%, 55.4% | 60.8%, 49.5% |
 
 **The gate holds** on all three. What the set refuses, by the share of the
 nodes in the expressions it refuses:
 
-- **`sqlite3.c`:** bit-fields 1.54%, callees with semantics of their own 0.37%
+- **`sqlite3.c`:** bit-fields 1.54%, callees with semantics of their own 0.38%
   (the library folds `strcmp`, `strlen`, `memcmp`, and the printf family),
-  builtins and `va_arg` 0.29%, struct copies 0.21%, brace initializers 0.04%,
+  builtins and `va_arg` 0.30%, struct copies 0.21%, brace initializers 0.04%,
   `register` variables 0.02%.
 - **Lua:** builtins 4.51%, three quarters of their expressions
   `__builtin_expect`'s (`l_likely`, `l_unlikely`, `luaL_argcheck`), the first
   builtin worth a code of the machine's; the library folds 2.70%; struct copies
   0.85%; other controls 1.05%.
 - **musl:** nodes popped twice, compound literals' values, 3.23% (as the
-  prototype found); controls 1.77%; complex values 1.62%; builtins 0.99%;
+  prototype found); controls 1.89%; complex values 1.62%; builtins 0.99%;
   struct copies 0.58%; callees 0.52%.
 
 The silence tests refuse nothing of `sqlite3.c`, which reports no warning, and
-next to nothing of Lua. Of musl's @M_SIL@: a floating-point pragma's bodies
+next to nothing of Lua. Of musl's 1.24%: a floating-point pragma's bodies
 (`fma.c` and its kin, by design) 0.84%, then parentheses 0.43% and three
 `-Wstring-plus-int`s, which are warnings the pipeline reports (`if (map =
 __map_file(...))`, `s[e]+0U<<24`), then comparisons at a type's bound, which
@@ -599,13 +600,24 @@ are conservative. Two things make that low share trustworthy:
 
 The census's set leaves calls, `&&`, `||` and `?:` in, as step 2 does. What it
 counts as refused but step 2 could take later: `__builtin_expect` (Lua), the
-library folds, bit-fields (`sqlite3.c`) and compound literals (musl).
+library folds, bit-fields (`sqlite3.c`) and compound literals (musl). With them
+out, `sqlite3.c`'s taken expressions hold 97.5% of its nodes, above the
+estimate's optimistic 95% for step 2 ([below](#expected-gains)): the coverage
+is not what limits step 2's gain. Step 3's whole bodies are another matter:
+87.6% of `sqlite3.c`'s bodies have every expression taken, but they hold 60.2%
+of its nodes, the largest bodies being the ones with a bit-field or a call with
+semantics somewhere.
+
+Step 1 is next: the tables baked, the three sweeps run after the pipeline on
+every root the census takes, compared entry for entry and timed. The census is
+where its silence tests start: each is written here first, against a fixture
+line of the warning it stands for.
 
 ### The readers of an expression's inside
 
 A summary node (step 2) hides its expression's nodes from every pass after the
 reader; each pass that reads below a root has to take the summary's side record
-or be shown not to need it. From the code at @COMMIT@, by the files that read
+or be shown not to need it. From the code at `eb62e20f`, by the files that read
 the graph's operators and operands after the graph run:
 
 - **The warnings:** `check_driver_common_warnings` (`c_check_common_warnings.c`:
