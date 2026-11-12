@@ -1130,31 +1130,33 @@ static __attribute__((noinline)) void check_attested_hashes(CheckAttested* censu
             const __mmask8 roots = (__mmask8)(_mm256_cmpeq_epi32_mask(_mm256_maskz_loadu_epi32(lanes, parents + t), _mm256_set1_epi32(-1)) & lanes);
             const __mmask8 starts = (__mmask8)(((uint32_t)roots << 1 | previous_root) & lanes);
             const __m512i token = _mm512_add_epi64(_mm512_set1_epi64(t), lane);
-            // Each lane's declaration's first token: the greatest start at or below it, or the last block's.
-            __m512i first = _mm512_maskz_mov_epi64(starts, token);
-            first = _mm512_max_epu64(first, _mm512_alignr_epi64(first, zero, 7));
-            first = _mm512_max_epu64(first, _mm512_alignr_epi64(first, zero, 6));
-            first = _mm512_max_epu64(first, _mm512_alignr_epi64(first, zero, 4));
-            first = _mm512_max_epu64(first, carry_first);
+            // Each lane's declaration's first token: the greatest start at or below it in the block, or the last blocks'
+            // (the block's own maximum doesn't wait for theirs: one max carries from block to block).
+            __m512i local_first = _mm512_maskz_mov_epi64(starts, token);
+            local_first = _mm512_max_epu64(local_first, _mm512_alignr_epi64(local_first, zero, 7));
+            local_first = _mm512_max_epu64(local_first, _mm512_alignr_epi64(local_first, zero, 6));
+            local_first = _mm512_max_epu64(local_first, _mm512_alignr_epi64(local_first, zero, 4));
+            const __m512i first = _mm512_max_epu64(local_first, carry_first);
             const __m512i placed = _mm512_xor_si512(word, _mm512_mullo_epi64(_mm512_sub_epi64(token, first), _mm512_set1_epi64((int64_t)BUSTER_ATTESTED_K3)));
             __m512i low = _mm512_maskz_mov_epi64(lanes, check_attested_mix_lanes(_mm512_xor_si512(placed, _mm512_set1_epi64((int64_t)BUSTER_ATTESTED_K0)),
                                                                                  BUSTER_ATTESTED_M0, BUSTER_ATTESTED_M1));
             __m512i high = _mm512_maskz_mov_epi64(lanes, check_attested_mix_lanes(_mm512_xor_si512(placed, _mm512_set1_epi64((int64_t)BUSTER_ATTESTED_K2)),
                                                                                   BUSTER_ATTESTED_M2, BUSTER_ATTESTED_M3));
-            // The running sums at each lane.
+            // The block's own running sums at each lane, which don't wait for the last blocks': the running sums are them
+            // and the carry, one add from block to block.
             low = _mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 7));
             high = _mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 7));
             low = _mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 6));
             high = _mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 6));
-            low = _mm512_add_epi64(_mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 4)), carry_low);
-            high = _mm512_add_epi64(_mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 4)), carry_high);
+            low = _mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 4));
+            high = _mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 4));
             // At the roots, the running sums, packed (`sums` has room for a register past the last declaration).
-            _mm512_storeu_si512(sums_low + d, _mm512_maskz_compress_epi64(roots, low));
-            _mm512_storeu_si512(sums_high + d, _mm512_maskz_compress_epi64(roots, high));
+            _mm512_storeu_si512(sums_low + d, _mm512_add_epi64(_mm512_maskz_compress_epi64(roots, low), carry_low));
+            _mm512_storeu_si512(sums_high + d, _mm512_add_epi64(_mm512_maskz_compress_epi64(roots, high), carry_high));
             d += (uint32_t)__builtin_popcount(roots);
-            carry_low = _mm512_permutexvar_epi64(last, low);
-            carry_high = _mm512_permutexvar_epi64(last, high);
-            carry_first = _mm512_permutexvar_epi64(last, first);
+            carry_low = _mm512_add_epi64(carry_low, _mm512_permutexvar_epi64(last, low));
+            carry_high = _mm512_add_epi64(carry_high, _mm512_permutexvar_epi64(last, high));
+            carry_first = _mm512_max_epu64(carry_first, _mm512_permutexvar_epi64(last, local_first));
             previous_root = (uint32_t)roots >> (length - 1) & 1;
         }
         // A last declaration that no root ends (a failed parse's view): the sums at the end.
