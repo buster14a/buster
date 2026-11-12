@@ -3134,12 +3134,8 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
-        {
-            "fixed enum: declared with a declarator",
-            "int a;\nenum E : int x;\n",
-            true,
-            false
-        },
+        // (An enum base with a declarator, `enum E : int x;`, is -Welaborated-enum-base's error by default since #2213, a
+        // warning event these fixtures don't read: test-checker-driver's default-warning sweep compares it with clang.)
         {
             "fixed enum: an enum without one given one",
             "enum E { A };\nenum E : int;\n",
