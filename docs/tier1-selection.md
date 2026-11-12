@@ -91,7 +91,15 @@ patterns are:
   keeps its sequence, its accesses going through the register it leaves. A
   rip-relative operand has no index, so a table reached through one
   (`yy_lookahead`, `sqlite3Stat.nowValue[op]`) keeps its symbol's `lea` as the
-  base. The walk takes either leaf one node past its bound: the typed stream
+  base. The lowering makes a symbol's address again for every access, and the
+  index's sign extension too: a pattern reads its block's first symbol address,
+  sign extension or zero extension of the same operand in their place
+  (`tier1_select_symbol_firsts`, #2601), so a block's accesses of one table
+  share one `lea` and one index register. `sqlite3StatusUp`'s five `lea`s of
+  `sqlite3Stat` are two, one per block (speedtest1's 1.73 M to 0.97 M). Only
+  a block's: hoisting a symbol's address past its blocks made
+  `luaV_execute`'s `disptab` worse in #2572's experiment, where the loop's
+  pressure evicted it. The walk takes either leaf one node past its bound: the typed stream
   puts a ptrtoint and an inttoptr around each member's address, so
   `sqlite3Config.m.xSize`, an indirect call's callee in `sqlite3MallocSize`, is
   eight nodes above its symbol, and the leaf reads no value whose life it could

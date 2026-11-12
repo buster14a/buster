@@ -26,9 +26,12 @@ requirements. [Command index](README.md).
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
   self-loops. Integer comparisons fold single-use loads at their original
   access width when the final consumer's memory-order proof permits it
-  (#1218), including exact immediate comparisons through zero/sign extension.
-  `test-tier1-select` checks guard-page boundaries, predicates, address aliases
-  and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
+  (#1218), including exact immediate comparisons through zero/sign extension;
+  a word's, doubleword's or quadword's constant within a signed byte takes the
+  sign-extended `imm8` form (#2600).
+  `test-tier1-select` checks guard-page boundaries, predicates, every constant
+  each side of the byte's, word's and doubleword's signed bounds and its form,
+  address aliases and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
   realignment and fused branches. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it, its plain and
   callee-saved-preferring problems in one call (#2538, `tier1_emit_cfg_one_call`;
@@ -282,12 +285,16 @@ fold it from another block, no node computes its address, and the others keep
 their sequences; without the column every symbol folds and the consumer, given
 it, refuses the plan. The code certifies and runs natively with its `PC32`,
 GOT and thread-pointer references resolved by the test, the comparisons'
-addends covering their immediates. `tests/driver/tier1_symbols.c` is the
+addends covering their immediates. Its repeated-access fixture (#2601) has the
+lowering's three symbol addresses and index extensions for three indexed
+accesses of one table in one block: every access reads the first of each, by
+both paths, and the code has one `lea` and runs natively. `tests/driver/tier1_symbols.c` is the
 standalone native regression, run by `tools/ci/correctness.tests`: every
 width's loads, stores, comparisons with an immediate after the displacement
 field and branches on them, the operations that take a memory operand,
-floating accesses, a sequentially consistent store, a loop and indexed and
-address-of uses, by both host paths with `--tier1-strict --verify`, linked by
+floating accesses, a sequentially consistent store, a loop, comparisons with
+a constant a signed byte holds (#2600), and indexed (three accesses sharing one
+`lea`, #2601) and address-of uses, by both host paths with `--tier1-strict --verify`, linked by
 the system linker against a Clang oracle; `objdump -dr` must find no `lea` of
 a direct symbol but the indexed table's and the address's, each branch fused
 with its comparison, and the GOT's and thread-locals' sequences, with no

@@ -4698,17 +4698,63 @@ static bool tier1_select_repeated_leaf(const IrFunction* function, uint32_t node
     return op == IR_SYMBOL_ADDR || op == IR_SEXT || op == IR_ZEXT;
 }
 
+// The repeated leaves among the 64 nodes from `first` (tier1_select_repeated_leaf's), their operations compared at once:
+// the vector path's scan, whose twin is the scalar loop over the nodes.
+static uint64_t tier1_select_leaves_mask(const IrFunction* function, uint32_t first, uint32_t count)
+{
+    const uint32_t left = count - first;
+    const __mmask64 active = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
+    const __m512i op = _mm512_maskz_loadu_epi8(active, function->op + first);
+    return (_mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_SYMBOL_ADDR)) | _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_SEXT)) |
+            _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ZEXT))) & active;
+}
+
+// Puts leaf `node` in the table of firsts (`slots`, each a node plus one, 0 empty, `capacity` a power of two): its first
+// node plus one into firsts[node] where one of the same operation, type and operand precedes it in its block. Returns
+// whether one does.
+static bool tier1_select_first_insert(const IrFunction* function, const uint32_t* blocks, uint32_t* slots, uint32_t capacity, uint32_t* firsts, uint32_t node)
+{
+    const uint32_t block = blocks[node];
+    const uint32_t op = function->op[node];
+    const uint32_t type = function->type[node];
+    const uint32_t operand = function->a[node];
+    uint32_t slot = (block * 0x9e3779b1u ^ operand * 0x85ebca77u ^ (op << 8 | type) * 0xc2b2ae3du) & (capacity - 1);
+    bool searching = slots[slot] != 0;
+    while (searching)
+    {
+        const uint32_t first = slots[slot] - 1;
+        searching = !(blocks[first] == block && function->op[first] == op && function->type[first] == type && function->a[first] == operand);
+        slot = searching ? (slot + 1) & (capacity - 1) : slot;
+        searching &= slots[slot] != 0;
+    }
+    firsts[node] = slots[slot];
+    slots[slot] = slots[slot] != 0 ? slots[slot] : node + 1;
+    return firsts[node] != 0;
+}
+
 // Each repeated leaf's first in its block (#2601, Tier1SelectForest.symbol_first): the first node of the same operation,
 // type and operand (a symbol's address's symbol), by an open-addressed table of them, a power of two at least twice the
 // function's leaves, in `scratch`, which the plan keeps until it is made. Null where no block repeats one. The first
-// precedes the others in their block, so it dominates their users, and a leaf is pure, so it is their value.
-static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, Arena* scratch, bool* ok)
+// precedes the others in their block, so it dominates their users, and a leaf is pure, so it is their value. The vector
+// path finds the leaves 64 nodes at a time (tier1_select_leaves_mask); the table's inserts, a function's few leaves',
+// are scalar on either path, in the nodes' order, so both make the same column.
+static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, Arena* scratch, bool vector, bool* ok)
 {
     const uint32_t count = function->instruction_count;
     uint32_t leaves = 0;
-    for (uint32_t node = 0; node < count; node += 1)
+    if (BUSTER_VECTOR_PATH(vector))
     {
-        leaves += tier1_select_repeated_leaf(function, node);
+        for (uint32_t first = 0; first < count; first += 64)
+        {
+            leaves += (uint32_t)__builtin_popcountll(tier1_select_leaves_mask(function, first, count));
+        }
+    }
+    else
+    {
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            leaves += tier1_select_repeated_leaf(function, node);
+        }
     }
     uint32_t capacity = 4;
     while (capacity < 2 * (uint64_t)leaves)
@@ -4717,30 +4763,23 @@ static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, co
     }
     const bool candidates = leaves >= 2;
     uint32_t* firsts = candidates ? ir_allocate(scratch, count, 4, ok) : 0;
-    // Each slot's node plus one, 0 for an empty slot.
     uint32_t* slots = candidates ? ir_allocate(scratch, capacity, 4, ok) : 0;
     bool repeated = false;
-    for (uint32_t node = 0; *ok && candidates && node < count; node += 1)
+    if (*ok && candidates && BUSTER_VECTOR_PATH(vector))
     {
-        if (tier1_select_repeated_leaf(function, node))
+        for (uint32_t first = 0; first < count; first += 64)
         {
-            const uint32_t block = blocks[node];
-            const uint32_t op = function->op[node];
-            const uint32_t type = function->type[node];
-            const uint32_t operand = function->a[node];
-            uint32_t slot = (block * 0x9e3779b1u ^ operand * 0x85ebca77u ^ (op << 8 | type) * 0xc2b2ae3du) & (capacity - 1);
-            while (slots[slot] != 0)
+            for (uint64_t mask = tier1_select_leaves_mask(function, first, count); mask != 0; mask &= mask - 1)
             {
-                const uint32_t first = slots[slot] - 1;
-                if (blocks[first] == block && function->op[first] == op && function->type[first] == type && function->a[first] == operand)
-                {
-                    break;
-                }
-                slot = (slot + 1) & (capacity - 1);
+                repeated |= tier1_select_first_insert(function, blocks, slots, capacity, firsts, first + (uint32_t)__builtin_ctzll(mask));
             }
-            firsts[node] = slots[slot];
-            repeated |= slots[slot] != 0;
-            slots[slot] = slots[slot] != 0 ? slots[slot] : node + 1;
+        }
+    }
+    else if (*ok && candidates)
+    {
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            repeated |= tier1_select_repeated_leaf(function, node) && tier1_select_first_insert(function, blocks, slots, capacity, firsts, node);
         }
     }
     return repeated && *ok ? firsts : 0;
@@ -6910,7 +6949,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
-        symbol_first = tier1_select_symbol_firsts(function, blocks, scratch, &ok);
+        symbol_first = tier1_select_symbol_firsts(function, blocks, scratch, vector, &ok);
         error = ok ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     const Tier1SelectForest forest =
