@@ -240,10 +240,15 @@ patterns are:
   floating value, the source converts as a signed value where its sign bit is
   clear. Otherwise it is halved with its last bit kept as a sticky bit, so
   rounding the half rounds the source, then converted, and `paddq` or `paddd`
-  adds 1 to the result's exponent. From a floating value, the result is the
-  signed conversion's, or, where that is 2^63 (the value is 2^63 or more), 2^63
-  ORed with the truncation of the value less 2^63: the negation of the
-  truncation of 2^63 less the value. A return moves its value into xmm0. Still
+  adds 1 to the result's exponent. From a floating value, one truncation runs,
+  raising the floating exceptions C's conversion raises and no others (#2562):
+  `ucomis*` compares the value with 2^63; below it, or unordered, the value's
+  own bits are truncated, and at 2^63 or more its half (its bits less one in
+  the exponent's lowest bit, exact there), whose result is doubled (`cmovb`
+  chooses the bits and `lea` and `cmovae` the double, none of which writes the
+  flags). No floating arithmetic runs, so a value in range raises no invalid,
+  and an integral one no inexact; the half's truncation raises invalid exactly
+  where the value is 2^64 or more. A return moves its value into xmm0. Still
   refused: a select of floating values.
 - Long double (#141): `F80`, the x87's, whose values the CFG consumer keeps in
   frame objects of their own, 16 bytes each, one per value, and computes on the
