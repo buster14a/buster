@@ -2017,8 +2017,9 @@ static inline __attribute__((always_inline)) void node_machine_put(NodeMachine* 
 }
 
 // A test of a value of class `class` (check_lower_truth's entries): a narrow class's value converted to I32, then compared
-// with 0 by NE, or by EQ where `negate`.
-static void node_machine_put_truth(NodeMachine* machine, uint8_t class, bool negate)
+// with 0 by NE, or by EQ where `negate`. Inlined into X's rows and segments, as main has it: the updates' second inlined
+// copy of node_machine_own made it a call of its own.
+static inline __attribute__((always_inline)) void node_machine_put_truth(NodeMachine* machine, uint8_t class, bool negate)
 {
     const bool narrow = check_lower_narrow(class);
     if (narrow)
