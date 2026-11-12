@@ -4,7 +4,8 @@ Status: step 0, the census, is built and its gate holds
 ([below](#step-0-the-census)). Step 1, the shadow, is built
 ([below](#step-1-the-shadow)): the machine's entries are the pipeline's on every
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
-gate asks for 120, and it codes only part of the set (no calls yet). No compile
+gate asks for 120 (188 with `&&`, `||` and `?:`, whose expressions cost more a
+node), and it codes only part of the set (no calls yet). No compile
 takes it. Its gains are estimates that its first two steps exist to confirm or
 refute; a prototype of its three sweeps has been run over the compile's real
 nodes ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -837,7 +838,8 @@ its operands. They are the machine's now (#2569):
   be the lowering's of the same number counted from the expression's first, at
   the same entry, and each branch's target that entry.
 
-On the 9700X, against main `0af27a30` (`--verify`, CPU 2, under the lock):
+On the 9700X, against main `0af27a30` (`--verify`, CPU 2, under the lock;
+[the record](https://github.com/buster14a/buster-performance/tree/18dc758cb1e170014646de5a6ed39dc5b966c65e/docs/measurements/node-machine-logical-2524-2026-11-12)):
 
 | | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
 | --- | ---: | ---: | ---: |
@@ -853,6 +855,34 @@ so the labels' comparison isn't vacuous. What the code refusal leaves on
 operator without a code is a call, and the increments and compound
 assignments are the rest. No `&&`, `||` or `?:` of `sqlite3.c` is refused by its
 template.
+
+The sweeps' cost on `sqlite3.c`, in cycles a taken evaluated node (the least of
+11 passes, each sweep set timed on its own, as above):
+
+| version | T | C | X | all three | instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| main `0af27a30` | 95.5 | 42.7 | 32.9 | 171.1 | 669.9 |
+| the three typed by the action (`48abdd08`) | 96.2 | 55.3 | 38.0 | 189.5 | 702.9 |
+| `&&` and `\|\|` by a rule, labels numbered from the labeled records (`cadbbe12`) | 97.2 | 52.1 | 38.9 | 188.2 | 695.3 |
+
+Lua's are 180.6 on main and 190.4. The average rises because the expressions
+newly taken cost more a node, not the old ones: by the difference of the
+totals, the 23,721 newly taken nodes cost 282 cycles each (T 107, C 103, X 72),
+against 171 for those taken before, and they write 2.06 entries a node against
+1.28 (their tests, branches and jumps). Two attempts moved it no more than
+placement's 3%:
+
+- numbering the labels from the labeled records alone, in place of a preorder
+  walk of the records (C from 55.3 to 52.1);
+- keeping the logical operators' rule, classification and numbering out of
+  line, so that `node_machine_evaluate` is inlined again (186.6 in all, C
+  53.3), which was then left out.
+
+C's most sampled instruction is still its branch on whether a record is
+evaluated. The levers for the cost are the ones above, the records and the
+baked tables, not this code. `-c sqlite3.c` is unchanged: 123.978 ms against
+main's 123.923, user cycles +0.02%, 5,323 more instructions (the inventory's
+log's test, once a body).
 
 ## Expected gains
 
