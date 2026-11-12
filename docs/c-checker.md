@@ -5283,7 +5283,8 @@ report): an undeclared name in it isn't shielded by a statement expression,
 or the initializer's outermost node is diagnosed, of no valid type or
 incomplete as the initializers' diagnosis counts it. An initializer with no
 node keeps its report: a rejected unit's retained graph ends at its first
-missing name, so a later valid initializer has none. A statement expression
+missing name where its reader doesn't recover from the name (a whole unit's
+and a parse error's prefix's do, #1799), so a later valid initializer has none. A statement expression
 shields a name in a statement before its last, its value
 (`check_init_undeclared_poisons`). The report keeps its initializer's first
 token (`value`) for this; only a unit with another error drops one. A
@@ -5373,7 +5374,17 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name `u8` and a character constant. A view that reads past every parse
   error of the unit (`Parser.whole_view`) recovers from its missing names as a
   complete unit does (`check_input_diagnostic_recover`), so the unit's later
-  diagnostics stay.
+  diagnostics stay. So does the prefix view of a unit with a parse error
+  (`Parser.prefix_view`, `check_prefix_make`, #1799): C declares a name before
+  its uses, so a name its complete declarations before the error don't declare
+  the whole unit doesn't either, and a graph error past the name (`x = 1, y =
+  x()`'s called `int`, `3 + (void)0`'s operands) is clang's, an unsized
+  array's list error giving way to its initializer's own. Differences left: an
+  error the prefix's first reading doesn't reach, which a unit without the
+  parse error takes from its second readings (`check_driver_rejected_common`,
+  which a prefix view doesn't run), such as one in a function body or a
+  struct's initializer list after the name, and one past the parse error
+  (#2509).
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -6674,7 +6685,12 @@ declarator, at file scope and for a member), the ungrouped plain `_Complex` assu
 `-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
 for an unnamed parameter before C23. Since then (#147), `-Wextern-initializer` warns of a file-scope extern
 variable's initializer at its name, after its attributes' warnings, as clang's `AddInitializerToDecl` does (a block
-scope's is an error). Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+scope's is an error). `-Wgnu-empty-struct` (#2409, off by default, `-pedantic`'s and `-Wgnu`'s) warns of a
+struct's or union's definition without named members at its keyword, as clang's `ActOnFields` does when it
+completes the record: "empty struct is a GNU extension", or "struct without named members is a GNU extension" where
+its members are unnamed bit-fields alone (an anonymous member counts as named). Left: clang's off-by-default
+`-Wc++-compat` "empty struct has size 0 in C, size 1 in C++" and `-Wzero-length-array` aren't given. Command-line
+options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
 compares the driver's complete diagnostics with clang's for every producer and policy, and

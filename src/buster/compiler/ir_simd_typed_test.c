@@ -2080,6 +2080,72 @@ static void ir_simd_typed_test_reductions(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the front end's reductions decode to the IR's reduce, %u second rows to lane_extract\n", decoded_rows, split);
 }
 
+// The lanes' unary operations (#1840): each row of tier1_masks_test_lane_unary_row at each width decodes as the IR's
+// lane_unary of its lanes and operation, written out (the two-operand leading zero count's with its select), at exactly
+// its records' features and the vectors' moves; refused without each and under 6 changes.
+static void ir_simd_typed_test_lane_unaries(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ),
+                                         BUSTER_X86_FEATURE(AVX512CD), BUSTER_X86_FEATURE(AVX512BITALG), BUSTER_X86_FEATURE(AVX512VPOPCNTDQ) };
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t kind = 0; tables && kind < 10; kind += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            uint32_t flags = 0;
+            const Tier0Operation row = tier1_masks_test_lane_unary_row(kind, width, &flags);
+            uint64_t expected = ir_typed_vector_moves(row.result_bytes, all);
+            for (uint32_t r = 0; r < row.record_count; r += 1)
+            {
+                expected |= x86_target_requirement(row.records[r].form) & ~BUSTER_X86_TARGET_KNOWN;
+            }
+            IrSimdTypedOperation decoded;
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+            char description[192];
+            snprintf(description, sizeof(description), "lane unary %u at %u bytes: the IR's lane_unary 0x%x at exactly its features", kind, row.result_bytes, flags);
+            const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.lane_unary && decoded.lane_unary_zero == (kind == 6 || kind == 7) &&
+                            decoded.immediate == flags && !decoded.lane_op && decoded.required_features == expected;
+            ir_test_expect(tally, ok, description);
+            decoded_rows += ok;
+            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+            {
+                IrSimdTypedOperation without;
+                memset(&without, 0x5a, sizeof(without));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                const bool required = ((expected | ir_typed_vector_moves(row.result_bytes, all & ~features[f])) & features[f]) != 0;
+                ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.lane_unary,
+                               "a lane's unary operation without a feature it needs stays the machine row, and needs no other");
+            }
+            for (uint32_t m = 0; m < 6; m += 1)
+            {
+                Tier0Operation changed = row;
+                X86Instruction* last = &changed.records[changed.record_count - 1];
+                switch (m)
+                {
+                case 0: changed.records[0].decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+                case 1: last->mode = BUSTER_X86_MEMORY_BASE; break;
+                case 2: last->rm = BUSTER_TIER0_ROLE_VECTOR(3); break;
+                case 3: changed.result_bytes = (uint8_t)(row.result_bytes == 64 ? 32 : 64); break;
+                case 4: last->decorations ^= 1; break;
+                case 5:
+                    changed.records[changed.record_count] = changed.records[0];
+                    changed.record_count += 1;
+                    break;
+                }
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), "a changed lane unary operation's row is not the IR's lane_unary");
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 10 * 3, "every lane count and conflict decodes");
+    printf("  IR SIMD rows: %u population counts, leading zero counts and conflicts decode to the IR's lane_unary\n", decoded_rows);
+}
+
 // The floating operations at their own rounding (#1840): vaddps to vdivpd with embedded rounding, each rounding
 // (tier1_masks_test_fround_row), decode as the IR's fround of their operation, lanes and rounding, written out, at
 // exactly AVX512F; refused without it and under 6 changes.
@@ -2453,6 +2519,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_masked_memory(tally);
     ir_simd_typed_test_lane_moves(tally);
     ir_simd_typed_test_reductions(tally);
+    ir_simd_typed_test_lane_unaries(tally);
     ir_simd_typed_test_frounds(tally);
     ir_simd_typed_test_cvtts(tally);
     ir_simd_typed_test_aes(tally);

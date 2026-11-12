@@ -234,6 +234,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // A unit with a parse error, checked as the prefix of complete declarations before it, whose reader recovers from
+        // a missing name as a whole unit's does (#1799, Parser.prefix_view): the graph's errors past the name are clang's,
+        // and an unsized array's list error gives way to its initializer's own.
+        "int c = undecl_n, x = 1, y = x();\nunknown_type z;\n",
+        "int c = undecl_n;\nint y = 3 + (void)0;\nunknown_type z;\n",
+        "int c = undecl_n, d[] = 1 + (void)0;\nunknown_type z;\n",
+        "int c = undecl_n;\nint f(int);\nint y = f(1, 2);\nunknown_type z;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its

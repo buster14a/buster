@@ -107,6 +107,9 @@ typedef enum IrSimdOperation
     // A reduction of a's doublewords or quadwords into every lane of a 16-byte result (#1840, ir.c's
     // BUSTER_IR_INTRINSIC_REDUCE), the action's `index` the IR's flags: the lanes' bytes' log2 and the operation.
     IR_SIMD_REDUCE,
+    // A unary operation of each of a's integer lanes (#1840, ir.c's BUSTER_IR_INTRINSIC_LANE_UNARY), the action's `index`
+    // the IR's flags: the lanes' bytes' log2 and the operation (population count, leading zero count, conflicts).
+    IR_SIMD_LANE_UNARY,
     // A floating operation of each lane at its own rounding, its exceptions suppressed (#1840, ir.c's
     // BUSTER_IR_INTRINSIC_FROUND), the action's `index` the IR's flags (ir_simd_float_rounded).
     IR_SIMD_FROUND,
@@ -261,7 +264,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
                           action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
                           action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
-                          action->operation == IR_SIMD_REDUCE || action->operation == IR_SIMD_FROUND || action->operation == IR_SIMD_CVTT);
+                          action->operation == IR_SIMD_REDUCE || action->operation == IR_SIMD_LANE_UNARY || action->operation == IR_SIMD_FROUND ||
+                          action->operation == IR_SIMD_CVTT);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -312,6 +316,10 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_REDUCE:
                 valid = valid && type == IR_SIMD_V4I32 && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index & 3) >= 2 &&
                         (uint32_t)(action->index >> 2) < 9;
+                break;
+            case IR_SIMD_LANE_UNARY:
+                valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index >> 2) <= 2 &&
+                        ((action->index >> 2) == 0 || (action->index & 3) >= 2);
                 break;
             case IR_SIMD_CVTT: valid = valid && type == IR_SIMD_NONE && a == IR_SIMD_V4I32 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3; break;
             case IR_SIMD_FROUND: valid = valid && type == IR_SIMD_V16I32 && a == type && b == type && c == IR_SIMD_NONE && action->index < 32; break;
@@ -823,6 +831,34 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         for (uint32_t lane = 0; lane < 128 / lane_bits; lane += 1)
         {
             ir_simd_lane_write(&staged, lane_bits, lane, total);
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_LANE_UNARY)
+    {
+        // Each lane's set bits, its leading zeros (its bits for zero), or the bits of the lanes below it equal to it.
+        const uint32_t lane_bits = 8u << (action->index & 3);
+        const uint32_t operation = (uint32_t)(action->index >> 2);
+        const uint32_t lanes = ir_simd_bits(action->result) / lane_bits;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const uint64_t x = ir_simd_lane_read(values[0], lane_bits, lane);
+            uint64_t value = 0;
+            if (operation == 0)
+            {
+                value = (uint64_t)__builtin_popcountll(x);
+            }
+            else if (operation == 1)
+            {
+                value = x == 0 ? lane_bits : (uint64_t)__builtin_clzll(x) - (64 - lane_bits);
+            }
+            else
+            {
+                for (uint32_t below = 0; below < lane; below += 1)
+                {
+                    value |= (uint64_t)(ir_simd_lane_read(values[0], lane_bits, below) == x) << below;
+                }
+            }
+            ir_simd_lane_write(&staged, lane_bits, lane, value);
         }
     }
     else if (valid && action->operation == IR_SIMD_CVTT)

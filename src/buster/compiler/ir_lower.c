@@ -805,6 +805,22 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, (IrSimdLane)size);
         }
     }
+    else if (operation->lane_unary)
+    {
+        // A unary operation of each lane (#1840), its lanes and operation in its flags; clang's leading zero count with a
+        // second operand takes that operand's lane where the first's is zero.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_UNARY, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->lane_unary_zero)
+        {
+            const uint64_t zero[8] = {0};
+            const uint32_t zeros = ir_typed_vector_constant(sink, type, zero);
+            const uint32_t mask = ir_typed_emit(sink, IR_VCMP, (IrType)ir_lane_mask(type, operation->lane), operands[0], zeros, IR_EQ, 0);
+            ir_typed_lanes(sink, mask, operation->lane);
+            value = ir_typed_emit(sink, IR_VSELECT, type, mask, operands[1], value, 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else if (operation->fround)
     {
         // A floating operation at its own rounding (#1840): its operation, lanes and rounding in its flags.
