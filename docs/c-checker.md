@@ -8981,11 +8981,12 @@ arguments against the function. The checker now gives these as clang does.
   argument expressions (`aligned(zzz)`, `alloc_size(nosuch)`,
   `check_input_read_attributes`). A name that clang's search corrects
   (`aligned(alignedy)` near a variable `alignedx`) still gets no suggestion
-  and no "'aligned' attribute requires integer constant" after it; and a
-  later warning of the unit's file scope can be dropped where a dropped
-  attribute's declarator group is read again by a constant (`int v
-  __attribute__((aligned(zzz))), w;` then `_Static_assert(_Alignof(w) == 8,
-  "")`). Then, after their subjects and counts (with the handlers' "at
+  and no "'aligned' attribute requires integer constant" after it. A
+  dropped attribute's report leaves its declaration valid for a rejected
+  unit's readings (`CheckInputReport.attribute_name`, #2468), so a constant
+  that reads its declarator group again (`int v __attribute__((aligned(zzz))),
+  w;` then `_Static_assert(_Alignof(w) == 4, "")`) keeps the unit's later
+  warnings. Then, after their subjects and counts (with the handlers' "at
   least 1 argument"): `capability`'s name a string literal; a trylock's
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of

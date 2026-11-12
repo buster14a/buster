@@ -142,6 +142,8 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "void f(int a) { a == 1; }\n",
         "struct V [[gnu::packed]] { char c; int i; };\n_Static_assert(sizeof(struct V) == 8, \"\");\nint g(int a) { return a << 40; }\n"
         "int z = 1 << 40;\n",
+        // An attribute dropped for an undeclared name in its argument (#2251): its declarator group, which a constant reads.
+        "int v __attribute__((aligned(zzz))), w;\n_Static_assert(_Alignof(w) == 4, \"\");\nint y = 1/0;\nvoid f(int a) { a == 1; }\n",
         // Last, gnu17's alone (C23 has no K&R definition): a K&R definition's parameter declarations' _Alignas, which the
         // parser takes as the function declarator's suffix, each declarator's "cannot be applied to a function parameter".
         "void kr(a) _Alignas(3) int a; {}\nvoid kr2(a, b) _Alignas(8) int a, b; { (void)a; (void)b; }\n"

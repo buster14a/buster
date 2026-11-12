@@ -2827,16 +2827,18 @@ static bool check_driver_in_body(const Parser* parser, uint32_t token)
 }
 
 // Whether a recovered report is one whose declaration stays valid (#1835): a dropped attribute's
-// (check_input_attribute_recoverable), a dropped specifier's (check_input_specifiers_recover) or a misplaced attribute
-// list's that the tag's declaration reads past (#2468: `struct U [[gnu::aligned(8)]] { … }`), whose tag a later constant
-// may read. A rejected unit's rounds read past it (check_driver_rejected_common).
+// (check_input_attribute_recoverable, and an undeclared name's in its argument, CheckInputReport.attribute_name), a
+// dropped specifier's (check_input_specifiers_recover) or a misplaced attribute list's that the tag's declaration reads
+// past (#2468: `struct U [[gnu::aligned(8)]] { … }`), whose declaration a later constant may read. A rejected unit's
+// rounds read past it (check_driver_rejected_common).
 static bool check_driver_report_keeps_valid(const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
     const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
                            message == CHECK_INPUT_SPECIFIER_COMPLEX;
     const bool list = message == CHECK_INPUT_ATTRIBUTE_LIST_PLACE;
-    return report->recovered && (specifier || list || check_input_attribute_recoverable(report));
+    const bool name = message == CHECK_INPUT_UNDECLARED && report->attribute_name;
+    return report->recovered && (specifier || list || name || check_input_attribute_recoverable(report));
 }
 
 // Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is one the
