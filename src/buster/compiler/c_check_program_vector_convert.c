@@ -144,6 +144,169 @@ static CheckVectorForms check_vector_elementwise_forms(CBuiltinId builtin, Check
     return forms;
 }
 
+// The reason a row's features refuse it, by the builtin: what the target hasn't of `needed`.
+static const char* check_vector_builtin_feature_reason(CBuiltinId builtin, uint64_t needed, uint64_t target)
+{
+    const uint64_t missing = needed & ~target;
+    const char* reason = NULL;
+    if ((missing & BUSTER_X86_FEATURE(AVX512BITALG)) != 0)
+    {
+        reason = "vector population counts of 8- and 16-bit elements without AVX-512 BITALG";
+    }
+    else if ((missing & BUSTER_X86_FEATURE(AVX512VPOPCNTDQ)) != 0)
+    {
+        reason = "vector population counts of 32- and 64-bit elements without AVX-512 VPOPCNTDQ";
+    }
+    else if ((missing & BUSTER_X86_FEATURE(AVX512CD)) != 0)
+    {
+        reason = "vector leading zero counts without AVX-512CD";
+    }
+    else if ((missing & BUSTER_X86_FEATURE(AVX512VBMI2)) != 0)
+    {
+        reason = "vector funnel shifts without AVX-512 VBMI2";
+    }
+    else if ((missing & BUSTER_X86_FEATURE(AVX512DQ)) != 0)
+    {
+        reason = "vector multiplication of 64-bit elements without AVX-512DQ";
+    }
+    else if (missing != 0)
+    {
+        reason = builtin >= CBUILTIN_REDUCE_ADD ? "vector reductions of 8- and 16-bit elements without AVX-512BW" :
+                                                  "elementwise vector builtins of 8- and 16-bit elements without AVX-512BW";
+    }
+    return reason;
+}
+
+// The most rows a reduction takes: a row's 8 records hold three halvings and the element's move.
+#define BUSTER_CHECK_VECTOR_REDUCE_ROWS 2u
+
+// The rows of an integer __builtin_reduce_* function of a vector into its element: halves combined by the operation
+// down to one element (the high 32 bytes of 64 by VEXTRACTI64X4, the high 16 of 32 by VEXTRACTI32X4, then within 16
+// bytes the high 8 by VPSHUFD 0x4e, the high 4 by VPSHUFD 0xb1, the high 2 by VPSRLD 16 and the high byte by VPSRLW 8,
+// each beside the low part in v1), then that element in the general register (VMOVQ, VMOVD, VPEXTRW or VPEXTRB). A
+// halving is two records. Byte product reductions first widen to words (pairing widened halves for 64-byte inputs).
+// Where a row's eight records aren't enough, split between complete halvings and carry the low live vector bytes
+// into the second row, at least 16. `count` gets the rows' number. By the vector's shape, so that the IR decoder's tests
+// (#1840, ir_simd_typed_reduce) read the same rows.
+static const char* check_vector_reduce_shape_rows(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape,
+                                                  Tier0Operation rows[BUSTER_CHECK_VECTOR_REDUCE_ROWS], uint32_t* count)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const char* reason = NULL;
+    uint64_t needed = 0;
+    memset(rows, 0, BUSTER_CHECK_VECTOR_REDUCE_ROWS * sizeof(*rows));
+    *count = 0;
+    if (!shape.integer)
+    {
+        reason = "vector reductions of floating elements";
+    }
+    else if (shape.element == 0)
+    {
+        reason = "vector reductions of elements of this size";
+    }
+    else
+    {
+        CheckVectorShape operation = shape;
+        X86Instruction records[2 * BUSTER_TIER0_OPERATION_RECORDS];
+        uint32_t r = 0;
+        if (builtin == CBUILTIN_REDUCE_MUL && shape.element == 1)
+        {
+            // The low byte of a product is unchanged by zero-extending its factors and keeping intermediate products
+            // modulo 2^16. Widen first, then reuse the packed-word reduction. A 64-byte input has two widened halves:
+            // multiply them pairwise before reducing, keeping the live vector at 64 bytes and the plan at two rows.
+            operation.element = 2;
+            operation.bytes = shape.bytes < 64 ? 2 * shape.bytes : 64;
+            if (shape.bytes == 64)
+            {
+                records[r] = check_vector_lower_record(X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8, v0, 0, v1);
+                records[r++].immediate = 1;
+            }
+            const uint32_t widen = shape.bytes <= 8 ? X86_FORM_VPMOVZXBW_X_XM64_EVEX : shape.bytes == 16 ? X86_FORM_VPMOVZXBW_Y_XM128_EVEX :
+                                                                                                    X86_FORM_VPMOVZXBW_Z_YM256;
+            records[r++] = check_vector_lower_record(widen, v0, 0, v0);
+            if (shape.bytes == 64)
+            {
+                records[r++] = check_vector_lower_record(widen, v1, 0, v1);
+                records[r++] = check_vector_lower_record(X86_FORM_VPMULLW_Z_Z_ZM512, v0, v0, v1);
+            }
+        }
+        const uint32_t prefix = r;
+        const CheckVectorForms forms = check_vector_elementwise_forms(builtin, operation, &needed);
+        uint32_t span = operation.bytes;
+        while (span > operation.element && forms.forms[0] != 0)
+        {
+            span /= 2;
+            const uint32_t at = span >= 16 ? span : 16;
+            if (span >= 32)
+            {
+                records[r] = check_vector_lower_record(X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8, v0, 0, v1);
+            }
+            else if (span == 16)
+            {
+                records[r] = check_vector_lower_record(X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, v0, 0, v1);
+            }
+            else if (span >= 4)
+            {
+                records[r] = check_vector_lower_record(X86_FORM_VPSHUFD_X_XM128_IMM8_EVEX, v1, 0, v0);
+            }
+            else
+            {
+                records[r] = check_vector_lower_record(span == 2 ? X86_FORM_VPSRLD_X_XM128_IMM8 : X86_FORM_VPSRLW_X_XM128_IMM8, 0, v1, v0);
+            }
+            records[r].immediate = span >= 16 ? 1 : span == 8 ? 0x4e : span == 4 ? 0xb1 : span == 2 ? 16 : 8;
+            records[r + 1] = check_vector_lower_record(forms.forms[check_vector_builtin_width(at)], v0, v0, v1);
+            r += 2;
+        }
+        const uint8_t result = shape.element == 8 ? BUSTER_TYPED_CLASS_I64 : shape.element == 4 ? BUSTER_TYPED_CLASS_I32 :
+                               shape.element == 2 ? BUSTER_TYPED_CLASS_U16 : BUSTER_TYPED_CLASS_U8;
+        const uint32_t move = shape.element == 8 ? X86_FORM_VMOVQ_RM64_X_EVEX : shape.element == 4 ? X86_FORM_VMOVD_RM32_X_EVEX :
+                              shape.element == 2 ? X86_FORM_VPEXTRW_R32_X_IMM8_EVEX : X86_FORM_VPEXTRB_RM32_X_IMM8_EVEX;
+        // VPEXTRW's register form names the general register in reg, the others in rm.
+        records[r] = shape.element == 2 ? check_vector_lower_record(move, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, v0) :
+                                          check_vector_lower_record(move, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+        r += 1;
+        needed |= shape.element <= 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
+        if (forms.forms[0] == 0)
+        {
+            reason = builtin == CBUILTIN_REDUCE_MUL ? "vector multiplication of 8-bit elements" : "this vector reduction";
+        }
+        else if ((target->features & needed) != needed)
+        {
+            reason = check_vector_builtin_feature_reason(builtin, needed, target->features);
+        }
+        else
+        {
+            // Split only between complete halvings: the temporary in v1 is private to its row. A widening prefix can
+            // leave an odd record count; it must not move a halving's shuffle into a different row from its multiply.
+            const bool single = r <= BUSTER_TIER0_OPERATION_RECORDS;
+            const uint32_t taken = single ? r : prefix + 2 * ((BUSTER_TIER0_OPERATION_RECORDS - prefix) / 2);
+            const uint32_t reduced = operation.bytes >> ((taken - prefix) / 2);
+            const uint32_t left = reduced >= 16 ? reduced : 16;
+            memcpy(rows[0].records, records, taken * sizeof(*records));
+            rows[0].record_count = (uint8_t)taken;
+            rows[0].operand_count = 1;
+            rows[0].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            rows[0].operand_bytes[0] = (uint8_t)shape.bytes;
+            rows[0].result_class = single ? result : BUSTER_TYPED_CLASS_VECTOR;
+            rows[0].result_bytes = single ? 0 : (uint8_t)left;
+            *count = 1;
+            if (!single)
+            {
+                memcpy(rows[1].records, records + taken, (r - taken) * sizeof(*records));
+                rows[1].record_count = (uint8_t)(r - taken);
+                rows[1].operand_count = 1;
+                rows[1].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+                rows[1].operand_bytes[0] = (uint8_t)left;
+                rows[1].result_class = result;
+                *count = 2;
+            }
+        }
+    }
+    return reason;
+}
+
+
 // The forms of a __builtin_convertvector with floating elements (check_vector_convert_row) by its pair, at the width a
 // widening one takes at its result's and any other at its source's, or the reason it has none. `needed` gets what they
 // need past AVX-512F and AVX-512VL: DQ's for 64-bit integers. Between half-precision elements and 16-, 32- and 64-bit
