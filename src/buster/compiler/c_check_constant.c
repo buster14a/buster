@@ -2397,7 +2397,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                 };
                 CheckActionResult checked;
                 check_action_scalar(reader->types, &action, &checked);
-                check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
+                check_input_warning_add_value(reader, action.node, checked.warnings, action.context.source_position, &checked.value);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE && (checked.value.flags & BUSTER_CHECK_BIT_FIELD) == 0 && checked.value.offset >= 0;
                 valid &= (uint64_t)checked.value.offset <= UINT64_MAX - number;
@@ -2925,7 +2925,7 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
-        check_input_warning_add_at(input->reader, action->node, checked.warnings, action->context.source_position);
+        check_input_warning_add_value(input->reader, action->node, checked.warnings, action->context.source_position, &checked.value);
     }
     *value = checked.value;
     return checked.diagnostic == CHECK_DIAG_NONE;
@@ -3575,7 +3575,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                                                   action.operands + 1, begin, reader->ends[source] + 1, action.context.source_position);
                     }
                 }
-                check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
+                check_input_warning_add_value(reader, action.node, checked.warnings, action.context.source_position, &checked.value);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
@@ -3821,7 +3821,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 }
                 arena_pop_to(reader->scratch, mark);
             }
-            check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
+            check_input_warning_add_value(reader, action.node, checked.warnings, action.context.source_position, &checked.value);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             if (valid && check_sparse_wide_present(reader->output->noderef_types))

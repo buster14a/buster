@@ -12605,7 +12605,7 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
     const bool integer = scalar && element != BUSTER_TYPE_BOOL && check_action_integer_type(program->types, element, &width, &is_signed) && width != 0 && width <= 64;
     if (scalar && !integer)
     {
-        check_lower_unsupported(writer, "elementwise builtins of scalars of more than 64 bits");
+        check_lower_unsupported(writer, "elementwise builtins of scalars of more than 128 bits");
     }
     else if (scalar && builtin != CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
     {
@@ -17072,8 +17072,7 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
         // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834); and so the saturating
         // builtins' of 32- and 64-bit elements (check_lower_integer_elements, #2216), and a scalar's one element of an
-        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type, and its pdep,
-        // pext or clmul (check_lower_scalar_lanes, #2410).
+        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type.
         const bool vector = check_lower_transport_is_vector(types, type);
         const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
                           member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
@@ -17084,8 +17083,22 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
             counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
             counts->transport_locals += room != 0 ? 0 : 12;
         }
-        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic || member == CBUILTIN_ELEMENTWISE_PDEP || member == CBUILTIN_ELEMENTWISE_PEXT ||
-                                                   member == CBUILTIN_ELEMENTWISE_CLMUL) && !vector)
+        else if (op == CHECK_OP_BUILTIN_VECTOR && (member == CBUILTIN_ELEMENTWISE_PDEP || member == CBUILTIN_ELEMENTWISE_PEXT || member == CBUILTIN_ELEMENTWISE_CLMUL) &&
+                 !check_lower_bool_vector(types, type))
+        {
+            // pdep's, pext's and clmul's, an instruction's row or their expansion where none takes them (#2410), element by
+            // element: a deposit's log2(bits) rounds of its mask's prefix and moves (check_lower_sequence_deposit), fewer
+            // than (6 log2(bits) + 40) entries a round, and a product's 25 pairs of classes of 14 entries at most and its 5
+            // classes' kept bits (check_lower_sequence_clmul), in the element's class of 32, 64 or 128 bits, and its locals.
+            const TypeId element = vector ? check_lower_transport_element(types, type) : type_unqualified(type_strip_aligned(types, type));
+            const uint64_t size = type_size(types, element);
+            const uint32_t bits = size > 8 ? 128 : size > 4 ? 64 : 32;
+            const uint32_t rounds = bits == 128 ? 7 : bits == 64 ? 6 : 5;
+            const uint64_t each = (member == CBUILTIN_ELEMENTWISE_CLMUL ? 25 * 14 + 5 * 8 : (6 * (uint64_t)rounds + 40) * rounds) + 96;
+            counts->transport_entries += each * (vector ? check_builtin_vector_lanes(types, type_conversion_operand(types, type)) : 1);
+            counts->transport_locals += 24;
+        }
+        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic) && !vector)
         {
             // A 128-bit scalar's sequences build their constants of halves and mask its operands by shifts (#2410).
             counts->transport_entries += type_size(types, type_unqualified(type_strip_aligned(types, type))) > 8 ? 320 : 144;
