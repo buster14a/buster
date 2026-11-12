@@ -2619,10 +2619,6 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
 // The exit helper's checks (#1444, lane_exit_helper_start): how long a run's helpers may take to end once the driver
 // has, and how much of each stream a run keeps.
 #define BUSTER_CHECK_LANES_EXIT_SECONDS 10
-// How long a driver must still run after its streams end for them to have ended first, in milliseconds: well inside a
-// held driver's BUSTER_TEST_EXIT_HELPER_PAUSE (2000), and far longer than an exiting process's files close before its
-// exit can be waited for.
-#define BUSTER_CHECK_LANES_EXIT_GRACE 500
 #define BUSTER_CHECK_LANES_EXIT_STREAM (UINT64_C(1) << 20)
 
 // One run of the driver for the exit helper's checks: its status, its standard output and error, the threads its lanes
@@ -2749,15 +2745,7 @@ static void check_lanes_test_exit_run(CheckLanesExitRun* run, char* const* argum
                 nanosleep(&pause_step, 0);
             }
         }
-        // A process's files close as it exits, a moment before its exit can be waited for, longer for a threaded one on a
-        // loaded runner: the streams ended first only if the driver still runs a grace period after they end (#1430's
-        // drill caught an exiting TSan driver in that moment).
         waited = waitpid(child, &status, WNOHANG);
-        for (uint32_t grace = 0; waited == 0 && !output_open && !errors_open && grace < BUSTER_CHECK_LANES_EXIT_GRACE; grace += 1)
-        {
-            nanosleep(&pause_step, 0);
-            waited = waitpid(child, &status, WNOHANG);
-        }
         run->streams_ended_first = !output_open && !errors_open && waited == 0;
         if (waited == 0)
         {
@@ -2897,13 +2885,16 @@ static void check_lanes_test_exit_helper(CheckLanesTestTally* tally, const char*
         }
     }
     // Held after its helper's start, the driver's streams end while it still runs: neither it nor its helper holds them.
+    // Without a helper (a sanitizer build) the order is the kernel's, not the driver's: a threaded process's files can
+    // close while another of its threads still tears its address space down, long before its exit can be waited for, and
+    // the merge-queue drill (#1430) saw TSan drivers end both ways. So the order is checked only where a helper sets it.
     char* held[] = { (char*)executable, (char*)"-c", (char*)"-o", (char*)"/dev/null", small, NULL };
     check_lanes_test_exit_run(&runs[0], held, "1", "2000", threads_path);
     const bool helped = !BUSTER_SANITIZER_RESOURCES;
     char detail[256];
     snprintf(detail, sizeof(detail), "status %d, streams ended first: %d, %u helpers, %u ended%s", runs[0].status, runs[0].streams_ended_first, runs[0].helpers,
              runs[0].helpers_ended, runs[0].helpers_timed_out ? ", timed out" : "");
-    check_lanes_test_expect(tally, runs[0].status == 0 && runs[0].streams_ended_first == helped && runs[0].helpers == (helped ? 1u : 0u) &&
+    check_lanes_test_expect(tally, runs[0].status == 0 && (!helped || runs[0].streams_ended_first) && runs[0].helpers == (helped ? 1u : 0u) &&
                                        runs[0].helpers_ended == runs[0].helpers && !runs[0].helpers_timed_out,
                             "a reader of the driver's streams sees them end without waiting for its exit helper", detail);
     printf("  exit helper: %u commands by BUSTER_EXIT_HELPER=0, =1 and by default (orphans %s here), and a driver held after the helper's start\n",
