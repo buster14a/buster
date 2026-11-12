@@ -694,6 +694,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_driver.c"
 // The driver's commands of several source files (#152): their units on lanes, and one executable of them all.
 #include "buster/compiler/c_checker_units.c"
+// #2531's measure-attested: attested declarations' census, beside a command's units (check_driver_attested).
+#include "buster/compiler/c_check_attested.c"
 #pragma clang section text = ""
 // #2524's node machine: a full expression's typed entries in one visit a node. Its transition table is baked below; its
 // shadow (measure-node-machine --shadow) is c_check_node_census.c's.
@@ -808,6 +810,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/c_check_lower_inventory_test.c"
 #include "buster/compiler/c_check_node_census_test.c"
+#include "buster/compiler/c_check_attested_test.c"
 #endif
 // #1048's test-lowering-templates: node templates against the tasks' rules, function for function.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
@@ -2019,6 +2022,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-node-machine") == 0)
     {
         result = run_node_census(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-attested") == 0)
+    {
+        arena_static_base_pages();
+        arena_limits_fix();
+        result = run_attested_census(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
