@@ -18,9 +18,10 @@
 # runtime, sanitizer, fuzzing and debug information, only when the settings, PATH or the toolchain changed since it
 # last did (a changed clang starts the tree afresh), then has Ninja build what changed: an unchanged build compiles,
 # links and bakes nothing. It builds Release unless --config says Debug or Develop (Release's optimization in parts, for
-# the edit loop), at most one compile per core of the CPUs it may run on, and when it builds the executable, build/cmake/VARIANT/CONFIG/compiler, it publishes that file as
-# build/compiler (a hard link, the same file) and its configuration's compile commands as build/compile_commands.json,
-# once the build has succeeded. Builds of one tree, and publications, wait for each other.
+# the edit loop), at most one compile per core of the CPUs it may run on, and when it builds the executable,
+# build/cmake/VARIANT/CONFIG/compiler, it publishes that file as build/compiler (a hard link, the same file) and its
+# configuration's compile commands as build/compile_commands.json, once the build has succeeded. Builds of one tree,
+# and publications, wait for each other.
 #
 # print-compile-flags, print-sanitizer-flags, print-host-flags and print-sources print expanded arguments and source
 # paths as NUL-delimited argv, without building (cmake/BusterPrint.cmake); consumers read arrays rather than reevaluating

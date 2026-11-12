@@ -2,8 +2,8 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
 # The build of build/cmake/VARIANT/CONFIG/compiler: Ninja Multi-Config, Debug, Release and Develop in one tree per
-# toolchain and variant (CMakePresets.json, build.sh). docs/commands/build.md has the configurations, the settings, the targets
-# and the outputs. cmake/BusterSettings.cmake holds the sources and the flags; this file applies them.
+# toolchain and variant (CMakePresets.json, build.sh). docs/commands/build.md has the configurations, the settings, the
+# targets and the outputs. cmake/BusterSettings.cmake holds the sources and the flags; this file applies them.
 
 cmake_minimum_required(VERSION 3.25)
 

@@ -801,8 +801,31 @@ whose `benchmark-preprocessor` `test-preprocessor` runs for its location
 option, and `tier1_model_measure.c` and the two test units. A test that comes to
 run another benchmark command needs its unit taken off the list.
 
+**Measured** on the 9700X, eight jobs, the host's clang 23.1.1 ([the record](https://github.com/buster14a/buster-performance/tree/ba33a36de7aecf915f9ffceb48ea9d5cf666ae8a/docs/measurements/develop-configuration-2559-2026-11-12)):
+
+| Scenario | Develop | Release |
+| --- | ---: | ---: |
+| Clean build | 33.8 s (265 s of CPU) | 84.3 s (494 s) |
+| Nothing changed | 0.04 s | 0.03 s |
+| A function appended to `c_check_input.c` (1 part job) | 13.6 s | 73.7 s |
+| One before `c_check_input.c`'s first line (7) | 15.4 s | |
+| `differential.c` (1) | 7.3 s | |
+| `tier0.c`, which two units read (2) | 14.9 s | |
+| `c_parser_impl.c` (1) | 4.9 s | |
+| `host_isa.h`'s time alone (0) | 11.7 s | |
+
+After a series of eleven edits the rebuilt executable is a clean build's; the
+correctness inventory passes on Develop's executable (with CI's toolchain, at
+`znver5`); it writes the same objects and preprocessed output as Release's on
+`sqlite3.c` and the compiler's own units; the record's 21 test commands take
+47.3 s against Release's 43.3 s (+9%); and the compile path runs 1.9% more user
+cycles (`-c sqlite3.c`, `-fsyntax-only` of the checker's unit, one placement).
+A clean Develop build is bound by its work on eight jobs; an edit by the edited
+unit's front end (6.6 s for the checker's unit), its split and its largest
+changed part.
+
 **What it costs.** Develop's executable runs the compile path 1% to 2% slower
-than Release's (#2559's measurements) and writes the same outputs; its debug
+than Release's (above) and writes the same outputs; its debug
 information has functions and lines, not variables, so `perf` and backtraces
 work and a debugger's `print` doesn't (Debug is for that). Release and Debug are
 untouched: their commands are the same, and so are their executables, byte for

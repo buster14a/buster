@@ -3,9 +3,9 @@
 #
 # Split one source module into PARTITIONS code parts and the part of its global variables, recording its public
 # definitions before the split hides local ones another part refers to: SPLIT is tools/codegen/split.c (Release's fully
-# optimized module, in module order) or tools/codegen/presplit.c (Develop's, before the optimizer), with OPTIONS. Unchanged
-# parts and exports retain their mtimes so Ninja can reuse their native objects. Changed files are renamed into place,
-# and the stamp is written last. An interrupted split cannot publish a successful collection.
+# optimized module, in module order) or tools/codegen/presplit.c (Develop's, before the optimizer), with OPTIONS.
+# Unchanged parts and exports retain their mtimes so Ninja can reuse their native objects. Changed files are renamed
+# into place, and the stamp is written last. An interrupted split cannot publish a successful collection.
 
 cmake_minimum_required(VERSION 3.25)
 foreach(name INPUT DIRECTORY SPLIT NM PARTITIONS)
