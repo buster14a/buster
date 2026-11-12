@@ -334,7 +334,7 @@ static const ChangesModule changes_modules[] = {
     },
     {
         .name = "ir_optimize",
-        .sources = "ir|ir_validate|ir_optimize[a-z0-9_]*",
+        .sources = "ir|ir_validate|ir_optimize[a-z0-9_]*|ir_thread[a-z0-9_]*",
     },
     {
         .name = "checker",
@@ -399,7 +399,7 @@ static const ChangesModule changes_modules[] = {
     {
         .name = "tier1_programs",
         .sources = "tier1_programs_measure|profile|compile_measure|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
-                   "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|tier1_[a-z0-9_]*",
+                   "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|ir_thread|tier1_[a-z0-9_]*",
     },
     // #1059's paired measurements (measure-helpers): the primitives' kernels and speedtest1 by both tiers, each as the
     // compiler lowers them and with --helper-forms=all, where what they compare changes (the direct forms' admission and
