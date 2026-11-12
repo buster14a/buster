@@ -196,9 +196,20 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // An unparenthesized `+` or `-` as a shift's operand (#2264, clang's DiagnoseAdditionInShift): -Wshift-op-parentheses,
+    // on by default, under -Wparentheses.
+    CHECK_WARNING_ID_SHIFT_OP_PARENTHESES = 141,
+    // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
+    // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 142,
+    // A relational comparison whose left operand is one, unparenthesized (#2264, clang's diagnoseChainedComparison):
+    // -Wparentheses', an error by default.
+    CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
+    // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
+    CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
     // A local variable only set (#2409, clang's DiagnoseUnusedButSetDecl): -Wunused-but-set-variable, -Wunused's, -Wall's.
     // Its event is an UNUSED_VARIABLE one whose payload.data is 1.
-    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 141,
+    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 145,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -520,6 +531,9 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // An asm label on a block-scope object of automatic storage, not `register` (#2370, check_input_asm_labels): at the
+    // label's first string token, payload.token that token.
+    CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
