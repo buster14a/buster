@@ -3708,6 +3708,74 @@ static bool check_graph_const_warnings(const TypeTable* types, const CheckGraph*
     return valid;
 }
 
+// Whether clang goes on to a call's next argument after `argument` failed to convert to `parameter` with `diagnostic`:
+// where its conversion is one clang makes with an error-by-default warning (incompatible pointers, an integer and a
+// pointer: checkAssignmentConstraints' IncompatiblePointer, IntToPointer, PointerToInt), not a hard error (incompatible
+// types, another address space), after which it stops.
+static bool check_graph_soft_argument(const TypeTable* types, const CheckStream* stream, CheckDiagnostic diagnostic, uint32_t argument, TypeId parameter)
+{
+    const TypeId source = argument < stream->count ? type_strip_aligned(types, check_stream_type(stream, argument)) : 0;
+    const uint8_t from = source != 0 ? type_kind(types, source) : BUSTER_TYPE_KIND_NONE;
+    const uint8_t to = type_kind(types, type_strip_aligned(types, parameter));
+    const bool from_pointer = from == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(from) || from == BUSTER_TYPE_KIND_FUNCTION;
+    const bool from_integer = from == BUSTER_TYPE_KIND_INTEGER || from == BUSTER_TYPE_KIND_BIT_INT || from == BUSTER_TYPE_KIND_ENUM;
+    const bool to_pointer = to == BUSTER_TYPE_KIND_POINTER;
+    const bool to_integer = to == BUSTER_TYPE_KIND_INTEGER || to == BUSTER_TYPE_KIND_BIT_INT || to == BUSTER_TYPE_KIND_ENUM;
+    return diagnostic == CHECK_DIAG_INCOMPATIBLE && ((from_pointer && to_pointer) || (from_pointer && to_integer) || (from_integer && to_pointer));
+}
+
+// A call's later arguments that don't convert either (#2413): clang reports each argument's conversion error, where the
+// action stops at the first (its diagnostic's operand). Rare (only a call already in error): the call's check runs again
+// with each failed argument taken as its parameter's type, and each later failure is its own report at its argument, in
+// order. Bounded: calls of up to 64 arguments, whose failed arguments' nodes have no report of their own.
+static void check_graph_report_arguments(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+{
+    const uint32_t count = graph->argument_counts != NULL && graph->argument_tokens != NULL ? graph->argument_counts[node] : 0;
+    uint32_t failed = stream->diagnostic_operands[node];
+    const CheckDiagnostic first = stream->diagnostics[node];
+    const bool conversion = first == CHECK_DIAG_INCOMPATIBLE || first == CHECK_DIAG_ADDRESS_SPACE || first == CHECK_DIAG_ADDRESS_SPACE_NESTED;
+    if (graph->ops[node] == CHECK_OP_CALL && conversion && failed != 0 && failed < count && count <= 64)
+    {
+        CheckValue arguments[64];
+        CheckConversion conversions[64];
+        CheckAction action;
+        check_graph_action(graph, stream, node, arguments, &action);
+        action.argument_conversions = conversions;
+        const CheckValue callee = action.operands[0];
+        TypeId function = type_strip_aligned(types, callee.type);
+        function = type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        const uint32_t offset = graph->argument_offsets[node];
+        CheckDiagnostic last = first;
+        for (uint32_t steps = 0; parameters != NULL && failed != 0 && failed <= parameter_count && steps < count &&
+                                 check_graph_soft_argument(types, stream, last, graph->argument_nodes[offset + failed - 1], parameters[failed - 1]);
+             steps += 1)
+        {
+            arguments[failed - 1] = (CheckValue){ .type = type_conversion_operand(types, parameters[failed - 1]), .category = CHECK_RVALUE };
+            CheckActionResult checked = { 0 };
+            check_action_scalar(types, &action, &checked);
+            const bool later = checked.diagnostic_operand > failed && checked.diagnostic_operand <= count &&
+                               (checked.diagnostic == CHECK_DIAG_INCOMPATIBLE || checked.diagnostic == CHECK_DIAG_ADDRESS_SPACE ||
+                                checked.diagnostic == CHECK_DIAG_ADDRESS_SPACE_NESTED);
+            const uint32_t argument = later ? graph->argument_nodes[offset + checked.diagnostic_operand - 1] : BUSTER_CHECK_NONE;
+            if (later && argument < graph->count && stream->diagnostics[argument] == CHECK_DIAG_NONE && stream->report_count < graph->count)
+            {
+                stream->reports[stream->report_count] = (CheckReport){
+                    .node = node,
+                    .token = graph->argument_tokens[offset + checked.diagnostic_operand - 1],
+                    .message = CHECK_MESSAGE_ACTION,
+                    .diagnostic = checked.diagnostic,
+                    .fault = CHECK_FAULT_NONE,
+                };
+                stream->report_count += 1;
+            }
+            failed = later ? checked.diagnostic_operand : 0;
+            last = checked.diagnostic;
+        }
+    }
+}
+
 static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
 {
     const uint8_t context = graph->contexts != 0 ? graph->contexts[node] & (uint8_t)~BUSTER_CHECK_CONTEXT_VALUE : 0;
@@ -3721,6 +3789,7 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
         if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
         {
             check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
+            check_graph_report_arguments(types, graph, stream, node);
         }
     }
     else if (context != 0 && value->type != 0)

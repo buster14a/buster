@@ -10309,7 +10309,16 @@ enables, which this checker doesn't all give.
     declarator reader puts its missing name, for a pointer parameter
     (`check_driver_parameter_source`), and the end of its declarator for
     another (`check_driver_parameter_place`). Both read the declaration's
-    tokens when a note is given; no prototype keeps them;
+    tokens when a note is given; no prototype keeps them. A call's later
+    arguments that don't convert either get their own errors, in order, as
+    clang's ConvertArgumentsForCall goes on past an error-by-default
+    conversion (incompatible pointers, an integer and a pointer) and stops at
+    a hard one (incompatible types, another address space) (#2413,
+    `check_graph_report_arguments`, which checks the call again with each failed
+    argument taken as its parameter's type: only for a call already in error).
+    Still apart: a later argument's `-Wpointer-sign` or qualifier warning comes
+    before an earlier argument's error here, where clang gives them in argument
+    order;
   - the types as written: an array's and a function's unconverted, a qualified
     lvalue's qualified, with their typedefs;
   - clang's fix-it words (`check_driver_conversion_hint`,

@@ -3122,7 +3122,13 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
     const bool incompatible = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE;
     const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const bool void_return = returning && check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_VOID;
-    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    // The argument the report is at (#2413: a call's later failed arguments' reports, at each one's token), else the
+    // action's diagnostic operand.
+    uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    for (uint32_t i = 0; op == CHECK_OP_CALL && graph->argument_tokens != NULL && i < graph->argument_counts[node]; i += 1)
+    {
+        argument_index = graph->argument_tokens[graph->argument_offsets[node] + i] == token ? i + 1 : argument_index;
+    }
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     uint32_t source = BUSTER_CHECK_NONE;
     TypeId target = 0;
@@ -3596,7 +3602,13 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     // message gives.)
     const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
                            check_action_kind(types, graph->types[node]) != BUSTER_TYPE_KIND_VOID;
-    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    // The argument the report is at (#2413: a call's later failed arguments' reports, at each one's token), else the
+    // action's diagnostic operand.
+    uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    for (uint32_t i = 0; op == CHECK_OP_CALL && graph->argument_tokens != NULL && i < graph->argument_counts[node]; i += 1)
+    {
+        argument_index = graph->argument_tokens[graph->argument_offsets[node] + i] == token ? i + 1 : argument_index;
+    }
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE &&
                          (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || returning || passing);
