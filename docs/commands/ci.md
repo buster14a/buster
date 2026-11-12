@@ -24,6 +24,47 @@ evidence keeps `hosted=run` and no hosted reuse source, with `scope=plain` in
 the nightly mode and `scope=full` before it, including documentation-only
 pushes.
 
+## The merge queue
+
+`9700x.yml` also runs on `merge_group` (`checks_requested`, main, no path
+filter), the merge queue's candidates (#1430). It is inert until a ruleset
+turns the queue on; the ruleset, removing the `push` triggers and the AGENTS.md
+rule change together, after the capacity gate and the owner's decision.
+
+- **What a candidate runs.** The full hosted contract on its exact commit,
+  documentation alone included:
+  - every row and sanitizer;
+  - the vector pool;
+  - the three fuzz campaigns.
+
+  It takes its own run-id concurrency group, and its rows don't fail fast.
+  It never uses the 9700X (`hardware=skip`, reason `merge-group`), and
+  SQLite's full Tcl suite stays nightly.
+- **Selector.** `changes --event merge_group --workflow
+  .github/workflows/9700x.yml` is its profile: `code`, `measure=all` and
+  `performance`, whatever it changes.
+- **Aggregate.** The required aggregate passes a candidate only through its
+  coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
+  run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
+  - every shard 1..N of every row and sanitizer;
+  - the vector verdict;
+  - each fuzz campaign;
+
+  all completed and successful. `qualification.c` reads the step's outcome
+  (`COVERAGE_RESULT`); no other event runs the step.
+- **Record and credit.** The coverage record has purpose `queue`, and its
+  `pr_head` is the merge's second parent. The nightly's evidence glue, run
+  listing and harvest accept the candidate's runs of the same commit. Once
+  one is credited, the report lists the states without a passing candidate run
+  as coverage gaps.
+- **Policy pins.** `changes --self-test` pins the trigger, the concurrency
+  group, the selector's routing and the aggregate's coverage step, with
+  mutants: a path filter, another branch or type, a shared slot, a skipped
+  selector or coverage step.
+
+[The merge queue](../ci.md#the-merge-queue) has the details and what is still
+to come.
+
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
@@ -466,8 +507,11 @@ the policy. In short:
 - Every `9700x.yml` run has an `evidence` job, which must succeed. A push to
   main is admitted and runs its own native correctness: it reuses nothing
   from its pull request, whose 9700X job skips native correctness (#1272).
+  A merge-queue candidate is never admitted. When main is fast-forwarded to its
+  commit, its plain rows are that state's (#1430).
   A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
-  main, may reuse the commit's own earlier plain hosted rows, and enforces
+  main, may reuse the commit's own earlier plain hosted rows (a push's, a
+  dispatch's or a merge-queue candidate's), and enforces
   02:00-08:00 Europe/Madrid. The 9700X job checks the window again after it
   takes the lock, right after the host's OS and CPU-model check. That is
   before the host identity's package queries and hashing, and before any
