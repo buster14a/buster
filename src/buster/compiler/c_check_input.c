@@ -389,6 +389,10 @@ typedef enum CheckInputMessage
     // "conflicting asm label" at its name, its note "previous declaration is here" at the earlier label's string
     // (`note_token`).
     CHECK_INPUT_ASM_LABEL_CONFLICT,
+    // A `case` or a `default` label outside any switch (#2406): clang's "'case' statement not in switch statement" (or
+    // 'default') at its keyword.
+    CHECK_INPUT_CASE_OUTSIDE_SWITCH,
+    CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -607,6 +611,11 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_CONSTANT_DIVISION,
     // A jump's scope it enters (#1942): a statement expression's `(`, "jump enters a statement expression".
     CHECK_INPUT_NOTE_JUMP,
+    // A condition's cast clang's constant evaluation refuses (#2253, check_condition_cast): to void, "non-literal type 'void'
+    // cannot be used in a constant expression"; between an integer and a pointer, "this conversion is not allowed in a
+    // constant expression".
+    CHECK_INPUT_NOTE_CONSTANT_VOID,
+    CHECK_INPUT_NOTE_CONSTANT_CONVERSION,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
@@ -5191,7 +5200,29 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
         uint32_t cursor = token + 1;
         CheckInputAttributes* attributes = 0;
         reader->tag_attributes = true;
-        const bool valid = check_input_read_attributes(reader, &cursor, end, &attributes);
+        bool valid = check_input_read_attributes(reader, &cursor, end, &attributes);
+        // C23 lists between a struct's or a union's name and its body (#2268): clang's parser's "an attribute list cannot
+        // appear here" at the first, after which it reads them on as the tag's own (CheckMisplacedCXX11Attribute), with the
+        // ones before the name.
+        const Parser* parser = reader->parser;
+        const uint32_t list = valid && parser->tokens.kinds[token] == PARSE_KIND_STRUCT && cursor + 1 < end && parser->tokens.kinds[cursor] == PARSE_KIND_IDENTIFIER &&
+                              parser->tokens.kinds[cursor + 1] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, cursor + 1, end) ? cursor + 1 : BUSTER_CHECK_NONE;
+        uint32_t list_end = list;
+        while (list_end < end && parser->tokens.kinds[list_end] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, list_end, end))
+        {
+            list_end = parser->tree.parents[list_end] < end ? parser->tree.parents[list_end] + 1 : end;
+        }
+        if (list_end < end && parser->tokens.kinds[list_end] == PARSE_KIND_L_BRACE)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, list, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
+            valid = !reader->output->resource && check_input_recover_reports(reader, before);
+            uint32_t at = list;
+            reader->tag_name_list = true;
+            valid = valid && check_input_read_attributes(reader, &at, list_end, &attributes);
+            reader->tag_name_list = false;
+            memset(reader->ignored + list, 1, list_end - list);
+        }
         reader->tag_attributes = false;
         // Before the identity, which completes an enum with a fixed underlying type and its alignment attribute.
         check_input_set_attributes_at(reader->output, token, valid ? attributes : 0);
@@ -6808,6 +6839,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     }
     CheckInputAttributes parsed = { 0 };
     bool valid = check_input_attributes(reader, cursor, end, &parsed);
+    // (Whether an attribute was dropped for an undeclared name in its arguments, #2251.)
+    bool names_dropped = false;
     for (uint32_t i = 0; valid && i < parsed.count; i += 1)
     {
         CheckInputAttribute* attribute = &parsed.records[i];
@@ -6821,7 +6854,30 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                  attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
         if (expressions && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS)
         {
+            const uint32_t reported = reader->output->report_count;
+            const CheckInputAttributeError error_before = parsed.error;
+            const uint32_t error_first_before = parsed.error_first;
+            const uint32_t error_end_before = parsed.error_end;
             valid = check_input_attribute_expressions(reader, &parsed, attribute);
+            // An argument's name that names nothing (#2251): clang's parser drops the attribute after its "use of undeclared
+            // identifier" and the declaration goes on, with the list's other attributes.
+            bool undeclared = !valid && !reader->output->resource && reader->output->report_count > reported;
+            for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
+            {
+                undeclared = reader->output->reports[r].message == CHECK_INPUT_UNDECLARED;
+            }
+            if (undeclared && check_input_recover_reports(reader, reported))
+            {
+                names_dropped = true;
+                parsed.error = error_before;
+                parsed.error_first = error_first_before;
+                parsed.error_end = error_end_before;
+                memmove(parsed.records + i, parsed.records + i + 1, (uint64_t)(parsed.count - i - 1) * sizeof(CheckInputAttribute));
+                parsed.count -= 1;
+                i -= 1;
+                valid = true;
+                continue;
+            }
             if (!valid)
             {
                 break;
@@ -7060,10 +7116,12 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             valid = true;
         }
     }
-    CheckInputAttributes* combined = valid ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
-    reader->output->resource |= valid && combined == 0;
-    valid &= combined != 0;
-    if (valid)
+    // (A list whose every attribute was dropped adds nothing, #2251.)
+    const bool emptied = valid && parsed.count == 0 && parsed.repeats == NULL && names_dropped;
+    CheckInputAttributes* combined = valid && !emptied ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
+    reader->output->resource |= valid && !emptied && combined == 0;
+    valid &= emptied || combined != 0;
+    if (valid && !emptied)
     {
         const CheckInputAttributes empty = { 0 };
         valid = check_input_attribute_merge(reader, *attributes != 0 ? *attributes : &empty, &parsed, combined);
@@ -10278,10 +10336,13 @@ static TypeId check_input_auto_type_merged(const TypeTable* types, TypeId declar
         if (check_input_auto_type(stripped))
         {
             // The placeholder's const and volatile, and a restrict one's restrict (its marker's bit is the others' too), are
-            // the earlier type's; an _Atomic one is an atomic type (check_input_auto_type_refused), not modeled here.
+            // the earlier type's. A plain one takes an atomic type too, and an _Atomic one only an atomic type, whose value
+            // type it merges as clang's mergeTypes merges two atomic types' (#1844): `_Atomic int r; __auto_type r = 1;`
+            // is an `_Atomic int` (check_input_auto_type_refused refuses the others).
             const TypeId marker = stripped & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
             const uint32_t own = (qualifiers & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) | (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0);
-            result = own == type_qualifiers(prior) && marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC && type_kind(types, prior) != BUSTER_TYPE_KIND_ATOMIC ? previous : 0;
+            const bool atomic_match = marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC || type_kind(types, prior) == BUSTER_TYPE_KIND_ATOMIC;
+            result = own == type_qualifiers(prior) && atomic_match ? previous : 0;
             walking = false;
         }
         else if (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER && type_kind(types, prior) == BUSTER_TYPE_KIND_POINTER && qualifiers == type_qualifiers(prior))
@@ -14054,6 +14115,32 @@ static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const 
     const bool pointer = held != 0 && type_kind(types, held) == BUSTER_TYPE_KIND_POINTER && argument->offset == 0 &&
                          check_const_load(types, &reader->output->const_values, argument->object, 0, 0, 0, held, position, &pointee) &&
                          pointee.constant_kind == CHECK_CONSTANT_ADDRESS && pointee.object != 0;
+    // That pointer's own initializer's casts (#2189): one that lost the designator loses it for the call too, as clang's
+    // evaluator reads the stored pointer's designator (`(const char*)(const void*)arr`). Its initializer runs from the
+    // declarator's `=` to its `,` or `;`.
+    uint32_t equal = pointer && receipt->declaration < parser->tokens.count ? receipt->declaration + 1 : parser->tokens.count;
+    uint32_t depth = 0;
+    while (equal < parser->tokens.count && !(depth == 0 && (parser->tokens.kinds[equal] == PARSE_KIND_EQUAL || parser->tokens.kinds[equal] == PARSE_KIND_SEMI ||
+                                                            parser->tokens.kinds[equal] == PARSE_KIND_COMMA)))
+    {
+        const uint8_t kind = parser->tokens.kinds[equal];
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? 1u : 0u;
+        equal += 1;
+    }
+    const bool initialized = equal < parser->tokens.count && parser->tokens.kinds[equal] == PARSE_KIND_EQUAL;
+    uint32_t stop = initialized ? equal + 1 : equal;
+    depth = 0;
+    while (initialized && stop < parser->tokens.count && !(depth == 0 && (parser->tokens.kinds[stop] == PARSE_KIND_SEMI || parser->tokens.kinds[stop] == PARSE_KIND_COMMA)))
+    {
+        const uint8_t kind = parser->tokens.kinds[stop];
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? 1u : 0u;
+        stop += 1;
+    }
+    const CheckInputVerboseTrapDesignator stored = initialized && equal + 1 < stop ? check_input_verbose_trap_designator(reader, equal + 1, stop) :
+                                                                                       CHECK_INPUT_VERBOSE_TRAP_DESIGNATED;
+    designator = stored == CHECK_INPUT_VERBOSE_TRAP_DESIGNATED ? designator : designator == CHECK_INPUT_VERBOSE_TRAP_UNKNOWN ? designator : stored;
     const CheckValue* address = pointer ? &pointee : argument;
     receipt = pointer ? check_const_find(&reader->output->const_values, address->object, position, &owner) : receipt;
     uint64_t begin = 0;

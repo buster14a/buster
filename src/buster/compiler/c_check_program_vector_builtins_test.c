@@ -707,6 +707,19 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "return (int)h;}",
         },
         {
+            // pdep, pext and clmul of integer scalars (#2410, check_lower_scalar_lanes): of each width and signedness and
+            // _BitInts of widths no power of two, their operands' bits past the width cleared first and the product
+            // truncated to it; all ones and random bits.
+            "scalar-integer-bits",
+            "#define D(T,k) {T a=(T)((unsigned long long)n*0x9e3779b97f4a7c15ull>>k),b=(T)((unsigned long long)n*0x2545f4914f6cdd1dull>>(k+5)),c=(T)-1;"
+            "T q_[]={__builtin_elementwise_pdep(a,b),__builtin_elementwise_pdep(c,b),__builtin_elementwise_pext(a,b),__builtin_elementwise_pext(a,c),"
+            "__builtin_elementwise_clmul(a,b),__builtin_elementwise_clmul(c,c)};FOLD(q_);}\n"
+            "int tested(int n){unsigned h=2166136261u;"
+            "D(unsigned char,1)D(signed char,2)D(short,3)D(unsigned short,4)D(int,5)D(unsigned,6)D(long,7)D(unsigned long long,8)"
+            "D(unsigned _BitInt(37),9)D(_BitInt(37),10)D(unsigned _BitInt(5),11)D(_BitInt(64),12)D(unsigned _BitInt(1),13)"
+            "return (int)h;}",
+        },
+        {
             // The masked memory builtins (#148), of masks read from random bytes (a vector of bools' bits, those past its
             // lanes among them, which take no part), on memory of random bytes: loads and expanding loads of every element
             // size at each width and of 2, 3 and 4 lanes, without a passthru (whose elements k1 leaves are undefined, set
@@ -945,11 +958,14 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
         { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
-        // The integer elementwise builtins of scalars that clang's code computes by instructions of their own: clmul's,
-        // pdep's and pext's (the others are element sequences, check_lower_integer_elements), and those of 128-bit integers.
-        { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "elementwise builtins of scalars", 0 },
-        { "znver5", "__int128 tested(__int128 n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
-        { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars", 0 },
+        // The integer elementwise builtins of scalars (#2410): clmul's without PCLMUL and pdep's and pext's without BMI2,
+        // which clang's code expands bit by bit (check_lower_scalar_lanes takes them with those instructions), and those of
+        // integers wider than 128 bits, and pdep's, pext's and clmul's of integers wider than 64.
+        { "x86-64-v3", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "carry-less multiplication without PCLMUL", 0 },
+        { "znver5", "_BitInt(129) tested(_BitInt(129) n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
+        { "znver5", "__int128 tested(__int128 n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars of more than 64 bits", 0 },
+        { "x86-64-v2", "unsigned tested(unsigned n){return __builtin_elementwise_pdep(n,n);}", "bit deposits and extractions without BMI2", 0 },
+        { "x86-64-v2", "unsigned long tested(unsigned long n){return __builtin_elementwise_pext(n,n);}", "bit deposits and extractions without BMI2", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_floor(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sin(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8hf* p,v8hf* q){*p=__builtin_elementwise_maximum(*p,*q);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },

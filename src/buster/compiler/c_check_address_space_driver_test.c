@@ -352,6 +352,22 @@ static const CheckDriverDefaultWarningFixture check_driver_address_space_fixture
                   "int f(__seg_gs int *p) { return *p + p[1]; }\n"
                   "void g(__seg_fs struct S *s, int v) { s->b = v; }\n",
     },
+    {
+        // A generic atomic builtin's pointers that take the object's pointer type (a store's value, an exchange's result,
+        // a compare-exchange's desired) in another address space than the object's (#2233): clang's "changes address
+        // space of pointer". The others take a pointer to the object's value type, which drops the space, as clang's do.
+        .name = "generic atomic builtins' pointers in another address space",
+        .source = "void a(int __seg_gs *p, int *v, int *o) { __atomic_exchange(p, v, o, 5); }\n"
+                  "void b(int __seg_gs *p, int *r) { __atomic_load(p, r, 5); }\n"
+                  "void c(int __seg_gs *p, int *v) { __atomic_store(p, v, 5); }\n"
+                  "_Bool d(int __seg_gs *p, int *e, int *w) { return __atomic_compare_exchange(p, e, w, 0, 5, 5); }\n"
+                  "void a2(int __seg_gs *p, int __seg_gs *v, int *o) { __atomic_exchange(p, v, o, 5); }\n"
+                  "void a3(int *p, int __seg_gs *v, int *o) { __atomic_exchange(p, v, o, 5); }\n"
+                  "void b3(int *p, int __seg_gs *r) { __atomic_load(p, r, 5); }\n"
+                  "void c3(int *p, int __seg_gs *v) { __atomic_store(p, v, 5); }\n"
+                  "_Bool d3(int *p, int __seg_gs *e, int __seg_gs *w) { return __atomic_compare_exchange(p, e, w, 0, 5, 5); }\n",
+        .errors = 6,
+    },
 };
 
 static void check_test_driver_address_spaces(CheckTest* test, const char* clang, const char* executable, const char* directory)

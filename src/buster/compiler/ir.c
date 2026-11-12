@@ -399,10 +399,13 @@ struct IrCall
 // An asm statement placed in its caller (#1839, Tier0AsmBody): the records a body call runs in its place, which read the
 // statement's operand block through BUSTER_TIER0_ASM_BLOCK's base, their own branches (relative to the first record; a
 // target may be `count`, the body's end) and the registers they write (`touched`, BUSTER_TIER0_XMM's layout: rax to r15
-// in bits 0 to 15, xmm0 to xmm15 in bits 16 to 31). The block is the call's one argument, a ptr that is the block's
+// in bits 0 to 15, xmm0 to xmm15 in bits 16 to 31). The block is the call's first argument, a ptr that is the block's
 // IR_STACK_ADDR, and a body without one has none: every pass takes the call as an unknown callee's of that pointer, so
-// the block escapes into it, its stores stay before it and no access moves across it. The records are borrowed from the
-// producer, trusted as a row's are; the verifier checks the columns' shape.
+// the block escapes into it, its stores stay before it and no access moves across it. The register operands follow it
+// (#2144, CheckProgramAsm.inline_passed): `passed` arguments, the call's last, each a value its records read in its
+// register, `locations[k].registers[0]` (a general register's number, or BUSTER_ABI_REGISTER_VECTOR | n for xmm n), as
+// Tier 0's call row has them. The records and locations are borrowed from the producer, trusted as a row's are; the
+// verifier checks the columns' shape.
 typedef struct IrAsmBody IrAsmBody;
 struct IrAsmBody
 {
@@ -418,7 +421,11 @@ struct IrAsmBody
     // Whether it moves an input into rsp (#1846: rsp's explicit register variable, Tier0AsmBody.stack): its function's
     // frame is then the program's, which the code certificate leaves uncertified.
     bool stack;
+    // Its register operands' registers (#2144), one location per argument past the block, `passed` of them.
+    const AbiLocation* locations;
+    uint32_t passed;
 };
+
 
 typedef struct IrSizes IrSizes;
 struct IrSizes
@@ -1715,15 +1722,30 @@ static bool ir_row_call_valid(const IrFunction* f, const IrCall* call)
     return valid;
 }
 
+// A body call's block argument (#1839, IrAsmBody): its first, where it has more arguments than register operands, or
+// BUSTER_IR_NONE.
+static uint32_t ir_asm_body_block(const IrFunction* f, const IrCall* call, const IrAsmBody* body)
+{
+    return call->argument_count > body->passed ? f->extra[call->argument_first] : BUSTER_IR_NONE;
+}
+
 // Whether a body call's descriptor fits its asm body (#1839): within the bodies, of no row, no ABI records and no variadic
-// arguments, void, and of one ptr argument, its block's address, or of none; and the body's branch columns in order, each
-// branch a record of it and each target one of its records or its end.
+// arguments, void, and of one ptr argument, its block's address, or of none, then one argument of a scalar type per
+// register operand (#2144), each in a register; and the body's branch columns in order, each branch a record of it and
+// each target one of its records or its end.
 static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
 {
     const IrAsmBody* body = call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : 0;
-    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->result_type == IR_VOID && call->argument_count <= 1 &&
-                 call->parameter_count == call->argument_count && (call->argument_count == 0 || f->call_types[call->type_first] == IR_PTR) &&
+    const bool block = body != 0 && call->argument_count > body->passed;
+    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->result_type == IR_VOID && call->argument_count - body->passed <= 1 &&
+                 call->argument_count >= body->passed && call->parameter_count == call->argument_count && (!block || f->call_types[call->type_first] == IR_PTR) &&
+                 (body->passed == 0 || body->locations != 0) &&
                  (body->count == 0 || body->records != 0) && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+    for (uint32_t k = 0; valid && k < body->passed; k += 1)
+    {
+        const uint8_t type = f->call_types[call->type_first + (block ? 1 : 0) + k];
+        valid = body->locations[k].kind == BUSTER_ABI_LOCATION_REGISTERS && type != IR_VOID && type < IR_TYPE_COUNT;
+    }
     for (uint32_t k = 0; valid && k < body->branch_count; k += 1)
     {
         valid = body->branches[k] < body->count && (k == 0 || body->branches[k - 1] < body->branches[k]) && body->targets[k] <= body->count;

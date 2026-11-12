@@ -95,6 +95,14 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         // (#2332).
         { "malformed suppress before a label's name", "int g(int x) {\n__attribute__((suppress(1))) l: x++;\nreturn x;\n}\n" },
         { "suppress's empty argument before a label's name", "int g(int x) {\n__attribute__((suppress(\"a\",))) l: x++;\nreturn x;\n}\n" },
+        // A non-string inside the argument's parentheses (#2332): the string error, then the parser's "expected ')'" at the
+        // same token, noted at the innermost `(`; in a statement, a declaration, a label's and a C23 list.
+        { "parenthesized non-string in suppress", "int g(int x) {\n__attribute__((suppress((1)))) x++;\nreturn x;\n}\n" },
+        { "a name in suppress's double parentheses", "int g(int x) {\n__attribute__((suppress(((x))))) x++;\nreturn x;\n}\n" },
+        { "parenthesized non-string in suppress's second argument", "int g(int x) {\n__attribute__((suppress(\"a\", (1)))) x++;\nreturn x;\n}\n" },
+        { "parenthesized non-string in suppress before a declaration", "int g(int x) {\n__attribute__((suppress((1)))) int y = x;\nreturn y;\n}\n" },
+        { "parenthesized non-string in suppress before a label", "int g(int x) {\n__attribute__((suppress((1)))) l: x++;\nreturn x;\n}\n" },
+        { "parenthesized non-string in C23's suppress", "int g(int x) {\n[[clang::suppress((1))]] x++;\nreturn x;\n}\n" },
         { "nomerge and suppress before an if", "int g(int x) {\n__attribute__((nomerge, suppress(\"a\", \"b\"))) if (x) x++;\nreturn x;\n}\n" },
         { "clang::nomerge before a return", "int g(int (*p)(void)) {\n[[clang::nomerge]] return p();\n}\n" },
         { "fallthrough in a switch, beside noinline", "int f(int);\nint g(int x) {\nswitch (x) {\ncase 0:\nx = f(x);\n__attribute__((noinline, fallthrough));\n"

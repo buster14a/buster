@@ -552,6 +552,14 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "typedef float w8 __attribute__((vector_size(32)));\n"
         "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x) { w8 a = { 1, 2, 3, 4, 5, 6, 7, 8 }; "
         "a = a * (w8){ x, x, x, x, x, x, x, x }; int y = 0; for (int i = 0; i < 8; i += 1) { y += (int)a[i]; } return y; }\n"
+        // A body that takes its labels' addresses (#2247): each copy's code its own labels, the static table the last
+        // copy's, as clang's static data reaches the last clone it emits (the objects' places of code are clang's).
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long j(int x) { static void* table[] = { &&a, &&b }; "
+        "void* local[] = { &&b, &&a }; goto *(x < 0 ? table[-x & 1] : local[x & 1]); a: return 1; b: return 2; }\n"
+        // A body with a switch whose jump table each copy has of its own (#2247), and one in the next function.
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) int k(int x) { switch (x) { case 0: return 3; case 1: return 5; "
+        "case 2: return 7; case 3: return 11; case 5: return 13; default: return x; } }\n"
+        "int call_k(int x) { switch (x) { case 1: return k(0); case 2: return k(1); case 3: return k(5); case 4: return k(9); default: return k(x); } }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
@@ -568,14 +576,18 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x);\n"
         "int call_s(void);\nint call_t(void);\n"
         "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x);\n"
-        // (In one unit with the definition, the direct path's link doesn't take a label of a symbol the unit defines: #2204.
-        // The versions compute the same values, so the function itself stands for them there.)
-        "#ifndef TARGET_JOINED\n"
+        // Labels of the versions' names: in one unit with the definition, clang's module has one global per name, so they are
+        // the versions' own symbols (#2204, check_program_label_forwards).
         "int w0(int) __asm__(\"w.avx2.0\");\nint w2(int) __asm__(\"w.sse4.2.2\");\nint w3(int) __asm__(\"w.default.3\");\n"
-        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#endif\n"
+        "long j1(int) __asm__(\"j.sse4.2.1\");\nlong j2(int) __asm__(\"j.default.2\");\n"
+        "int k1(int) __asm__(\"k.sse4.2.1\");\nint k2(int) __asm__(\"k.default.2\");\n"
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long j(int x);\n"
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) int k(int x);\nint call_k(int x);\n"
         "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\nint (*address_d)(int) = d;\n"
         "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9),\n"
         "    w(2), w0(3), w2(4), w3(5));\n"
+        "    for (int x = -2; x < 3; x += 1) { printf(\" %ld%ld%ld\", j(x), j1(x), j2(x)); }\n"
+        "    for (int x = -1; x < 7; x += 1) { printf(\" %d:%d,%d,%d,%d\", x, k(x), k1(x), k2(x), call_k(x)); }\n    printf(\"\\n\");\n"
         "    return 0; }\n";
     char sources[2][PATH_MAX];
     char objects[2][3][PATH_MAX];
@@ -624,14 +636,14 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         free(symbols[i]);
     }
     static const uint32_t mixes[][2] = { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 1, 0 }, { 0, 1 }, { 2, 0 }, { 0, 2 } };
-    char runs[BUSTER_ARRAY_LENGTH(mixes)][128];
+    char runs[BUSTER_ARRAY_LENGTH(mixes)][512];
     char program[PATH_MAX];
     snprintf(program, sizeof(program), "%s/target-mixed", directory);
     for (uint32_t m = 0; written && m < BUSTER_ARRAY_LENGTH(mixes); m += 1)
     {
         const bool ran = built[0][mixes[m][0]] && built[1][mixes[m][1]] &&
                          check_test_cpu_dispatch_link_run(clang, objects[0][mixes[m][0]], objects[1][mixes[m][1]], program, runs[m], sizeof(runs[m]));
-        char description[384];
+        char description[1280];
         snprintf(description, sizeof(description), "target versions: the versions' object %u and the callers' %u link and run as clang's: \"%s\" (clang \"%s\")",
                  mixes[m][0], mixes[m][1], ran ? runs[m] : "", runs[0]);
         check_test_expect(test, ran && strcmp(runs[m], runs[0]) == 0, description);
@@ -641,13 +653,44 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
     char together[PATH_MAX];
     snprintf(together, sizeof(together), "%s/target-together.c", directory);
     char text[sizeof(versions) + sizeof(callers) + 32];
-    snprintf(text, sizeof(text), "#define TARGET_JOINED 1\n%s%s", versions, callers);
+    snprintf(text, sizeof(text), "%s%s", versions, callers);
     const bool joined = written && parse_test_write(together, text, strlen(text));
+    // The unit's -c object has clang's symbols: the labels' references are the versions' symbols, with no undefined
+    // symbol of their names (#2204).
+    {
+        char joined_objects[3][PATH_MAX];
+        char* joined_symbols[3] = { malloc(SYMBOLS), malloc(SYMBOLS), malloc(SYMBOLS) };
+        bool joined_built[3] = { false, false, false };
+        for (uint32_t p = 0; joined && p < 3; p += 1)
+        {
+            snprintf(joined_objects[p], sizeof(joined_objects[p]), "%s/target-together-%u.o", directory, p);
+            joined_built[p] = check_test_cpu_dispatch_build(p == 0 ? clang : executable, together, joined_objects[p], true, p == 2, NULL);
+        }
+        const bool read = joined_symbols[0] != NULL && joined_symbols[1] != NULL && joined_symbols[2] != NULL && joined_built[0] && joined_built[1] && joined_built[2] &&
+                          check_test_target_versions_symbols(joined_objects[0], joined_symbols[0], SYMBOLS) &&
+                          check_test_target_versions_symbols(joined_objects[1], joined_symbols[1], SYMBOLS) &&
+                          check_test_target_versions_symbols(joined_objects[2], joined_symbols[2], SYMBOLS);
+        for (uint32_t p = 1; joined && p < 3; p += 1)
+        {
+            char description[SYMBOLS * 2 + 256];
+            snprintf(description, sizeof(description), "target versions: one unit's object of labels of its versions' names has clang's symbols, by the %s path:\n%s(clang\n%s)",
+                     p == 1 ? "vector" : "scalar", read ? joined_symbols[p] : "", read ? joined_symbols[0] : "");
+            check_test_expect(test, read && check_test_target_versions_same_lines(joined_symbols[0], joined_symbols[p]), description);
+        }
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            free(joined_symbols[p]);
+            if (joined)
+            {
+                unlink(joined_objects[p]);
+            }
+        }
+    }
     for (uint32_t p = 0; joined && p < 4; p += 1)
     {
         char built_program[PATH_MAX];
         char debug_object[PATH_MAX];
-        char captured[128] = { 0 };
+        char captured[512] = { 0 };
         snprintf(built_program, sizeof(built_program), "%s/target-direct-%u", directory, p);
         snprintf(debug_object, sizeof(debug_object), "%s/target-debug-%u.o", directory, p);
         bool ran = false;
@@ -667,7 +710,7 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
             free(output);
             ran = linked && check_test_driver_capture(built_program, captured, sizeof(captured));
         }
-        char description[384];
+        char description[1280];
         snprintf(description, sizeof(description), "target versions: %s, by the %s path, runs as clang's build: \"%s\" (clang \"%s\")",
                  p < 2 ? "the direct path's executable" : "-g's object", p % 2 == 0 ? "vector" : "scalar", captured, runs[0]);
         check_test_expect(test, ran && strcmp(captured, runs[0]) == 0, description);
