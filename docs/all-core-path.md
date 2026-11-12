@@ -8,17 +8,20 @@ already in hand remove of that, and the change that removes the rest. The issue
 is [#2536](https://github.com/buster14a/buster/issues/2536). The names of
 existing code are main's at `4c8c3c9c`, and every figure not attributed
 otherwise is that revision's on the 9700X, under the lock, from
-[the measurement record](https://github.com/buster14a/buster-performance/tree/eaa710db255e42520666aaea225b142aa74a2bde/docs/measurements/all-core-design-672-2026-11-12).
+[the measurement record](https://github.com/buster14a/buster-performance/tree/222f622d5f7d46abbc333d80ec8e6ce91930fc4b/docs/measurements/all-core-rerun-2536-2026-11-12),
+which measured [the first record](https://github.com/buster14a/buster-performance/tree/eaa710db255e42520666aaea225b142aa74a2bde/docs/measurements/all-core-design-672-2026-11-12)
+again once the stray process of [#2555](https://github.com/buster14a/buster/issues/2555)
+was gone.
 
 **In one paragraph.** Eight compiles of `sqlite3.c` at once cost each of them
-1.89 times the cycles of one alone (1,297 M against 687 M), for the same
-instructions: 295 MB/s where eight times one compile would be 594. All of the
+1.97 times the cycles of one alone (1,350 M against 687 M), for the same
+instructions: 289 MB/s where eight times one compile would be 585. All of the
 difference is memory. Twice as many loads miss every cache, since the
 third-level cache is shared by eight, and each waits a quarter longer: loads
-that aren't complete are 390 M of the 433 M more user cycles. And the kernel's
+that aren't complete are 419 M of the 466 M more user cycles. And the kernel's
 work for the 190 MB of pages a compile touches once triples. The stages whose
-loads reach all over the unit inflate most: the parse 3.0 times, `check-input`
-1.8, `check-program` 1.8, the lowering 1.7. Tier 0 and the encoder, which stay
+loads reach all over the unit inflate most: the parse 3.4 times, `check-input`
+1.9, `check-program` 1.8, the lowering 1.6. Tier 0 and the encoder, which stay
 inside one function, cost 1.2 times. The design makes the rest of the compile
 run as they do: the unit is read one **window** of external declarations at a
 time, each window taken from its tokens to its code before the next is
@@ -28,8 +31,8 @@ the unit: the twin, and the oracle. It composes with the two one-core
 designs, [the node machine](node-machine.md) for the bodies and
 [attested declarations](attested-declarations.md) for the file scope: they
 remove work, and this removes the waiting for what is left. Expected for
-eight workers on `sqlite3.c`: 1.9 times main's throughput from the windows
-alone (558 MB/s), 2.1 from the node machine alone, and 3.5 to 3.8 from both,
+eight workers on `sqlite3.c`: 2.0 times main's throughput from the windows
+alone (567 MB/s), 2.1 from the node machine alone, and 3.6 to 4.0 from both,
 1.0 to 1.1 GB/s.
 
 ## The problem
@@ -44,30 +47,38 @@ over six rounds of every worker's runs but its first and last, per compile:
 
 | workers | MB/s | wall ms | user cycles | kernel cycles | L2 fills from DRAM | peak RSS | faults | GHz |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1, CPU 2 | 74.3 | 125.0 | 602.4 M | 84.4 M | 13.1 M | 236.7 MB | 7,461 | 5.54 |
-| 1, CPU 5 | 74.1 | 125.9 | 602.8 M | 84.4 M | 13.1 M | 236.7 MB | 7,460 | 5.50 |
-| 2 | 113.6 | 164.3 | 722.5 M | 164.0 M | 13.9 M | 190.5 MB | 63,081 | 5.51 |
-| 4 | 198.9 | 183.4 | 802.4 M | 182.6 M | 15.1 M | 190.7 MB | 63,006 | 5.47 |
-| 8 | 295.4 | 252.3 | 1,044.7 M | 251.8 M | 15.2 M | 190.7 MB | 62,996 | 5.21 |
-| 15, every online CPU | 323.1 | 433.0 | 1,802.7 M | 392.3 M | 15.6 M | 190.7 MB | 62,994 | 5.14 |
+| 1, CPU 2 | 73.2 | 125.0 | 601.5 M | 85.0 M | 13.1 M | 241.0 MB | 7,404 | 5.55 |
+| 1, CPU 5 | 75.3 | 125.5 | 602.4 M | 83.1 M | 13.1 M | 241.0 MB | 7,404 | 5.51 |
+| 2 | 125.6 | 143.1 | 679.6 M | 100.0 M | 15.0 M | 236.7 MB | 7,460 | 5.52 |
+| 4 | 198.8 | 188.0 | 822.7 M | 194.9 M | 15.1 M | 195.2 MB | 62,964 | 5.50 |
+| 8 | 288.8 | 259.0 | 1,074.4 M | 275.6 M | 15.3 M | 195.2 MB | 62,982 | 5.28 |
+| 15, every online CPU | 321.1 | 446.7 | 1,870.7 M | 420.8 M | 15.6 M | 195.2 MB | 62,970 | 5.21 |
 
 Every compile retires the same 1,348.9 M user instructions. Eight workers give
-3.98 times one worker's throughput; each compile costs 1.73 times the user
-cycles and 2.98 times the kernel's, 1.89 times in all. The second thread of
-each core adds 9%. CPU 2 alone runs the performance governor, and a compile
-alone on a powersave core (CPU 5) is 0.8% slower; nothing here changed a host
-setting. From two workers on, a compile finds the host busy when it starts and
-takes base pages (#1561): that is why the peak and the faults change there.
+3.95 times one worker's throughput; each compile costs 1.79 times the user
+cycles and 3.24 times the kernel's, 1.97 times in all. The second thread of
+each core adds 11%. CPU 2 alone runs the performance governor, and a compile
+alone on a powersave core (CPU 5) is 0.4% slower; nothing here changed a host
+setting. From four workers on, a compile finds the host busy when it starts
+and takes base pages (#1561): that is why the peak and the faults change
+there. Two workers are at the test's edge (runnable tasks a quarter of the 15
+CPUs): 46 of their 72 compiles took huge pages, and the row is theirs; the 26
+that took base pages cost 163.9 ms, 722.7 M user and 166.1 M kernel cycles.
+The peaks include about 4.5 MB of the executable's own file, which the
+measuring copy of it maps and the first record's build didn't (the record
+checks it): a compile's own peak is 236.7 MB alone and 190.7 MB in base pages,
+as before.
 
-A stray process held a core through the day (a test program left looping by
-another session, not under the lock). It sat on the second thread of core 0
-in nearly every cohort, so from four workers on, the medians leave out the
-worker on CPU 0, whose compiles took 300 ms and more, and the rates take that
-worker's as the others' mean. The record has where the stray was for every
-cohort.
+The first record of this design was measured beside a stray process (a test
+program left looping by another session outside the lock, #2555). It shared
+core 0 with a worker, which the first record left out, and the slowed worker
+left the others a lighter host: eight workers there cost 1,297 M cycles a
+compile and ran 295 MB/s. It was also one more runnable task, which put the
+two-worker cohorts over the busy test. The figures here are from the same
+executable, scripts and inputs once the stray was gone.
 
-For 1 GB/s on eight cores a compile has 76 ms of a core, 396 M cycles at the
-frequency eight workers run at. Today's 1,297 M is 3.3 times that.
+For 1 GB/s on eight cores a compile has 76 ms of a core, 401 M cycles at the
+frequency eight workers run at. Today's 1,350 M is 3.4 times that.
 
 ### All of it is memory
 
@@ -75,36 +86,36 @@ The same cohorts under three other counter sets, per compile:
 
 | | 1 worker | 8 workers |
 | --- | ---: | ---: |
-| user cycles | 601.1 M | 1,033.7 M |
-| … with a load not complete at retirement | 248.3 M | 638.8 M |
-| dispatch slots waiting for the backend | 39.7% | 59.1% |
-| L1D demand fills: all; from L3; from DRAM | 11.34 M; 1.20 M; 1.43 M | 10.93 M; 0.77 M; 2.95 M |
-| L2 fills from L3, user | 8.62 M | 2.50 M |
-| L2 fills from DRAM: user; kernel | 7.97 M; 5.07 M | 10.16 M; 5.15 M |
-| L3 lookups that miss; a miss's sampled latency | 59%; 115 ns | 84%; 146 ns |
+| user cycles | 601.6 M | 1,067.4 M |
+| … with a load not complete at retirement | 248.9 M | 668.2 M |
+| dispatch slots waiting for the backend | 39.7% | 60.4% |
+| L1D demand fills: all; from L3; from DRAM | 11.38 M; 1.22 M; 1.43 M | 10.93 M; 0.81 M; 3.01 M |
+| L2 fills from L3, user | 8.68 M | 2.44 M |
+| L2 fills from DRAM: user; kernel | 7.99 M; 5.10 M | 10.15 M; 5.09 M |
+| L3 lookups that miss; a miss's sampled latency | 59%; 116 ns | 85%; 150 ns |
 | mispredicted branches | 3.62 M | 3.70 M |
 
-- **The waiting is the inflation.** 390 M of the 433 M more user cycles have a
+- **The waiting is the inflation.** 419 M of the 466 M more user cycles have a
   load that isn't complete. The branches, the instructions and the first-level
   cache's misses are the same.
 - **Twice the misses, each a quarter longer.** Alone, a compile has the 32 MB
   third-level cache to itself; beside seven others it has an eighth. The
-  demand fills that come from DRAM double (1.43 M to 2.95 M) and the L3's own
+  demand fills that come from DRAM double (1.43 M to 3.01 M) and the L3's own
   fall by a third. An L3 miss's sampled latency (`l3_xi_sampled_latency`, on
-  every CPU) is 115 ns with one worker, 104 with two, 115 with four, 146 with
-  eight and 160 with fifteen, against 82 on the idle host.
+  every CPU) is 116 ns with one worker, 127 with two (in huge pages), 120 with
+  four, 150 with eight and 166 with fifteen, against 79 on the idle host.
 - **The kernel's part is the pages.** A compile touches 190 MB of fresh pages
   once: 63,000 faults, each with its clear, its charge and its place in the
-  kernel's lists, and at its end as many pages given back. That is 155 M
-  kernel cycles alone with base pages and 252 M beside seven others: 4,000
-  cycles a page, 1.3 M for each megabyte of the peak. The exit alone, where
-  eight processes give their pages back at once, is about 35 M of them, and
+  kernel's lists, and at its end as many pages given back. That is 157 M
+  kernel cycles alone with base pages and 276 M beside seven others: 4,400
+  cycles a page, 1.4 M for each megabyte of the peak. The exit alone, where
+  eight processes give their pages back at once, is about 33 M of them, and
   `native_queued_spin_lock_slowpath` leads its teardown.
 - **It isn't the clearing that grows.** By the kernel's functions, in sampled
-  cycles a compile at eight workers: `_raw_spin_lock` 57 M,
-  `do_anonymous_page` 51 M, `clear_page_erms` 44 M, `lock_vma_under_rcu`
-  32 M, `native_queued_spin_lock_slowpath` 22 M, `asm_exc_page_fault` 21 M.
-  Alone, with huge pages, `clear_page_erms` is 59 M and nothing else is above
+  cycles a compile at eight workers: `_raw_spin_lock` 56 M,
+  `do_anonymous_page` 53 M, `clear_page_erms` 52 M, `lock_vma_under_rcu`
+  33 M, `asm_exc_page_fault` 21 M, `native_queued_spin_lock_slowpath` 15 M.
+  Alone, with huge pages, `clear_page_erms` is 57 M and nothing else is above
   4 M. The clear of a page costs what it did; the fault's own path and its
   locks, taken 63,000 times beside seven other processes doing the same, are
   the rest.
@@ -120,23 +131,23 @@ Per compile, one worker against eight:
 
 | stage | ms | user cycles, M | times | with a load not complete, M | kernel cycles, M | demand fills from DRAM, thousands | pages faulted, 8 | DRAM bytes moved, MB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| preprocess | 9.7 → 15.6 | 43.1 → 60.2 | 1.39 | 8.7 → 23.3 | 10.2 → 17.5 | 15 → 57 | 5,643 | 93 → 80 |
-| parse | 7.3 → 23.0 | 22.9 → 69.4 | 3.03 | 3.9 → 44.3 | 17.0 → 41.7 | 12 → 204 | 10,430 | 178 → 141 |
-| check-input | 46.1 → 101.8 | 219.0 → 401.8 | 1.84 | 94.7 → 244.6 | 33.9 → 115.6 | 762 → 1,138 | 33,433 | 602 → 558 |
-| check-expressions | 11.5 → 20.5 | 58.4 → 85.3 | 1.46 | 19.9 → 42.9 | 4.9 → 15.5 | 38 → 119 | 6,650 | 98 → 111 |
-| check-declarations, static-data | 2.5 → 4.1 | 12.6 → 17.0 | 1.35 | 7.1 → 11.6 | 1.0 → 3.3 | 53 → 59 | 549 | 37 → 27 |
-| check-program | 23.9 → 45.5 | 128.4 → 226.6 | 1.76 | 68.7 → 157.5 | 2.2 → 6.3 | 380 → 747 | 2,546 | 208 → 251 |
-| select | 1.1 → 2.7 | 5.0 → 11.4 | 2.30 | 2.5 → 8.3 | 0.9 → 2.3 | 16 → 60 | 782 | 13 → 16 |
-| lower | 11.4 → 19.7 | 61.0 → 101.4 | 1.66 | 25.9 → 64.1 | 1.7 → 2.6 | 95 → 234 | 2,147 | 69 → 101 |
-| the emission, Tier 0 to the code's atoms | 8.6 → 12.3 | 46.1 → 64.3 | 1.39 | 12.7 → 28.5 | 1.3 → 0.6 | 39 → 96 | 299 | 33 → 54 |
-| the object | 1.4 → 2.5 | 4.5 → 5.4 | 1.19 | 1.2 → 2.7 | 3.8 → 8.1 | 7 → 17 | 37 | 11 → 10 |
-| the process's start and end | 0.3 → 0.3 | 1.3 → 1.9 | | 0.4 → 0.7 | 7.4 → 38.2 | 1 → 2 | 392 | 22 → 25 |
-| whole compile | 123.6 → 247.8 | 602.4 → 1,044.7 | 1.73 | 245.8 → 628.5 | 84.4 → 251.8 | 1,419 → 2,733 | 62,908 | 1,364 → 1,374 |
+| preprocess | 9.7 → 15.7 | 43.2 → 60.3 | 1.40 | 8.9 → 23.7 | 10.0 → 18.7 | 13 → 53 | 5,639 | 96 → 80 |
+| parse | 7.3 → 24.5 | 23.0 → 78.8 | 3.43 | 4.0 → 53.7 | 17.3 → 46.9 | 11 → 230 | 10,430 | 183 → 151 |
+| check-input | 46.1 → 106.3 | 217.9 → 421.3 | 1.93 | 94.1 → 259.5 | 33.1 → 127.7 | 770 → 1,257 | 33,430 | 609 → 576 |
+| check-expressions | 11.4 → 20.9 | 58.1 → 86.6 | 1.49 | 19.4 → 44.2 | 5.0 → 17.8 | 37 → 129 | 6,649 | 102 → 113 |
+| check-declarations, static-data | 2.5 → 3.9 | 12.6 → 18.8 | 1.49 | 7.2 → 13.4 | 1.0 → 3.6 | 46 → 58 | 549 | 34 → 25 |
+| check-program | 23.9 → 46.5 | 128.6 → 232.2 | 1.81 | 68.9 → 163.4 | 1.9 → 9.1 | 381 → 824 | 2,546 | 214 → 252 |
+| select | 1.1 → 2.8 | 5.0 → 12.1 | 2.43 | 2.5 → 8.6 | 1.0 → 2.4 | 21 → 66 | 782 | 12 → 15 |
+| lower | 11.5 → 19.8 | 61.7 → 98.3 | 1.59 | 26.8 → 61.4 | 1.6 → 4.2 | 97 → 255 | 2,147 | 71 → 88 |
+| the emission, Tier 0 to the code's atoms | 8.6 → 12.2 | 45.6 → 59.3 | 1.30 | 12.3 → 24.3 | 1.3 → 1.5 | 37 → 95 | 298 | 32 → 51 |
+| the object | 1.5 → 2.7 | 4.7 → 4.9 | 1.04 | 1.3 → 2.3 | 5.3 → 7.8 | 8 → 21 | 37 | 13 → 9 |
+| the process's start and end | 0.3 → 0.3 | 1.1 → 1.8 | | 0.3 → 0.7 | 7.6 → 35.9 | 2 → 2 | 382 | 20 → 27 |
+| whole compile | 123.7 → 255.6 | 601.5 → 1,074.4 | 1.79 | 245.9 → 655.1 | 85.0 → 275.6 | 1,421 → 2,991 | 62,889 | 1,386 → 1,387 |
 
 The emission's stages interleave function by function, so they are one row.
 The user cycles are the sampled cohorts' scaled to the unsampled medians, and
 the kernel's are less the sampling's own. The pages are base pages at eight
-workers; alone, the kernel clears huge pages instead (7,461 faults).
+workers; alone, the kernel clears huge pages instead (7,404 faults).
 
 The same compile's function bodies, by family of function (the unit whole
 less the unit without its bodies, the one-core record's split and families),
@@ -144,31 +155,31 @@ in user cycles a body token:
 
 | family | alone | at eight | times |
 | --- | ---: | ---: | ---: |
-| the parser and the tree's columns | 44.1 | 140.9 | 3.19 |
-| libc's `memset`, `memmove`, `memcmp` | 26.8 | 50.9 | 1.90 |
-| the program and its controls | 127.0 | 235.7 | 1.86 |
-| the reader's other functions | 159.9 | 283.1 | 1.77 |
-| the graph's construction | 99.4 | 174.3 | 1.75 |
-| warnings | 124.2 | 198.1 | 1.59 |
-| initializers and static data | 23.9 | 37.6 | 1.57 |
-| the lowering | 93.1 | 141.8 | 1.52 |
-| the C rules for a node | 29.6 | 39.9 | 1.35 |
-| the graph run's loop | 53.8 | 64.9 | 1.21 |
-| the emission: Tier 0, the encoder, branch sizing, unwinding | 74.5 | 90.0 | 1.21 |
-| all of the bodies | 883 | 1,561 | 1.77 |
+| the parser and the tree's columns | 43.7 | 144.4 | 3.30 |
+| the reader's other functions | 157.1 | 285.8 | 1.82 |
+| the graph's construction | 98.0 | 175.9 | 1.80 |
+| the program and its controls | 126.0 | 225.5 | 1.79 |
+| libc's `memset`, `memmove`, `memcmp` | 25.5 | 44.2 | 1.74 |
+| warnings | 123.3 | 205.7 | 1.67 |
+| initializers and static data | 24.3 | 39.9 | 1.64 |
+| the lowering | 93.0 | 142.5 | 1.53 |
+| the C rules for a node | 31.8 | 41.2 | 1.30 |
+| the graph run's loop | 52.0 | 66.6 | 1.28 |
+| the emission: Tier 0, the encoder, branch sizing, unwinding | 75.8 | 90.9 | 1.20 |
+| all of the bodies | 879 | 1,570 | 1.79 |
 
 - **What inflates is a load the prefetchers can't guess, into a record
   longer than the cache.** The parser's passes scatter into arrays as long as
-  the unit (`parse_tree_columns`, `parse_top_parents8`): 3.2 times. The
+  the unit (`parse_tree_columns`, `parse_top_parents8`): 3.3 times. The
   reader's and the program's walks follow the tree and the graph: 1.8. The
-  warnings and the lowering read the graph a node at a time: 1.5 to 1.6.
+  warnings and the lowering read the graph a node at a time: 1.5 to 1.7.
 - **What doesn't is a pass that streams, or one that stays in a function.**
   The graph's run reads its nodes in order and writes the stream behind it,
-  and costs 1.21 times. Tier 0 and the encoder take one function's typed
-  entries to its code and touch nothing else: 1.21 too, and what they do wait
+  and costs 1.28 times. Tier 0 and the encoder take one function's typed
+  entries to its code and touch nothing else: 1.20, and what they do wait
   for is the stream that the lowering wrote for the whole unit before them.
 - **By stage, the kernel's cycles follow the pages** the stage is first to
-  touch: `check-input` 116 M for 33,433 pages, the parse 42 M for 10,430.
+  touch: `check-input` 128 M for 33,430 pages, the parse 47 M for 10,430.
 
 ### The page policy apart from the load
 
@@ -177,15 +188,15 @@ other two corners were run too (`BUSTER_HUGE_PAGES=0` alone, `=1` at eight):
 
 | | wall ms | user cycles | kernel cycles | load not complete | DRAM bytes moved | MB/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 worker, huge pages (main) | 125.0 | 602.4 M | 84.4 M | 248.3 M | 1,388 MB | 74.3 |
-| 1 worker, base pages | 150.2 | 659.9 M | 155.1 M | 303.2 M | 1,150 to 1,310 MB | 62.5 |
-| 8 workers, base pages (main) | 252.3 | 1,044.7 M | 251.8 M | 638.8 M | 1,385 MB | 295.4 |
-| 8 workers, huge pages | 282.7 | 1,206.3 M | 276.6 M | 791.7 M | 1,727 MB | 272.1 |
+| 1 worker, huge pages (main) | 125.0 | 601.5 M | 85.0 M | 248.9 M | 1,380 MB | 73.2 |
+| 1 worker, base pages | 149.2 | 658.7 M | 156.6 M | 301.5 M | 1,155 to 1,184 MB | 62.6 |
+| 8 workers, base pages (main) | 259.0 | 1,074.4 M | 275.6 M | 668.2 M | 1,388 MB | 288.8 |
+| 8 workers, huge pages | 289.4 | 1,239.5 M | 278.5 M | 814.2 M | 1,733 MB | 267.2 |
 
-With the pages held the same, eight workers cost 1.58 times the user cycles
-and 1.62 times the kernel's in base pages, and 2.00 and 3.28 times in huge
-pages. #1561's policy is still right at this main: 8.6% more throughput at
-eight workers, where base pages alone would cost one compile 20%. Neither
+With the pages held the same, eight workers cost 1.63 times the user cycles
+and 1.76 times the kernel's in base pages, and 2.06 and 3.28 times in huge
+pages. #1561's policy is still right at this main: 8.1% more throughput at
+eight workers, where base pages alone would cost one compile 19%. Neither
 corner is the fix: the inflation is 1.6 times with the better pages.
 
 ### DRAM traffic
@@ -198,29 +209,28 @@ and so does this):
 
 | workers | read, MB a compile | written | bytes a source byte | GB/s over the cohort | the data bus in use |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 887 | 495 | 146 | 10.6 | 13% |
-| 2 | 907 | 379 | 135 | 15.5 | 18% |
-| 4 | 971 | 399 | 144 | 24.0 | 28% |
-| 8 | 978 | 406 | 146 | 38.2 | 46% |
-| 15 | 999 | 418 | 149 | 37.8 | 45% |
+| 1 | 875 | 507 | 145 | 11.0 | 13% |
+| 2 | 948 | 480 | 150 | 18.5 | 22% |
+| 4 | 972 | 397 | 144 | 28.7 | 34% |
+| 8 | 983 | 406 | 146 | 42.0 | 50% |
+| 15 | 1,008 | 414 | 150 | 46.1 | 55% |
 
 A compile moves 1.39 GB through DRAM whether it runs alone or beside seven
 others: 146 bytes for each source byte (#672's first record had 269, and
 217 two days later). Eight at once would ask the bus for eight times one
 compile's rate, 89 GB/s, where two channels of DDR5-5200 carry 83.2 at most;
-they get 43 GB/s while all eight run (the median of the counters read every
-2 ms is 41, and the cohort's own mean, which the slowed worker stretches, 38;
-fifteen workers' is 42 in the rounds where no worker shared its CPU with the
-stray), and slow down until their traffic fits. So #672's model still holds: 43 GB/s
-over 146 bytes a byte is 295 MB/s. Streams over 1 GB a worker on the same
-eight cores, the same day, move 55 GB/s reading, 52 with ordinary stores and
-56 copying (one core alone: 48, 46 and 51): the compiles use three quarters
-of what a stream gets.
+they get 43 GB/s while all eight run (42.6; the median of the counters read
+every 2 ms is 43.5, and the cohort's own mean 42.0; fifteen workers' is 46),
+and slow down until their traffic fits. So #672's model still holds: 42.6 GB/s
+over 146 bytes a byte is 292 MB/s, where 289 were measured. Streams over 1 GB
+a worker on the same eight cores, the same day, move 55 GB/s reading, 52 with
+ordinary stores and 57 copying (one core alone: 48, 46 and 51): the compiles
+use three quarters of what a stream gets.
 
 By stage, per compile at eight workers (each 2 ms interval's count divided
 among the stages its runs were in; the stage table's last column):
-`check-input` 558 MB, `check-program` 251, the parse 141, `check-expressions`
-111, the lowering 101, the preprocessor 80, the whole emission 54.
+`check-input` 576 MB, `check-program` 252, the parse 151, `check-expressions`
+113, the lowering 88, the preprocessor 80, the whole emission 51.
 
 ### The bodies and the file scope at eight workers
 
@@ -230,19 +240,19 @@ eight:
 
 | per compile | whole, 1 | file scope, 1 | bodies, 1 | whole, 8 | file scope, 8 | bodies, 8 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| wall ms | 117.2 | 18.9 | 98.3 | 243.6 | 36.2 | 207.4 |
-| user cycles | 563.3 M | 74.3 M | 489.0 M | 1,006.0 M | 123.2 M | 882.8 M |
-| kernel cycles | 80.3 M | 26.4 M | 53.9 M | 247.1 M | 52.7 M | 194.4 M |
-| load not complete | 239.1 M | 19.3 M | 219.8 M | 636.1 M | 61.3 M | 574.7 M |
-| peak RSS | 228.5 MB | 84.9 MB | | 180.5 MB | 43.8 MB | |
-| DRAM bytes moved | 1,344 MB | 223 MB | 1,121 MB | 1,364 MB | 182 MB | 1,182 MB |
+| wall ms | 116.9 | 18.9 | 98.0 | 245.8 | 36.7 | 209.1 |
+| user cycles | 562.2 M | 74.3 M | 487.9 M | 1,021.9 M | 126.3 M | 895.6 M |
+| kernel cycles | 81.3 M | 26.9 M | 54.4 M | 258.4 M | 55.5 M | 202.9 M |
+| load not complete | 236.9 M | 19.2 M | 217.7 M | 656.9 M | 63.7 M | 593.2 M |
+| peak RSS | 233.2 MB | 89.4 MB | | 185.2 MB | 48.4 MB | |
+| DRAM bytes moved | 1,343 MB | 222 MB | 1,121 MB | 1,362 MB | 179 MB | 1,183 MB |
 
 The bodies are 86% of a compile's cycles at eight workers, and 84% alone.
-By stage, of the compile's 116.1 ms alone and 240.0 ms at eight workers: the
+By stage, of the compile's 115.8 ms alone and 242.3 ms at eight workers: the
 bodies' part of the stages between the parser and Tier 0 (`check-input` to
-`lower`, the node machine's territory) is 81.3 and 166.2 ms; of the parse,
-5.6 and 19.0; of Tier 0 and the emission, 8.4 and 12.4. The file scope alone, a sixth of the
-unit's time, still inflates 1.66 times in user cycles: 150,169 tokens of
+`lower`, the node machine's territory) is 81.5 and 167.4 ms; of the parse,
+5.6 and 20.8; of Tier 0 and the emission, 8.3 and 12.2. The file scope alone, a sixth of the
+unit's time, still inflates 1.70 times in user cycles: 150,169 tokens of
 declarations are 44 MB of fresh pages, far past any cache.
 
 ### musl: units on lanes, units as processes
@@ -253,89 +263,89 @@ the units:
 
 | way | pass ms | units/s | user cycles | kernel cycles | L2 fills from DRAM | faults |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| one command, one lane (CPU 2) | 1,072 | 1,246 | 4,816 M | 1,101 M | 10.3 M | 343,109 |
-| one command, 8 lanes | 222 | 6,016 | 5,812 M | 2,295 M | 47.8 M | 326,797 |
-| 8 commands, a share of the units and one lane each | 218 | 6,131 | 5,479 M | 1,501 M | 39.1 M | 392,180 |
-| a process a unit, one at a time | 2,300 | 581 | 5,894 M | 4,319 M | 44.8 M | 855,089 |
-| a process a unit, 8 at a time | 457 | 2,922 | 7,033 M | 5,621 M | 91.5 M | 1,777,589 |
+| one command, one lane (CPU 2) | 1,054 | 1,268 | 4,774 M | 1,050 M | 7.6 M | 343,084 |
+| one command, 8 lanes | 207 | 6,444 | 5,676 M | 2,265 M | 47.9 M | 327,488 |
+| 8 commands, a share of the units and one lane each | 212 | 6,313 | 5,219 M | 1,417 M | 39.1 M | 386,350 |
+| a process a unit, one at a time | 2,217 | 603 | 5,812 M | 4,072 M | 36.0 M | 805,820 |
+| a process a unit, 8 at a time | 405 | 3,297 | 6,712 M | 5,342 M | 87.8 M | 1,743,541 |
 
-- **Eight lanes are 4.8 times one lane**, for 1.37 times the cycles: the user
-  cycles rise 1.21 times and the kernel's 2.08. A pass moves 1.5 GB through
+- **Eight lanes are 5.1 times one lane**, for 1.36 times the cycles: the user
+  cycles rise 1.19 times and the kernel's 2.16. A pass moves 1.3 GB through
   DRAM on one lane and 4.9 GB on eight.
 - **The user side barely inflates** (the table below). A unit of musl is
   3,800 tokens: its records are in the
-  caches already. A unit's own compile as a process each costs 1.19 times the
+  caches already. A unit's own compile as a process each costs 1.15 times the
   user cycles at eight at a time; the cluster of 2,000 tokens of
   [#672's experiment](https://github.com/buster14a/buster/issues/672#issuecomment-6810078226)
   cost 1.08 to 1.15 times, and a unit of `sqlite3.c`'s size 1.84.
-- **Lanes against processes.** The same units as eight commands take the same
-  time (a pass is its slowest share's) for 14% fewer cycles: 0.94 times the
-  lanes' user cycles and 0.65 times their kernel cycles. What the lanes pay
-  for one address space is 800 M kernel cycles a pass: the TLB flushes sent
-  to the other lanes when a unit's arenas are given back are 660 M sampled
-  cycles a pass on eight lanes and 14 M as eight processes, and the pages
-  come back to be cleared cold (183 M against 88 M)
+- **Lanes against processes.** The same units as eight commands take about
+  the same time (2% longer: a pass is its slowest share's) for 16% fewer
+  cycles: 0.92 times the lanes' user cycles and 0.63 times their kernel
+  cycles. What the lanes pay for one address space is 850 M kernel cycles a
+  pass: the TLB flushes sent to the other lanes when a unit's arenas are given
+  back are 776 M sampled cycles a pass on eight lanes and 15 M as eight
+  processes, and the pages come back to be cleared cold (192 M against 99 M)
   ([#1213](https://github.com/buster14a/buster/issues/1213)).
-- **A process a unit** costs 1.73 times the cycles of one command alone and
-  2.14 times at eight at a time, and takes 2.1 times as long as the command
-  on lanes: 3.2 M cycles of start and end for a unit whose own compile is
+- **A process a unit** costs 1.70 times the cycles of one command alone and
+  2.07 times at eight at a time, and takes 2.0 times as long as the command
+  on lanes: 3.0 M cycles of start and end for a unit whose own compile is
   4.4 M ([#1444](https://github.com/buster14a/buster/issues/1444)).
 
 A command of several units reports no stages, so its inflation is by family
 of function: sampled user cycles a pass, one cohort each way (their totals
-inflate 1.16 times where the unsampled medians above inflate 1.21).
+inflate 1.16 times where the unsampled medians above inflate 1.19).
 
 | family, user cycles a pass | one lane | 8 lanes | times |
 | --- | ---: | ---: | ---: |
-| the reader's functions | 1,489 M | 1,615 M | 1.08 |
-| the preprocessor and the lexer | 805 M | 1,002 M | 1.24 |
-| the emission | 325 M | 341 M | 1.05 |
-| the parser and the tree's columns | 279 M | 301 M | 1.08 |
-| libc's `memset`, `memmove`, `memcmp` | 239 M | 326 M | 1.36 |
-| the graph's construction | 225 M | 255 M | 1.13 |
-| warnings | 176 M | 193 M | 1.10 |
-| the program and its controls | 165 M | 187 M | 1.13 |
-| the lowering | 102 M | 127 M | 1.25 |
-| the type table | 98 M | 102 M | 1.04 |
-| initializers and static data | 96 M | 102 M | 1.06 |
-| the graph run and its loop | 81 M | 88 M | 1.09 |
-| the C rules for a node | 64 M | 73 M | 1.15 |
-| the rest of the compiler | 571 M | 627 M | 1.10 |
-| samples at the kernel's addresses | 185 M | 356 M | 1.93 |
-| all | 4,898 M | 5,694 M | 1.16 |
+| the reader's functions | 1,489 M | 1,622 M | 1.09 |
+| the preprocessor and the lexer | 817 M | 1,000 M | 1.22 |
+| the emission | 330 M | 343 M | 1.04 |
+| the parser and the tree's columns | 288 M | 304 M | 1.06 |
+| libc's `memset`, `memmove`, `memcmp` | 248 M | 338 M | 1.37 |
+| the graph's construction | 225 M | 259 M | 1.15 |
+| warnings | 180 M | 195 M | 1.08 |
+| the program and its controls | 172 M | 191 M | 1.11 |
+| the lowering | 105 M | 129 M | 1.22 |
+| the type table | 104 M | 103 M | 0.99 |
+| initializers and static data | 97 M | 103 M | 1.07 |
+| the graph run and its loop | 83 M | 90 M | 1.08 |
+| the C rules for a node | 65 M | 76 M | 1.16 |
+| the rest of the compiler | 578 M | 616 M | 1.07 |
+| samples at the kernel's addresses | 186 M | 389 M | 2.09 |
+| all | 4,967 M | 5,758 M | 1.16 |
 
 And the kernel, by family, in both modes' sampled cycles a pass:
 
 | family | one lane | 8 lanes | 8 commands |
 | --- | ---: | ---: | ---: |
-| TLB flushes sent to other CPUs | 12 M | 663 M | 14 M |
-| page faults | 456 M | 572 M | 628 M |
-| pages given back | 285 M | 417 M | 416 M |
-| clearing pages | 85 M | 183 M | 88 M |
-| spin locks | 162 M | 216 M | 215 M |
-| sleeping locks (the address space's) | 5 M | 34 M | 8 M |
+| TLB flushes sent to other CPUs | 13 M | 776 M | 15 M |
+| page faults | 458 M | 573 M | 646 M |
+| pages given back | 286 M | 403 M | 431 M |
+| clearing pages | 86 M | 192 M | 99 M |
+| spin locks | 162 M | 220 M | 236 M |
+| sleeping locks (the address space's) | 6 M | 39 M | 9 M |
 
 ### What the designs in hand remove at eight workers
 
-Each as a share of what a compile costs at eight workers (1,297 M cycles for
-`sqlite3.c`, 8,107 M a pass for musl's command on eight lanes): measured where
+Each as a share of what a compile costs at eight workers (1,350 M cycles for
+`sqlite3.c`, 7,941 M a pass for musl's command on eight lanes): measured where
 it could be, and by [the model](#the-model) where it is a design's estimate.
 
 | design | `sqlite3.c`, eight processes | musl's command, eight lanes |
 | --- | --- | --- |
-| **The node machine**, [#2524](https://github.com/buster14a/buster/issues/2524): the bodies between the parser and Tier 0 | Its territory is 878 M of the 1,297 M, 68% (64% alone): 3.1 times if it were free. The cycles a body token that its steps 2, 3 and 4 stop spending are 605, 294 and 334 at eight workers, where they are 384, 171 and 187 alone. With its own coverage and cost: **1.37, 1.56 and 2.15 times** after those steps (405, 460 and 634 MB/s). | The families it removes inflate 1.1 to 1.25 times on lanes, as the whole pass's user side does: about 1.1 times, as alone. |
-| **Attested declarations**, [#2531](https://github.com/buster14a/buster/issues/2531): a file-scope declaration read once a command | Nothing: a command of one unit has no memo. | The reader's functions are 1,615 M of a pass's 5,694 M sampled user cycles and inflate 1.08 times on lanes, where the pass's cycles inflate 1.37: the file scope's reading falls from 32% of the command to about a quarter, and the 1,099 M cycles a pass that its skip measures alone are about 1,250 M of the lanes' 8,107 M. **About 1.2 times** by that estimate, where the skip measures 1.25 alone; it wasn't run on lanes. |
-| **The windows**, [#672's research](https://github.com/buster14a/buster/issues/672#issuecomment-6749355847): this design | It removes 588 M of the 1,297 M after its five steps, expected, and leaves 709 M: **1.89 times** (558 MB/s). | Little on the user side: the units are a window each already. The bodies' records leave the arenas a unit gives back. |
-| **The lanes' kernel time**, [#1213](https://github.com/buster14a/buster/issues/1213) | Nothing: no lanes. | 794 M kernel cycles and 333 M user cycles a pass against the same units as eight processes: **1.16 times**. |
-| **A process's start**, [#1444](https://github.com/buster14a/buster/issues/1444) | 0.3%. | Nothing in one command. Of a process a unit, eight at a time: 45% of 12,654 M cycles. |
-| **The peak**, [#1701](https://github.com/buster14a/buster/issues/1701) | 1.3 M kernel cycles a megabyte: the 190.7 MB are 252 M, a fifth of the compile. | The kernel is 2,295 M of a pass's 8,107 M, 28%. |
+| **The node machine**, [#2524](https://github.com/buster14a/buster/issues/2524): the bodies between the parser and Tier 0 | Its territory is 913 M of the 1,350 M, 68% (64% alone): 3.1 times if it were free. The cycles a body token that its steps 2, 3 and 4 stop spending are 613, 292 and 330 at eight workers, where they are 383, 171 and 183 alone. With its own coverage and cost: **1.37, 1.55 and 2.15 times** after those steps (395, 448 and 620 MB/s). | The families it removes inflate 1.1 to 1.25 times on lanes, as the whole pass's user side does: about 1.1 times, as alone. |
+| **Attested declarations**, [#2531](https://github.com/buster14a/buster/issues/2531): a file-scope declaration read once a command | Nothing: a command of one unit has no memo. | The reader's functions are 1,622 M of a pass's 5,758 M sampled user cycles and inflate 1.09 times on lanes, where the pass's cycles inflate 1.36: the file scope's reading falls from 32% of the command to about a quarter, and the 1,099 M cycles a pass that its skip measures alone are about 1,250 M of the lanes' 7,941 M. **About 1.2 times** by that estimate, where the skip measures 1.25 alone; it wasn't run on lanes. |
+| **The windows**, [#672's research](https://github.com/buster14a/buster/issues/672#issuecomment-6749355847): this design | It removes 642 M of the 1,350 M after its five steps, expected, and leaves 708 M: **1.96 times** (567 MB/s). | Little on the user side: the units are a window each already. The bodies' records leave the arenas a unit gives back. |
+| **The lanes' kernel time**, [#1213](https://github.com/buster14a/buster/issues/1213) | Nothing: no lanes. | 848 M kernel cycles and 457 M user cycles a pass against the same units as eight processes: **1.20 times**. |
+| **A process's start**, [#1444](https://github.com/buster14a/buster/issues/1444) | 0.3%. | Nothing in one command. Of a process a unit, eight at a time: 45% of 12,054 M cycles. |
+| **The peak**, [#1701](https://github.com/buster14a/buster/issues/1701) | 1.4 M kernel cycles a megabyte: the 190.7 MB are 276 M, a fifth of the compile. | The kernel is 2,265 M of a pass's 7,941 M, 29%. |
 | The asm matcher's index, [#2532](https://github.com/buster14a/buster/issues/2532) | Nothing: no asm statement. | 7.9% of the command alone (its issue); not measured on lanes. |
 
 So at eight workers the node machine ranks first for `sqlite3.c` (2.15 times
-after its last step), the windows second (1.89), and no design in hand removes
+after its last step), the windows second (1.96), and no design in hand removes
 what the other leaves: the machine takes the bodies' middle out of both the
 waiting and the pages, and what stays (the parse, the file scope, the
-preprocessor, the bodies it refuses, the emission) is 603 M cycles a compile
+preprocessor, the bodies it refuses, the emission) is 628 M cycles a compile
 that still inflate as they do today. For musl's command the order is attested
 declarations, the lanes' kernel time, then the node machine.
 
@@ -362,8 +372,8 @@ steps with gates.
 
 The emission shows the other order. For one function at a time it takes the
 typed entries to x86 records, sizes the branches and encodes, and each of
-those steps reads what the one before wrote microseconds ago. It moves 54 MB
-of the compile's 1,380, and inflates 1.2 to 1.4 times, most of that for the
+those steps reads what the one before wrote microseconds ago. It moves 51 MB
+of the compile's 1,387, and inflates 1.2 to 1.3 times, most of that for the
 one unit-wide record it does read.
 
 So the design doesn't make a stage faster. It changes the order the stages
@@ -424,7 +434,7 @@ epilogue  what needs the whole unit: which internal functions are emitted,
   arenas' rule changes: a popped arena's bytes are not zero (`arena_push`
   says so already), so a stage that reads a column before it writes it clears
   what it will read, and the clear is of a window's length, in the cache. The
-  kernel's work for 190 MB of pages is 252 M cycles a compile at eight
+  kernel's work for 190 MB of pages is 276 M cycles a compile at eight
   workers; a `memset` of every window's records, if every stage needed one,
   would be about 6 M. It is the retained workspace that
   [#1213's design](https://github.com/buster14a/buster/issues/1213#issuecomment-6721231167)
@@ -568,12 +578,12 @@ losing more than they gain takes the window, not the body, as its range.
 
 What stays ordered is the spine, as C requires, and the epilogue's merges.
 The spine is measured: the unit without its bodies is 18.9 ms of the unit's
-117.2 alone and 36.2 of 243.6 at eight workers, and within it the reader's
-walk of the declarations is the ordered step (`check-input`, 11.6 and 21.6
+116.9 alone and 36.7 of 245.8 at eight workers, and within it the reader's
+walk of the declarations is the ordered step (`check-input`, 11.6 and 22.0
 ms), which [attested declarations](attested-declarations.md) shortens for
 commands of many units and step 4 keeps in the cache for one. The epilogue
 isn't built, so it has no measurement; what it replaces is today's selection
-and the object's stages, 2.5 ms alone and 5.1 at eight workers.
+and the object's stages, 2.5 ms alone and 5.5 at eight workers.
 The chain's bodies are independent, which is the parallelism the lanes take.
 
 ### Lanes, units and processes
@@ -604,18 +614,18 @@ tests' twin.
 | step | what is built | gate, on `sqlite3.c` at eight workers unless it says | expected at eight workers |
 | --- | --- | --- | ---: |
 | 0. The gauge | The record's cohort runner in `tools/`, and a step of the 9700X job on main's pushes: a compile's cycles of both modes, its peak and its faults at one worker and at eight, by stage from the workers' own reports. No compile changes. | Reproduces this record's stage table within 3% at `4c8c3c9c`, in two holds of under 30 s. | a table |
-| 1. The back half by parts | One lane's emission cuts the bodies into parts of W tokens, as the lanes' does, and takes each part's lowering and its code before the next part's; the writer's columns and a part's typed stream are reused; `always_inline` callees' streams are kept. | `lower` and the emission at most 1.25 times their one-worker user cycles (1.66 and 1.39 today). Instructions a token within 2% of `W = ∞`. Objects the same bytes on every corpus. One worker not slower. | 307 MB/s, 1.04 times |
-| 2. The chain from the graph's run | `check_graph_run`, the warnings' passes, `check_program` and the references for a body's range, before step 1's parts; the stream's and the program's rows in the window's arena; the selection by names, exact in the epilogue. | `check-expressions` to `lower` at most 1.3 times their one-worker cycles (1.35 to 2.30). Those stages fault under 1,000 pages (12,674). | 345, 1.17 |
-| 3. The chain from the reader | A body's reading joins the chain: its token columns and its graph are the window's, by biased bases, and it binds file-scope names through the environment at its position. With #2524's step 4, which needs the same reading. | The bodies' part of `check-input` at most 1.3 times its one-worker cycles (2.3 in time today). Peak RSS under 100 MB (190.7). Objects and diagnostics the same at W of 1, 2,048 and ∞, on both paths. | 444, 1.50 |
-| 4. The tree and the file scope by windows | The parser yields external declarations; the spine reads a window's declarations into the environment before its bodies; the tree's columns are the window's. | The parse at most 1.3 times its one-worker cycles (3.03). The unit without its bodies at most 1.3 times (1.66). Peak under 60 MB. | 531, 1.80 |
-| 5. The tokens by windows | The preprocessor yields; the unit's own file is lexed in blocks. | The preprocessor at most 1.2 times (1.39). Peak under 30 MB. Under 25 DRAM bytes moved a source byte (146). | 558, 1.89 |
-| 6. Windows on lanes | The spine on one lane and the chain's windows on the others; a units' lane keeps its window arena across its units. | `--lanes 8` of `sqlite3.c` alone: the chain's stages scale as the emission's lanes do today. musl's command on 8 lanes: kernel cycles a pass at most eight processes' (1,501 M; 2,295 M today). | one unit's latency; musl's pass 1.1 |
+| 1. The back half by parts | One lane's emission cuts the bodies into parts of W tokens, as the lanes' does, and takes each part's lowering and its code before the next part's; the writer's columns and a part's typed stream are reused; `always_inline` callees' streams are kept. | `lower` and the emission at most 1.25 times their one-worker user cycles (1.59 and 1.30 today). Instructions a token within 2% of `W = ∞`. Objects the same bytes on every corpus. One worker not slower. | 298 MB/s, 1.03 times |
+| 2. The chain from the graph's run | `check_graph_run`, the warnings' passes, `check_program` and the references for a body's range, before step 1's parts; the stream's and the program's rows in the window's arena; the selection by names, exact in the epilogue. | `check-expressions` to `lower` at most 1.3 times their one-worker cycles (1.49 to 2.43). Those stages fault under 1,000 pages (12,673). | 336, 1.16 |
+| 3. The chain from the reader | A body's reading joins the chain: its token columns and its graph are the window's, by biased bases, and it binds file-scope names through the environment at its position. With #2524's step 4, which needs the same reading. | The bodies' part of `check-input` at most 1.3 times its one-worker cycles (2.4 in time today). Peak RSS under 100 MB (190.7). Objects and diagnostics the same at W of 1, 2,048 and ∞, on both paths. | 441, 1.53 |
+| 4. The tree and the file scope by windows | The parser yields external declarations; the spine reads a window's declarations into the environment before its bodies; the tree's columns are the window's. | The parse at most 1.3 times its one-worker cycles (3.43). The unit without its bodies at most 1.3 times (1.70). Peak under 60 MB. | 538, 1.86 |
+| 5. The tokens by windows | The preprocessor yields; the unit's own file is lexed in blocks. | The preprocessor at most 1.2 times (1.40). Peak under 30 MB. Under 25 DRAM bytes moved a source byte (146). | 567, 1.96 |
+| 6. Windows on lanes | The spine on one lane and the chain's windows on the others; a units' lane keeps its window arena across its units. | `--lanes 8` of `sqlite3.c` alone: the chain's stages scale as the emission's lanes do today. musl's command on 8 lanes: kernel cycles a pass at most eight processes' (1,417 M; 2,265 M today). | one unit's latency; musl's pass 1.1 |
 
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step
-2, 405 MB/s; this design's steps 1 and 2 beside it, 451; the machine's step 3,
-491; this design's step 3 with the machine's step 4, which are one piece of
-work on the reader, 743; step 4, 1,020; step 5, 1,125. Step 0 comes first
+2, 395 MB/s; this design's steps 1 and 2 beside it, 439; the machine's step 3,
+476; this design's step 3 with the machine's step 4, which are one piece of
+work on the reader, 727; step 4, 1,032; step 5, 1,144. Step 0 comes first
 because every later gate is its table, and step 1 early because it is the
 cheapest test of the premise. Attested declarations and
 [#1213](https://github.com/buster14a/buster/issues/1213) are independent of
@@ -637,7 +647,7 @@ rules:
   conservative, 1.08 optimistic. Only the optimistic case counts what cache
   residency gives a stage alone (10%), though #672's experiment found units
   of this size 37% dearer a token than small ones on one core.
-- **The kernel's cycles follow the pages faulted**, at today's 4,000 cycles a
+- **The kernel's cycles follow the pages faulted**, at today's 4,400 cycles a
   page at eight workers. A chained stage faults its window's arena once (512
   pages expected), not its records for the unit.
 - **In step 2 the graph is still read cold.** The reader wrote it for the
@@ -648,27 +658,27 @@ rules:
   that design's coverage (70%, 85%, 95% of the body tokens) and cost (150,
   100, 60 cycles a body token for its three parts), which stays in the
   first-level cache (a residual of 1.10).
-- **A compile's slot** is its cycles at 5.205 GHz plus the time it is off its
-  CPU, 8.4 ms today, taken to follow the kernel's cycles.
+- **A compile's slot** is its cycles at 5.278 GHz plus the time it is off its
+  CPU, 7.6 ms today, taken to follow the kernel's cycles.
 
-| eight workers on `sqlite3.c`: MB/s, and times today's 295 | conservative | expected | optimistic |
+| eight workers on `sqlite3.c`: MB/s, and times today's 289 | conservative | expected | optimistic |
 | --- | ---: | ---: | ---: |
-| this design's step 1 | 303, 1.03 | 307, 1.04 | 312, 1.06 |
-| step 2 | 333, 1.13 | 345, 1.17 | 366, 1.24 |
-| step 3 | 415, 1.40 | 444, 1.50 | 498, 1.68 |
-| step 4 | 483, 1.63 | 531, 1.80 | 623, 2.11 |
-| step 5 | 501, 1.70 | **558, 1.89** | 671, 2.27 |
-| the node machine alone, after its steps 2, 3, 4 | 382, 411, 510 | 405, 460, 634 | 417, 499, 768 |
-| both: step 2 here, the machine's step 2 | 415, 1.41 | 451, 1.53 | 482, 1.63 |
-| step 2 here, the machine's step 3 | 437, 1.48 | 491, 1.66 | 535, 1.81 |
-| step 3 here, the machine's step 4 | 611, 2.07 | 743, 2.51 | 884, 2.99 |
-| step 4 here, the machine's step 4 | 772, 2.61 | **1,020, 3.45** | 1,376, 4.66 |
-| step 5 here, the machine's step 4 | 821, 2.78 | 1,125, 3.81 | 1,629, 5.52 |
+| this design's step 1 | 294, 1.02 | 298, 1.03 | 303, 1.05 |
+| step 2 | 325, 1.12 | 336, 1.16 | 356, 1.23 |
+| step 3 | 412, 1.43 | 441, 1.53 | 493, 1.71 |
+| step 4 | 489, 1.69 | 538, 1.86 | 631, 2.19 |
+| step 5 | 509, 1.76 | **567, 1.96** | 681, 2.36 |
+| the node machine alone, after its steps 2, 3, 4 | 373, 400, 500 | 395, 448, 620 | 407, 485, 751 |
+| both: step 2 here, the machine's step 2 | 405, 1.40 | 439, 1.52 | 468, 1.62 |
+| step 2 here, the machine's step 3 | 425, 1.47 | 476, 1.65 | 517, 1.79 |
+| step 3 here, the machine's step 4 | 602, 2.08 | 727, 2.52 | 859, 2.97 |
+| step 4 here, the machine's step 4 | 781, 2.71 | **1,032, 3.57** | 1,392, 4.82 |
+| step 5 here, the machine's step 4 | 834, 2.89 | 1,144, 3.96 | 1,660, 5.75 |
 
-- **1 GB/s takes both.** It is 396 M cycles a compile. The windows alone leave
-  709 M expected, because they remove no work; the node machine alone leaves
-  603 M, because what it doesn't take still waits. Neither reaches 1 GB/s in
-  its optimistic case. Together they leave 384 M at this design's step 4.
+- **1 GB/s takes both.** It is 401 M cycles a compile. The windows alone leave
+  708 M expected, because they remove no work; the node machine alone leaves
+  628 M, because what it doesn't take still waits. Neither reaches 1 GB/s in
+  its optimistic case. Together they leave 385 M at this design's step 4.
 - **One core gains too, less.** A compile alone goes from 125 ms to 110 with
   the windows (the pages it no longer faults), to 63 with the node machine,
   and to 55 with both, by the same rules.
@@ -678,7 +688,7 @@ rules:
   under #672's budget of 50; at step 5 it is the source, the environment and
   the object.
 - **What the model can't say:** whether the second threads then add what they
-  add to compute-bound work, which is more than today's 9%; and what a
+  add to compute-bound work, which is more than today's 11%; and what a
   command of many small units gains, which is the table of designs above.
 
 ## What would refute it
