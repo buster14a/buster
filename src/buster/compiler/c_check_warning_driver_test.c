@@ -2577,6 +2577,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .errors = 10,
     },
     {
+        // The same error for a cast to an atomic scalar type from a record, and to a scalar from an atomic cast's rvalue
+        // (#2375, #2230), its type '_Atomic(int)'.
+        .name = "casts of records and atomic rvalues to atomic types",
+        .source = "struct S { int a; } s;\nvoid g(int x){ long l = (_Atomic long)(_Atomic int)x; (void)(_Atomic int)s; (void)(_Atomic(int *))s;\n"
+                  "(void)(int)(_Atomic int)x; (void)l; }\n",
+        .errors = 4,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },
