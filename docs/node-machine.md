@@ -1024,7 +1024,7 @@ integer-to-pointer cast's).
 On the 9700X at `2044025c`, on #2571's split (`27ee009a`) and main `0af27a30`
 (`sqlite3.c`, CPU 2, under the lock, the least of 11 passes, a taken evaluated
 node;
-[the record](https://github.com/buster14a/buster-performance/tree/ef4bef26ca71ceb698b39d0df2ad09a8201361d0/docs/measurements/node-machine-records-2524-2026-11-12)):
+[the record](https://github.com/buster14a/buster-performance/tree/6eb0a054b6f07132d12569ad1d275422084594f1/docs/measurements/node-machine-records-2524-2026-11-12)):
 
 | | T: cycles, instructions | all three: cycles, instructions | all three, warm |
 | --- | ---: | ---: | ---: |
@@ -1061,6 +1061,26 @@ go from 178.6 cycles a node to 169.8, and to 162.2 with the stagger alone.
   take them off the action. The rest of T is its inputs, cold in one run: the
   leaves' records, the per-type words and the graph's columns, which step 2
   replaces with the parser's tree.
+
+**With the new codes** (calls, `&&`, `||` and `?:`, at `04abc91b`, which merges
+#2571's `f5b919f2`), the machine takes 93.0% of `sqlite3.c`'s evaluated nodes,
+not 50.2%, and the figures move:
+
+| | T: cycles, instructions | all three: cycles, instructions | all three, warm |
+| --- | ---: | ---: | ---: |
+| #2571's `f5b919f2` | 119.1, 446.7 | 212.4, 764.1 | 167.1 |
+| the same, staggered alone | 119.0, 446.7 | 209.6, 764.1 | 159.3 |
+| T's columns (`04abc91b`) | **116.2, 434.5** | **211.3, 733.1** | **160.5** |
+
+- **The stagger is worth 2.8 cycles in one run and 7.8 warm**, a sixth of what
+  it was. The calls' 43 cycles a node more are mostly elsewhere.
+- **The columns still cut 31 of the 764 instructions, but no cycles:** 1.7
+  more in one run and 1.2 warm than the staggered whole values, and 4.0 on Lua.
+  The action types more nodes now (12,942 of 147,250), and a call's arguments
+  are made whole for the action's conversions.
+- **The gate is further off:** 211.3 cycles in one run and 160.5 warm against
+  120. `--verify` at `04abc91b` shows no difference on the corpora, with `-g`
+  too.
 
 ## Expected gains
 
