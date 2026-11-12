@@ -9691,6 +9691,27 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         valid = check_input_warning_event(reader, &event, NULL, 0);
                     }
                 }
+                // A struct or union without named members: clang's ActOnFields counts every member but an unnamed bit-field.
+                uint32_t named = 0;
+                for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
+                {
+                    named += members[member].member.name != 0 || members[member].member.bit_width == BUSTER_TYPE_NOT_BIT_FIELD;
+                }
+                if (valid && named == 0)
+                {
+                    const CheckWarningEvent event = {
+                        .id = CHECK_WARNING_ID_GNU_EMPTY_STRUCT,
+                        .kind = CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT,
+                        .token = frame->token,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = after,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                     .data = (kind == BUSTER_TYPE_KIND_UNION ? 1u : 0u) | (frame->first != BUSTER_CHECK_NONE ? 2u : 0u) },
+                    };
+                    valid = check_input_warning_event(reader, &event, NULL, 0);
+                }
                 if (valid && variable_sized)
                 {
                     valid = check_warning_set_add(&reader->variable_sized_records, type_index(frame->type) + 1);

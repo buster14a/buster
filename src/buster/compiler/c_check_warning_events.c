@@ -223,6 +223,9 @@ enum
     // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
     // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
     CHECK_WARNING_ID_PSABI = 150,
+    // A struct or union without named members (#2409, clang's ext_empty_struct_union and ext_no_named_members_in_struct_union):
+    // -Wgnu-empty-struct, off by default, -pedantic's.
+    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 151,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -504,6 +507,10 @@ typedef enum CheckWarningEventKind
     // A C23 attribute list before C23 (#2409, CHECK_WARNING_ID_C23_ATTRIBUTES): -Wc23-extensions' "[[]] attributes are a
     // C23 extension", at its first `[`, as clang's parser gives it (ext_c_attributes).
     CHECK_WARNING_EVENT_C23_ATTRIBUTES,
+    // A struct's or union's definition without named members (#2409), at its keyword: payload.data's bit 0 a union's, bit 1
+    // one with members (unnamed bit-fields), "struct without named members is a GNU extension", else "empty struct is a GNU
+    // extension".
+    CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT,
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
