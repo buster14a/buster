@@ -128,6 +128,10 @@ static uint32_t check_input_names_drop(CheckInputReader* reader, CheckInputAttri
     {
         const uint32_t before = reader->output->report_count;
         check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].attribute_name = true;
+        }
         const bool recovered = reader->output->report_count > before && check_input_recover_reports(reader, before);
         attribute->ignored |= recovered;
         result = recovered ? BUSTER_CHECK_NONE : undeclared;

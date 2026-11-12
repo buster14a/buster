@@ -1491,6 +1491,30 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "S(unsigned __int128)A(__int128)S(unsigned _BitInt(100))A(_BitInt(100))A(_BitInt(65))S(unsigned _BitInt(128))A(_BitInt(127))S(unsigned _BitInt(65))"
           "x=x*31+y;y^=x>>7;}return (int)h;}\n"
         },
+        // pdep, pext and clmul where no instruction takes them (#2410): without BMI2 (x86-64 and x86-64-v2), without PCLMUL
+        // (every level here), and of scalars past 64 bits at every level, by Hacker's Delight's compress and expand and the
+        // shift-and-xor product, as LLVM expands them; of each width and signedness, _BitInts of widths no power of two,
+        // __int128 and _BitInts of 65 to 128 bits, and vectors element by element; masks of no bits, all bits and random
+        // ones, operands of all ones.
+        { "scalar-bits-expanded",
+          "typedef unsigned EU4 __attribute__((vector_size(16)));typedef unsigned long long EQ2 __attribute__((vector_size(16)));"
+          "typedef unsigned char EB16 __attribute__((vector_size(16)));typedef short EH8 __attribute__((vector_size(16)));\n"
+          "#define D(T) {T q_[]={__builtin_elementwise_pdep((T)a,(T)b),__builtin_elementwise_pdep((T)c,(T)b),__builtin_elementwise_pext((T)a,(T)b),"
+          "__builtin_elementwise_pext((T)a,(T)c),__builtin_elementwise_pdep((T)a,(T)z),__builtin_elementwise_pext((T)c,(T)a),"
+          "__builtin_elementwise_clmul((T)a,(T)b),__builtin_elementwise_clmul((T)c,(T)c)};FOLD(q_);}\n"
+          "int tested(int n){unsigned h=2166136261u;unsigned long long x=(unsigned long long)n*0x9e3779b97f4a7c15ull,y=x*0x2545f4914f6cdd1dull;\n"
+          "for(int i=0;i<4;i++){unsigned __int128 a=((unsigned __int128)x<<64)|(y*3),b=((unsigned __int128)(y^x)<<64)|(x&y),c=~(unsigned __int128)0,z=0;"
+          "if(i==1)b=a&(b>>3);if(i==2)b=c;if(i==3)a=(unsigned __int128)1<<127|1;\n"
+          "D(unsigned char)D(signed char)D(short)D(unsigned short)D(int)D(unsigned)D(long)D(unsigned long long)D(unsigned _BitInt(37))D(_BitInt(37))"
+          "D(unsigned _BitInt(1))D(unsigned __int128)D(__int128)D(unsigned _BitInt(100))D(_BitInt(65))D(unsigned _BitInt(128))\n"
+          "EU4 u={(unsigned)x,(unsigned)y,(unsigned)(x>>32),~0u},v={(unsigned)(y>>7),(unsigned)b,0,(unsigned)(a>>40)};"
+          "EQ2 p={x,y},r={y&x,~0ull};EB16 e={(unsigned char)x,(unsigned char)y,3,255},f={(unsigned char)(y>>8),5,255,(unsigned char)i};"
+          "EH8 g={(short)x,(short)y,-1},k={(short)(y>>3),(short)x,-1};\n"
+          "EU4 w[]={__builtin_elementwise_pdep(u,v),__builtin_elementwise_pext(u,v),__builtin_elementwise_clmul(u,v)};FOLD(w);"
+          "EQ2 t[]={__builtin_elementwise_pdep(p,r),__builtin_elementwise_pext(p,r),__builtin_elementwise_clmul(p,r)};FOLD(t);"
+          "EB16 o[]={__builtin_elementwise_clmul(e,f),__builtin_elementwise_pdep(e,f)};FOLD(o);EH8 l[]={__builtin_elementwise_pext(g,k)};FOLD(l);\n"
+          "x=x*31+y;y^=x>>7;}return (int)h;}\n"
+        },
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
