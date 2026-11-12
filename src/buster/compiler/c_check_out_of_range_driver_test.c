@@ -76,6 +76,21 @@ static const CheckDriverDefaultWarningFixture check_driver_out_of_range_fixtures
                   "}\n",
         .warnings = 16,
     },
+    {
+        // The vector test's type rule: an int or a long class operand against a constant its type covers is no candidate,
+        // a narrower one's constant is (an int's against a long constant), and a boolean operator's always is.
+        .name = "constants out of range of builtin types",
+        .source = "int f(int i, unsigned long ul, long l, unsigned u, _Bool b)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    r += i == 4000000000; r += ul == -1; r += l < 5; r += u > 4294967296; r += (i < l) == 3;\n"
+                  "    r += i < 5L; r += !i == 2; r += (i || l) > 2; r += b == 3; r += (unsigned char)i < 256;\n"
+                  "    r += 2 < i; r += i == 1; r += l != 1L; r += u == 7u; r += -1 == ul; r += (long)i > 4294967296L;\n"
+                  "    return r;\n"
+                  "}\n",
+        .warnings = 8,
+        .notes = 2,
+    },
 };
 
 static void check_test_driver_out_of_range(CheckTest* test, const char* clang, const char* executable, const char* directory)

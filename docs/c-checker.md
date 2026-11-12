@@ -6527,8 +6527,11 @@ is on and `-Wsign-compare` off, only for a comparison whose constant is out of
 the other operand's range, `check_common_range_out`: the reach scan leaves the
 comparisons out of its operator set, and `check_common_range_candidates` finds
 them in a pass of their own, 16 nodes at a time, gathering both operands'
-value flags and testing only the lanes of a comparison one of whose operands
-is an integer constant expression, its scalar twin testing every comparison;
+value flags, types and operators, and testing only the lanes of a comparison
+one of whose operands is an integer constant expression, where the other one,
+if only one is, isn't an `int` or `long` class builtin that covers the
+constant's type and isn't a boolean operator's; its scalar twin tests every
+comparison;
 #2451), a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
 an analysis whose diagnostics are ignored. The token passes find their roles

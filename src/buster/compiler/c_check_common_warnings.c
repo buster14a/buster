@@ -2308,9 +2308,11 @@ static bool check_common_range_out(const CheckGraph* graph, const CheckStream* s
 
 // The comparisons that may give -Wtautological-constant-out-of-range-compare (check_common_range_out), a bit each in
 // `candidates`, for the comparison walk's reach where -Wsign-compare doesn't take every comparison. The vector path
-// tests 16 nodes at a time: a comparison operator, both operands' nodes, and one of their value flags an integer
-// constant expression's (gathered from the stream's flag column), which every candidate has; only those lanes take the
-// scalar test. The scalar path, its twin and oracle, tests every comparison.
+// tests 16 nodes at a time: a comparison operator, both operands' nodes, one of their value flags an integer constant
+// expression's (gathered from the stream's flag column), which every candidate has, and, where only one is, the other
+// operand no int or long class builtin that covers the constant's type (the TypeIds' builtin codes, gathered too), which
+// no candidate's is; only the lanes left take the scalar test. The scalar path, its twin and oracle, tests every
+// comparison.
 static void check_common_range_candidates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint64_t* candidates, bool vector)
 {
     const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
@@ -2329,9 +2331,35 @@ static void check_common_range_candidates(const CheckGraph* graph, const CheckSt
             const __m512i left = _mm512_maskz_loadu_epi32(compares, graph->operand0 + first);
             const __m512i right = _mm512_maskz_loadu_epi32(compares, graph->operand1 + first);
             const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(_mm512_mask_cmplt_epu32_mask(compares, left, limit), right, limit);
+            const __m512i ice = _mm512_set1_epi32(BUSTER_CHECK_ICE);
             const __m512i left_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, left, stream->value_flags, 4);
             const __m512i right_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, right, stream->value_flags, 4);
-            selected = _mm512_mask_test_epi32_mask(inside, _mm512_or_si512(left_flags, right_flags), _mm512_set1_epi32(BUSTER_CHECK_ICE));
+            const __mmask16 left_ice = _mm512_mask_test_epi32_mask(inside, left_flags, ice);
+            const __mmask16 right_ice = _mm512_mask_test_epi32_mask(inside, right_flags, ice);
+            // Where one operand alone is an integer constant expression, it is the constant: the other one is no candidate's
+            // when it is an int or a long class builtin at least as wide as the constant's type promoted, and no boolean
+            // operator's (check_common_range_candidate's own_width test, its types' codes read from their TypeIds).
+            const __mmask16 one = (__mmask16)(left_ice ^ right_ice);
+            const __m512i left_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, stream->value_types, 4);
+            const __m512i right_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, stream->value_types, 4);
+            const __m512i left_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, graph->ops, 4);
+            const __m512i right_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, graph->ops, 4);
+            const __m512i other_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, left_types, right_types), BUSTER_TYPE_INDEX_SHIFT);
+            const __m512i constant_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, right_types, left_types), BUSTER_TYPE_INDEX_SHIFT);
+            const __m512i other_op = _mm512_mask_blend_epi32(left_ice, left_ops, right_ops);
+            const __m512i bool_code = _mm512_set1_epi32(BUSTER_TYPE_CODE_BOOL);
+            const __mmask16 boolean = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_op, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                                    _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS)) |
+                                      _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_NOT)) |
+                                      _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
+                                      _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR));
+            const __m512i constant_offset = _mm512_sub_epi32(constant_code, bool_code);
+            const __mmask16 int_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_INT)), _mm512_set1_epi32(1)) &
+                                       _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT - BUSTER_TYPE_CODE_BOOL));
+            const __mmask16 long_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG)), _mm512_set1_epi32(3)) &
+                                        _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_ULLONG - BUSTER_TYPE_CODE_BOOL));
+            const __mmask16 covered = (__mmask16)(one & ~boolean & (int_wide | long_wide));
+            selected = (uint32_t)(left_ice | right_ice) & ~(uint32_t)covered;
         }
         for (uint32_t bits = selected; bits != 0; bits &= bits - 1)
         {
