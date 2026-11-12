@@ -265,6 +265,9 @@ struct CheckProgramAsm
     uint32_t* inline_branches;
     uint32_t* inline_targets;
     uint32_t inline_branch_count;
+    // An asm goto's body without stores after its exits (Tier0AsmBody.exits, #2351): its exits' first record, past the
+    // template's; 0 for any other body.
+    uint32_t inline_exits;
     // Whether its template returns (Tier0AsmBody.leaves).
     bool inline_leaves;
     // Whether it moves rsp's variable's input into rsp (#1846, Tier0AsmBody.stack).
@@ -3413,6 +3416,9 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->label_count = valid ? code.label_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
+        // An asm goto's whose exits fall straight into the exit's move into eax, with no store or pop between (#2351):
+        // Tier 0 may branch from its jumps to their labels and drop the exits.
+        plan->inline_exits = valid && labels != 0 && records_count == tail + 1 ? exits : 0;
         // An asm goto's exit number in eax, its call row's result.
         plan->inline_touched = inline_touched | (labels != 0 ? 1u << X86_REGISTER_RAX : 0);
         plan->inline_masks = inline_masks;
@@ -3502,6 +3508,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->row = 0;
         plan->inline_records = 0;
         plan->inline_count = 0;
+        plan->inline_exits = 0;
         plan->inline_label_records = 0;
         plan->inline_label_names = 0;
         plan->inlined = false;
