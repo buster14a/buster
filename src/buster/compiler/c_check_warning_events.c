@@ -232,8 +232,14 @@ enum
     // A folded signed `<<` whose result sets its type's sign bit (#2264, clang's DiagnoseBadShiftValues):
     // -Wshift-sign-overflow, off by default.
     CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW = 153,
+    // An integer constant converted to an enumeration that none of its enumerators equals (#2264, clang's
+    // DiagnoseAssignmentEnum): -Wassign-enum, off by default.
+    CHECK_WARNING_ID_ASSIGN_ENUM = 154,
+    // A function's label that no goto and no address names (#2264, clang's DiagnoseUnusedDecl of a LabelDecl):
+    // -Wunused-label, under -Wunused and so -Wmost and -Wall.
+    CHECK_WARNING_ID_UNUSED_LABEL = 155,
     // clang's -Wtautological-constant-out-of-range-compare (#2218), on by default, in -Wtautological-constant-compare.
-    CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 154,
+    CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 156,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -272,6 +278,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_UNUSED_VARIABLE,
     CHECK_WARNING_EVENT_UNUSED_FUNCTION,
     CHECK_WARNING_EVENT_UNUSED_PARAMETER,
+    // A label no goto or address names (#2264): "unused label 'l'" at its name, or a local label's at its `__label__`
+    // list's, published as the function's body ends.
+    CHECK_WARNING_EVENT_UNUSED_LABEL,
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,

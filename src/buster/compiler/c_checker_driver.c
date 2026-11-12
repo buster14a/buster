@@ -2791,7 +2791,9 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
         for (uint32_t i = 0; valid && i < events->count; i += 1)
         {
             const CheckWarningEvent* event = events->events + i;
-            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
+            // (A label's scope is its function's body, #2264.)
+            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
+                                event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL;
             const bool unit_end = unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
             const uint32_t close = unused && event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? event->completion : count;
             // The scope's opening delimiter, before the declaration. A for initializer retains its header's `)`
@@ -7710,6 +7712,15 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                               before != PARSE_KIND_ARROW;
                 }
                 arena_pop_to(scratch, scopes_mark);
+            }
+            // An unused label's, where the first reading found a goto or an address naming it (#2264): a part the view left
+            // out, as an erroneous goto's whose jump enters a statement expression, is clang's use of it all the same.
+            const uint32_t colon = events->events[i].kind == CHECK_WARNING_EVENT_UNUSED_LABEL && at + 1 < count &&
+                                   unit->tree.roles[at + 1] == PARSE_ROLE_LABEL ? at + 1 : BUSTER_CHECK_NONE;
+            for (uint32_t t = 0; colon != BUSTER_CHECK_NONE && !errored && t < count; t += 1)
+            {
+                const uint8_t kind = unit->tokens.kinds[t];
+                errored = (kind == PARSE_KIND_GOTO || kind == PARSE_KIND_AMPAMP) && check_sparse_get(first_input->label_targets, t) == colon;
             }
             // (Past `stop` the first reading published none of its events.) Not at a repaired view's synthetic or incomplete
             // statements' tokens (CheckCommonView).

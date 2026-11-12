@@ -283,6 +283,17 @@ compile's user cycles, and the stages from `check-input` to `lower` spend about
 per node from the parser's tree to the typed stream, with this pipeline as its
 twin. It has the measurements, by stage and by node, and the estimate.
 
+**At eight workers (#2536).** At `4c8c3c9c` eight compiles of `sqlite3.c` at
+once cost each of them 1.89 times the cycles of one alone, for the same
+instructions: 295 MB/s on the 9700X where eight times one compile would be 594.
+All of the difference is memory: the stages' records of the whole unit come
+from DRAM where the third-level cache is shared by eight, and the kernel's work
+for 190 MB of pages triples.
+[The all-core path's design](all-core-path.md) is the change for that: the unit
+compiled one window of external declarations at a time, from its tokens to its
+code, in memory the next window reuses, with this order as its twin. It has
+the inflation by stage, what each design in hand removes of it, and the model.
+
 ## Memory first touched (#528, #572)
 
 Three allocations touched far more memory than they used.
