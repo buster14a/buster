@@ -10319,13 +10319,27 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
 
-What isn't clang's yet: an overload call whose candidates fail by an
-argument's conversion has the checker's error, not clang's "no known
-conversion" notes ([#2384](https://github.com/buster14a/buster/issues/2384));
+An overload call's candidate that fails by an argument's conversion has
+clang's note "candidate function not viable: no known conversion from 'A' to
+'P' for Nth argument", at its first such argument, with clang's fix-it words
+("; take the address of the argument with &", "; dereference the argument
+with *"), these candidates first in display order (#2384,
+`CheckOverloadExplained.argument`). An overload set's address that no
+candidate matches, initialized or assigned, is clang's error with
+'<overloaded function type>' as its source, "incompatible function pointer
+types ..." where the enable_ifs leave one candidate, and a note at each
+candidate, the latest first: "made ineligible by enable_if", "has different
+number of parameters", "has type mismatch at Nth parameter", "has different
+return type", or none (`check_driver_overload_address`).
+
+What isn't clang's yet: an overload set's address returned or passed has
+the conversion error of its latest candidate's type, where clang's is
+"returning/passing '<overloaded function type>' ..."; an incompatible
+pointer argument makes a candidate not viable here, where clang's C
+overloading takes it with its warning (`h(ip)` of `h(long *)` and
+`h(struct T)` picks `h(long *)` there);
 a `volatile` parameter's read as a comma's left operand in a condition gets
-`-Wunused-value`, which clang doesn't give a volatile read; an overload set's address that no candidate matches has
-the checker's error, not clang's "<overloaded function type>" with its
-candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
+`-Wunused-value`, which clang doesn't give a volatile read; the condition shapes
 above; `-Wint-to-pointer-cast` and its relatives in a condition, which this
 checker doesn't give anywhere yet
 ([#1943](https://github.com/buster14a/buster/issues/1943)); the comma warnings of a static assertion's
