@@ -458,11 +458,14 @@ static uint32_t check_input_cpu_dispatch_match(CheckInputReader* reader, uint32_
 }
 
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible, bool redefinition);
+static void check_input_invalid_declare(CheckInputReader* reader, uint32_t token);
 
 // The redeclaration `token` of the version declared at `version` (#1447), which binding keeps apart from other versions:
 // its object; clang's redefinition error where both define it, at `token` with its note at the version's definition;
 // otherwise the definition it inherits and the composite type, or clang's conflicting-types error where the types aren't
-// compatible.
+// compatible. A redefinition is clang's invalid declaration (#2362): its error is recovered, and it stays bound, the
+// declarations after it while it is visible invalid with it and quiet (check_input_bind); one after another version
+// redeclares it as any.
 static void check_input_cpu_dispatch_redeclare(CheckInputReader* reader, uint32_t token, uint32_t version, uint32_t point)
 {
     reader->objects[token] = reader->objects[version];
@@ -475,10 +478,15 @@ static void check_input_cpu_dispatch_redeclare(CheckInputReader* reader, uint32_
     {
         const uint32_t before = reader->output->report_count;
         check_input_report_subject(reader, token, CHECK_INPUT_REDECLARATION, version);
-        if (reader->output->report_count != before)
+        if (reader->output->report_count == before + 1)
         {
             reader->output->reports[before].note_token = definition - 1;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+            // (Not a lane's: an invalid declaration's uses are quiet in source order.)
+            if (!reader->lane && check_input_recover_reports(reader, before))
+            {
+                check_input_invalid_declare(reader, token);
+            }
         }
     }
     else

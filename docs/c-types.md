@@ -536,7 +536,11 @@ and none canonicalizes.
   - `POINTER` and `ARRAY`: structural levels, made only over sugar.
 - **Normal form.** A structural or parenthesized node over no sugar is never
   made, so a declaration without sugar has none at any level and makes no
-  node.
+  node. The one exception is a group around an array, in a unit that names
+  `__builtin_clear_padding` (#1842's 1b). Its `PAREN` stands over the
+  canonical array (`struct S (*p)[2]`), a parameter's too, because clang's
+  padding walk treats such an array as one scalar. It prints as the group
+  did before.
 - **Hash-consing.** Nodes are hash-consed in an open-addressed index of their
   own, and the table grows from an arena.
 - **Storage.** The checker keeps the table, and a map of the few declaring

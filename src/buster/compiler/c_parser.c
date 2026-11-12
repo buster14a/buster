@@ -2699,6 +2699,9 @@ struct Parser
     uint8_t* meaning_column;
     uint32_t meaning_room;
     uint32_t errors;
+    // A checker's view of a failed parse that covers the whole unit, every error of which its recovery read past
+    // (check_prefix_resume): its reader recovers from missing names as a complete unit's does (#2255).
+    bool whole_view;
     // A checked diagnostic prefix may include one complete declaration with already diagnosed parameter types.
     // Only its parameter specifiers may recover as int; ordinary parses and emission never enable this.
     bool recovered_parameter_types;
