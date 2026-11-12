@@ -212,7 +212,10 @@ takes its entries.
   the checker unit, before `baked.c`. C, X and the shadow's comparison read a
   record only through the accessors (`node_machine_record_*`, below), so that
   a new record layout changes the machine's file and T alone.
-- **The record accessors,** each `(machine, r)` and one load or store today:
+- **The record accessors,** each `(machine, r)` and one load or store of a
+  column; `_integer`, `_offset`, `_floating`, `_fault` and `_overloaded` test
+  the record's standing first and read its wide value where it has one
+  (`_wide`):
   - what T wrote: `_op`, `_left`, `_right` (operand records, `UINT32_MAX` for
     none), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
     low 64 bits), `_floating`, `_object`, `_offset`, `_fault`, `_overloaded`,
@@ -231,6 +234,19 @@ takes its entries.
   C reads the comma's and a store's type before it evaluates their operands:
   after `node_machine_evaluate`, a call, an accessor would load its column's
   pointer again.
+- **T's records** are the design's columns, not a whole `CheckValue` a record:
+  a value's type, flags and object, a standing byte (its category, its
+  constant kind and which field its 64-bit payload holds: its integer, its
+  offset or its floating value's significand, beside a 16-bit exponent) and
+  the payload. A value they can't hold whole (a fault, an overload set, a
+  bit-field's width, an integer past 64 bits, two payload fields) goes whole to
+  a side array, `wides`, which its payload indexes. T writes them with
+  `node_machine_record` and `node_machine_record_from` (an operand's value with
+  its type, category, flags and constant kind replaced) and makes a value whole
+  only for the action, `--verify` and the rare conversions. T's and C's
+  columns are the arrays of one struct, `NodeMachineColumns`, so that every
+  field is one load from one base, each array 128 bytes past the one before
+  modulo 4 KB: [the design](../node-machine.md#ts-records-as-columns) has why.
 
 - **Its records** are the expression's graph nodes: one range of them and the
   root, which the reader may make later (a condition's wrapper follows the
