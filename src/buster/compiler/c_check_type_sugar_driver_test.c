@@ -1383,6 +1383,53 @@ static const CheckDriverDefaultWarningFixture check_driver_counted_sugar_fixture
     },
 };
 
+// A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete there (#1842's 3d,
+// check_graph_counted_uses): clang's "cannot use" at a read (a condition's, a `.`'s, a return's) and "cannot assign to" at
+// an assignment, each with its two notes; none for `&`'s operand, a sized_by member, or a pointee completed before the use.
+static const CheckDriverDefaultWarningFixture check_driver_counted_incomplete_fixtures[] =
+{
+    {
+        .name = "counted_by pointee incomplete",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct Inc;\n"
+                  "struct B { int n; struct Inc *__counted_by(n) p; };\n"
+                  "struct Inc *g(struct B *b, struct Inc *x)\n"
+                  "{\n"
+                  "    b->p = x;\n"
+                  "    struct Inc *y = b->p;\n"
+                  "    return b->p;\n"
+                  "}\n"
+                  "void h(struct B *b) { (void)b->p; void *v = b->p; struct Inc **pp = &b->p; }\n",
+        .errors = 5,
+        .notes = 10,
+    },
+    {
+        .name = "counted_by pointee completed later",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct Inc;\n"
+                  "struct Late;\n"
+                  "struct B { int n; struct Inc *__counted_by(n) p; struct Late *__counted_by(n) l; struct Inc *__attribute__((counted_by_or_null(n))) o; struct Inc *__attribute__((sized_by(n))) z; };\n"
+                  "void early(struct B *b, struct B v)\n"
+                  "{\n"
+                  "    struct Late *a = b->l;\n"
+                  "    struct Inc *c = v.p;\n"
+                  "    struct Inc *d = b->o;\n"
+                  "    struct Inc *e = b->z;\n"
+                  "    if (b->p) { }\n"
+                  "    b->o = 0;\n"
+                  "    struct Inc **f = &v.p;\n"
+                  "}\n"
+                  "struct Late { int x; };\n"
+                  "void late(struct B *b)\n"
+                  "{\n"
+                  "    struct Late *a = b->l;\n"
+                  "    int k = b->l[0].x;\n"
+                  "}\n",
+        .errors = 5,
+        .notes = 10,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
@@ -1394,6 +1441,8 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_size_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_size_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_counted_incomplete_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_counted_incomplete_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_counted_sugar_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_counted_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_parameter_typedef_fixtures,
