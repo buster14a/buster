@@ -507,10 +507,27 @@ declaration queued them, depth first, and the driver in source order: the errors
 of two deferred functions come in the other order where their definitions are in
 the other order from the first uses or the declarations that queue them. Where
 clang evaluates a statement out of source order (an assignment's right side
-first), the order of several errors in it may differ; and where an error's
-feature is the first of the rest of a map (an `arch=` CPU's, or a caller's
-attribute that turns several features off), clang's order is its `StringMap`'s
-and the driver's `predefines_features`', so the two may name different features.
+first), the order of several errors in it may differ.
+
+Where an error's feature is the first of the rest of a map (an `arch=` CPU's,
+or a caller's attribute that turns several features off), it is the first the
+map's `llvm::StringMap` iterates to, and a caller's attribute's errors come in
+that order (#2093, `c_check_feature_map.c`). A `StringMap` iterates its
+buckets, so the order follows from the keys' hashes (`xxh3_64bits`, truncated
+to 32 bits: `xxh3_short.c`), its linear probing and its doublings past three
+quarters full, and the order in which `X86TargetInfo::initFeatureMap` first
+writes the keys: `sse2` and what it implies, the CPU's features in LLVM's
+`FeatureInfos` order, each followed by what it implies, then the command line's
+`-m` features (the driver's last of each, in order) and the attribute's items,
+then the soft rules' `popcnt`, `mmx`, `xsave` and `crc32`. The features' order,
+direct implications and CPUs' features are `c_check_feature_map.inc`, generated
+from LLVM's `X86TargetParser` (`tools/generate_x86_feature_map.c`,
+THIRD_PARTY_NOTICES.md). Differences left: under `-march=native`, whose
+features the driver lists in the host's own map's order, and for a
+`cpu_specific` version's map, the feature named is still the first by
+`predefines_features`' order; and the driver's features that no `-m` feature
+flag gives (`-mretpoline`'s, `-mharden-sls`'s), which are keys of clang's map
+too, aren't modeled.
 `--lower-all`, #129's test option, checks every definition it lowers, those
 clang never emits among them.
 
