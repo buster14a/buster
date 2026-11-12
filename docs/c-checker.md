@@ -8911,7 +8911,17 @@ arguments against the function. The checker now gives these as clang does.
   one being declared), a struct's earlier member, or a function
   declarator's own parameter; one that names nothing is clang's "use of
   undeclared identifier", before any of the declaration's attributes is
-  applied. Then, after their subjects and counts (with the handlers' "at
+  applied, after which clang's parser drops that attribute and the
+  declaration goes on with its others (#2251, `check_input_names_drop`): so
+  does a name in a generic attribute's expression or in a known attribute's
+  argument expressions (`aligned(zzz)`, `alloc_size(nosuch)`,
+  `check_input_read_attributes`). A name that clang's search corrects
+  (`aligned(alignedy)` near a variable `alignedx`) still gets no suggestion
+  and no "'aligned' attribute requires integer constant" after it; and a
+  later warning of the unit's file scope can be dropped where a dropped
+  attribute's declarator group is read again by a constant (`int v
+  __attribute__((aligned(zzz))), w;` then `_Static_assert(_Alignof(w) == 8,
+  "")`). Then, after their subjects and counts (with the handlers' "at
   least 1 argument"): `capability`'s name a string literal; a trylock's
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of
