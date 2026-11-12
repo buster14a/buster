@@ -160,14 +160,61 @@ static uint32_t check_input_counted_unevaluated_end(const Parser* parser, uint32
     return t;
 }
 
+// clang's -Wdivision-by-zero in a counted_by family's argument [first, end) (#1842), which its parser reads as an
+// expression: each `/` or `%` whose right operand is a constant zero, at the operator. Rare: scalar.
+static void check_input_counted_division(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    for (uint32_t t = first; t < end && !reader->output->resource; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool divides = (kind == PARSE_KIND_SLASH || kind == PARSE_KIND_PERCENT) && parser->tree.roles[t] == PARSE_ROLE_MULTIPLICATIVE;
+        // The right operand: the run past the operator that its node holds.
+        uint32_t stop = t + 1;
+        bool under = divides;
+        while (under && stop < end)
+        {
+            uint32_t at = stop;
+            for (uint32_t steps = 0; at != t && at >= first && at < end && parser->tree.parents[at] != at && steps < end - first; steps += 1)
+            {
+                at = parser->tree.parents[at];
+            }
+            under = at == t;
+            stop += under ? 1u : 0u;
+        }
+        CheckValue value = { 0 };
+        TypeId unused = 0;
+        const uint32_t reports = reader->output->report_count;
+        const bool zero = divides && stop > t + 1 && check_input_constant_read(reader, t + 1, stop, false, false, true, &value, &unused, NULL, NULL) &&
+                          value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.integer == 0;
+        reader->output->report_count = reports;
+        if (zero)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_DIVISION_BY_ZERO,
+                .kind = CHECK_WARNING_EVENT_DIVISION_BY_ZERO,
+                .token = t,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = t + 1,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = kind == PARSE_KIND_PERCENT ? 1u : 0u },
+            };
+            check_input_warning_once(reader, &event);
+        }
+    }
+}
+
 // The type of a counted_by family's argument that is more than a name (#1842), as clang's parser reads it where the
 // attribute is: the record's earlier members and the scope's names (check_input_thread_name; in sizeof's, alignof's and
 // typeof's unevaluated operands, the scope's alone, as clang's member lookup there finds none), each name that names
 // nothing clang's "use of undeclared identifier" error, at the first (*undeclared, which ends the attribute); 0 where its
 // type isn't worked out.
 static TypeId check_input_counted_argument_type(CheckInputReader* reader, const CheckTagFrame* frames, uint32_t depth, const CheckTagMember* members,
-                                                uint32_t member_count, uint32_t first, uint32_t end, uint32_t* undeclared)
+                                                uint32_t member_count, const CheckInputAttribute* attribute, uint32_t first, uint32_t end, uint32_t* undeclared,
+                                                bool* expression_error)
 {
+    *expression_error = false;
     const Parser* parser = reader->parser;
     *undeclared = BUSTER_CHECK_NONE;
     uint32_t unevaluated = first;
@@ -187,9 +234,36 @@ static TypeId check_input_counted_argument_type(CheckInputReader* reader, const 
         const uint32_t reports = reader->output->report_count;
         CheckValue value = { 0 };
         TypeId unused = 0;
-        const bool read = check_input_constant_read(reader, first, end, false, false, true, &value, &unused, NULL, NULL);
+        CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+        uint32_t failed = BUSTER_CHECK_NONE;
+        const bool read = check_input_constant_read(reader, first, end, false, false, true, &value, &unused, &failed, &failure);
         type = read || value.type != 0 ? value.type : 0;
         reader->output->report_count = reports;
+        check_input_counted_division(reader, first, end);
+        // A member access clang's Sema refuses in the expression (#1842): its error, as an attribute expression's
+        // (check_constant_failure_error); the caller then gives clang's integer error.
+        const CheckConstantError mapped = !read && failure.diagnostic != CHECK_DIAG_NONE ?
+                                          check_constant_failure_error(reader, &failure, failure.token < end ? failure.token : first) :
+                                          (CheckConstantError){ .error = CHECK_ARGUMENT_COUNT };
+        if (mapped.error == CHECK_ARGUMENT_EXPRESSION_MEMBER_BASE || mapped.error == CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME ||
+            mapped.error == CHECK_ARGUMENT_EXPRESSION_ARROW_POINTER)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report_argument(reader, mapped.token, CHECK_INPUT_ATTRIBUTE_ARGUMENT, (uint32_t)mapped.error | mapped.number << 8);
+            if (reader->output->report_count > before)
+            {
+                CheckInputReport* report = reader->output->reports + before;
+                report->attribute = attribute->first;
+                report->type = mapped.type;
+                report->value = mapped.value;
+                report->type_spelling = check_input_typedef_spelling(reader->output, reader->parser, mapped.spelling != 0 ? mapped.spelling : first);
+                report->note_token = mapped.note_token;
+                report->note_kind = mapped.note_kind;
+                report->completion = mapped.token + 1;
+            }
+            *expression_error = true;
+            type = 0;
+        }
     }
     return type;
 }
@@ -206,6 +280,7 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
     for (uint32_t a = 0; valid && attributes != 0 && a < attributes->count; a += 1)
     {
         const CheckInputAttribute* attribute = &attributes->records[a];
+        const uint32_t reported = reader->output->report_count;
         const uint8_t kind = attribute->kind == CHECK_ATTRIBUTE_COUNTED_BY ? check_input_counted_kind(check_input_attribute_name(reader, attribute->name)) :
                                                                              BUSTER_TYPE_COUNT_NONE;
         const uint32_t index = kind != BUSTER_TYPE_COUNT_NONE ? (uint32_t)kind - 1 : 0;
@@ -260,9 +335,11 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
         }
         // Any other expression's type, with the members' names (#1842); a literal's where it isn't worked out.
         uint32_t undeclared = BUSTER_CHECK_NONE;
+        bool expression_error = false;
         const TypeId argument_type = kind != BUSTER_TYPE_COUNT_NONE && named == BUSTER_CHECK_NONE && first < attribute->argument_end ?
-                                     check_input_counted_argument_type(reader, frames, depth, members, member_count, first, attribute->argument_end, &undeclared) : 0;
-        const bool integer_argument = argument_type != 0 ? check_input_counted_integer(types, argument_type) : literal_integer;
+                                     check_input_counted_argument_type(reader, frames, depth, members, member_count, attribute, first, attribute->argument_end,
+                                                                       &undeclared, &expression_error) : 0;
+        const bool integer_argument = expression_error ? false : argument_type != 0 ? check_input_counted_integer(types, argument_type) : literal_integer;
         if (kind == BUSTER_TYPE_COUNT_NONE)
         {
         }
@@ -343,6 +420,14 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
         {
             member->count_kind = kind;
             member->count_name = name;
+        }
+        // Clang's attribute errors come once its argument is parsed, after the warnings and errors its expression gave
+        // (#1842), which keep their places.
+        for (uint32_t r = reported; r < reader->output->report_count; r += 1)
+        {
+            CheckInputReport* report = reader->output->reports + r;
+            const bool parsed = report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || report->message == CHECK_INPUT_UNDECLARED;
+            report->completion = !parsed && report->completion < attribute->argument_end ? attribute->argument_end : report->completion;
         }
     }
     return valid;
