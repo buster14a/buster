@@ -3479,10 +3479,15 @@ What the lowering covers past scalars (#145's programs):
     - Each copy has its switches' jump tables of its own, as clang's clones
       do (#2247): `check_lower_switch_tables` makes them per body, the copies'
       too, and `check_lower_table_of` finds a table by its body and control.
-    - A body with inline assembly or a label whose address it may take is
-      still compiled once, with the unit's features. Its versions' names are
-      symbols at that one code: those plans and label symbols are a body's
-      own. A group with a reference, or a
+    - Each copy's code takes its own symbols of the body's labels whose
+      addresses it takes (#2247, `check_program_target_number`,
+      `check_lower_label_symbol`). The last copy in the options' order keeps
+      the labels' own symbols, which the program's data reaches: clang's
+      block-scope static `static void* t[] = { &&a };` holds the last clone's
+      label addresses, since that clone is emitted last.
+    - A body with inline assembly is still compiled once, with the unit's
+      features. Its versions' names are symbols at that one code: those
+      plans are a body's own. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -4510,6 +4515,17 @@ take clang's words and places:
   subscript of a function's name or pointer is "subscript of pointer to
   function type 'int (void)'" at that operand, a typedef'd pointee as written
   (`check_semantic_constraint`).
+- **A member access** whose base is no structure or union, anywhere else
+  (#2288, `check_semantic_constraint`'s member branch): clang's "member
+  reference base type 'int' is not a structure or union" at the operator,
+  with the operand's type as written for `.` (`'myint' (aka 'int')`) and the
+  pointee for `->`; `.` of a pointer to a record is "member reference type
+  'struct S *' is a pointer; did you mean to use '->'?" there, and `->` of no
+  pointer is "member reference type 'int' is not a pointer" at the member's
+  name. Clang goes on reading `.` of a pointer as `->`, so a member that
+  pointer's record lacks adds its "no member named" there; buster's
+  expression stays invalid and gives only the first. `->`'s pointee type
+  prints as its canonical type, not its typedef's.
 
 Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
@@ -4867,7 +4883,10 @@ do:
     compatible there unless one is unnamed and written in its definition: two
     named records, a struct and a union, or two typedefs' unnamed records are,
     as in clang. Such a pair is queued and compared member by member after the
-    definition's own members, breadth first.
+    definition's own members, breadth first. Two unnamed records written in
+    their definitions, one a struct and the other a union, are clang's error
+    at the second's record, noted "'' is a struct here" at the earlier one,
+    with no notes at the outer member (#1826, `CHECK_TAG_MISMATCH_KIND`).
   - The first difference is clang's "type 'struct S' has incompatible
     definitions", with its two notes at the differing members (name,
     bit-field, type, a member with no counterpart). An unnamed member's note
@@ -4877,7 +4896,10 @@ do:
     f.c:2:21)`, an anonymous member's `(anonymous at ...)`).
   - The errors are published where the second body ends, after what its
     members report. A member whose record is itself an incompatible
-    redefinition reads as an `int`, as clang's invalid declaration does.
+    redefinition reads as an `int` in its place, as clang's invalid
+    declaration does: the pointers, atomics and arrays around it stay
+    (`_Atomic(int) *`, #1826). A record after a specifier that heads its
+    subtree (`_Atomic struct T { ... }`) is found by its own keyword.
 
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.

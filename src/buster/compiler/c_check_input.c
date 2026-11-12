@@ -14088,6 +14088,32 @@ static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const 
     const bool pointer = held != 0 && type_kind(types, held) == BUSTER_TYPE_KIND_POINTER && argument->offset == 0 &&
                          check_const_load(types, &reader->output->const_values, argument->object, 0, 0, 0, held, position, &pointee) &&
                          pointee.constant_kind == CHECK_CONSTANT_ADDRESS && pointee.object != 0;
+    // That pointer's own initializer's casts (#2189): one that lost the designator loses it for the call too, as clang's
+    // evaluator reads the stored pointer's designator (`(const char*)(const void*)arr`). Its initializer runs from the
+    // declarator's `=` to its `,` or `;`.
+    uint32_t equal = pointer && receipt->declaration < parser->tokens.count ? receipt->declaration + 1 : parser->tokens.count;
+    uint32_t depth = 0;
+    while (equal < parser->tokens.count && !(depth == 0 && (parser->tokens.kinds[equal] == PARSE_KIND_EQUAL || parser->tokens.kinds[equal] == PARSE_KIND_SEMI ||
+                                                            parser->tokens.kinds[equal] == PARSE_KIND_COMMA)))
+    {
+        const uint8_t kind = parser->tokens.kinds[equal];
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? 1u : 0u;
+        equal += 1;
+    }
+    const bool initialized = equal < parser->tokens.count && parser->tokens.kinds[equal] == PARSE_KIND_EQUAL;
+    uint32_t stop = initialized ? equal + 1 : equal;
+    depth = 0;
+    while (initialized && stop < parser->tokens.count && !(depth == 0 && (parser->tokens.kinds[stop] == PARSE_KIND_SEMI || parser->tokens.kinds[stop] == PARSE_KIND_COMMA)))
+    {
+        const uint8_t kind = parser->tokens.kinds[stop];
+        depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
+        depth -= (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) && depth != 0 ? 1u : 0u;
+        stop += 1;
+    }
+    const CheckInputVerboseTrapDesignator stored = initialized && equal + 1 < stop ? check_input_verbose_trap_designator(reader, equal + 1, stop) :
+                                                                                       CHECK_INPUT_VERBOSE_TRAP_DESIGNATED;
+    designator = stored == CHECK_INPUT_VERBOSE_TRAP_DESIGNATED ? designator : designator == CHECK_INPUT_VERBOSE_TRAP_UNKNOWN ? designator : stored;
     const CheckValue* address = pointer ? &pointee : argument;
     receipt = pointer ? check_const_find(&reader->output->const_values, address->object, position, &owner) : receipt;
     uint64_t begin = 0;
