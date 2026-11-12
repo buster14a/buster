@@ -6234,7 +6234,21 @@ which no graph node holds (an enumerator's, a bound's), leave a
 Left: a left operand past 64 bits there (an `__int128`'s), and a
 `_BitInt` past 128 bits anywhere, give none. And, as on main before it, a
 body's `-Wshift-overflow` is published at the function's end, where clang
-gives it as the shift is built (#2488). `-Wstring-plus-int` (#2190, on by
+gives it as the shift is built (#2488). `-Wassign-enum` (#2264, off by default,
+`check_common_assign_enum`) is clang's `DiagnoseAssignmentEnum`: an integer
+constant expression of another type than the enumeration it converts to (an
+assignment's right operand, a compound assignment's too, an initializer's, a
+return's, a prototype argument's, a brace initializer's or a compound
+literal's value), whose value in the enumeration's width and signedness is
+none of its enumerators', "integer constant not in range of enumerated type
+'enum A'" at the value's expression location, the target as written without
+its qualifiers, given as the conversion is built. A `flag_enum` one takes a
+value whose bits, or whose complement's, are its single-bit enumerators';
+an `enum_extensibility(open)` one gives none. Both attributes are read from
+the definition's tokens, between `enum` and `{` and in the GNU attributes
+after `}` (`check_common_enum_attribute`): one only a redeclaration carries
+is left out. A unit where nothing enables the warning, or that defines no
+enumeration, skips the scan. `-Wstring-plus-int` (#2190, on by
 default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 `+` of a string literal, not parenthesized, and an operand of integer,
 boolean or enumeration type in either order, "adding 'T' to a string does not

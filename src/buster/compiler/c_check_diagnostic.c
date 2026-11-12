@@ -202,6 +202,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = { "-Wgnu-empty-struct", "-Wgnu", "empty struct is a GNU extension" },
     [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = { "-Wunused-but-set-variable", "-Wunused", "variable set but not used" },
     [CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW] = { "-Wshift-sign-overflow", NULL, "signed shift result sets the sign bit of the shift expression's type" },
+    [CHECK_WARNING_ID_ASSIGN_ENUM] = { "-Wassign-enum", NULL, "integer constant not in range of enumerated type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

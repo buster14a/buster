@@ -232,6 +232,9 @@ enum
     // A folded signed `<<` whose result sets its type's sign bit (#2264, clang's DiagnoseBadShiftValues):
     // -Wshift-sign-overflow, off by default.
     CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW = 153,
+    // An integer constant converted to an enumeration that none of its enumerators equals (#2264, clang's
+    // DiagnoseAssignmentEnum): -Wassign-enum, off by default.
+    CHECK_WARNING_ID_ASSIGN_ENUM = 154,
     CHECK_WARNING_ID_COUNT,
 };
 
