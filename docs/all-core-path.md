@@ -8,7 +8,7 @@ already in hand remove of that, and the change that removes the rest. The issue
 is [#2536](https://github.com/buster14a/buster/issues/2536). The names of
 existing code are main's at `4c8c3c9c`, and every figure not attributed
 otherwise is that revision's on the 9700X, under the lock, from
-[the measurement record](https://github.com/buster14a/buster-performance/tree/26d5707dddf0a1fb56418ad0e694b8a28a698265/docs/measurements/all-core-design-672-2026-11-12).
+[the measurement record](https://github.com/buster14a/buster-performance/tree/eaa710db255e42520666aaea225b142aa74a2bde/docs/measurements/all-core-design-672-2026-11-12).
 
 **In one paragraph.** Eight compiles of `sqlite3.c` at once cost each of them
 1.89 times the cycles of one alone (1,297 M against 687 M), for the same
@@ -100,6 +100,14 @@ The same cohorts under three other counter sets, per compile:
   cycles a page, 1.3 M for each megabyte of the peak. The exit alone, where
   eight processes give their pages back at once, is about 35 M of them, and
   `native_queued_spin_lock_slowpath` leads its teardown.
+- **It isn't the clearing that grows.** By the kernel's functions, in sampled
+  cycles a compile at eight workers: `_raw_spin_lock` 57 M,
+  `do_anonymous_page` 51 M, `clear_page_erms` 44 M, `lock_vma_under_rcu`
+  32 M, `native_queued_spin_lock_slowpath` 22 M, `asm_exc_page_fault` 21 M.
+  Alone, with huge pages, `clear_page_erms` is 59 M and nothing else is above
+  4 M. The clear of a page costs what it did; the fault's own path and its
+  locks, taken 63,000 times beside seven other processes doing the same, are
+  the rest.
 
 ### By stage
 
@@ -254,10 +262,8 @@ the units:
 - **Eight lanes are 4.8 times one lane**, for 1.37 times the cycles: the user
   cycles rise 1.21 times and the kernel's 2.08. A pass moves 1.5 GB through
   DRAM on one lane and 4.9 GB on eight.
-- **The user side barely inflates.** By family of function, eight lanes
-  against one: the reader 1.08 times, the parser 1.08, the graph's
-  construction 1.13, the program 1.13, the emission 1.05, the preprocessor
-  1.24, `memset` 1.36. A unit of musl is 3,800 tokens: its records are in the
+- **The user side barely inflates** (the table below). A unit of musl is
+  3,800 tokens: its records are in the
   caches already. A unit's own compile as a process each costs 1.19 times the
   user cycles at eight at a time; the cluster of 2,000 tokens of
   [#672's experiment](https://github.com/buster14a/buster/issues/672#issuecomment-6810078226)
@@ -274,6 +280,40 @@ the units:
   2.14 times at eight at a time, and takes 2.1 times as long as the command
   on lanes: 3.2 M cycles of start and end for a unit whose own compile is
   4.4 M ([#1444](https://github.com/buster14a/buster/issues/1444)).
+
+A command of several units reports no stages, so its inflation is by family
+of function: sampled user cycles a pass, one cohort each way (their totals
+inflate 1.16 times where the unsampled medians above inflate 1.21).
+
+| family, user cycles a pass | one lane | 8 lanes | times |
+| --- | ---: | ---: | ---: |
+| the reader's functions | 1,489 M | 1,615 M | 1.08 |
+| the preprocessor and the lexer | 805 M | 1,002 M | 1.24 |
+| the emission | 325 M | 341 M | 1.05 |
+| the parser and the tree's columns | 279 M | 301 M | 1.08 |
+| libc's `memset`, `memmove`, `memcmp` | 239 M | 326 M | 1.36 |
+| the graph's construction | 225 M | 255 M | 1.13 |
+| warnings | 176 M | 193 M | 1.10 |
+| the program and its controls | 165 M | 187 M | 1.13 |
+| the lowering | 102 M | 127 M | 1.25 |
+| the type table | 98 M | 102 M | 1.04 |
+| initializers and static data | 96 M | 102 M | 1.06 |
+| the graph run and its loop | 81 M | 88 M | 1.09 |
+| the C rules for a node | 64 M | 73 M | 1.15 |
+| the rest of the compiler | 571 M | 627 M | 1.10 |
+| samples at the kernel's addresses | 185 M | 356 M | 1.93 |
+| all | 4,898 M | 5,694 M | 1.16 |
+
+And the kernel, by family, in both modes' sampled cycles a pass:
+
+| family | one lane | 8 lanes | 8 commands |
+| --- | ---: | ---: | ---: |
+| TLB flushes sent to other CPUs | 12 M | 663 M | 14 M |
+| page faults | 456 M | 572 M | 628 M |
+| pages given back | 285 M | 417 M | 416 M |
+| clearing pages | 85 M | 183 M | 88 M |
+| spin locks | 162 M | 216 M | 215 M |
+| sleeping locks (the address space's) | 5 M | 34 M | 8 M |
 
 ### What the designs in hand remove at eight workers
 
@@ -527,6 +567,13 @@ percent of a pass; step 1 measures the instructions a token at W against
 losing more than they gain takes the window, not the body, as its range.
 
 What stays ordered is the spine, as C requires, and the epilogue's merges.
+The spine is measured: the unit without its bodies is 18.9 ms of the unit's
+117.2 alone and 36.2 of 243.6 at eight workers, and within it the reader's
+walk of the declarations is the ordered step (`check-input`, 11.6 and 21.6
+ms), which [attested declarations](attested-declarations.md) shortens for
+commands of many units and step 4 keeps in the cache for one. The epilogue
+isn't built, so it has no measurement; what it replaces is today's selection
+and the object's stages, 2.5 ms alone and 5.1 at eight workers.
 The chain's bodies are independent, which is the parallelism the lanes take.
 
 ### Lanes, units and processes
