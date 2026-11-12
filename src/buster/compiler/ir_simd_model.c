@@ -104,6 +104,9 @@ typedef enum IrSimdOperation
     IR_SIMD_LANE_EXTRACT,
     IR_SIMD_LANE_INSERT,
     IR_SIMD_MOVEMASK,
+    // A reduction of a's doublewords or quadwords into every lane of a 16-byte result (#1840, ir.c's
+    // BUSTER_IR_INTRINSIC_REDUCE), the action's `index` the IR's flags: the lanes' bytes' log2 and the operation.
+    IR_SIMD_REDUCE,
     // A unary operation of each of a's integer lanes (#1840, ir.c's BUSTER_IR_INTRINSIC_LANE_UNARY), the action's `index`
     // the IR's flags: the lanes' bytes' log2 and the operation (population count, leading zero count, conflicts).
     IR_SIMD_LANE_UNARY,
@@ -254,7 +257,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
                           action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
                           action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
-                          action->operation == IR_SIMD_LANE_UNARY);
+                          action->operation == IR_SIMD_REDUCE || action->operation == IR_SIMD_LANE_UNARY);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -301,6 +304,10 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_LANE_INSERT:
                 valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
                         (uint32_t)(action->index >> 2) < ir_simd_bits(type) / (8u << (action->index & 3));
+                break;
+            case IR_SIMD_REDUCE:
+                valid = valid && type == IR_SIMD_V4I32 && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index & 3) >= 2 &&
+                        (uint32_t)(action->index >> 2) < 9;
                 break;
             case IR_SIMD_LANE_UNARY:
                 valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index >> 2) <= 2 &&
@@ -743,6 +750,29 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         {
             staged = *values[0];
             ir_simd_lane_write(&staged, lane_bits, lane, lane_bits == 64 ? values[1]->words[0] : values[1]->words[0] & ((UINT64_C(1) << lane_bits) - 1));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_REDUCE)
+    {
+        // The operation of every lane of a, in order (each is associative and commutative), into every result lane.
+        const uint32_t lane_bits = 8u << (action->index & 3);
+        const uint32_t operation = (uint32_t)(action->index >> 2);
+        const uint32_t lanes = ir_simd_bits(action->operands[0]) / lane_bits;
+        const uint64_t mask = lane_bits == 64 ? UINT64_MAX : (UINT64_C(1) << lane_bits) - 1;
+        const uint64_t sign = UINT64_C(1) << (lane_bits - 1);
+        uint64_t total = ir_simd_lane_read(values[0], lane_bits, 0);
+        for (uint32_t lane = 1; lane < lanes; lane += 1)
+        {
+            const uint64_t x = ir_simd_lane_read(values[0], lane_bits, lane);
+            // A signed comparison as an unsigned one of both values with the sign bit flipped.
+            const uint64_t flip = (operation & 1) != 0 ? sign : 0;
+            const bool less = (x ^ flip) < (total ^ flip);
+            const uint64_t results[9] = { less ? x : total, less ? x : total, less ? total : x, less ? total : x, total + x, total * x, total & x, total | x, total ^ x };
+            total = results[operation] & mask;
+        }
+        for (uint32_t lane = 0; lane < 128 / lane_bits; lane += 1)
+        {
+            ir_simd_lane_write(&staged, lane_bits, lane, total);
         }
     }
     else if (valid && action->operation == IR_SIMD_LANE_UNARY)

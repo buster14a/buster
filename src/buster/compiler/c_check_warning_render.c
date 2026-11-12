@@ -1463,7 +1463,22 @@ static String8 check_driver_counted_type(const Parser* parser, Preprocessor* pp,
                          check_driver_spelling_ready(parser, pp, input, types, spell, scratch);
     if (counted)
     {
-        const TypeNames names = { .bytes = spell->bytes, .lengths = spell->lengths, .count = spell->count, .anonymous = spell->anonymous, .anonymous_count = spell->anonymous_count };
+        TypeNames names = { .bytes = spell->bytes, .lengths = spell->lengths, .count = spell->count, .anonymous = spell->anonymous, .anonymous_count = spell->anonymous_count };
+        // The typedef the member's declaration spells its pointee or element with (`const T * __counted_by(n)`), as its
+        // sugar keeps it, with the qualifiers written beside it.
+        const uint32_t declarator = check_semantic_member_token(parser, input, types, selected);
+        const uint32_t use = declarator < input->token_count ? check_input_typedef_sugar(input, parser, declarator) : 0;
+        uint32_t alias_written = 0;
+        const uint32_t spelling = use != 0 ? check_input_sugar_declaration(input, parser, use, &alias_written) : 0;
+        TypeId alias_type = spelling != 0 && spelling < input->token_count ? input->declared_types[spelling] : 0;
+        String8 alias_name = alias_type != 0 ? check_driver_warning_name(pp, parser->tokens.names[spelling]) : (String8){ 0 };
+        if (alias_type != 0 && alias_name.length != 0)
+        {
+            names.alias_types = &alias_type;
+            names.alias_names = &alias_name;
+            names.alias_written = &alias_written;
+            names.alias_count = 1;
+        }
         const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
         const TypeId inner = types->members.type[selected];
         const bool array = type_kind_is_array(type_kind(types, type_strip_aligned(types, inner)));
@@ -2524,6 +2539,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 "relational comparison result unused",
             };
             result = messages[payload->data < BUSTER_ARRAY_LENGTH(messages) ? payload->data : 0];
+            break;
+        }
+        case CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = type.length != 0 ? check_warning_text(scratch, "C99 forbids casting nonscalar type %.*s to the same type", (int)type.length, type.pointer) : NULL;
             break;
         }
         case CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION:

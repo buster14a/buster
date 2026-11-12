@@ -792,6 +792,19 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_AES, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->reduce)
+    {
+        // A reduction (#1840) into every lane of 16 bytes, its flags the lanes and the operation; a row into a general
+        // register then takes lane 0, as its vmovd or vmovq does.
+        value = ir_typed_emit(sink, IR_INTRINSIC, IR_V4I32, operands[0], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (type != IR_V4I32)
+        {
+            const uint32_t size = operation->immediate & 3;
+            value = ir_typed_emit(sink, IR_INTRINSIC, size == 3 ? IR_I64 : IR_I32, value, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)size);
+        }
+    }
     else if (operation->lane_unary)
     {
         // A unary operation of each lane (#1840), its lanes and operation in its flags; clang's leading zero count with a

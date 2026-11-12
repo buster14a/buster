@@ -782,6 +782,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // type name" with its note for a typedef; before `;` or an operator other than `*` or `&` no type is offered.
         "typedef int myint;\nint f(void)\n{\n    unsignd x = 1;\n    myin y = 2;\n    myin *p = &y;\n    myin;\n    myin + 2;\n"
         "    return x + y + *p;\n}\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        // A parameter's unknown type name (#1447, check_input_parameter_typo): clang's "unknown type name" with its
+        // suggestion, a typedef's (a block's own too) or a type's keyword, and the parameter read with it; every
+        // declaration's, a prototype's and a definition's, in one reading. A name with no suggestion keeps its error alone.
+        "typedef int myint;\nint a(unsignd v);\nint b(constt int c);\nvoid g(void) { typedef long blk; int h(blkk q); }\n"
+        "int d(myin v, myin w) { return v + w; }\nint e(myin *p, int n);\nint f(int n, myin p[n]);\nstruct S { int q; };\n"
+        "typedef struct S Sty;\nint i(Stx s) { return s.q; }\nint k(nosuchtype v);\n",
+        // A parenthesized name before an operand (`(myin)x`, clang's MaybeTypeCast): "use of undeclared identifier" with a
+        // typedef's suggestion, the expression invalid and its rest skipped (check_driver_typo_tail); `(myin)(x)` is the
+        // same name's call.
+        "typedef int myint;\nvoid n(int x) { char *p = (myin)x; }\nvoid m(int x) { int q = (myin)(x); }\n"
+        "void k(int x) { int q = (myin)x + \"a\"; }\nvoid j(int x) { int q = (myin)x, r = (myin)x; }\n"
+        "void i(int x) { int q = (nosuchthing)x; }\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
         // A name before an operand within an expression (`sizeo a`, `retrn 5`): its keyword's suggestion, and the
         // expression's rest skipped to its `,`, `;` or closer without the parser's error (check_driver_typo_tail).
         "void take(int, int);\nint g(int a)\n{\n    int w = sizeo * 2;\n    int v = sizeo a b, k = zzz1;\n    take(sizeo a, zzz2);\n"
@@ -790,6 +802,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // An undeclared name in an attribute's argument (#2251): clang's error at it, after which its parser drops the
+        // attribute, the list's others stand, and the declaration and the unit go on: a generic attribute's, a known one's
+        // expression (aligned, alloc_size, cleanup), a member's and a block-scope declarator's; a library function's name
+        // is still declared implicitly there.
+        "void *a1(void *d) __attribute__((diagnose_as_builtin(nosuch, 1)));\nvoid *p = memset;\n"
+        "int g(int) __attribute__((alloc_size(nosuch), unused));\nint v __attribute__((aligned(zzz))), w __attribute__((aligned(8)));\n"
+        "void h(void) __attribute__((cleanup(qq)));\nstruct S { int m __attribute__((aligned(yyy))); int n; } s;\n"
+        "void k(void) { int l __attribute__((aligned(xxx))) = 1; int unused; (void)l; }\nint y = 1/0;\n"
+        "int f(void) { return undeclared_fn(1); }\n",
         // Statement checks in clang's words (#2406): a `case` or a `default` outside any switch at its keyword; a subscript of
         // a function's pointer at that operand, the pointee's typedef as written; and of neither an array, a pointer nor a
         // vector at its `[`.
