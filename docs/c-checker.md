@@ -4566,6 +4566,14 @@ Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
 fixtures compare each with clang.
 
+A block's thread-local object without `static` or `extern` (`_Thread_local int
+z;`, C23's `thread_local`, GNU's `__thread`, a `for`'s declaration too) is
+clang's "'_Thread_local' variables must have global storage" (`'__thread'` for
+GNU's) at the keyword (#2420, `CHECK_INPUT_THREAD_NON_GLOBAL`), and the report
+recovers: the reader goes on with the declaration, as clang does. With
+`register` beside it, clang's "cannot combine" comes first, and the reader
+still stops there (two errors of one specifier list, #1820 (c)).
+
 #### Invalid declarations (#1447)
 
 Clang marks a declaration whose declarator or type is in error invalid, keeps it
@@ -8510,6 +8518,12 @@ arguments against the function. The checker now gives these as clang does.
     after the specifiers, with "'X' attribute ignored";
   - a list after a pointer's qualifiers (`int * const [[gnu::unused]] p`) is
     the parser's error "an attribute list cannot appear here".
+- **Before C23** (#2409), each list gives clang's parser's extension
+  warning "[[]] attributes are a C23 extension" at its first `[`, under
+  `-Wc23-extensions` (`-Wc2x-extensions`), off by default and given by
+  `-pedantic` (`CHECK_WARNING_ID_C23_ATTRIBUTES`): once, from the reader that
+  reads the list (`check_input_attributes`, `CHECK_WARNING_EVENT_C23_ATTRIBUTES`).
+  Clang's `-Wpre-c23-compat` warning of a list in C23 isn't given.
 - **Lists before a declarator's suffixes.** C23's direct-declarator takes a
   list after the name and after each suffix, before the next one:
   `int x [[gnu::unused]] [2];` and `void f [[gnu::cold]] (void) {}`. The
