@@ -4321,7 +4321,9 @@ static void check_input_report_specifiers(CheckInputReader* reader, uint32_t fir
                 // An error of the list's end follows the list's repeated specifiers' warnings, which come first at that
                 // point (check_input_duplicate_specifier), and precedes the declarator's diagnostics.
                 reader->output->reports[count].completion = declspec.finish != BUSTER_CHECK_NONE ? declspec.finish : 0;
-                reader->output->reports[count].suborder = declspec.finish != BUSTER_CHECK_NONE ? 2u : 0u;
+                // Several of them keep DeclSpec::Finish's order, whatever their places (#1820 (c): a sign's error before
+                // a width's).
+                reader->output->reports[count].suborder = declspec.finish != BUSTER_CHECK_NONE ? 2u + e : 0u;
             }
         }
     }
