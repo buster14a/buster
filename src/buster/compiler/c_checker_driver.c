@@ -2721,7 +2721,8 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
         for (uint32_t i = 0; valid && i < events->count; i += 1)
         {
             const CheckWarningEvent* event = events->events + i;
-            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION;
+            const bool unused = event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
+                                event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF;
             const bool unit_end = unused && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
             const uint32_t close = unused && event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? event->completion : count;
             // The scope's opening delimiter, before the declaration. A for initializer retains its header's `)`
@@ -2753,35 +2754,37 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
 }
 
 // The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative
-// definition's (#2238's array, #2168's const object), 2 an unused file-scope declaration's.
+// definition's (#2238's array, #2168's const object), 2 an unused file-scope declaration's, 3 an unused block-scope
+// typedef's (#2264), which clang gives after those, under their gate.
 static uint32_t check_driver_unit_end_class(const CheckWarningEvent* event)
 {
     const bool unit_end = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
     const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) && unit_end;
+    const bool typedefs = event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF;
     const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY || (event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT && unit_end);
-    return tentative ? 1u : unused ? 2u : 0u;
+    return tentative ? 1u : unused ? 2u : typedefs ? 3u : 0u;
 }
 
 // Splits a reader's warning events (`events`) into those published where they stand (`kept`) and the unit-end ones
 // (`late`), which clang's ActOnEndOfTranslationUnit gives after every other diagnostic (#2238): late[0] the tentative
-// arrays' warnings, late[1] the unused file-scope declarations', which it leaves out once any error has occurred, a
-// warning -Werror promotes included. Each keeps its order. `kept` may be `events`; a unit with unit-end events copies
+// arrays' warnings, late[1] the unused file-scope declarations' and then the unused block-scope typedefs', which it
+// leaves out once any error has occurred, a warning -Werror promotes included. Each keeps its order. `kept` may be `events`; a unit with unit-end events copies
 // them into `arena`. Whether there was room.
 static bool check_driver_unit_end_split(const CheckWarningEvents* events, Arena* arena, CheckWarningEvents* kept, CheckWarningEvents late[2])
 {
     const CheckWarningEvents source = *events;
-    uint32_t counts[3] = { 0 };
+    uint32_t counts[4] = { 0 };
     for (uint32_t i = 0; i < source.count; i += 1)
     {
         counts[check_driver_unit_end_class(source.events + i)] += 1;
     }
     late[0] = (CheckWarningEvents){ .notes = source.notes, .note_count = source.note_count };
     late[1] = late[0];
-    CheckWarningEvent* copy = counts[1] + counts[2] != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, source.count) : NULL;
-    const bool valid = counts[1] + counts[2] == 0 || copy != NULL;
+    CheckWarningEvent* copy = counts[1] + counts[2] + counts[3] != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, source.count) : NULL;
+    const bool valid = counts[1] + counts[2] + counts[3] == 0 || copy != NULL;
     if (copy != NULL)
     {
-        uint32_t cursors[3] = { 0, counts[0], counts[0] + counts[1] };
+        uint32_t cursors[4] = { 0, counts[0], counts[0] + counts[1], counts[0] + counts[1] + counts[2] };
         for (uint32_t i = 0; i < source.count; i += 1)
         {
             const uint32_t class = check_driver_unit_end_class(source.events + i);
@@ -2791,7 +2794,7 @@ static bool check_driver_unit_end_split(const CheckWarningEvents* events, Arena*
         late[0].events = copy + counts[0];
         late[0].count = counts[1];
         late[1].events = copy + counts[0] + counts[1];
-        late[1].count = counts[2];
+        late[1].count = counts[2] + counts[3];
     }
     else
     {

@@ -207,6 +207,9 @@ enum
     CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
     // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
     CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
+    // A block-scope typedef that is never used (#2264, clang's emitAndClearUnusedLocalTypedefWarnings): -Wunused-local-typedef,
+    // off by default, under -Wunused and so -Wmost and -Wall.
+    CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF = 145,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -245,6 +248,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_UNUSED_VARIABLE,
     CHECK_WARNING_EVENT_UNUSED_FUNCTION,
     CHECK_WARNING_EVENT_UNUSED_PARAMETER,
+    // A block-scope typedef no use names (#2264, -Wunused-local-typedef), at its name, completed at the unit's end: payload.name
+    // its name. Published after the unused file-scope declarations, under their gate (check_driver_unit_end_split).
+    CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF,
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,

@@ -68,7 +68,9 @@ static bool check_warning_option(uint32_t id, String8 option)
     // -Wunused-value's (with -Wunused-comparison, -Wunused-result and -Wunevaluated-expression under it) is in -Wunused, which
     // -Wmost and so -Wall hold.
     const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT ||
-                        id == CHECK_WARNING_ID_UNEVALUATED_EXPRESSION;
+                        id == CHECK_WARNING_ID_UNEVALUATED_EXPRESSION || id == CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF;
+    // (-Wunused-local-typedefs is its GCC spelling, #2264.)
+    matches |= id == CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF && check_diagnostic_option(option, "-Wunused-local-typedefs");
     matches |= unused && (check_diagnostic_option(option, "-Wunused") || check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
     // -Wint-in-bool-context, -Wtautological-compare (with -Wtautological-constant-compare under it), diagnose_if's

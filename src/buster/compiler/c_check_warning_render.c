@@ -569,7 +569,8 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
         const CheckWarningEvent* event = view->events + i;
         // An unused file-scope declaration's at the unit's end is published after every other, where none was an error
         // (#2141): its own promotion rejects the unit then.
-        const bool unit_end = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+        const bool unit_end = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
+                               event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF) &&
                               event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
         promoted = !unit_end && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX && (repair == NULL || check_repair_warning_token(repair, event->token)) &&
                    check_driver_warning_severity(pp, input, event) >= CHECK_WARNING_ERROR;
@@ -2550,6 +2551,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_UNUSED_PARAMETER:
             result = check_warning_text(scratch, "unused parameter '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF:
+            result = check_warning_text(scratch, "unused typedef '%.*s'", (int)name.length, name.pointer);
             break;
         default: break;
     }
