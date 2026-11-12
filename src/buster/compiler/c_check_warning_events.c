@@ -207,6 +207,9 @@ enum
     CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
     // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
     CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
+    // A folded signed `<<` whose result sets its type's sign bit (#2264, clang's DiagnoseBadShiftValues):
+    // -Wshift-sign-overflow, off by default.
+    CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW = 145,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -455,6 +458,11 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // No message: a `<<` the constant reader folds into its type's sign bit (#2264, -Wshift-sign-overflow), an array
+    // bound's or an enumerator value's, which no graph node holds. token the `<<`, payload.first_type the shift's type,
+    // payload.data and token its left operand's low and high 32 bits, payload.name that operand's typedef spelling (0 for
+    // none). check_common_shift_sign_overflow reports it as the graph's shifts.
+    CHECK_WARNING_EVENT_SHIFT_SIGN,
     // target_clones' versions (#1838, c_check_target_versions.c), each at its string literal's quote plus its offset in
     // the trimmed string (BUSTER_CHECK_TARGET_CLONES_CPU's payload): -Wignored-attributes' unsupported one,
     // -Wfunction-multiversion's duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.

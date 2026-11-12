@@ -512,6 +512,50 @@ static __attribute__((noinline)) void check_constant_enum_mix(CheckConstantInput
     }
 }
 
+// Clang's -Wshift-sign-overflow for the constant reader's `<<` at `token` (#2264, DiagnoseBadShiftValues): a signed
+// shift of a nonnegative left operand that folds, by a count below its promoted type's width, whose result needs one bit
+// more than that width, the sign bit's. A CHECK_WARNING_EVENT_SHIFT_SIGN keeps it for check_common_shift_sign_overflow,
+// which reports those no graph node holds (an enumerator's, a bound's): payload.first_type the shift's type,
+// payload.data and token the left operand's low and high 32 bits, payload.name its typedef spelling where its type is
+// the shift's. A left operand past 64 bits isn't kept. Kept out of its caller's hot loop, as check_constant_enum_mix.
+static __attribute__((noinline)) void check_constant_shift_sign(CheckConstantInput* input, const CheckAction* action, const CheckValue* result, uint32_t first,
+                                                               uint32_t token)
+{
+    CheckInputReader* reader = input->reader;
+    const TypeId type = result->type;
+    uint32_t width = 0;
+    bool is_signed = false;
+    uint32_t count_width = 0;
+    bool count_signed = false;
+    const bool folded = result->constant_kind == CHECK_CONSTANT_INTEGER && action->operands[0].constant_kind == CHECK_CONSTANT_INTEGER &&
+                        action->operands[1].constant_kind == CHECK_CONSTANT_INTEGER && type_is_valid(reader->types, type) &&
+                        type_is_valid(reader->types, action->operands[1].type) &&
+                        check_action_integer_type(reader->types, type, &width, &is_signed) && is_signed && width != 0 && width <= 128 &&
+                        check_action_integer_type(reader->types, action->operands[1].type, &count_width, &count_signed) && count_width != 0 &&
+                        count_width <= 128;
+    const unsigned __int128 value = folded ? action->operands[0].integer & check_action_mask(width) : 0;
+    const unsigned __int128 places = folded ? action->operands[1].integer & check_action_mask(count_width) : 0;
+    const bool negative_count = count_signed && count_width != 0 && ((places >> (count_width - 1)) & 1) != 0;
+    const uint32_t length = value == 0 ? 0 : (uint64_t)(value >> 64) != 0 ? 128u - (uint32_t)__builtin_clzll((uint64_t)(value >> 64)) :
+                                                                           64u - (uint32_t)__builtin_clzll((uint64_t)value);
+    if (folded && !negative_count && places < width && length != 0 && length <= 64 && length < width && length + (uint32_t)places == width)
+    {
+        const uint32_t leaf = action->operands[0].type == type && first >= input->first && first < input->end ? check_constant_enum_leaf(input, first) : BUSTER_CHECK_NONE;
+        const uint32_t spelling = leaf < reader->parser->tokens.count ? check_input_token_type_spelling(reader->output, reader->parser, leaf, true) : 0;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW,
+            .kind = CHECK_WARNING_EVENT_SHIFT_SIGN,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .first_type = type, .name = spelling, .token = (uint32_t)(value >> 32), .data = (uint32_t)value },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 typedef struct CheckConstantPart CheckConstantPart;
 struct CheckConstantPart
 {
@@ -3555,6 +3599,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                      (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_CONDITIONAL))
                 {
                     check_constant_enum_mix(input, &action, first, count, token);
+                }
+                if (checked.diagnostic == CHECK_DIAG_NONE && op == CHECK_OP_SHIFT_LEFT && count == 2)
+                {
+                    check_constant_shift_sign(input, &action, &checked.value, first, token);
                 }
                 if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && first >= input->first && first < input->end)
                 {

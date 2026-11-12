@@ -2648,33 +2648,13 @@ static const char* check_driver_shift_message(const Parser* parser, Preprocessor
             const uint32_t count = (uint32_t)(check_stream_value(stream, right).integer & 0xffu);
             const uint32_t length = value == 0 ? 0 : (uint64_t)(value >> 64) != 0 ? 128u - (uint32_t)__builtin_clzll((uint64_t)(value >> 64)) :
                                                                                    64u - (uint32_t)__builtin_clzll((uint64_t)value);
-            // The hexadecimal digits of value << count: those of value << (count % 4), three 64-bit limbs wide, then
-            // count / 4 zeros.
-            const uint32_t nibble = count % 4u;
-            uint64_t limbs[3] = { (uint64_t)value, (uint64_t)(value >> 64), 0 };
-            limbs[2] = nibble != 0 ? limbs[1] >> (64u - nibble) : 0;
-            limbs[1] = nibble != 0 ? limbs[1] << nibble | limbs[0] >> (64u - nibble) : limbs[1];
-            limbs[0] = limbs[0] << nibble;
-            char digits[64 + 1];
-            uint32_t used = 0;
-            bool leading = true;
-            for (uint32_t i = 48; i != 0; i -= 1)
-            {
-                const uint32_t digit = (uint32_t)(limbs[(i - 1) / 16] >> (((i - 1) % 16) * 4)) & 0xfu;
-                leading = leading && digit == 0 && i != 1;
-                if (!leading)
-                {
-                    digits[used] = "0123456789ABCDEF"[digit];
-                    used += 1;
-                }
-            }
-            digits[used] = 0;
+            char digits[48 + 32 + 1];
+            check_common_shift_digits(value, count, digits);
             const uint32_t spelling = check_stream_type(stream, left) == type ? check_input_operand_type_spelling(input, parser, left) : 0;
             const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
             if (name.length != 0)
             {
-                result = check_warning_text(scratch, "signed shift result (0x%s%.*s) requires %u bits to represent, but %.*s only has %u bits", digits,
-                                            (int)(count / 4u), "00000000000000000000000000000000000000000000000000000000000000000000",
+                result = check_warning_text(scratch, "signed shift result (0x%s) requires %u bits to represent, but %.*s only has %u bits", digits,
                                             length + count + 1u, (int)name.length, name.pointer, width);
             }
         }

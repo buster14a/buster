@@ -8177,6 +8177,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_chained_comparison_driver_test.c"
 #include "c_check_builtin_pointer_sign_driver_test.c"
 #include "c_check_shift_op_parentheses_driver_test.c"
+#include "c_check_shift_sign_overflow_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
 #include "c_check_asm_label_auto_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
@@ -9122,6 +9123,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_chained_comparisons(&test, clang, executable, directory);
             check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);
             check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
+            check_test_driver_shift_sign_overflow(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_asm_label_auto(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);

@@ -4216,6 +4216,125 @@ static void check_common_sizeof_array_decay(const Parser* parser, Preprocessor* 
     }
 }
 
+// The hexadecimal digits of `value << count` as clang's APInt prints a shift's result (DiagnoseBadShiftValues), without
+// leading zeros: those of value << (count % 4), three 64-bit limbs wide, then count / 4 zeros. `digits` holds 48 digits,
+// their terminator and count / 4 zeros, at most 32 of them.
+static void check_common_shift_digits(unsigned __int128 value, uint32_t count, char digits[48 + 32 + 1])
+{
+    const uint32_t nibble = count % 4u;
+    uint64_t limbs[3] = { (uint64_t)value, (uint64_t)(value >> 64), 0 };
+    limbs[2] = nibble != 0 ? limbs[1] >> (64u - nibble) : 0;
+    limbs[1] = nibble != 0 ? limbs[1] << nibble | limbs[0] >> (64u - nibble) : limbs[1];
+    limbs[0] = limbs[0] << nibble;
+    uint32_t used = 0;
+    bool leading = true;
+    for (uint32_t i = 48; i != 0; i -= 1)
+    {
+        const uint32_t digit = (uint32_t)(limbs[(i - 1) / 16] >> (((i - 1) % 16) * 4)) & 0xfu;
+        leading = leading && digit == 0 && i != 1;
+        if (!leading)
+        {
+            digits[used] = "0123456789ABCDEF"[digit];
+            used += 1;
+        }
+    }
+    const uint32_t zeros = count / 4u < 32u ? count / 4u : 32u;
+    memset(digits + used, '0', zeros);
+    digits[used + zeros] = 0;
+}
+
+// -Wshift-sign-overflow (#2264, clang's DiagnoseBadShiftValues as it builds a shift): a `<<` of a signed left operand and
+// a count that both fold, the left one nonnegative and the count below its promoted type's width, whose result needs
+// exactly one bit more than that width, the sign bit's: "signed shift result (0x…) sets the sign bit of the shift
+// expression's type ('T') and becomes negative" at the `<<`, given as the shift is built. Off by default. It is no
+// runtime warning, so an unevaluated or unreachable shift gives it too; under -fwrapv (or -fno-strict-overflow) signed
+// overflow is defined and clang gives none. A unit where nothing enables it skips the scan.
+static void check_common_shift_sign_overflow(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                             CheckWarningSpelling* spell, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const uint8_t roles[] = { PARSE_ROLE_SHIFT };
+    CheckCommonScan scan = { 0 };
+    const PredefinesOptions* predefines = &pp->options.predefines;
+    const bool wrapv = predefines->wrapv != 0 ? predefines->wrapv == BUSTER_PREDEFINES_ON : predefines->strict_overflow == BUSTER_PREDEFINES_OFF;
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const bool enabled = !wrapv && graph != NULL && types != NULL && input->token_nodes != NULL &&
+                         check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW, true);
+    for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count; token < count;
+         token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
+    {
+        const uint32_t node = parser->tokens.kinds[token] == PARSE_KIND_LESSLESS && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        const bool shift = node < stream->count && graph->ops[node] == CHECK_OP_SHIFT_LEFT && graph->operand0[node] < stream->count &&
+                           graph->operand1[node] < stream->count;
+        const uint32_t left = shift ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        const uint32_t right = shift ? graph->operand1[node] : BUSTER_CHECK_NONE;
+        const TypeId type = shift ? check_stream_type(stream, node) : 0;
+        uint32_t width = 0;
+        bool is_signed = false;
+        uint32_t count_width = 0;
+        bool count_signed = false;
+        const bool folded = shift && check_action_integer_type(types, type, &width, &is_signed) && is_signed && width != 0 && width <= 128 &&
+                            check_action_integer_type(types, check_stream_type(stream, right), &count_width, &count_signed) &&
+                            count_width != 0 && count_width <= 128 &&
+                            check_stream_constant_kind(stream, left) == CHECK_CONSTANT_INTEGER &&
+                            check_stream_constant_kind(stream, right) == CHECK_CONSTANT_INTEGER;
+        const unsigned __int128 value = folded ? check_stream_value(stream, left).integer & check_action_mask(width) : 0;
+        const unsigned __int128 shifted = folded ? check_stream_value(stream, right).integer & check_action_mask(count_width) : 0;
+        const bool count_negative = count_signed && count_width != 0 && ((shifted >> (count_width - 1)) & 1) != 0;
+        const bool counted = folded && !count_negative && shifted < width && value != 0 && ((value >> (width - 1)) & 1) == 0;
+        const uint32_t places = counted ? (uint32_t)shifted : 0;
+        const uint32_t length = value == 0 ? 0 : (uint64_t)(value >> 64) != 0 ? 128u - (uint32_t)__builtin_clzll((uint64_t)(value >> 64)) :
+                                                                               64u - (uint32_t)__builtin_clzll((uint64_t)value);
+        // ResultBits = the left operand's significant bits (its length and a sign bit) plus the count: one past the width.
+        if (counted && length + places == width)
+        {
+            const uint64_t mark = scratch->length;
+            char digits[48 + 32 + 1];
+            check_common_shift_digits(value, places, digits);
+            const uint32_t spelling = check_stream_type(stream, left) == type ? check_input_operand_type_spelling(input, parser, left) : 0;
+            const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
+            const char* message = name.length != 0 ?
+                                  check_warning_text(scratch, "signed shift result (0x%s) sets the sign bit of the shift expression's type (%.*s) and becomes negative",
+                                                     digits, (int)name.length, name.pointer) : NULL;
+            if (message != NULL)
+            {
+                check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, token), CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW, true, message, NULL, 0,
+                                       scratch);
+            }
+            arena_pop_to(scratch, mark);
+        }
+    }
+    // The constant reader's (CHECK_WARNING_EVENT_SHIFT_SIGN), but where the graph has the shift: an enumerator's, a bound's.
+    for (uint32_t i = 0; enabled && i < input->warning_events.count && !pp->fatal; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + i;
+        const uint32_t token = event->token;
+        const uint32_t node = event->kind == CHECK_WARNING_EVENT_SHIFT_SIGN && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        uint32_t width = 0;
+        bool is_signed = false;
+        if (event->kind == CHECK_WARNING_EVENT_SHIFT_SIGN && token < count && (node >= graph->count || graph->tokens[node] != token) &&
+            check_action_integer_type(types, event->payload.first_type, &width, &is_signed) && width != 0 && width <= 128)
+        {
+            const uint64_t mark = scratch->length;
+            const uint64_t value = (uint64_t)event->payload.token << 32 | event->payload.data;
+            const uint32_t length = value != 0 ? 64u - (uint32_t)__builtin_clzll(value) : 0;
+            char digits[48 + 32 + 1];
+            check_common_shift_digits(value, width - length, digits);
+            const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, event->payload.first_type, event->payload.name);
+            const char* message = name.length != 0 ?
+                                  check_warning_text(scratch, "signed shift result (0x%s) sets the sign bit of the shift expression's type (%.*s) and becomes negative",
+                                                     digits, (int)name.length, name.pointer) : NULL;
+            if (message != NULL)
+            {
+                check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, token), CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW, true, message, NULL, 0,
+                                       scratch);
+            }
+            arena_pop_to(scratch, mark);
+        }
+    }
+}
+
 // The type clang's getEnumCoercedType gives an operand: an enumerator's own enumeration where the operand names one
 // (parentheses are no nodes) and that enumeration's definition is complete, past its closing brace, else its type.
 static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
@@ -10886,6 +11005,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_shift_op_parentheses(parser, pp, input, scratch);
     check_common_string_plus_int(parser, pp, input, stream, types, &spell, scratch);
     check_common_sizeof_array_decay(parser, pp, input, stream, types, &spell, scratch);
+    check_common_shift_sign_overflow(parser, pp, input, stream, types, &spell, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
