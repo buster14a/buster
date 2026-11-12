@@ -8,6 +8,7 @@
 //   changes --event pull_request --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]
 //   changes --event push --workflow HEAD.yml [--output FILE]
 //   changes --event push --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]
+//   changes --event merge_group --workflow HEAD.yml [--output FILE]
 //   changes --self-test [--root DIR]
 //
 // LIST holds the merge's changed paths, one a line (`git diff --no-renames --name-only HEAD^1 HEAD`); BASE.yml is the
@@ -23,7 +24,10 @@
 // A push sets code alone and measure to all. A push given its first-parent change (the nightly mode's, docs/ci.md) is
 // targeted instead: it decides as a pull request on that change, but code is always true: every main revision runs its
 // own hosted rows, including documentation-only changes (#1271; plain alone in the nightly mode, #2057), and
-// a push of several commits can bring code that its head's own change doesn't show. `changes_decide` is the
+// a push of several commits can bring code that its head's own change doesn't show. A merge-queue candidate
+// (`merge_group`, #1430) runs the full integration contract whatever it changes, documentation alone included: code,
+// measure all and the performance readers' qualification, which its hosted rows' shard 1 runs; the other outputs gate
+// the 9700X job's steps, which a candidate never runs. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
 // main's trigger and the hosted scope the evidence job decides (changes_main_policy), the hosted rows' workflow
@@ -1231,6 +1235,8 @@ struct ChangesInput
     bool push;
     // A push decided on its first-parent change (`files`), as the nightly mode's pushes are.
     bool targeted;
+    // A merge-queue candidate (#1430): the full integration contract, whatever it changes.
+    bool merge_group;
     // The merge's changed paths, each NUL-terminated.
     TextList files;
     Text base_workflow;
@@ -1265,7 +1271,16 @@ static void changes_set_gate(ChangesResult* result, Text gate)
 static ChangesResult changes_decide(const ChangesInput* input)
 {
     ChangesResult result = { 0 };
-    if (input->push && !input->targeted)
+    if (input->merge_group)
+    {
+        // The queue's candidate is the only per-merge correctness run (#1430): every hosted row whatever it changes,
+        // and the performance readers' qualification, which the rows' shard 1 runs. The other gates select the 9700X
+        // job's steps, which a candidate never runs (its evidence skips the hardware).
+        result.code = true;
+        result.all = true;
+        result.fixed[CHANGES_PERFORMANCE] = true;
+    }
+    else if (input->push && !input->targeted)
     {
         // Every main push tests, including documentation alone; measurement selection is separate (#1271).
         result.code = true;
@@ -2105,6 +2120,26 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
         }
     }
 
+    // A merge-queue candidate (#1430) runs the full integration contract whatever it changes, documentation alone and
+    // nothing at all included: code, every plain benchmark and the performance readers' qualification (its hosted rows'
+    // shard 1), and no gate of the 9700X job's steps, which a candidate never runs.
+    const char* candidate_files[] = { "", "README.md docs/ci.md", "src/buster/compiler/c_types.c", "tools/ci/qualification.c" };
+    for (uint32_t i = 0; i < sizeof(candidate_files) / sizeof(candidate_files[0]); i += 1)
+    {
+        ChangesInput candidate = {
+            .merge_group = true,
+            .files = changes_words(candidate_files[i]),
+            .base_workflow = workflow,
+            .head_workflow = workflow,
+            .root = root,
+        };
+        ChangesResult full = changes_decide(&candidate);
+        changes_expect(test, full.code && full.all && changes_output(&full, "performance"), "a merge-queue candidate runs the full contract", text_c(candidate_files[i]));
+        changes_expect(test, strcmp(changes_measure(&full), "all") == 0, "a merge-queue candidate's measure is all", text_c(candidate_files[i]));
+        full.fixed[CHANGES_PERFORMANCE] = false;
+        changes_expect(test, !changes_any_gate(&full), "a merge-queue candidate opens no 9700X gate", text_c(candidate_files[i]));
+    }
+
     ChangesInput nothing = {
         .base_workflow = workflow,
         .head_workflow = workflow,
@@ -2788,6 +2823,10 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
 // rows and fuzzing). Keep its unfiltered trigger and per-run concurrency separate from a PR's replaceable queue. The
 // evidence glue tests pin scope and hosted=run for pushes; here the workflow must consume those decisions without
 // reducing the matrix or suppressing fuzzing for a full scope.
+// Every merge-queue candidate (#1430), documentation alone included, runs the full contract too: its trigger is
+// `checks_requested` for main with no path filter, its concurrency group its own run's (the queue builds several at
+// once), its selector the merge-group profile, and the required aggregate runs for it and reads its coverage step,
+// which checks the candidate's jobs one by one.
 // This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
 static bool changes_main_policy(Text workflow)
 {
@@ -2796,16 +2835,24 @@ static bool changes_main_policy(Text workflow)
         uint32_t job;
         const char* line;
     } required[] = {
-        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
+        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
+        { 5, "    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')" },
+        { 5, "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then" },
+        { 5, "              \"$RUNNER_TEMP/changes\" --event merge_group --workflow \"$workflow\" --output \"$GITHUB_OUTPUT\"" },
+        { 6, "    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}" },
+        { 6, "      actions: read" },
+        { 6, "        if: github.event_name == 'merge_group'" },
+        { 6, "        run: bash tools/ci/nightly.sh coverage \"$RUNNER_TEMP/coverage\"" },
+        { 6, "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}" },
         { 4, "    needs: [changes, evidence, policy]" },
-        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}" },
+        { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}" },
         { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
         { 1, "    needs: [changes, evidence, policy, prepare-hosted-tools]" },
         { 1, "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES },
         { 1, "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
-        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}" },
-        { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
+        { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}" },
+        { 1, "      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}" },
         { 1, BUSTER_CHANGES_HOST_ARCHES },
         { 1, BUSTER_CHANGES_VECTOR_ROWS },
         { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
@@ -2813,7 +2860,7 @@ static bool changes_main_policy(Text workflow)
         { 2, "    needs: [changes, evidence, prepare-hosted-tools]" },
         { 2, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
         { 2, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}" },
-        { 2, "      fail-fast: false" },
+        { 2, "      fail-fast: ${{ github.event_name == 'merge_group' }}" },
         { 2, "          - entry: frontend" },
         { 2, "          - entry: elf-override" },
         { 2, "          - entry: crash-replay-proof" },
@@ -2822,8 +2869,12 @@ static bool changes_main_policy(Text workflow)
     bool seen[sizeof(required) / sizeof(required[0])] = { false };
     bool valid = true;
     bool push = false;
+    bool queue = false;
     uint32_t pushes = 0;
     uint32_t branches = 0;
+    uint32_t queues = 0;
+    uint32_t queue_types = 0;
+    uint32_t queue_branches = 0;
     uint32_t section = 0;
     uint32_t job = 3;
     size_t offset = 0;
@@ -2841,12 +2892,15 @@ static bool changes_main_policy(Text workflow)
             {
                 section = text_equal_c(line, "on:") ? 1 : text_equal_c(line, "concurrency:") ? 2 : text_equal_c(line, "jobs:") ? 3 : 0;
                 push = false;
+                queue = false;
                 job = 3;
             }
             else if (section == 1 && indent == 2)
             {
                 push = text_equal_c(line, "  push:");
                 pushes += push;
+                queue = text_equal_c(line, "  merge_group:");
+                queues += queue;
             }
             else if (section == 1 && push)
             {
@@ -2855,9 +2909,18 @@ static bool changes_main_policy(Text workflow)
                 branches += branch;
                 valid = valid && branch;
             }
+            else if (section == 1 && queue)
+            {
+                // A merge-queue candidate for main: the one event type, and no path or other filter.
+                const bool types = text_equal_c(line, "    types: [checks_requested]");
+                const bool branch = text_equal_c(line, "    branches: [main]");
+                queue_types += types;
+                queue_branches += branch;
+                valid = valid && (types || branch);
+            }
             else if (section == 3 && indent == 2)
             {
-                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : 3;
+                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : 3;
             }
             const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
             for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
@@ -2870,7 +2933,7 @@ static bool changes_main_policy(Text workflow)
     {
         valid = valid && seen[i];
     }
-    return valid && pushes == 1 && branches == 1;
+    return valid && pushes == 1 && branches == 1 && queues == 1 && queue_types == 1 && queue_branches == 1;
 }
 
 static void changes_test_main_policy(ChangesTest* test, Text workflow)
@@ -2887,16 +2950,32 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "on:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "source-only path inclusion" },
         { "on:", "    branches: [main]", "    branches: [release]", "wrong push branch" },
         { "on:", "  push:", "  pull_request_target:", "missing main push" },
-        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
+        { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'", "merge-queue documentation exclusion" },
+        { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "merge-queue source-only inclusion" },
+        { "  merge_group:", "    branches: [main]", "    branches: [release]", "merge queue of another branch" },
+        { "  merge_group:", "    types: [checks_requested]", "    types: [destroyed]", "merge queue without its checks" },
+        { "  merge_group:", "  merge_group:\n    types: [checks_requested]\n    branches: [main]\n", "", "missing merge-queue trigger" },
+        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
+        { "concurrency:", " || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id))", "", "candidates share one pending slot" },
+        { "  changes:", " || github.event_name == 'merge_group' || ", " || ", "a candidate skips the selector and its self-tests" },
+        { "  changes:", "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then", "          if false; then", "a candidate decided by its change alone" },
+        { "  changes:", "--event merge_group --workflow", "--event push --workflow", "a candidate decided as a push" },
+        { "  qualification:", " && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}", " && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
+        { "  qualification:", "        if: github.event_name == 'merge_group'\n", "        if: false\n", "a candidate's coverage unchecked" },
+        { "  qualification:", "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}\n", "", "the aggregate ignores the candidate's coverage" },
+        { "  qualification:", "      actions: read\n", "", "the coverage step can't read the run's jobs" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: true", "main cancellation" },
         { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: false", "lost PR cancellation" },
-        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}", "native reuse suppresses hosted tests" },
+        { "  test:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}", "native reuse suppresses hosted tests" },
         { "  prepare-hosted-tools:", "needs.evidence.outputs.hosted == 'run'", "needs.evidence.outputs.hosted == 'reused'", "preparation excludes required hosted work" },
         { "  prepare-hosted-tools:", "    uses: ./.github/workflows/prepare-hosted-tools.yml", "    uses: ./.github/workflows/absent.yml", "missing preparation implementation" },
         { "  test:", "needs.prepare-hosted-tools.result == 'success' && ", "", "tests bypass preparation failure" },
         { "  test:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "tests accept skipped preparation" },
         { "  test:", "    needs: [changes, evidence, policy, prepare-hosted-tools]", "    needs: [changes, evidence, policy]", "tests omit preparation dependency" },
-        { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
+        { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}", "      fail-fast: true", "main matrix fail-fast" },
+        { "  test:", " || github.event_name == 'merge_group' }}", " }}", "a candidate's rows don't fail fast" },
+        { "  test:", "((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success')", "(github.event_name != 'pull_request' || needs.policy.result == 'success')", "a candidate's tests don't wait for the policy job" },
+        { "  prepare-hosted-tools:", "((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success')", "(github.event_name != 'pull_request' || needs.policy.result == 'success')", "a candidate's fuzzing doesn't wait for the policy job" },
         { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"native\"]'", "missing baseline architecture" },
         { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"x86-64\", \"vector\"]'", "main's native row replaced before its qualification" },
         { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none\"", "the vector sanitizer configurations dropped" },
@@ -2913,7 +2992,8 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success' && ", "", "fuzzing bypasses preparation failure" },
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "fuzzing accepts skipped preparation" },
         { "  fuzz:", "    needs: [changes, evidence, prepare-hosted-tools]", "    needs: [changes, evidence]", "fuzzing omits preparation dependency" },
-        { "  fuzz:", "      fail-fast: false", "      fail-fast: true", "fuzz campaign cancellation" },
+        { "  fuzz:", "      fail-fast: ${{ github.event_name == 'merge_group' }}", "      fail-fast: true", "fuzz campaign cancellation" },
+        { "  fuzz:", "      fail-fast: ${{ github.event_name == 'merge_group' }}", "      fail-fast: false", "a candidate's fuzz campaigns don't fail fast" },
         { "  fuzz:", "          - entry: frontend", "          - entry: removed", "missing frontend fuzzing" },
         { "  fuzz:", "          - entry: elf-override", "          - entry: removed", "missing ELF fuzzing" },
         { "  fuzz:", "          - entry: crash-replay-proof", "          - entry: removed", "missing replay proof" },
@@ -2968,7 +3048,7 @@ static bool changes_row_policy(Text row)
         { 1, "          name: ${{ steps.name.outputs.artifact }}" },
         { 2, "    needs: compiler" },
         { 2, "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}" },
-        { 2, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
+        { 2, "      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}" },
         { 2, "          ref: ${{ github.sha }}" },
         { 2, "          artifact-name: ${{ inputs.hosted-tools }}" },
         { 2, "          BUILD: ${{ needs.compiler.result }}" },
@@ -3493,6 +3573,7 @@ static const char* changes_usage =
     "usage: changes --event pull_request --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]\n"
     "       changes --event push --workflow HEAD.yml [--output FILE]\n"
     "       changes --event push --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]\n"
+    "       changes --event merge_group --workflow HEAD.yml [--output FILE]\n"
     "       changes --self-test [--root DIR]\n";
 
 int main(int argc, char** argv)
@@ -3550,8 +3631,10 @@ int main(int argc, char** argv)
     }
     bool push = event != NULL && strcmp(event, "push") == 0;
     bool pull_request = event != NULL && strcmp(event, "pull_request") == 0;
+    bool merge_group = event != NULL && strcmp(event, "merge_group") == 0;
     const bool targeted = push && files != NULL;
-    valid = valid && root != NULL && (self_test ? event == NULL : ((push && (files == NULL) == (base_workflow == NULL)) || (pull_request && files != NULL && base_workflow != NULL)) && head_workflow != NULL);
+    const bool profile = merge_group && files == NULL && base_workflow == NULL;
+    valid = valid && root != NULL && (self_test ? event == NULL : ((push && (files == NULL) == (base_workflow == NULL)) || (pull_request && files != NULL && base_workflow != NULL) || profile) && head_workflow != NULL);
     int status = 2;
     if (!valid)
     {
@@ -3566,11 +3649,12 @@ int main(int argc, char** argv)
         ChangesInput input = {
             .push = push,
             .targeted = targeted,
+            .merge_group = merge_group,
             .root = root,
         };
         Text list = { .data = "", .length = 0 };
         bool read = read_file(head_workflow, &input.head_workflow);
-        read = read && ((push && !targeted) || (read_file(files, &list) && read_file(base_workflow, &input.base_workflow)));
+        read = read && ((push && !targeted) || merge_group || (read_file(files, &list) && read_file(base_workflow, &input.base_workflow)));
         if (!read)
         {
             fprintf(stderr, "changes: can't read an input: %s\n", strerror(errno));

@@ -5,22 +5,24 @@
 // constants live than there are registers, each recipe among them: statics' addresses from rip, a static array's
 // member's at an addend, extern variables' from their GOT slots, frame objects' addresses and a member's of one, and
 // constants of each encoding (a zero, a 32-bit one, a sign-extended and a 64-bit one), each a value the C driver's typed
-// stream converts (its pointers are 64-bit integers). A second fixture's loop divides by constants and by a register
-// while such values stay live across the divisions, whose sequences take rax and rdx (#141). Clang's build of the same
-// source is each one's oracle. Included by c_checker_driver_test.c after its ELF readers.
+// stream converts (its pointers are 64-bit integers). Its statics are indexed by the loop's k: an access at a constant
+// offset takes its symbol rip-relative (#2573), which leaves no address live. A second fixture's loop divides by
+// constants and by a register while such values stay live across the divisions, whose sequences take rax and rdx
+// (#141). Clang's build of the same source is each one's oracle. Included by c_checker_driver_test.c after its ELF
+// readers.
 
 // The fixture: tier1_remat is the function under test, main prints its results.
 static const char check_test_tier1_remat_source[] =
     "#include <stdio.h>\n"
     "#include <unistd.h>\n"
     "extern char** environ;\n"
-    "static long s0, s1, s2, s3, s4, s5;\n"
+    "static long s0[2], s1[2], s2[2], s3[2], s4[2], s5[2];\n"
     "static long sa[8];\n"
     "long tier1_remat(long n)\n"
     "{\n"
     "    long a0[2], a1[2], a2[2], a3[2], a4[2], a5[4];\n"
     "    long *p0 = a0, *p1 = a1, *p2 = a2, *p3 = a3, *p4 = a4, *p5 = &a5[1];\n"
-    "    long *q0 = &s0, *q1 = &s1, *q2 = &s2, *q3 = &s3, *q4 = &s4, *q5 = &s5, *q6 = &sa[3];\n"
+    "    long *q0 = s0, *q1 = s1, *q2 = s2, *q3 = s3, *q4 = s4, *q5 = s5, *q6 = &sa[3];\n"
     "    char*** r0 = &environ;\n"
     "    int* r1 = &opterr;\n"
     "    int* r2 = &optind;\n"
@@ -39,7 +41,7 @@ static const char check_test_tier1_remat_source[] =
     "    {\n"
     "        const long k = i & 1;\n"
     "        p0[k] += i; p1[k] ^= i; p2[k] -= i; p3[k] += i * 3; p4[k] ^= i + 7; p5[k] += i ^ 5;\n"
-    "        q0[0] += i; q1[0] ^= i; q2[0] -= i; q3[0] += i * 5; q4[0] ^= i + 3; q5[0] += i ^ 9; q6[k] += i;\n"
+    "        q0[k] += i; q1[k] ^= i; q2[k] -= i; q3[k] += i * 5; q4[k] ^= i + 3; q5[k] += i ^ 9; q6[k] += i;\n"
     "        total += (*r0 != 0) + *r1 + *r2;\n"
     "        total = total * 31 + wide;\n"
     "        total += middle;\n"
@@ -47,7 +49,7 @@ static const char check_test_tier1_remat_source[] =
     "        q6[k ^ 1] = negative;\n"
     "    }\n"
     "    return total + p0[0] + p0[1] + p1[0] + p1[1] + p2[0] + p2[1] + p3[0] + p3[1] + p4[0] + p4[1] + a5[0] + a5[1] + a5[2] + a5[3] +\n"
-    "           s0 + s1 + s2 + s3 + s4 + s5 + sa[3] + sa[4];\n"
+    "           s0[0] + s0[1] + s1[0] + s1[1] + s2[0] + s2[1] + s3[0] + s3[1] + s4[0] + s4[1] + s5[0] + s5[1] + sa[3] + sa[4];\n"
     "}\n"
     "int main(void)\n"
     "{\n"
@@ -58,17 +60,19 @@ static const char check_test_tier1_remat_source[] =
 // The division fixture: tier1_divide is the function under test. Its loop divides by eight constants, each a reciprocal's
 // sequence of another shape (64-bit signed by 10 and its remainder by 641, unsigned remainder by 1000003, the add
 // sequence's division by 7 and the even divisor's pre-shift by 14; 32-bit signed by -7, unsigned remainder by 10 and
-// division by 7), and by a register, while statics' and frame objects' addresses and constants stay live. main's calls
-// leave nothing live across them, so the saves its build reports are tier1_divide's (check_test_tier1_divide_main).
+// division by 7), and by a register, while statics' and frame objects' addresses and constants stay live. The statics are
+// indexed by k: an access at a constant offset takes its symbol rip-relative (#2573), which would leave no address to
+// keep. main's calls leave nothing live across them, so the saves its build reports are tier1_divide's
+// (check_test_tier1_divide_main).
 static const char check_test_tier1_divide_source[] =
     "#include <stdio.h>\n"
-    "static long s0, s1, s2, s3;\n"
+    "static long s0[2], s1[2], s2[2], s3[2];\n"
     "static unsigned long su[4];\n"
     "unsigned long tier1_divide(long n, long d)\n"
     "{\n"
     "    long a0[2], a1[2], a2[2];\n"
     "    long *p0 = a0, *p1 = a1, *p2 = a2;\n"
-    "    long *q0 = &s0, *q1 = &s1, *q2 = &s2, *q3 = &s3;\n"
+    "    long *q0 = s0, *q1 = s1, *q2 = s2, *q3 = s3;\n"
     "    unsigned long* u = &su[1];\n"
     "    const unsigned long wide = 0x123456789abcdefull;\n"
     "    const unsigned long middle = 0x87654321ull;\n"
@@ -84,14 +88,14 @@ static const char check_test_tier1_divide_source[] =
     "        p0[k] += i / 10;\n"
     "        p1[k] ^= (long)(x % 1000003u);\n"
     "        p2[k] -= (int)i / -7;\n"
-    "        q0[0] += (unsigned)x % 10u;\n"
-    "        q1[0] ^= i / d;\n"
-    "        q2[0] += i % 641;\n"
-    "        q3[0] ^= (long)(x / 7u);\n"
+    "        q0[k] += (unsigned)x % 10u;\n"
+    "        q1[k] ^= i / d;\n"
+    "        q2[k] += i % 641;\n"
+    "        q3[k] ^= (long)(x / 7u);\n"
     "        u[k] += x / 14u + (unsigned)x / 7u;\n"
     "        total = total * 31u + wide + middle + (unsigned long)p0[k];\n"
     "    }\n"
-    "    return total + (unsigned long)(p0[0] + p0[1] + p1[0] + p1[1] + p2[0] + p2[1]) + (unsigned long)(s0 + s1 + s2 + s3) + su[1] + su[2];\n"
+    "    return total + (unsigned long)(p0[0] + p0[1] + p1[0] + p1[1] + p2[0] + p2[1]) + (unsigned long)(s0[0] + s0[1] + s1[0] + s1[1] + s2[0] + s2[1] + s3[0] + s3[1]) + su[1] + su[2];\n"
     "}\n"
     "int main(void)\n"
     "{\n"
@@ -1325,10 +1329,10 @@ static bool check_test_tier1_build(const char* executable, const char* source, c
 
 // The fixture's object, decoded: every zeroing xor leaves no status flag live (#178: a recomputed zero is an xor only
 // where no flag is live, as every point between two nodes' records is), there is one at least, and every instruction
-// that addresses from rip has its own relocation at its displacement, a PC32 for a lea and a GOT one for a load (each
-// recomputed address one more). Into *loop_addresses, how many instructions in the loop (the range of its back edge, the
-// last backward jump) address from rip or from rsp's frame: the recomputed addresses there; and into *zeroing_count, its
-// zeroing xors.
+// that addresses from rip has its own relocation at its displacement: a PC32 for a lea and for a direct symbol's access
+// (#2573), and a GOT one for a load of an address (each recomputed address one more). Into *loop_addresses, how many
+// instructions in the loop (the range of its back edge, the last backward jump) compute an address from rip (a lea, or
+// a load from a GOT slot) or from rsp's frame: the recomputed addresses there; and into *zeroing_count, its zeroing xors.
 static bool check_test_tier1_code(CheckTest* test, const char* object, uint32_t* loop_addresses, uint32_t* zeroing_count)
 {
     enum
@@ -1339,8 +1343,11 @@ static bool check_test_tier1_code(CheckTest* test, const char* object, uint32_t*
     uint32_t* offsets = calloc(CHECK_TEST_TIER1_RECORDS, sizeof(uint32_t));
     uint32_t* types = calloc(CHECK_TEST_TIER1_RECORDS, sizeof(uint32_t));
     uint8_t* live = calloc(CHECK_TEST_TIER1_RECORDS, 1);
+    // Each record that computes an address from rip: a lea, or a load from a GOT slot.
+    uint8_t* from_rip = calloc(CHECK_TEST_TIER1_RECORDS, 1);
     uint32_t relocations = 0;
-    const uint32_t count = records != NULL && offsets != NULL && types != NULL && live != NULL ? check_test_tier1_function(object, "tier1_remat", records, CHECK_TEST_TIER1_RECORDS, offsets, types, &relocations) : 0;
+    const uint32_t count = records != NULL && offsets != NULL && types != NULL && live != NULL && from_rip != NULL ?
+                               check_test_tier1_function(object, "tier1_remat", records, CHECK_TEST_TIER1_RECORDS, offsets, types, &relocations) : 0;
     check_test_expect(test, count != 0, "the fixture's function decodes, with its relocations");
     if (count != 0)
     {
@@ -1369,26 +1376,28 @@ static bool check_test_tier1_code(CheckTest* test, const char* object, uint32_t*
             zeroing += 1;
             safe &= live[i] == 0;
         }
-        if (instruction->mode == BUSTER_X86_MEMORY_RIP && (form == X86_FORM_LEA_R64_M || form == X86_FORM_MOV_R64_RM64))
+        if (instruction->mode == BUSTER_X86_MEMORY_RIP)
         {
-            // The displacement is the record's last four bytes: neither form has an immediate.
-            const uint32_t field = records[i].offset + records[i].length - 4;
-            const uint32_t expected = form == X86_FORM_LEA_R64_M ? R_X86_64_PC32 : R_X86_64_REX_GOTPCRELX;
-            uint32_t found = 0;
+            // The displacement field ends where any immediate after it starts. A lea's reference is a PC32, and a mov
+            // r64's a PC32 for a direct symbol's value or a GOT slot's for an address; any other access's a PC32.
+            const uint32_t field = records[i].offset + records[i].length - x86_fixup_distance(form, X86_FIXUP_DISPLACEMENT);
+            uint32_t direct = 0;
+            uint32_t slot = 0;
             for (uint32_t r = 0; r < relocations; r += 1)
             {
-                found += offsets[r] == field && types[r] == expected;
+                direct += offsets[r] == field && types[r] == R_X86_64_PC32;
+                slot += offsets[r] == field && types[r] == R_X86_64_REX_GOTPCRELX;
             }
-            referenced &= found == 1;
+            referenced &= direct + slot == 1 && (slot == 0 || form == X86_FORM_MOV_R64_RM64);
+            from_rip[i] = form == X86_FORM_LEA_R64_M || slot != 0;
         }
     }
     for (uint32_t i = loop_first; i <= loop_last && i < count; i += 1)
     {
         const X86Instruction* instruction = &records[i].instruction;
         const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-        const bool rip = instruction->mode == BUSTER_X86_MEMORY_RIP && (form == X86_FORM_LEA_R64_M || form == X86_FORM_MOV_R64_RM64);
         const bool frame = instruction->mode == BUSTER_X86_MEMORY_BASE && instruction->rm == X86_REGISTER_RSP && form == X86_FORM_LEA_R64_M;
-        addressed += rip || frame;
+        addressed += from_rip[i] != 0 || frame;
     }
     check_test_expect(test, count == 0 || (zeroing != 0 && safe), "every zeroing xor of Tier 1's code leaves no flag live, and the fixture has one");
     check_test_expect(test, count == 0 || referenced, "each instruction that addresses from rip has a relocation of its own");
@@ -1399,6 +1408,7 @@ static bool check_test_tier1_code(CheckTest* test, const char* object, uint32_t*
     free(offsets);
     free(types);
     free(live);
+    free(from_rip);
     return count != 0;
 }
 

@@ -898,3 +898,11 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
 ./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"
+== Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+# #2573: every width's loads, stores, comparisons with an immediate after the displacement field, operations, floating
+# accesses, a sequentially consistent store and a loop, by both host paths without fallback, linked by the system linker
+# against a Clang oracle; objdump checks that no direct access goes through a lea of its symbol, each branch keeps its
+# fused comparison, and the GOT's and thread-locals' accesses keep their sequences.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_symbols.c -o build/test-driver-tier1-symbols
+./build/test-driver-tier1-symbols "$BUSTER_COMPILER" "$(command -v clang)"

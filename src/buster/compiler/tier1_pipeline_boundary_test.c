@@ -316,7 +316,7 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     uint32_t node = BUSTER_IR_NONE;
     if (ok)
     {
-        const Tier1SelectError error = tier1_select_plan_verified(&optimized.function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], scratch, test->vector, &plan, &node);
+        const Tier1SelectError error = tier1_select_plan_verified(&optimized.function, &dominance, 0, 0, &test->arenas[TIER1_PIPELINE_SELECTED], scratch, test->vector, &plan, &node);
         ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "boundary selection succeeds without fallback");
     }
     if (ok)

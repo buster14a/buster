@@ -337,6 +337,31 @@ stored and loaded in both arms of a branch, by both selection paths, with and
 without a frame pointer: folded into each access where nothing else uses it,
 and kept, its value the accesses' base, where the returned sum does.
 
+A direct symbol's address folds into its memory operands rip-relative
+(#2573, [the selection guide](../tier1-selection.md)). `test-tier1-emit`'s
+`tier1_symbol_fold_test.c` plans a function of a direct, a GOT, a local-exec
+and an initial-exec symbol by both paths with the access column: the direct
+symbol's load, store, byte comparison and word comparison fused with a branch
+fold it from another block, no node computes its address, and the others keep
+their sequences; without the column every symbol folds and the consumer, given
+it, refuses the plan. The code certifies and runs natively with its `PC32`,
+GOT and thread-pointer references resolved by the test, the comparisons'
+addends covering their immediates. `tests/driver/tier1_symbols.c` is the
+standalone native regression, run by `tools/ci/correctness.tests`: every
+width's loads, stores, comparisons with an immediate after the displacement
+field and branches on them, the operations that take a memory operand,
+floating accesses, a sequentially consistent store, a loop and indexed and
+address-of uses, by both host paths with `--tier1-strict --verify`, linked by
+the system linker against a Clang oracle; `objdump -dr` must find no `lea` of
+a direct symbol but the indexed table's and the address's, each branch fused
+with its comparison, and the GOT's and thread-locals' sequences, with no
+`PC32` to a symbol the unit reaches indirectly. From the repository root with a
+built compiler:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_symbols.c -o build/test-driver-tier1-symbols && ./build/test-driver-tier1-symbols build/compiler "$(command -v clang)"
+```
+
 `tier1_address_coalesce_test.c` checks that a simple unscaled, undisplaced
 base-plus-index uses `add` when allocation puts the result in either input
 register. This removes the SIB byte while keeping one instruction. Other

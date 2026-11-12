@@ -470,7 +470,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         uint32_t node = BUSTER_IR_NONE;
         // Full final SSA verification produced this exact revision and these intervals. No intervening pass mutates
         // it; the revision and both owners remain live until selection and emission have finished (#1055).
-        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[0], scratch, !scalar, &plan, &node);
+        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, function->symbol_access, function->symbol_count, &lane->steps[0], scratch, !scalar, &plan, &node);
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
         outcome.operation = refused;

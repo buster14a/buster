@@ -741,7 +741,8 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
 static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1SelectPlan* b)
 {
     const uint32_t count = a->function->instruction_count;
-    bool equal = a->function == b->function && a->function_verified == b->function_verified && a->estimated_cost == b->estimated_cost && a->effective_use_count == b->effective_use_count;
+    bool equal = a->function == b->function && a->function_verified == b->function_verified && a->estimated_cost == b->estimated_cost && a->effective_use_count == b->effective_use_count &&
+                 a->symbol_access == b->symbol_access && a->symbol_count == b->symbol_count;
     for (uint32_t node = 0; equal && node < count; node += 1)
     {
         const Tier1SelectPattern* p = &a->patterns[node];
@@ -749,7 +750,8 @@ static bool tier1_select_test_plans_equal(const Tier1SelectPlan* a, const Tier1S
         equal = p->immediate == q->immediate && memcmp(p->values, q->values, sizeof(p->values)) == 0 && p->displacement == q->displacement &&
                 p->stack_object == q->stack_object && p->rule == q->rule && p->operation == q->operation && p->width == q->width &&
                 p->source_width == q->source_width && p->storage_width == q->storage_width && p->condition == q->condition && p->scale == q->scale && p->fold_count == q->fold_count &&
-                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->compare_memory == q->compare_memory && p->sign_result == q->sign_result && p->nops == q->nops;
+                p->intrinsic_cost == q->intrinsic_cost && p->compare_immediate == q->compare_immediate && p->compare_memory == q->compare_memory && p->sign_result == q->sign_result && p->nops == q->nops &&
+                p->rip == q->rip;
         equal = equal && a->covered[node] == b->covered[node] && a->costs[node] == b->costs[node] && a->effective_use_offsets[node] == b->effective_use_offsets[node];
     }
     equal = equal && a->effective_use_offsets[count] == b->effective_use_offsets[count];
@@ -765,8 +767,8 @@ static bool tier1_select_test_plan_again(const IrFunction* function, const IrDom
     const uint64_t scratch_mark = scratch->length;
     Tier1SelectPlan again;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError error = verify ? tier1_select_plan(function, dominance, output, scratch, plan->vector, &again, &node) :
-                                            tier1_select_plan_verified(function, dominance, output, scratch, plan->vector, &again, &node);
+    const Tier1SelectError error = verify ? tier1_select_plan_access(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, plan->vector, &again, &node) :
+                                            tier1_select_plan_verified(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, plan->vector, &again, &node);
     const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && plan->vector == again.vector && tier1_select_test_plans_equal(plan, &again);
     arena_pop_to(output, mark);
     return equal;
@@ -780,7 +782,7 @@ static bool tier1_select_test_plan_twin(const IrFunction* function, const IrDomi
     const uint64_t scratch_mark = scratch->length;
     Tier1SelectPlan twin;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError error = tier1_select_plan_verified(function, dominance, output, scratch, !plan->vector, &twin, &node);
+    const Tier1SelectError error = tier1_select_plan_verified(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, !plan->vector, &twin, &node);
     const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && tier1_select_test_plans_equal(plan, &twin);
     arena_pop_to(output, mark);
     return equal;
@@ -790,7 +792,7 @@ static bool tier1_select_test_plan_twin(const IrFunction* function, const IrDomi
 // legality but chooses by coverage and its own switch's priorities, without classifying or reading the BURS tables.
 static Tier1SelectError tier1_select_test_plan_munch(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, Tier1SelectPlan* plan, uint32_t* node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, false, true, false, plan, node);
+    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, false, true, false, plan, node);
 }
 
 // The reference cover's costs column (Tier1SelectPlan.costs) against its definition, worked out here from the function alone:

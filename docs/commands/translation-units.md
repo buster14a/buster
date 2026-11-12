@@ -168,3 +168,74 @@ count's: lanes that serialize on the kernel, as #1128's did on the address
 space's lock, raise the system time where a busy machine's wall time may hide
 it. The 9700X job runs it by 1, 2, 4 and 8 lanes with the frozen corpus's
 headers and predefines, where `tools/ci/changes.c`'s `check-units` says.
+
+## Attested declarations' census (#2531)
+
+`./build/compiler measure-attested [--list N] [--passes N] [--twins] [compile options] file...`
+(`c_check_attested.c`) is step 0 of [attested declarations](../attested-declarations.md):
+the command of several units, run as `--lanes 1` runs it (the census refuses
+its own lanes' options and `--deferred-bodies`), with the design's passes and
+each declaration's record beside every unit. No compile changes: every
+declaration is read, and the counts say what step 2 would skip.
+`check_driver_unit` tests `check_driver_attested`, which only this command
+sets, at two places: its reader's call and its unit's end.
+
+- **The passes, before the reader:** the lists (each file-scope declaration's
+  range, a subtree whose root is the parser's root's child, and each
+  identifier's class, from its role and the groups open around it: a tag or a
+  declarator's name declares, a typedef's specifier and any name in an
+  expression, an array's bound, an initializer, an attribute or a `typeof`
+  looks up, a parameter's and a member's name is neither; in a function's
+  body every name looks up, and only a callee's name, or every name in a body
+  that spells `extern`, declares), the own hashes (a sum over each
+  declaration's tokens of its kind, role, system level and name or literal at
+  its place), the chain (each declaration's semantic hash from its own, the
+  pragmas before it and the current hash of every name it lists; the memo's
+  probe; its declared names' new hashes), the reach and the marks. The lists
+  go 64 tokens at a time and the own hashes eight a register on the vector
+  path, and `--scalar` runs their twins; `--twins` makes each unit's lists,
+  own hashes and literals again by the other path and counts the units whose
+  results differ. Each pass is timed by the thread's user-mode cycles, branch
+  misses and L1D read misses (`rdpmc`) and TSC ticks: the first run's, the
+  one inside the compile, and with `--passes N` the least of N runs. The
+  report gives them a token of the units' tokens.
+- **The reader** is `check_input_run` as `-c` calls it but with its
+  environment published, which keeps its binding events past it and changes
+  nothing it reads or writes.
+- **The record, at the unit's end:** silent (no diagnostic of the driver's
+  collected ones, every stage's, placed at one of the declaration's tokens by
+  its output position), pure (no token with a definition, a tentative
+  definition, internal linkage, a global register or an alias, and no
+  file-scope asm statement), and listed (each file-scope `DECLARE` event, each
+  tag it completes and each `USE` event is for a name its list holds). A unit
+  with an error, a failed parse or a diagnostic no declaration holds teaches
+  the memo nothing; otherwise the memo learns the semantic hashes of the
+  declarations read silently, purely and listed. A hit whose reading here
+  isn't that is a contradiction: an input of a reading that the hash doesn't
+  cover.
+- **Names no token spells** count as spelled by a root: the library function
+  of a `__builtin_` name a reached declaration spells, the identifiers in the
+  strings of a reached declaration's asm and attribute groups, and in a unit
+  with a body the runtime functions the lowering looks up by name in every
+  such unit (`check_lower_runtime_names` before `CHECK_LOWER_RUNTIME_LIBRARY`),
+  whose first declaration gives a runtime call's symbol. What that last rule
+  alone reaches is its own outcome, `reached-by-runtime-names`.
+- **The report** counts declarations and their tokens by outcome (`skipped`:
+  attested and not reached; `reached`; `learned`; a root's; a diagnostic's; an
+  impure reason's; an error's unit's), the share of the tokens outside
+  function definitions that would be skipped, the binding events against the
+  lists (`unlisted`, the gate's zero), the contradictions, the diagnostics and
+  the literals, the twins' differences and each pass's counts. `--list N` prints the first N
+  declarations of each outcome but `skipped`, and every unlisted name and
+  contradiction, by unit, file and line.
+
+`test-checker` (or `test-checker --attested`, alone) runs
+`c_check_attested_test.c`: commands of a few units over a header whose lines
+say each declaration's outcome by unit (learned in the first; skipped, reached,
+impure, a root, a diagnostic, an error's unit's in the next), by `-c`,
+`-fsyntax-only` and `--scalar`, with `--twins`; a typedef another unit declares otherwise and
+a declaration after `#pragma pack` being other hashes; a system header's
+declaration and a user's of one text being two; and the refusals of its own
+lanes' options and of a run without a file. Each command must have no unlisted
+name and no contradiction. [The design](../attested-declarations.md)'s "Step
+0: the census" has the results on musl's and the glibc units' commands.
