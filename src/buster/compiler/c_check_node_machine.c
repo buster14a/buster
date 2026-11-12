@@ -104,6 +104,57 @@ static const char* const node_machine_refusal_names[NODE_MACHINE_REFUSALS] = {
     [NODE_MACHINE_REFUSED_ROOT] = "root",
 };
 
+// T's and C's columns of an expression's records, one array a field, in one block: each record field is then one load
+// from one base, where a column's own pointer in NodeMachine would be loaded again after every store, as the build's
+// -fno-strict-aliasing lets a store change it (three instructions a field where one serves). Each array starts
+// BUSTER_NODE_MACHINE_STAGGER bytes past the one before modulo 4 KB, every array's size being a multiple of 4 KB: an
+// expression's records are its arrays' first elements, and arrays that all began on a 4 KB boundary would put those in
+// one set of the first-level cache, more lines than its ways, and each record's fields 4 KB apart, which the load-store
+// unit takes for aliases of each other's stores (docs/node-machine.md, "T's records as columns").
+#define BUSTER_NODE_MACHINE_STAGGER 128u
+typedef struct NodeMachineColumns NodeMachineColumns;
+struct NodeMachineColumns
+{
+    uint8_t codes[BUSTER_NODE_MACHINE_MOST];
+    uint8_t codes_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t left[BUSTER_NODE_MACHINE_MOST];
+    uint8_t left_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t right[BUSTER_NODE_MACHINE_MOST];
+    uint8_t right_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    TypeId value_types[BUSTER_NODE_MACHINE_MOST];
+    uint8_t value_types_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t value_flags[BUSTER_NODE_MACHINE_MOST];
+    uint8_t value_flags_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t objects[BUSTER_NODE_MACHINE_MOST];
+    uint8_t objects_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint64_t payloads[BUSTER_NODE_MACHINE_MOST];
+    uint8_t payloads_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint8_t standings[BUSTER_NODE_MACHINE_MOST];
+    uint8_t standings_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint16_t exponents[BUSTER_NODE_MACHINE_MOST];
+    uint8_t exponents_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t words[BUSTER_NODE_MACHINE_MOST];
+    uint8_t words_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint8_t facts[BUSTER_NODE_MACHINE_MOST];
+    uint8_t facts_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint8_t value_classes[BUSTER_NODE_MACHINE_MOST];
+    uint8_t value_classes_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    TypeId converted[2 * BUSTER_NODE_MACHINE_MOST];
+    uint8_t converted_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t conversion_flags[2 * BUSTER_NODE_MACHINE_MOST];
+    uint8_t conversion_flags_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint64_t member_offsets[BUSTER_NODE_MACHINE_MOST];
+    uint8_t member_offsets_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint8_t states[BUSTER_NODE_MACHINE_MOST];
+    uint8_t states_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint8_t contexts[BUSTER_NODE_MACHINE_MOST];
+    uint8_t contexts_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    TypeId targets[BUSTER_NODE_MACHINE_MOST];
+    uint8_t targets_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint8_t templates[BUSTER_NODE_MACHINE_MOST];
+    uint8_t templates_stagger[BUSTER_NODE_MACHINE_STAGGER];
+};
+
 // The machine's state: the unit's, set once a file (node_machine_begin), and the current expression's records and tape.
 typedef struct NodeMachine NodeMachine;
 struct NodeMachine
@@ -134,37 +185,19 @@ struct NodeMachine
     uint32_t first;
     uint32_t count;
     uint32_t root;
-    // T's columns (docs/node-machine.md, "The records and the tapes"), which C and X read through the record accessors
-    // alone: each record's operator and its first two operands' records (UINT32_MAX for none), and its value, which
-    // node_machine_record_value makes whole: its type, its flags, its object, its standing (BUSTER_NODE_MACHINE_STANDING and
-    // the payload's field) and its payload: its integer's low 64 bits, its offset, or its floating value's significand,
-    // with its sign and exponent in `exponents`. A value the columns can't hold whole (a fault, an overload set, a
-    // bit-field's width, an integer past 64 bits, two of the payload's fields) is in `wides`, and its payload is its index
-    // there. Then its type's word and facts and its class on the stack (an aggregate's is its address's), its operands'
-    // conversions (their types and flags) and a member's offset in bits.
-    uint8_t* codes;
-    uint32_t* left;
-    uint32_t* right;
-    TypeId* value_types;
-    uint32_t* value_flags;
-    uint32_t* objects;
-    uint64_t* payloads;
-    uint8_t* standings;
-    uint16_t* exponents;
+    // The records' columns (NodeMachineColumns), which C and X read through the record accessors alone. T's (docs/node-
+    // machine.md, "The records and the tapes"): each record's operator and its first two operands' records (UINT32_MAX for
+    // none), and its value, which node_machine_record_value makes whole: its type, its flags, its object, its standing
+    // (BUSTER_NODE_MACHINE_STANDING and the payload's field) and its payload: its integer's low 64 bits, its offset, or its
+    // floating value's significand, with its sign and exponent in `exponents`. A value the columns can't hold whole (a
+    // fault, an overload set, a bit-field's width, an integer past 64 bits, two of the payload's fields) is in `wides`,
+    // and its payload is its index there. Then its type's word and facts and its class on the stack (an aggregate's is its
+    // address's), its operands' conversions (their types and flags) and a member's offset in bits. C's: each record's
+    // state, its context (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to, and its
+    // template (CheckLowerTemplate).
+    NodeMachineColumns* columns;
     CheckValue* wides;
     uint32_t wide_count;
-    uint32_t* words;
-    uint8_t* facts;
-    uint8_t* value_classes;
-    TypeId* converted;
-    uint32_t* conversion_flags;
-    uint64_t* member_offsets;
-    // C's: each record's state, its context (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer
-    // converts it to, and its template (CheckLowerTemplate).
-    uint8_t* states;
-    uint8_t* contexts;
-    TypeId* targets;
-    uint8_t* templates;
     // X's tape: the expression's entries, a local's holding its object.
     uint8_t* kinds;
     uint8_t* classes;
@@ -182,20 +215,15 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
 static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object);
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object);
 
-// A column of `count` elements of `bytes` each from `arena`, starting `line` (below 64) cache lines past a 4 KB boundary.
-// An expression's records are its columns' first elements: columns that all began on such a boundary, as arrays of 4,096
-// elements do one after another, would put those in one set of the first-level cache, more lines than its ways, and
-// each record's fields 4 KB apart, which the load-store unit takes for aliases of each other's stores. On the 9700X, on
-// sqlite3.c, the three sweeps took 285 cycles a node so with T's columns and 154 staggered, and 169 so with a whole value
-// a record and 153 staggered (docs/node-machine.md, "T's records as columns").
+// A column of `count` elements of `bytes` each from `arena`, starting `line` (below 64) cache lines past a 4 KB boundary,
+// for the columns outside NodeMachineColumns: after its arrays' lines, as theirs are after each other's.
 static void* node_machine_column(Arena* arena, uint64_t count, uint64_t bytes, uint32_t line)
 {
     uint8_t* column = arena_push_array(arena, count * bytes + 4096, 1, 4096);
     return column != NULL ? column + (uint64_t)line * 64 : NULL;
 }
 
-// The machine's columns for `program`'s unit, from `arena`: whether there was room. Each record column starts two cache
-// lines past the one before modulo 4 KB (node_machine_column).
+// The machine's columns for `program`'s unit, from `arena`: whether there was room.
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
@@ -212,35 +240,16 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
-    machine->codes = node_machine_column(arena, most, sizeof(uint8_t), 0);
-    machine->left = node_machine_column(arena, most, sizeof(uint32_t), 2);
-    machine->right = node_machine_column(arena, most, sizeof(uint32_t), 4);
-    machine->value_types = node_machine_column(arena, most, sizeof(TypeId), 6);
-    machine->value_flags = node_machine_column(arena, most, sizeof(uint32_t), 8);
-    machine->objects = node_machine_column(arena, most, sizeof(uint32_t), 10);
-    machine->payloads = node_machine_column(arena, most, sizeof(uint64_t), 12);
-    machine->standings = node_machine_column(arena, most, sizeof(uint8_t), 14);
-    machine->exponents = node_machine_column(arena, most, sizeof(uint16_t), 16);
-    machine->wides = node_machine_column(arena, most, sizeof(CheckValue), 18);
-    machine->words = node_machine_column(arena, most, sizeof(uint32_t), 20);
-    machine->facts = node_machine_column(arena, most, sizeof(uint8_t), 22);
-    machine->value_classes = node_machine_column(arena, most, sizeof(uint8_t), 24);
-    machine->converted = node_machine_column(arena, 2 * most, sizeof(TypeId), 26);
-    machine->conversion_flags = node_machine_column(arena, 2 * most, sizeof(uint32_t), 28);
-    machine->member_offsets = node_machine_column(arena, most, sizeof(uint64_t), 30);
-    machine->states = node_machine_column(arena, most, sizeof(uint8_t), 32);
-    machine->contexts = node_machine_column(arena, most, sizeof(uint8_t), 34);
-    machine->targets = node_machine_column(arena, most, sizeof(TypeId), 36);
-    machine->templates = node_machine_column(arena, most, sizeof(uint8_t), 38);
+    _Static_assert(sizeof(NodeMachineColumns) % 64 == 0 && sizeof(NodeMachineColumns) % 4096 == 19 * BUSTER_NODE_MACHINE_STAGGER % 4096,
+                   "the record columns stagger by BUSTER_NODE_MACHINE_STAGGER each");
+    machine->columns = arena_push_array(arena, 1, sizeof(NodeMachineColumns), 4096);
+    // The others after the record columns' lines (19 arrays, two lines each).
+    machine->wides = node_machine_column(arena, most, sizeof(CheckValue), 38);
     machine->kinds = node_machine_column(arena, entries, sizeof(uint8_t), 40);
     machine->classes = node_machine_column(arena, entries, sizeof(uint8_t), 42);
     machine->tape = node_machine_column(arena, entries, sizeof(uint64_t), 44);
-    const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->codes != NULL && machine->left != NULL && machine->right != NULL &&
-                      machine->value_types != NULL && machine->value_flags != NULL && machine->objects != NULL && machine->payloads != NULL &&
-                      machine->standings != NULL && machine->exponents != NULL && machine->wides != NULL && machine->words != NULL && machine->facts != NULL &&
-                      machine->value_classes != NULL && machine->converted != NULL &&
-                      machine->conversion_flags != NULL && machine->member_offsets != NULL && machine->states != NULL && machine->contexts != NULL &&
-                      machine->targets != NULL && machine->templates != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL;
+    const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
+                      machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL;
     if (room)
     {
         check_lower_classify_types(program->types, machine->type_count, classes, facts);
@@ -293,41 +302,41 @@ static inline uint32_t node_machine_node(const NodeMachine* machine, uint32_t r)
 // Its operator.
 static inline CheckOp node_machine_record_op(const NodeMachine* machine, uint32_t r)
 {
-    return (CheckOp)machine->codes[r];
+    return (CheckOp)machine->columns->codes[r];
 }
 
 // Its operand 0's record and operand 1's: UINT32_MAX for none.
 static inline uint32_t node_machine_record_left(const NodeMachine* machine, uint32_t r)
 {
-    return machine->left[r];
+    return machine->columns->left[r];
 }
 
 static inline uint32_t node_machine_record_right(const NodeMachine* machine, uint32_t r)
 {
-    return machine->right[r];
+    return machine->columns->right[r];
 }
 
 // Its value's type, its category (an lvalue, an rvalue or a function designator) and its BUSTER_CHECK_* flags.
 static inline TypeId node_machine_record_type(const NodeMachine* machine, uint32_t r)
 {
-    return machine->value_types[r];
+    return machine->columns->value_types[r];
 }
 
 static inline CheckCategory node_machine_record_category(const NodeMachine* machine, uint32_t r)
 {
-    return (CheckCategory)(machine->standings[r] & 0x03u);
+    return (CheckCategory)(machine->columns->standings[r] & 0x03u);
 }
 
 static inline uint32_t node_machine_record_flags(const NodeMachine* machine, uint32_t r)
 {
-    return machine->value_flags[r];
+    return machine->columns->value_flags[r];
 }
 
 // Its wide value (NodeMachine.wides), or null where its columns hold its value whole: what the fields below read where
 // the columns don't have them.
 static inline const CheckValue* node_machine_record_wide(const NodeMachine* machine, uint32_t r)
 {
-    return (machine->standings[r] & BUSTER_NODE_MACHINE_WIDE) != 0 ? machine->wides + machine->payloads[r] : NULL;
+    return (machine->columns->standings[r] & BUSTER_NODE_MACHINE_WIDE) != 0 ? machine->wides + machine->columns->payloads[r] : NULL;
 }
 
 // Its whole value into `value`, every field as the action would give it: its wide value, or its columns' fields with
@@ -342,20 +351,20 @@ static inline __attribute__((always_inline)) void node_machine_record_value(cons
     }
     else
     {
-        const uint8_t field = machine->standings[r] & BUSTER_NODE_MACHINE_FIELD;
-        const uint64_t payload = machine->payloads[r];
+        const uint8_t field = machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD;
+        const uint64_t payload = machine->columns->payloads[r];
         const bool floating = field == BUSTER_NODE_MACHINE_FLOATING;
         *value = (CheckValue){
-            .type = machine->value_types[r],
+            .type = machine->columns->value_types[r],
             .category = node_machine_record_category(machine, r),
-            .flags = machine->value_flags[r],
-            .constant_kind = (CheckConstantKind)((machine->standings[r] >> 2) & 0x07u),
+            .flags = machine->columns->value_flags[r],
+            .constant_kind = (CheckConstantKind)((machine->columns->standings[r] >> 2) & 0x07u),
             .integer = field == 0 ? payload : 0,
-            .object = machine->objects[r],
+            .object = machine->columns->objects[r],
             .offset = field == BUSTER_NODE_MACHINE_OFFSET ? (int64_t)payload : 0,
         };
         value->floating_storage[0] = floating ? payload : 0;
-        value->floating_storage[1] = floating ? machine->exponents[r] : 0;
+        value->floating_storage[1] = floating ? machine->columns->exponents[r] : 0;
     }
 }
 
@@ -363,13 +372,13 @@ static inline __attribute__((always_inline)) void node_machine_record_value(cons
 // object (the object a value designates, for any other) and offset in bytes.
 static inline CheckConstantKind node_machine_record_constant_kind(const NodeMachine* machine, uint32_t r)
 {
-    return (CheckConstantKind)((machine->standings[r] >> 2) & 0x07u);
+    return (CheckConstantKind)((machine->columns->standings[r] >> 2) & 0x07u);
 }
 
 static inline uint64_t node_machine_record_integer(const NodeMachine* machine, uint32_t r)
 {
     const CheckValue* wide = node_machine_record_wide(machine, r);
-    return wide != NULL ? (uint64_t)wide->integer : (machine->standings[r] & BUSTER_NODE_MACHINE_FIELD) == 0 ? machine->payloads[r] : 0;
+    return wide != NULL ? (uint64_t)wide->integer : (machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD) == 0 ? machine->columns->payloads[r] : 0;
 }
 
 static inline long double node_machine_record_floating(const NodeMachine* machine, uint32_t r)
@@ -381,13 +390,13 @@ static inline long double node_machine_record_floating(const NodeMachine* machin
 
 static inline uint32_t node_machine_record_object(const NodeMachine* machine, uint32_t r)
 {
-    return machine->objects[r];
+    return machine->columns->objects[r];
 }
 
 static inline int64_t node_machine_record_offset(const NodeMachine* machine, uint32_t r)
 {
     const CheckValue* wide = node_machine_record_wide(machine, r);
-    return wide != NULL ? wide->offset : (machine->standings[r] & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_OFFSET ? (int64_t)machine->payloads[r] : 0;
+    return wide != NULL ? wide->offset : (machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_OFFSET ? (int64_t)machine->columns->payloads[r] : 0;
 }
 
 // Its value's fault, and whether it is an overload set's: a wide value's alone.
@@ -407,78 +416,78 @@ static inline bool node_machine_record_overloaded(const NodeMachine* machine, ui
 // BUSTER_TYPED_CLASS_U64).
 static inline uint8_t node_machine_record_facts(const NodeMachine* machine, uint32_t r)
 {
-    return machine->facts[r];
+    return machine->columns->facts[r];
 }
 
 static inline uint8_t node_machine_record_class(const NodeMachine* machine, uint32_t r)
 {
-    return machine->value_classes[r];
+    return machine->columns->value_classes[r];
 }
 
 // Its operand `k`'s (0 or 1) conversion: the type the operator converts it to (0 for none) and the conversion's
 // BUSTER_CHECK_CONVERT_* flags.
 static inline TypeId node_machine_record_converted(const NodeMachine* machine, uint32_t r, uint32_t k)
 {
-    return machine->converted[2 * r + k];
+    return machine->columns->converted[2 * r + k];
 }
 
 static inline uint32_t node_machine_record_conversion_flags(const NodeMachine* machine, uint32_t r, uint32_t k)
 {
-    return machine->conversion_flags[2 * r + k];
+    return machine->columns->conversion_flags[2 * r + k];
 }
 
 // A member's offset in its record, in bits.
 static inline uint64_t node_machine_record_member_offset(const NodeMachine* machine, uint32_t r)
 {
-    return machine->member_offsets[r];
+    return machine->columns->member_offsets[r];
 }
 
 // C's columns. Whether its consumer evaluates it (none is, until C reaches it), its context
 // (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to and its template.
 static inline bool node_machine_record_evaluated(const NodeMachine* machine, uint32_t r)
 {
-    return machine->states[r] == BUSTER_NODE_MACHINE_EVALUATED;
+    return machine->columns->states[r] == BUSTER_NODE_MACHINE_EVALUATED;
 }
 
 static inline uint8_t node_machine_record_context(const NodeMachine* machine, uint32_t r)
 {
-    return machine->contexts[r];
+    return machine->columns->contexts[r];
 }
 
 static inline TypeId node_machine_record_target(const NodeMachine* machine, uint32_t r)
 {
-    return machine->targets[r];
+    return machine->columns->targets[r];
 }
 
 static inline CheckLowerTemplate node_machine_record_template(const NodeMachine* machine, uint32_t r)
 {
-    return (CheckLowerTemplate)machine->templates[r];
+    return (CheckLowerTemplate)machine->columns->templates[r];
 }
 
 // C's writes: the first `count` records not evaluated, then a record evaluated, its context, its target and its template.
 static inline void node_machine_records_set_unevaluated(NodeMachine* machine, uint32_t count)
 {
-    memset(machine->states, 0, count);
+    memset(machine->columns->states, 0, count);
 }
 
 static inline void node_machine_record_set_evaluated(NodeMachine* machine, uint32_t r)
 {
-    machine->states[r] = BUSTER_NODE_MACHINE_EVALUATED;
+    machine->columns->states[r] = BUSTER_NODE_MACHINE_EVALUATED;
 }
 
 static inline void node_machine_record_set_context(NodeMachine* machine, uint32_t r, uint8_t context)
 {
-    machine->contexts[r] = context;
+    machine->columns->contexts[r] = context;
 }
 
 static inline void node_machine_record_set_target(NodeMachine* machine, uint32_t r, TypeId target)
 {
-    machine->targets[r] = target;
+    machine->columns->targets[r] = target;
 }
 
 static inline void node_machine_record_set_template(NodeMachine* machine, uint32_t r, CheckLowerTemplate kind)
 {
-    machine->templates[r] = (uint8_t)kind;
+    machine->columns->templates[r] = (uint8_t)kind;
 }
 
 // Whether `object` is a local of the function: an object without a symbol (a parameter's, an automatic object's), which
