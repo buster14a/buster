@@ -344,6 +344,12 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
+            if (!walked && reader->function_body == BUSTER_CHECK_NONE)
+            {
+                // A variable bound at file scope (#2252: a sizeof's, an _Alignof's or a cast's type, or the declaration
+                // clang refuses), which no graph walk reads either: its commas' -Wunused-value, as clang builds them.
+                check_input_attribute_unused(reader, first, end, true);
+            }
         }
         // A failure before the first undeclared name the reading reported is clang's error too, which its parser gives first
         // (#1447): `sizeof(struct Missing) - sizeof(missing)`'s.
