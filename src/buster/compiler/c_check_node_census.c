@@ -40,8 +40,11 @@
 // pure, or a const or pure builtin's name); a self-assignment; a return of a local's address or array; a for
 // statement's clauses where -Wfor-loop-analysis is enabled; an object written and named again unsequenced (the design's
 // test: written twice, or written by an operator below the root and named outside it, the two neither apart from a
-// sequence point nor in a conditional's two arms); tokens from a system header's macro in a user's expression; and a body
-// with a diagnostic or floating-point pragma, or a node with a floating-point environment.
+// sequence point nor in a conditional's two arms); and a body with a diagnostic or floating-point pragma, or a node with a
+// floating-point environment. The design's test of a system header's macro's tokens in a user's expression is counted
+// apart, not as a refusal: in a system header's macro the pipeline only suppresses diagnostics, so its silence holds
+// there without it, and on sqlite3.c it would refuse more nodes than the silence tests' whole budget, its asserts'
+// `((void)0)` under NDEBUG.
 //
 // The report counts, per test, the expressions and evaluated nodes it refuses (any), those it alone refuses (only) and
 // those it refuses first in the list's order (first); the step's gate (the set's share of the nodes, and the share the
@@ -85,7 +88,6 @@ typedef enum NodeCensusTest
     NODE_CENSUS_RETURN_ADDRESS,
     NODE_CENSUS_LOOP,
     NODE_CENSUS_UNSEQUENCED,
-    NODE_CENSUS_SYSTEM_MACRO,
     NODE_CENSUS_REGION,
     NODE_CENSUS_TESTS,
 } NodeCensusTest;
@@ -122,7 +124,6 @@ static const char* const node_census_test_names[NODE_CENSUS_TESTS] = {
     [NODE_CENSUS_RETURN_ADDRESS] = "return-address",
     [NODE_CENSUS_LOOP] = "for-loop-analysis",
     [NODE_CENSUS_UNSEQUENCED] = "unsequenced",
-    [NODE_CENSUS_SYSTEM_MACRO] = "system-macro",
     [NODE_CENSUS_REGION] = "region",
 };
 
@@ -227,6 +228,11 @@ struct NodeCensus
     // The warning events found in expressions, by ID (NODE_CENSUS_EVENT's), all the IDs past the array's in its last.
     uint64_t event_ids[CHECK_WARNING_ID_COUNT + 1];
     uint64_t largest;
+    // The expressions with a system header's macro's tokens in a user's expression, and their nodes, and of those the ones
+    // taken otherwise: what the design's system-macro test would refuse, counted apart (see node_census_report).
+    uint64_t system_expressions;
+    uint64_t system_nodes;
+    uint64_t system_taken_nodes;
 };
 
 // --list N: the first N expressions each test refuses.
@@ -258,9 +264,11 @@ struct NodeCensusScratch
     uint32_t* list;
     uint32_t* stack;
     uint32_t stamp;
-    // The current expression's tokens' span: its nodes' least and greatest tokens.
+    // The current expression's tokens' span: its nodes' least and greatest tokens; and whether a token of a system header's
+    // macro is among its nodes' where its root's isn't (the design's system-macro test, counted apart: see the report).
     uint32_t span_low;
     uint32_t span_high;
+    bool mixed_system;
     // Per pop of the current body: its node's first pop, its root pop, and the pops of each node (node_pop, by node).
     uint32_t* node_pop;
     uint32_t* root_pop;
@@ -737,6 +745,21 @@ static bool node_census_comparison(CheckOp op)
     return op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
 }
 
+// Whether `token` was written in a system header, as the common warnings find it (check_common_severity): the graph's
+// mark, or the preprocessor's level at the token's place.
+static bool node_census_system(const NodeCensusScratch* s, uint32_t token)
+{
+    const CheckProgram* program = s->program;
+    const Parser* parser = program->parser;
+    const Preprocessor* pp = s->pp;
+    bool system = check_graph_system_token(&program->input->graph, token);
+    if (!system && pp->output.locations != NULL && token < parser->tokens.count && parser->tokens.sources[token] < pp->output.count)
+    {
+        system = pp_system_level_at(pp, pp->output.locations[parser->tokens.sources[token]]) != BUSTER_PP_USER_FILE;
+    }
+    return system;
+}
+
 // Whether `op` has a code of the machine's (docs/node-machine.md, "T: bind and type").
 static bool node_census_coded(CheckOp op)
 {
@@ -1175,8 +1198,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const bool same = left != 0 && left == node_census_named_object(program, b);
         tests |= same ? UINT64_C(1) << NODE_CENSUS_SELF_ASSIGN : 0;
     }
-    const bool system = check_graph_system_token(graph, token) && !check_graph_system_token(graph, graph->tokens[root]);
-    tests |= system ? UINT64_C(1) << NODE_CENSUS_SYSTEM_MACRO : 0;
+    s->mixed_system |= node_census_system(s, token) && !node_census_system(s, graph->tokens[root]);
     tests |= input->fp_environments != NULL && graph->fp_environments != NULL && graph->fp_environments[node] != 0 ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
     return tests;
 }
@@ -1209,6 +1231,7 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     const CheckStream* stream = program->stream;
     const Parser* parser = program->parser;
     s->stamp += 1;
+    s->mixed_system = false;
     uint32_t count = 0;
     uint32_t top = 0;
     uint32_t lowest = UINT32_MAX;
@@ -1334,6 +1357,9 @@ static void node_census_count(NodeCensus* census, NodeCensusScratch* s, uint64_t
                    node_census_line(s->pp, s->program->parser, token), node_census_root_names[context], nodes, tests);
         }
     }
+    census->system_expressions += s->mixed_system;
+    census->system_nodes += s->mixed_system ? nodes : 0;
+    census->system_taken_nodes += s->mixed_system && tests == 0 ? nodes : 0;
     if (census->records != NULL && census->record_count < census->record_capacity)
     {
         const uint32_t token = s->program->input->graph.tokens[root];
@@ -1609,6 +1635,11 @@ static void node_census_report(const NodeCensus* census)
                node_census_share(census->any_nodes[t], nodes), census->only_expressions[t], census->only_nodes[t], node_census_share(census->only_nodes[t], nodes),
                census->first_expressions[t], census->first_nodes[t], node_census_share(census->first_nodes[t], nodes));
     }
+    // The design's system-macro test (docs/node-machine.md, "Silence") isn't one of the census's: in a system header's
+    // macro the pipeline only suppresses diagnostics, so a taken expression is as silent there as its tests make it.
+    printf("node-census: system-macro (not a refusal) expressions=%" PRIu64 " nodes=%" PRIu64 " (%.2f%%) of them taken=%" PRIu64 " (%.2f%%)\n",
+           census->system_expressions, census->system_nodes, node_census_share(census->system_nodes, nodes), census->system_taken_nodes,
+           node_census_share(census->system_taken_nodes, nodes));
     for (uint32_t id = 0; id <= CHECK_WARNING_ID_COUNT; id += 1)
     {
         if (census->event_ids[id] != 0)

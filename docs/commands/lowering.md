@@ -168,8 +168,9 @@ unevaluated operands too; its counts are the evaluated nodes, the inventory's.
   an effect or a discarded call of a `warn_unused_result`, `const` or `pure`
   callee, a self-assignment, a return of a local's address, a for statement's
   clauses with `-Wfor-loop-analysis` on, an object written and named again
-  unsequenced, a system header's macro in a user's expression, and a body with a
-  diagnostic or floating-point pragma.
+  unsequenced, and a body with a diagnostic or floating-point pragma. A system
+  header's macro in a user's expression is counted apart, not refused (the
+  design's "Silence" says why).
 
 The report gives the gate's two shares (the set's of the evaluated nodes, and
 the silence tests' refusals of all of them), the nodes taken by root kind, the
@@ -181,8 +182,9 @@ rather than times, so it needs no lock beyond the build's. `test-checker` runs
 compiler reports with `-Wall -Wextra` and the census must refuse by the test that
 stands for it; clean idioms it must take (a library call's discarded result, two
 fields written in one expression, a conditional's arms, `&a[N]`, a same-width
-sign change, `size_t` against `(size_t)-1`); the set's refusals; and warnings
-off by default refusing nothing. A new warning reported inside an expression
-needs its test here and a line in that fixture: the census is where the
-machine's silence tests are written first. [The design](../node-machine.md)'s
+sign change, `size_t` against `(size_t)-1`); the set's refusals; warnings off
+by default refusing nothing; and a system header's macros, taken and counted
+apart. A new warning reported inside an expression needs its test here and a
+line in that fixture: the census is where the machine's silence tests are
+written first. [The design](../node-machine.md)'s
 "Step 0: the census" has the results on `sqlite3.c`, Lua and musl.

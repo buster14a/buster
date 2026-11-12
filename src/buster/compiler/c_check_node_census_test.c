@@ -118,6 +118,19 @@ static const char node_census_test_set[] =
     "    return (int)d; // refuse: region\n"
     "}\n";
 
+// A system header's macro in a user's expression (with -isystem on the fixtures' directory's `system`): counted apart,
+// not refused.
+static const char node_census_test_system_header[] = "#define NOTHING ((void)0)\n#define ZERO(x) ((x) - (x))\n";
+
+static const char node_census_test_system[] =
+    "#include <zero.h>\n"
+    "int s(int x)\n"
+    "{\n"
+    "    NOTHING; // take\n"
+    "    x = ZERO(x) + 1; // take\n"
+    "    return x; // take\n"
+    "}\n";
+
 // The same warnings as the first fixture's where they are off by default: read with neither -Wall nor -Wextra, they
 // refuse nothing.
 static const char node_census_test_quiet[] =
@@ -141,8 +154,9 @@ static uint32_t node_census_test_named(const char* name, uint32_t length)
 }
 
 // Fixture `text`, written to `directory` as `name` and read with `options`: the census's records against each line's
-// expectation. Each line that fails is reported on stderr; whether every line held.
-static bool node_census_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count)
+// expectation, and its expressions with a system header's macro in `system`. Each line that fails is reported on stderr;
+// whether every line held.
+static bool node_census_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint64_t* system)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", directory, name);
@@ -190,6 +204,7 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
         line += 1;
         at = *end != 0 ? end + 1 : end;
     }
+    *system = census.system_expressions;
     free(census.records);
     unlink(path);
     return valid;
@@ -202,14 +217,30 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready, "node-census fixtures' directory is made");
     char* loud[] = { "-nostdinc", "-Wall", "-Wextra" };
     char* quiet[] = { "-nostdinc" };
-    check_test_expect(test, ready && node_census_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud)),
+    uint64_t system = 0;
+    check_test_expect(test, ready && node_census_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud), &system),
                       "node-census refuses each expression the compiler warns of, by the test that stands for its warning");
-    check_test_expect(test, ready && node_census_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_census_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud), &system),
                       "node-census takes the clean idioms its silence tests must not refuse");
-    check_test_expect(test, ready && node_census_test_fixture(directory, "set.c", node_census_test_set, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_census_test_fixture(directory, "set.c", node_census_test_set, loud, BUSTER_ARRAY_LENGTH(loud), &system),
                       "node-census refuses what the machine's set has no code for, by its test");
-    check_test_expect(test, ready && node_census_test_fixture(directory, "quiet.c", node_census_test_quiet, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+    check_test_expect(test, ready && node_census_test_fixture(directory, "quiet.c", node_census_test_quiet, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses nothing for warnings that are off by default");
+    char headers[512];
+    char header[640];
+    snprintf(headers, sizeof(headers), "%s/system", directory);
+    snprintf(header, sizeof(header), "%s/zero.h", headers);
+    const bool written = ready && mkdir(headers, 0700) == 0 && parse_test_write(header, node_census_test_system_header, strlen(node_census_test_system_header));
+    char* isystem[] = { "-nostdinc", "-Wall", "-Wextra", "-isystem", headers };
+    system = 0;
+    check_test_expect(test, written && node_census_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem), &system) &&
+                                system == 2,
+                      "node-census takes a system header's macros in a user's expression and counts them apart");
+    if (written)
+    {
+        unlink(header);
+        rmdir(headers);
+    }
     // The command refuses a run without a file.
     char* missing[] = { "--list", "1" };
     fflush(stdout);
