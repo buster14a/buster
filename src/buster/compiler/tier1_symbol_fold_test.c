@@ -4,17 +4,18 @@
 // #2573: a memory operand folds a direct symbol's address, rip-relative, from any block; a GOT slot's address and a
 // thread-local's keep their sequences. Included by tier1_emit_test.c. The entry block takes four symbols' addresses:
 // symbol 1 reached directly, 2 through its GOT slot, 3 a thread-local of the image (local-exec) and 4 one through its
-// offset's GOT slot (initial-exec), and branches on x. One arm loads symbol 1 + 8 and the other three symbols, adds
-// them, stores x into symbol 1 + 8 and the thread-local 3, and the sum into symbol 2; the other compares symbol 1's
-// first byte with 3 (cmp byte ptr [rip + symbol], 3, whose PC32 addend covers its immediate) and stores the truth value
-// into symbol 4. Both selection paths plan it with the access column: symbol 1's accesses and comparison fold it, no node
-// computes its address, and the others' go through their sequences' registers. Without the column, every symbol folds,
-// and the consumer, given the column, refuses the plan. The code is certified and runs natively with its references
-// resolved here: the PC32s and the GOT loads against a data page after the code, the thread-locals' against this
-// thread's own. A straight-line consumer's plan that claims a folded symbol is refused, which its chain rule keeps from
-// happening (tier1_emit_cfg_chain).
+// offset's GOT slot (initial-exec), and branches on symbol 1's word at 4 (cmp word ptr [rip + symbol + 4], 0x1234 and
+// a conditional jump, whose PC32 addend covers the immediate's two bytes). One arm loads symbol 1 + 8 and the other
+// three symbols, adds them, stores x into symbol 1 + 8 and the thread-local 3, and the sum into symbol 2; the other
+// compares symbol 1's first byte with 3 (cmp byte ptr [rip + symbol], 3) and stores the truth value into symbol 4.
+// Both selection paths plan it with the access column: symbol 1's accesses and comparisons fold it, no node computes
+// its address, and the others' go through their sequences' registers. Without the column, every symbol folds, and the
+// consumer, given the column, refuses the plan. The code is certified and runs natively with its references resolved
+// here: the PC32s and the GOT loads against a data page after the code, the thread-locals' against this thread's own.
+// A straight-line consumer's plan that claims a folded symbol is refused, which its chain rule keeps from happening
+// (tier1_emit_cfg_chain).
 
-#define BUSTER_TIER1_SYMBOL_FOLD_NODES 29
+#define BUSTER_TIER1_SYMBOL_FOLD_NODES 32
 
 static _Thread_local uint64_t tier1_symbol_fold_local;
 static _Thread_local uint64_t tier1_symbol_fold_initial;
@@ -35,7 +36,7 @@ static bool tier1_symbol_fold_function(Tier1EmitTest* test, IrFunction* function
         .block_count = 4,
         .extra_count = 4,
         .constant_count = 2,
-        .address_count = 1,
+        .address_count = 2,
         .parameter_count = 1,
     };
     bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
@@ -44,9 +45,10 @@ static bool tier1_symbol_fold_function(Tier1EmitTest* test, IrFunction* function
         function->result_type = IR_I64;
         function->parameter_types[0] = IR_I64;
         function->symbol_count = 5;
-        function->constants[0].low = 0;
-        function->constants[1].low = 3;
+        function->constants[0].low = 3;
+        function->constants[1].low = 0x1234;
         function->addresses[0] = (IrAddress){ .scale = 1, .offset = 8 };
+        function->addresses[1] = (IrAddress){ .scale = 1, .offset = 4 };
         uint32_t next = 0;
         const uint32_t x = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         uint32_t symbols[5] = { BUSTER_IR_NONE };
@@ -54,8 +56,11 @@ static bool tier1_symbol_fold_function(Tier1EmitTest* test, IrFunction* function
         {
             symbols[s] = tier1_select_test_append(function, &next, IR_SYMBOL_ADDR, IR_PTR, s, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
-        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t route = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, x, zero, IR_NE);
+        const uint32_t word_address = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, symbols[1], BUSTER_IR_NONE, 1);
+        const uint32_t word = tier1_select_test_append(function, &next, IR_LOAD, IR_I16, word_address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t widened_word = tier1_select_test_append(function, &next, IR_ZEXT, IR_I32, word, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t key = tier1_select_test_append(function, &next, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t route = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, widened_word, key, IR_NE);
         tier1_select_test_append(function, &next, IR_CBR, IR_VOID, route, 1, 2);
         function->block_offsets[1] = next;
         const uint32_t member = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, symbols[1], BUSTER_IR_NONE, 0);
@@ -73,7 +78,7 @@ static bool tier1_symbol_fold_function(Tier1EmitTest* test, IrFunction* function
         function->block_offsets[2] = next;
         const uint32_t byte = tier1_select_test_append(function, &next, IR_LOAD, IR_I8, symbols[1], BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t widened = tier1_select_test_append(function, &next, IR_ZEXT, IR_I32, byte, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t three = tier1_select_test_append(function, &next, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t three = tier1_select_test_append(function, &next, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t equal = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, widened, three, IR_EQ);
         const uint32_t truth = tier1_select_test_append(function, &next, IR_ZEXT, IR_I64, equal, BUSTER_IR_NONE, BUSTER_IR_NONE);
         tier1_select_test_append(function, &next, IR_STORE, IR_VOID, symbols[4], truth, BUSTER_IR_NONE);
@@ -98,27 +103,30 @@ static bool tier1_symbol_fold_folded(const Tier1SelectPattern* pattern, uint32_t
     return pattern->rip && pattern->stack_object == 1 && pattern->displacement == displacement && pattern->values[first] == BUSTER_IR_NONE && pattern->values[first + 1] == BUSTER_IR_NONE;
 }
 
-// The plan's shape with the access column: nodes 9 and 16 are symbol 1's load and store at 8, 23 its byte comparison
-// (or the truth value 24 that takes it), 10, 11 and 12 the other symbols' loads, 17, 18 and 25 their stores.
+// The plan's shape with the access column: node 10 is the entry's branch on symbol 1's word at 4, 12 and 19 symbol 1's
+// load and store at 8, 26 its byte comparison (or the truth value 27 that takes it), 13, 14 and 15 the other symbols'
+// loads, 20, 21 and 28 their stores.
 static bool tier1_symbol_fold_shape(const Tier1SelectPlan* plan)
 {
     const Tier1SelectPattern* patterns = plan->patterns;
-    const uint32_t compare = plan->covered[23] ? 24 : 23;
-    bool shape = plan->covered[1] && plan->covered[8] && !plan->covered[2] && !plan->covered[3] && !plan->covered[4];
-    shape = shape && patterns[9].rule == TIER1_RULE_LOAD_ADDRESS && tier1_symbol_fold_folded(&patterns[9], 0, 8);
-    shape = shape && patterns[16].rule == TIER1_RULE_STORE_ADDRESS && tier1_symbol_fold_folded(&patterns[16], 0, 8) && patterns[16].values[2] == 0;
+    const uint32_t compare = plan->covered[26] ? 27 : 26;
+    bool shape = plan->covered[1] && plan->covered[5] && plan->covered[11] && !plan->covered[2] && !plan->covered[3] && !plan->covered[4];
+    shape = shape && patterns[10].rule == TIER1_RULE_BRANCH_COMPARE && patterns[10].compare_memory && patterns[10].compare_immediate && patterns[10].width == 2 &&
+            patterns[10].immediate == 0x1234 && tier1_symbol_fold_folded(&patterns[10], 1, 4);
+    shape = shape && patterns[12].rule == TIER1_RULE_LOAD_ADDRESS && tier1_symbol_fold_folded(&patterns[12], 0, 8);
+    shape = shape && patterns[19].rule == TIER1_RULE_STORE_ADDRESS && tier1_symbol_fold_folded(&patterns[19], 0, 8) && patterns[19].values[2] == 0;
     shape = shape && patterns[compare].compare_memory && patterns[compare].compare_immediate && patterns[compare].width == 1 && patterns[compare].immediate == 3 &&
             tier1_symbol_fold_folded(&patterns[compare], 1, 0);
-    const uint32_t accesses[6] = { 10, 11, 12, 17, 18, 25 };
+    const uint32_t accesses[6] = { 13, 14, 15, 20, 21, 28 };
     const uint32_t bases[6] = { 2, 3, 4, 2, 3, 4 };
     for (uint32_t k = 0; k < 6; k += 1)
     {
         shape = shape && !patterns[accesses[k]].rip && patterns[accesses[k]].stack_object == BUSTER_IR_NONE && patterns[accesses[k]].values[0] == bases[k];
     }
-    // No node reads symbol 1's address or its member's: neither is an effective use.
+    // No node reads symbol 1's address or its members': none is an effective use.
     for (uint32_t use = 0; use < plan->effective_use_count; use += 1)
     {
-        shape = shape && plan->effective_use_values[use] != 1 && plan->effective_use_values[use] != 8;
+        shape = shape && plan->effective_use_values[use] != 1 && plan->effective_use_values[use] != 5 && plan->effective_use_values[use] != 11;
     }
     return shape;
 }
@@ -220,11 +228,14 @@ static void tier1_symbol_fold_execute(Tier1EmitTest* test, const Tier1EmitResult
         uint64_t thread = 0;
         __asm__("mov %%fs:0, %0" : "=r"(thread));
         const uint64_t initial = (uint64_t)(uintptr_t)&tier1_symbol_fold_initial - thread;
-        const uint64_t samples[] = { 0, 0, 1, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_C(0x0123456789abcdef) };
+        const uint64_t samples[] = { 0, 0, 1, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_C(0x0123456789abcdef), 7, 9 };
         for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(samples); s += 1)
         {
             const uint64_t x = samples[s];
-            uint64_t symbol[2] = { s == 0 ? 3 : UINT64_C(0x5a5a5a5a5a5a5a00) | s, UINT64_C(0x1111111111111111) * (s + 1) };
+            // The word at 4 routes: 0x1234 to the comparison's arm, its neighbor to the other.
+            const bool compares = (s & 1) == 0;
+            const uint64_t word = (uint64_t)(compares ? 0x1234 : 0x1235) << 32;
+            uint64_t symbol[2] = { word | (s == 0 ? 3 : UINT64_C(0x5a5a0000005a5a00) | s), UINT64_C(0x1111111111111111) * (s + 1) };
             const uint64_t got = UINT64_C(0x2222) << s;
             const uint64_t slot = (uint64_t)(uintptr_t)(data + 64);
             memcpy(data, symbol, sizeof(symbol));
@@ -237,13 +248,13 @@ static void tier1_symbol_fold_execute(Tier1EmitTest* test, const Tier1EmitResult
             const uint64_t before = tier1_symbol_fold_initial;
             const uint64_t sum = symbol[1] + got + local + before;
             const uint64_t truth = (symbol[0] & 0xff) == 3;
-            const uint64_t expected = x != 0 ? sum : truth;
+            const uint64_t expected = !compares ? sum : truth;
             const uint64_t actual = tier1_symbol_fold_call(mapping, x);
             uint64_t after[2];
             uint64_t got_after = 0;
             memcpy(after, data, sizeof(after));
             memcpy(&got_after, data + 64, sizeof(got_after));
-            const bool stored = x != 0 ? after[0] == symbol[0] && after[1] == x && got_after == sum && tier1_symbol_fold_local == x && tier1_symbol_fold_initial == before :
+            const bool stored = !compares ? after[0] == symbol[0] && after[1] == x && got_after == sum && tier1_symbol_fold_local == x && tier1_symbol_fold_initial == before :
                                          after[0] == symbol[0] && after[1] == symbol[1] && got_after == got && tier1_symbol_fold_local == local && tier1_symbol_fold_initial == truth;
             tier1_emit_test_expect(test, actual == expected && stored, "folded, GOT and thread-local symbols load, compare and store where C does");
         }
@@ -324,7 +335,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         Tier1SelectPlan all;
         uint32_t node = BUSTER_IR_NONE;
         const bool unreached = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &all, &node) == TIER1_SELECT_OK;
-        const bool every = unreached && all.patterns[10].rip && all.patterns[10].stack_object == 2 && all.patterns[11].rip && all.patterns[12].rip && all.covered[2];
+        const bool every = unreached && all.patterns[13].rip && all.patterns[13].stack_object == 2 && all.patterns[14].rip && all.patterns[15].rip && all.covered[2];
         tier1_emit_test_expect(test, every, "without the access column every symbol folds");
         Tier1EmitResult refused;
         const Tier1EmitError mismatch = every ? tier1_emit_function(&all, &options, test->allowed, &test->output, &test->scratch, &refused, &node) : TIER1_EMIT_OK;
@@ -353,8 +364,9 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         }
         if (certified)
         {
-            // Symbol 1's three references, each on its record's displacement field: the load and the store at 8, the
-            // comparison at 0 with its immediate byte after the field.
+            // Symbol 1's four references, each on its record's displacement field: the load and the store at 8, the
+            // byte comparison at 0 with its immediate byte after the field, and the branch's word comparison at 4 with
+            // its two.
             uint32_t direct = 0;
             uint32_t compares = 0;
             uint32_t sequences = 0;
@@ -364,14 +376,15 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
                 const X86Instruction* record = &emitted.code.records[reference->instruction];
                 const bool rip = (record->mode & BUSTER_X86_MODE_RIP) != 0 && record->displacement == 0;
                 const bool pc32 = reference->kind == BUSTER_LINK_FIXUP_PC32 && reference->target == 1 && reference->field == X86_FIXUP_DISPLACEMENT && rip;
-                const bool compare = pc32 && reference->addend == 0 && (record->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CMP_RM8_IMM8 &&
-                                     x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) == 5;
+                const bool byte = reference->addend == 0 && (record->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CMP_RM8_IMM8 && x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) == 5;
+                const bool word = reference->addend == 4 && (record->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CMP_RM16_IMM16 && x86_fixup_distance(record->form, X86_FIXUP_DISPLACEMENT) == 6;
+                const bool compare = pc32 && (byte || word);
                 direct += pc32 && (reference->addend == 8 || compare);
                 compares += compare;
                 sequences += (reference->kind == BUSTER_LINK_FIXUP_LOAD_GOT && reference->target == 2) || (reference->kind == BUSTER_LINK_FIXUP_TPOFF32 && reference->target == 3) ||
                              (reference->kind == BUSTER_LINK_FIXUP_GOTTPOFF && reference->target == 4);
             }
-            const bool referenced = direct == 3 && compares == 1 && sequences + direct == emitted.reference_count && sequences >= 3;
+            const bool referenced = direct == 4 && compares == 2 && sequences + direct == emitted.reference_count && sequences >= 3;
             tier1_emit_test_expect(test, referenced, "a folded symbol's PC32s are its accesses', and the others' sequences keep theirs");
             if (!referenced && test->failures < 20)
             {

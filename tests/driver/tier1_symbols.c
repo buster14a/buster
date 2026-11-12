@@ -5,8 +5,9 @@
 // by Buster, its ORACLE by Clang, and link them, so that the system linker resolves every PC32 reference, its addend
 // covering the immediate after the displacement field (cmp byte ptr [rip + x], 3's). The default mode is the process
 // supervisor. Both Tier 1 host paths must compile strictly, verify, and execute against the oracle. GNU objdump must
-// find every direct access rip-relative, without a lea of its symbol, and the GOT's and the thread-locals' accesses
-// keeping their sequences: no PC32 names a symbol the unit doesn't define, nor a thread-local.
+// find every direct access rip-relative, without a lea of its symbol, each branch's comparison of its symbol's memory
+// fused with its jump, and the GOT's and the thread-locals' accesses keeping their sequences: no PC32 names a symbol
+// the unit doesn't define, nor a thread-local.
 
 // Each width's fixtures, by name and type, and the constant its comparisons take: one that needs the width's immediate
 // (an imm8 for a byte, an imm16 for a word, an imm32 for a doubleword and a quadword).
@@ -50,6 +51,8 @@ float symbols_g_f32;
 double symbols_g_f64;
 static long symbols_hidden;
 _Thread_local long symbols_local_tls = 5;
+// Each branch's observable arm keeps it a branch, a comparison fused with its jump, under #1382's if-conversion.
+volatile long symbols_taken;
 
 // The oracle's: a symbol this unit doesn't define, through its GOT slot, and a thread-local of another unit, through its
 // offset's GOT slot (initial-exec).
@@ -81,6 +84,7 @@ extern _Thread_local long symbols_oracle_tls;
         if (symbols_g_##name < (type)(constant)) \
         { \
             result = x + 7; \
+            symbols_taken += 1; \
         } \
         return result; \
     } \
@@ -200,6 +204,7 @@ extern long symbols_table[8];
 extern float symbols_g_f32;
 extern double symbols_g_f64;
 extern _Thread_local long symbols_local_tls;
+extern volatile long symbols_taken;
 double symbols_float(double x);
 void symbols_float_store(double x);
 long symbols_table_sum(long i);
@@ -236,7 +241,9 @@ int main(void)
             memcpy(bytes, &symbols_record, sizeof(bytes)); \
             valid = symbols_g_##name == stored && memcmp(bytes, &wanted, sizeof(bytes)) == 0 && valid; \
             valid = symbols_load_##name() == (long)stored && symbols_member_##name() == (long)member && valid; \
+            const long taken = symbols_taken; \
             valid = symbols_branch_##name(value) == (stored < (type)(constant) ? value + 7 : value + 11) && valid; \
+            valid = symbols_taken == taken + (stored < (type)(constant)) && valid; \
             symbols_record.name = (type)(constant); \
             valid = symbols_equal_##name() == 1 && valid; \
             symbols_record.name = stored; \
@@ -364,6 +371,8 @@ static bool symbols_shape(const char* path)
     unsigned direct_references = 0;
     unsigned function_references = 0;
     unsigned function_leas = 0;
+    unsigned function_jumps = 0;
+    unsigned function_selects = 0;
     unsigned sequences[sizeof(symbols_sequences) / sizeof(symbols_sequences[0])] = { 0 };
     bool previous_lea = false;
     while (stream != NULL)
@@ -377,11 +386,15 @@ static bool symbols_shape(const char* path)
             const bool address = strcmp(function, "symbols_address") == 0;
             const bool indirect = strcmp(function, "symbols_got") == 0 || strcmp(function, "symbols_tls") == 0;
             const bool table = strcmp(function, "symbols_table_sum") == 0;
+            const bool branch = strncmp(function, "symbols_branch_", strlen("symbols_branch_")) == 0;
             const bool leas_valid = indirect || function_leas == (address || table ? 1u : 0u);
             const bool references_valid = indirect || address || function_references != 0;
-            if (!leas_valid || !references_valid)
+            // A branch's comparison of its symbol's memory with the constant feeds a conditional jump: no setcc or cmov.
+            const bool branch_valid = !branch || (function_jumps != 0 && function_selects == 0);
+            if (!leas_valid || !references_valid || !branch_valid)
             {
-                fprintf(stderr, "symbols shape %s: leas from rip=%u direct references=%u\n", function, function_leas, function_references);
+                fprintf(stderr, "symbols shape %s: leas from rip=%u direct references=%u conditional jumps=%u setcc/cmov=%u\n", function, function_leas, function_references, function_jumps,
+                        function_selects);
                 valid = false;
             }
             functions += 1;
@@ -397,6 +410,8 @@ static bool symbols_shape(const char* path)
             snprintf(function, sizeof(function), "%.*s", (int)(length < sizeof(function) ? length : 0), open + 1);
             function_references = 0;
             function_leas = 0;
+            function_jumps = 0;
+            function_selects = 0;
             previous_lea = false;
         }
         else if (strstr(line, "R_X86_64_") != NULL)
@@ -431,6 +446,8 @@ static bool symbols_shape(const char* path)
             const int fields = sscanf(line, " %llx: %31s %255s", &at, operation, operands);
             previous_lea = fields >= 2 && strcmp(operation, "lea") == 0 && fields == 3 && strstr(operands, "(%rip)") != NULL;
             function_leas += previous_lea;
+            function_jumps += fields >= 2 && operation[0] == 'j' && strcmp(operation, "jmp") != 0;
+            function_selects += fields >= 2 && (strncmp(operation, "set", 3) == 0 || strncmp(operation, "cmov", 4) == 0);
         }
     }
     if (stream != NULL)
