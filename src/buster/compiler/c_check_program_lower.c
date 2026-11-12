@@ -16628,7 +16628,14 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         }
         else if (control.kind == CHECK_CONTROL_RETURN)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_RETURN, check_lower_class(writer, writer->result), 0);
+            const uint8_t result = check_lower_class(writer, writer->result);
+            check_lower_instruction(writer, BUSTER_TYPED_RETURN, result, 0);
+            // A non-void function's `return;`, which clang accepts in a system header or where -Wreturn-mismatch is demoted
+            // (#1963): its value is undefined, so zero.
+            if (control.node == BUSTER_CHECK_NONE && result != BUSTER_TYPED_CLASS_VOID)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, result, 0);
+            }
         }
         if (control.node != BUSTER_CHECK_NONE)
         {

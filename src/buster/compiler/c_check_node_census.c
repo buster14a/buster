@@ -327,6 +327,13 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_ASSIGN_ENUM] = NODE_CENSUS_WARNING_TESTED,
     // Its comparisons are the tautological test's: a constant outside its other operand's range (#2218).
     [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    // A typedef is a declaration's, no expression's (#2264).
+    [CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF] = NODE_CENSUS_WARNING_OUTSIDE,
+    // The default-error conversions fire only at relaxed tokens (#1963): a unit with any is refused whole.
+    [CHECK_WARNING_ID_INT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_RETURN_MISMATCH] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -526,6 +533,8 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
     policy.assign_enum = check_common_enabled(pp, input, CHECK_WARNING_ID_ASSIGN_ENUM, true);
     policy.type_safety = check_common_enabled(pp, input, CHECK_WARNING_ID_TYPE_SAFETY, false) && input->type_tags != NULL &&
                          input->type_tags->declaration_count != 0;
+    // A demoted or ignored default-error conversion is made only at a relaxed token, and warned of there (#1963).
+    policy.unmodeled |= input->relaxed_tokens;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
     {
         const uint8_t class = node_census_warning_classes[id];

@@ -191,7 +191,7 @@ static uint32_t check_transition_static(const CheckGraph* graph, const CheckStre
     const bool eligible = check_transition_op(op) && (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
                           (!call || ((graph->members[node] & BUSTER_CHECK_LIBRARY_CALL) == 0 && count <= BUSTER_CHECK_TRANSITION_ARGUMENTS));
     const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
-    const uint32_t extensions = graph->extensions | (check_graph_system_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0);
+    const uint32_t extensions = graph->extensions | (check_graph_relaxed_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0);
     const uint32_t environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0;
     const uint32_t header = (uint32_t)op | extensions << 8 | environment << 11 | count << 18 | BUSTER_CHECK_KEY_VALID;
     return op == CHECK_OP_VALUE ? BUSTER_CHECK_TRANSITION_LEAF : eligible ? header : BUSTER_CHECK_TRANSITION_OTHER;
@@ -232,7 +232,7 @@ static void check_transition_statics(const CheckGraph* graph, const CheckStream*
             for (uint32_t lanes = (uint32_t)(__mmask16)~inside; lanes != 0; lanes &= lanes - 1)
             {
                 const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
-                system |= (__mmask16)((uint32_t)check_graph_system_token(graph, graph->tokens[node + lane]) << lane);
+                system |= (__mmask16)((uint32_t)check_graph_relaxed_token(graph, graph->tokens[node + lane]) << lane);
             }
         }
         const __m512i environment = graph->fp_environments != NULL ? _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(graph->fp_environments + node))) :

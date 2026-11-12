@@ -540,7 +540,7 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId o
 // without a graph, check_input_expression_extensions' (c_check_constant.c, included after this file).
 static uint32_t check_init_extensions(const CheckInitWalker* walker, uint32_t token)
 {
-    const uint32_t system = walker->graph != NULL && check_graph_system_token(walker->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0;
+    const uint32_t system = walker->graph != NULL && check_graph_relaxed_token(walker->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0;
     return walker->ignore_excess ? (walker->graph != NULL ? walker->graph->extensions | system :
            BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (walker->parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0)) : 0;
 }

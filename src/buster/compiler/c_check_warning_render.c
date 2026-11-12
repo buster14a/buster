@@ -572,7 +572,8 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
         const CheckWarningEvent* event = view->events + i;
         // An unused file-scope declaration's at the unit's end is published after every other, where none was an error
         // (#2141): its own promotion rejects the unit then.
-        const bool unit_end = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+        const bool unit_end = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
+                               event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF) &&
                               event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
         promoted = !unit_end && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                    event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && (repair == NULL || check_repair_warning_token(repair, event->token)) &&
@@ -2589,6 +2590,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_DIVISION_BY_ZERO:
             result = payload->data != 0 ? "remainder by zero is undefined" : "division by zero is undefined";
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF:
+            result = check_warning_text(scratch, "unused typedef '%.*s'", (int)name.length, name.pointer);
             break;
         default: break;
     }

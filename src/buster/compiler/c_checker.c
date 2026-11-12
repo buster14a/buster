@@ -1874,10 +1874,24 @@ static bool check_graph_validate_vector(const CheckGraph* graph, uint8_t* pure, 
     return result;
 }
 
+// CheckGraph.system_tokens' bits: a token written in a system header, and a relaxed one (#1963), where an option or a
+// pragma demotes or ignores one of clang's conversions that default to errors (check_input_relaxed_tokens). Either makes
+// those conversions as a system header's (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER); only the first suppresses warnings.
+#define BUSTER_CHECK_SYSTEM_TOKEN 0x01u
+#define BUSTER_CHECK_RELAXED_TOKEN 0x02u
+
 static bool check_graph_system_token(const CheckGraph* graph, uint32_t token)
 {
-    const bool system = graph->system_tokens != NULL && token < graph->system_token_count && graph->system_tokens[token] != 0;
+    const bool system = graph->system_tokens != NULL && token < graph->system_token_count && (graph->system_tokens[token] & BUSTER_CHECK_SYSTEM_TOKEN) != 0;
     return system;
+}
+
+// Whether the token's default-error conversions are made (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): a system header's or a
+// relaxed token's.
+static bool check_graph_relaxed_token(const CheckGraph* graph, uint32_t token)
+{
+    const bool relaxed = graph->system_tokens != NULL && token < graph->system_token_count && graph->system_tokens[token] != 0;
+    return relaxed;
 }
 
 // Construct one semantic view at the graph boundary. Diagnostic node ids and source ends are independent.
@@ -1891,7 +1905,7 @@ static CheckContext check_graph_context(const CheckGraph* graph, uint32_t node, 
         .transparent_unions = graph->transparent_unions,
         .tag_completion_count = graph->tag_completion_count,
         .source_position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE,
-        .extensions = graph->extensions | (check_graph_system_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
+        .extensions = graph->extensions | (check_graph_relaxed_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
         // A unit that changes its floating-point environment (#pragma STDC FENV_ACCESS and the like) is rare (#1175).
         .fp_environment = __builtin_expect(graph->fp_environments != NULL, 0) ? graph->fp_environments[node] : 0,
         .const_values = graph->const_values,

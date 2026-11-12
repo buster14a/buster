@@ -206,6 +206,12 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_UNUSED_LABEL] = { "-Wunused-label", "-Wunused", "unused label" },
     [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = { "-Wtautological-constant-out-of-range-compare", "-Wtautological-constant-compare",
                                                              "result of comparison of constant is always true or false" },
+    [CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF] = { "-Wunused-local-typedef", "-Wunused", "unused typedef" },
+    [CHECK_WARNING_ID_INT_CONVERSION] = { "-Wint-conversion", "-Wconversion", "incompatible integer to pointer conversion" },
+    [CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES] = { "-Wincompatible-pointer-types", NULL, "incompatible pointer types" },
+    [CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES] = { "-Wincompatible-function-pointer-types", "-Wincompatible-pointer-types",
+                                                               "incompatible function pointer types" },
+    [CHECK_WARNING_ID_RETURN_MISMATCH] = { "-Wreturn-mismatch", "-Wreturn-type", "void function should not return a value" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -279,6 +285,32 @@ static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* 
         }
     }
     return severity;
+}
+
+// Whether a diagnostic pragma names a group of clang's conversions that default to errors (#1963).
+static bool check_diagnostic_default_error_pragmas(const CheckInput* input)
+{
+    const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
+    bool named = false;
+    for (uint32_t i = 0; history != NULL && !named && i < history->count; i += 1)
+    {
+        for (uint32_t id = CHECK_WARNING_ID_INT_CONVERSION; id <= CHECK_WARNING_ID_RETURN_MISMATCH; id += 1)
+        {
+            named |= check_warning_option(id, history->records[i].option);
+        }
+    }
+    return named;
+}
+
+// Whether the pragmas at `token` demote or ignore one of those groups (#1963, BUSTER_CHECK_RELAXED_TOKEN).
+static bool check_diagnostic_default_error_relaxed_at(const CheckInput* input, uint32_t token, uint32_t source)
+{
+    bool relaxed = false;
+    for (uint32_t id = CHECK_WARNING_ID_INT_CONVERSION; !relaxed && id <= CHECK_WARNING_ID_RETURN_MISMATCH; id += 1)
+    {
+        relaxed = check_diagnostic_severity_id_from(input, token, source, id, CHECK_WARNING_ERROR) < CHECK_WARNING_ERROR;
+    }
+    return relaxed;
 }
 
 // check_diagnostic_severity_id_from for a grouped diagnose_if (#1447): the source pragma in force at the event that names

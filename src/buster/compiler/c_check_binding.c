@@ -148,7 +148,7 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
         const bool cleanup = attribute == CHECK_ATTRIBUTE_CLEANUP && !attributes->records[i].ignored;
         marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED || interrupt || cleanup;
     }
-    const bool result = kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION ? true : marked;
+    const bool result = kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION && kind != C_BINDING_TYPEDEF ? true : marked;
     return result;
 }
 
@@ -304,8 +304,10 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const uint32_t kind = events->kind[event];
         // Only an ordinary object's or function's declaration can be unused (check_input_unused_suppressed), once: the
         // facts below are read for those alone, not for every use and restore (#1489).
+        // A block's typedef is unused too (#2264, -Wunused-local-typedef); a file-scope one never is.
+        const bool local_typedef = kind == C_BINDING_TYPEDEF && events->depth[event] != 0;
         if (events->operation[event] != C_BINDING_DECLARE || events->key[event] / events->name_capacity != C_BINDING_ORDINARY || token >= count ||
-            (kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION) || reported[token])
+            (kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION && !local_typedef) || reported[token])
         {
             continue;
         }
@@ -320,7 +322,15 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
         // An invalid declaration (#1447, a recovered parameter's) is never unused, as clang's ShouldDiagnoseUnusedDecl skips it.
         const bool invalid_declaration = output->invalid_declarations != NULL && output->invalid_declarations[token] != 0;
-        const bool declaration_used = invalid_declaration || (parameter || local ? used_tokens[token] != 0 : used[event] != 0);
+        bool declaration_used = invalid_declaration || (parameter || local || local_typedef ? used_tokens[token] != 0 : used[event] != 0);
+        // A typedef's name in a declaration's specifiers is no use event: a later token of its scope that names it is a use.
+        // Only a block's typedef no use event named asks, and only its scope's tokens are read.
+        const uint32_t typedef_scope = local_typedef && !declaration_used ?
+                                       check_input_cached_ancestor(parser, parser->tree.parents[token], NULL, true, &scope_work) : BUSTER_CHECK_NONE;
+        for (uint32_t at = token + 1; !declaration_used && typedef_scope < count && at < typedef_scope; at += 1)
+        {
+            declaration_used = output->declarations[at] == token;
+        }
         // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
         // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
         // local's is one without linkage (#1447).
@@ -331,13 +341,15 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && (!declaration_used || set_only) &&
                               !check_input_unused_suppressed(output, token, kind) && chain_marked[event] == 0 && main_file &&
-                              (parameter || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
+                              (parameter || local_typedef || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
         const uint32_t id = set_only ? CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE : kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
+                            local_typedef ? CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF :
                             parameter ? CHECK_WARNING_ID_UNUSED_PARAMETER :
                             const_variable ? CHECK_WARNING_ID_UNUSED_CONST_VARIABLE : CHECK_WARNING_ID_UNUSED_VARIABLE;
         const uint32_t event_kind = kind == C_BINDING_FUNCTION ? CHECK_WARNING_EVENT_UNUSED_FUNCTION :
+                                    local_typedef ? CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF :
                                     parameter ? CHECK_WARNING_EVENT_UNUSED_PARAMETER : CHECK_WARNING_EVENT_UNUSED_VARIABLE;
         if (selected && token == chosen && !reported[token])
         {
@@ -347,8 +359,10 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             // A `struct S { } s` declaration walks past its type's own braces. A file-scope entity — an unused
             // function or a `static` object — waits for the translation unit's end, where every later
             // declaration could still have used it; sorting there keeps declaration order.
+            // A block's typedef waits for the unit's end too: clang's emitAndClearUnusedLocalTypedefWarnings, as a later
+            // use could still name it.
             uint32_t closing = BUSTER_CHECK_NONE;
-            const bool scoped = !file_scope && kind != C_BINDING_FUNCTION;
+            const bool scoped = !file_scope && kind != C_BINDING_FUNCTION && !local_typedef;
             if (scoped && scope_parents == NULL && scope_work >= count)
             {
                 scope_parents = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
