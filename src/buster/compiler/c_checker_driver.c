@@ -135,6 +135,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_ASM_LABEL_CONFLICT: result = "conflicting asm label"; break;
+        case CHECK_INPUT_THREAD_NON_GLOBAL: result = "'_Thread_local' variables must have global storage"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
         case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
@@ -810,6 +811,7 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 0 ?
            "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]" :
            report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 1 ? "a type specifier is required for all declarations" :
+           report->message == CHECK_INPUT_THREAD_NON_GLOBAL && report->detail == 1 ? "'__thread' variables must have global storage" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }

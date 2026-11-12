@@ -2228,6 +2228,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, "ignored asm label '%.*s' on automatic variable", (int)label.length, label.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_C23_ATTRIBUTES:
+            result = "[[]] attributes are a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :

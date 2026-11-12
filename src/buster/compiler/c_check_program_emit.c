@@ -4054,6 +4054,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     memcpy(base + context_length + 1, intern_bytes(identifiers, identifier), own_length);
                     name = check_program_emit_made_name(&result->link, &names, base, (uint32_t)base_length, scratch);
                 }
+                // An asm label naming the static's own name, `f.n` (#2439), which a given name takes first, so that the
+                // static is renamed: clang's module joins the label to the static where it emits the static's function
+                // before the label's first use, and doesn't otherwise. The emission doesn't model that order: refused by
+                // name (its name 0, which ends the symbols' loop). Only a renamed static looks.
+                for (uint32_t t = 0; base != 0 && name != 0 && result->link.names.length[name] != base_length && t < program->symbol_count; t += 1)
+                {
+                    const String8 label = symbol_names[t + 1];
+                    if (label.length == base_length && memcmp(label.pointer, base, base_length) == 0)
+                    {
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order";
+                        result->token = declaration;
+                        name = 0;
+                    }
+                }
             }
             else if (given != 0)
             {
