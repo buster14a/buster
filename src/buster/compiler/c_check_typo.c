@@ -31,6 +31,9 @@
 // In an undeclared name's report's detail beside its keyword's index + 1 (check_typo_suggestion): the name starts a
 // statement, whose suggestion clang's parser takes and reads the statement again with (check_driver_typo_edits).
 #define CHECK_TYPO_STATEMENT 0x100u
+// Beside it instead: the name is a parameter's unknown type name (check_typo_parameter), which the parser read as `int`
+// and clang's corrects to a type, its error "unknown type name" (check_driver_typo_errors).
+#define CHECK_TYPO_PARAMETER 0x200u
 
 typedef enum CheckTypoMode
 {
@@ -38,6 +41,9 @@ typedef enum CheckTypoMode
     CHECK_TYPO_VALUE,
     // An undeclared function's call: a function alone (DeclFilterCCC<FunctionDecl>).
     CHECK_TYPO_FUNCTION,
+    // A parameter's unknown type name (Sema::DiagnoseUnknownTypeName's): a typedef's name, or a type specifier's or a
+    // storage class's keyword; suggested, as a statement's start's, for the driver to read again with.
+    CHECK_TYPO_TYPE,
 } CheckTypoMode;
 
 // The declarations visible at `cursor`, the binding stream's declare events replayed in order as c_bindings_replay does:
@@ -86,6 +92,10 @@ struct CheckTypo
     // Their tokens, which CheckInput.corrected_tokens lists for the driver.
     uint32_t corrected_tokens[BUSTER_CHECK_TYPO_LIMIT];
     uint32_t corrected_count;
+    // The parameters' unknown type names' suggestions (check_typo_parameter), which CheckInput.parameter_typo_tokens lists.
+    uint32_t parameter_tokens[BUSTER_CHECK_TYPO_LIMIT];
+    uint32_t parameter_details[BUSTER_CHECK_TYPO_LIMIT];
+    uint32_t parameter_types[BUSTER_CHECK_TYPO_LIMIT];
     uint32_t value_count;
     uint32_t function_cursor;
     uint32_t function_searches;
@@ -436,15 +446,14 @@ static CheckTypoPlace check_typo_place(const CheckInputReader* reader, uint32_t 
     };
 }
 
-// The declaration a typo at `token` corrects to, its declare event's, from the declarations visible at `limit` (an event
-// index); or BUSTER_CHECK_NONE. A value's search also leaves what it would suggest without taking it in CheckTypo's
+// The declaration a typo at `token`, spelled `name`, corrects to, its declare event's, from the declarations visible at
+// `limit` (an event index); or BUSTER_CHECK_NONE. A value's search also leaves what it would suggest without taking it in CheckTypo's
 // suggested_* (a keyword, or a type name where the place takes one).
-static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scope, uint32_t token, uint32_t limit, CheckTypoMode mode)
+static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scope, uint32_t token, uint32_t name, uint32_t limit, CheckTypoMode mode)
 {
     const Parser* parser = reader->parser;
     const CBindings* bindings = &reader->bindings;
     CheckTypo* typo = reader->typo;
-    const uint32_t name = parser->tokens.names[token];
     const uint8_t* spelling = (const uint8_t*)intern_bytes(reader->pp->table, name);
     const uint32_t length = intern_length(reader->pp->table, name);
     const uint32_t bound = (length + 2) / 3;
@@ -480,7 +489,9 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
         // Each name's innermost declaration (the latest kept of its key) that the place takes, and the keywords it offers
         // (check_typo_place); the nearest is taken where it is the only one that near, a statement start's typedef or
         // keyword counting as near without being taken.
-        const CheckTypoPlace place = mode == CHECK_TYPO_VALUE ? check_typo_place(reader, token) : (CheckTypoPlace){ .values = true };
+        const CheckTypoPlace place = mode == CHECK_TYPO_VALUE ? check_typo_place(reader, token) :
+                                     mode == CHECK_TYPO_TYPE ? (CheckTypoPlace){ .keywords = CHECK_TYPO_KEYWORD_TYPE, .types = true, .statement = true } :
+                                                               (CheckTypoPlace){ .values = true };
         uint32_t best = UINT32_MAX;
         uint32_t best_at = BUSTER_CHECK_NONE;
         uint32_t best_keyword = 0;
@@ -496,7 +507,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             }
             const uint8_t kind = bindings->kind[scope->events[at]];
             const uint32_t distance = typo->distances[k];
-            const bool type = mode == CHECK_TYPO_VALUE && kind == C_BINDING_TYPEDEF;
+            const bool type = mode != CHECK_TYPO_FUNCTION && kind == C_BINDING_TYPEDEF;
             const bool taken = (type && place.types) || (!type && place.values && check_typo_accepted(kind, mode, place.takes));
             const bool near = !shadowed && distance != 0 && taken;
             ties = near && distance == best ? ties + 1 : near && distance < best ? 1 : ties;
@@ -504,7 +515,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             best_taken = near && distance < best ? taken : best_taken;
             best = near && distance < best ? distance : best;
         }
-        for (uint32_t w = 0; mode == CHECK_TYPO_VALUE && place.keywords != 0 && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
+        for (uint32_t w = 0; mode != CHECK_TYPO_FUNCTION && place.keywords != 0 && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
         {
             const char* keyword = check_typo_keywords[w];
             const uint32_t keyword_length = (uint32_t)strlen(keyword);
@@ -624,7 +635,7 @@ static uint32_t check_typo_value(CheckInputReader* reader, uint32_t token, uint3
         {
             typo->value_tokens[typo->value_count++] = token;
         }
-        result = room ? check_typo_search(reader, &typo->answers, token, event, CHECK_TYPO_VALUE) : BUSTER_CHECK_NONE;
+        result = room ? check_typo_search(reader, &typo->answers, token, parser->tokens.names[token], event, CHECK_TYPO_VALUE) : BUSTER_CHECK_NONE;
     }
     return result;
 }
@@ -649,7 +660,7 @@ static uint32_t check_typo_function(CheckInputReader* reader, uint32_t token)
     if (!reader->typo_disabled && check_typo_ready(reader) && reader->typo->walk_searches < BUSTER_CHECK_TYPO_LIMIT)
     {
         reader->typo->walk_searches += 1;
-        const uint32_t event = check_typo_search(reader, &reader->typo->walk, token, reader->bindings.count, CHECK_TYPO_FUNCTION);
+        const uint32_t event = check_typo_search(reader, &reader->typo->walk, token, reader->parser->tokens.names[token], reader->bindings.count, CHECK_TYPO_FUNCTION);
         const uint32_t declaration = event != BUSTER_CHECK_NONE ? reader->bindings.declaration[event] : BUSTER_CHECK_NONE;
         // An implicitly declared function, a library's or another call's, is no suggestion of clang's here, though it is
         // as near as any other (ImplicitlyDefineFunction: "not being a particularly good idea").
@@ -673,9 +684,39 @@ static uint32_t check_typo_walk_value(CheckInputReader* reader, uint32_t token)
         CheckTypo* typo = reader->typo;
         typo->walk_searches += 1;
         typo->walk_value_tokens[typo->walk_value_count++] = token;
-        result = check_typo_search(reader, &typo->walk, token, reader->bindings.count, CHECK_TYPO_VALUE);
+        result = check_typo_search(reader, &typo->walk, token, reader->parser->tokens.names[token], reader->bindings.count, CHECK_TYPO_VALUE);
     }
     return result;
+}
+
+// A parameter's type at `token` that a recovery view reads as `int` (check_prefix_make), whose spelling `name` named no
+// type (#1447): clang's parser corrects it to a typedef's name or a type's keyword visible there (ParseImplicitInt's
+// DiagnoseUnknownTypeName) and reads the parameter with it. The walk's scope is the declarations so far, as for a
+// declarator's constant, and the search counts toward the limit with the walk's values. A suggestion is listed in
+// CheckInput.parameter_typo_tokens, in the search's own room.
+static void check_typo_parameter(CheckInputReader* reader, uint32_t token, uint32_t name)
+{
+    if (!reader->typo_disabled && check_typo_ready(reader) && reader->typo->walk_searches < BUSTER_CHECK_TYPO_LIMIT &&
+        reader->typo->walk_value_count < BUSTER_CHECK_TYPO_LIMIT)
+    {
+        CheckTypo* typo = reader->typo;
+        typo->walk_searches += 1;
+        typo->walk_value_tokens[typo->walk_value_count++] = token;
+        check_typo_search(reader, &typo->walk, token, name, reader->bindings.count, CHECK_TYPO_TYPE);
+        const bool suggested = typo->suggested_token == token && (typo->suggested_keyword != 0 || typo->suggested_type != BUSTER_CHECK_NONE);
+        CheckInput* input = reader->output;
+        if (suggested && input->parameter_typo_count < BUSTER_CHECK_TYPO_LIMIT)
+        {
+            const uint32_t at = input->parameter_typo_count;
+            input->parameter_typo_tokens = typo->parameter_tokens;
+            input->parameter_typo_details = typo->parameter_details;
+            input->parameter_typo_types = typo->parameter_types;
+            typo->parameter_tokens[at] = token;
+            typo->parameter_details[at] = typo->suggested_keyword | CHECK_TYPO_PARAMETER;
+            typo->parameter_types[at] = typo->suggested_type < reader->parser->tokens.count ? typo->suggested_type + 1 : 0;
+            input->parameter_typo_count = at + 1;
+        }
+    }
 }
 
 // The calls' suggestions past the limit, once the values' searches are known, dropped: a call's search is clang's

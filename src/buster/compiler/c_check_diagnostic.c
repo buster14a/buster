@@ -191,6 +191,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY] = { "-Wsizeof-array-decay", NULL, "sizeof on pointer operation will return size of a pointer" },
     [CHECK_WARNING_ID_CHAINED_COMPARISON] = { "-Wparentheses", NULL, "chained comparison does not behave the same as a mathematical expression" },
     [CHECK_WARNING_ID_ASM_LABEL_ON_AUTO] = { NULL, NULL, "ignored asm label on automatic variable" },
+    [CHECK_WARNING_ID_ALIGNMENT_NO_OP] = { "-Wtautological-compare", NULL, "aligning a value to 1 byte is a no-op" },
+    [CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE] = { "-Wtautological-compare", NULL, "the result of checking whether a value is aligned to 1 byte is always true" },
+    [CHECK_WARNING_ID_NONSCALAR_SAME_CAST] = { "-Wpedantic", NULL, "C99 forbids casting nonscalar type to the same type" },
     [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = { "-Wtautological-constant-out-of-range-compare", "-Wtautological-constant-compare",
                                                              "result of comparison of constant is always true or false" },
 };

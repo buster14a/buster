@@ -92,6 +92,8 @@ struct CheckOverloadExplained
     // the unit's conditions) and whether it is among an ambiguous call's best (clang's OverloadCandidate.Best).
     uint32_t candidate;
     uint32_t condition;
+    // A conversion failure's argument (from 0): the first that converts to its parameter by no conversion (#2384).
+    uint32_t argument;
     uint8_t failure;
     bool best;
 };
@@ -685,6 +687,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
             const bool variadic = (table->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
             bool viable = !prototype || (request->argument_count >= parameter_count && (variadic || request->argument_count == parameter_count));
             uint8_t* row = ranks + (uint64_t)active_count * request->argument_count;
+            uint32_t failed_argument = UINT32_MAX;
             for (uint32_t i = 0; viable && !full && i < request->argument_count; i += 1)
             {
                 CheckValue argument = arguments[i];
@@ -707,6 +710,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
                 }
                 row[i] = viable ? (fixed ? check_overload_conversion(table, &argument, parameters[i], &request->context, &full) : CHECK_OVERLOAD_ELLIPSIS) : CHECK_OVERLOAD_IMPOSSIBLE;
                 viable = row[i] != CHECK_OVERLOAD_IMPOSSIBLE;
+                failed_argument = viable ? failed_argument : i;
             }
             const uint8_t arity = prototype && request->argument_count < parameter_count ? CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS :
                                   prototype && !variadic && request->argument_count > parameter_count ? CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS :
@@ -722,6 +726,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
                 request->explained[*request->explained_count] = (CheckOverloadExplained){
                     .candidate = current,
                     .condition = disabled,
+                    .argument = failed_argument,
                     .failure = arity != CHECK_OVERLOAD_FAILURE_NONE ? arity : !converted ? CHECK_OVERLOAD_FAILURE_CONVERSION :
                                disabled != UINT32_MAX ? CHECK_OVERLOAD_FAILURE_DISABLED : CHECK_OVERLOAD_FAILURE_NONE,
                 };

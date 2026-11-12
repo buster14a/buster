@@ -6958,6 +6958,9 @@ static TypeId check_common_format_argument_type(const CheckGraph* graph, const C
 {
     const uint32_t node = graph->argument_nodes[offset + argument];
     TypeId result = node < graph->count ? check_stream_type(stream, node) : 0;
+    // An _Atomic argument's lvalue conversion drops _Atomic (#2234): its value type is what the format checks.
+    const TypeId stripped = result != 0 ? type_strip_aligned(types, result) : 0;
+    result = stripped != 0 && type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC ? type_element(types, stripped) : result;
     if (stream->argument_conversions != NULL)
     {
         const CheckConversion conversion = stream->argument_conversions[offset + argument];
@@ -9224,14 +9227,15 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
     return result;
 }
 
-// A static assertion's floating literal (check_common_truth_operands) as the conversion walk's candidate: its operand, a root
-// with a constant-warning entry each, takes the bit from that short list rather than a test of every node's context.
+// A static assertion's floating literal, `<<` or conditional (check_common_truth_operands) as the conversion walk's
+// candidate: its operand, a root with a constant-warning entry each, takes the bit from that short list rather than a
+// test of every node's context. Clang's DiagnoseIntInBoolContext warns of the latter two there too (#2409).
 static void check_common_assertion_reach(const CheckGraph* graph, const CheckStream* stream, uint8_t* reach)
 {
     for (uint32_t i = 0; graph->contexts != NULL && i < graph->const_warning_count; i += 1)
     {
         const uint32_t node = graph->const_warnings[i].node;
-        if (node < graph->count && (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && check_common_truth_floating(graph, stream, node))
+        if (node < graph->count && (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && check_common_truth_candidate(graph, stream, node))
         {
             reach[node] |= BUSTER_CHECK_REACH_CONVERSION;
         }
