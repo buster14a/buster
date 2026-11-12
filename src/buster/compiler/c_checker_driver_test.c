@@ -7341,6 +7341,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_statement_recovery_driver_test.c"
 #include "c_check_type_attribute_recovery_driver_test.c"
 #include "c_check_structural_recovery_driver_test.c"
+#include "c_check_repaired_view_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
 #include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
@@ -9008,6 +9009,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_structural_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_repaired_view(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && type_sugar_only)
     {
@@ -9151,6 +9153,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_structural_recovery(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_repaired_view(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
