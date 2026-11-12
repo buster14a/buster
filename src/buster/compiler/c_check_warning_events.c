@@ -232,9 +232,12 @@ enum
     // A folded signed `<<` whose result sets its type's sign bit (#2264, clang's DiagnoseBadShiftValues):
     // -Wshift-sign-overflow, off by default.
     CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW = 153,
+    // An integer constant converted to an enumeration that none of its enumerators equals (#2264, clang's
+    // DiagnoseAssignmentEnum): -Wassign-enum, off by default.
+    CHECK_WARNING_ID_ASSIGN_ENUM = 154,
     // A function's label that no goto and no address names (#2264, clang's DiagnoseUnusedDecl of a LabelDecl):
     // -Wunused-label, under -Wunused and so -Wmost and -Wall.
-    CHECK_WARNING_ID_UNUSED_LABEL = 154,
+    CHECK_WARNING_ID_UNUSED_LABEL = 155,
     CHECK_WARNING_ID_COUNT,
 };
 
