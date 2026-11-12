@@ -4201,7 +4201,12 @@ What the lowering covers past scalars (#145's programs):
   Sema's, at `-fsyntax-only` too (`check_input_attribute_definition`): a
   definition (a body, an initializer, an external tentative definition, or an
   earlier alias or ifunc of the declaration) that is also an alias or ifunc,
-  "definition 'f' cannot also be an alias"; and a weakref with external
+  "definition 'f' cannot also be an alias", after which clang's handler drops
+  the attribute and the declaration stays a valid definition, as the reader
+  does (the report is a recovered one, #2449: later uses of it are quiet;
+  left: a function's definition with an alias after an alias declaration of
+  it lacks clang's two "redefinition of 'f'" errors around it); and
+  a weakref with external
   linkage, in a block, without a target or on a typedef. A static variable's
   alias or weakref is no tentative definition, and an alias, ifunc or weakref
   target defines its entity for later redeclarations, functions' and
@@ -4277,11 +4282,15 @@ What the lowering covers past scalars (#145's programs):
   data's too) exists, so neither `-c`'s object nor the direct path's
   executable has an undefined symbol of the name, as clang's hasn't.
   `test-checker-driver --target-versions-only` compares such a unit's object
-  with clang's and runs its direct path's executable. Left: a label naming a
+  with clang's and runs its direct path's executable. A label naming a
   block-scope static's made name (`extern int fn __asm__("f.n")`) is the
-  static when clang emits the static's function before the label's first use,
-  and the static is renamed `f.n.1` otherwise; here the static is always
-  renamed, so the first order's link fails where clang's doesn't (#2439).
+  static in clang's module when clang emits the static's function before the
+  label's first use, and the static is renamed `f.n.1` otherwise (a definition
+  so labelled is one GLOBAL of the static's storage). The emission doesn't
+  model clang's emission order, so it refuses any such label by name, the
+  second order's too, whose link fails in clang (#2439):
+  `test-checker-driver` checks the three shapes on both paths
+  (`check_test_driver_static_label`).
 - **GNU's `retain` attribute** (#147). A definition with one before it (the
   reader drops one after it) that the unit emits keeps its section: its named
   section's (a section attribute's), or a section of its own, its class's
@@ -4297,7 +4306,11 @@ What the lowering covers past scalars (#145's programs):
   the object's OS/ABI with clang's object's, and runs the programs, linked
   from `-c`'s objects and by the direct path. The `common` attribute and
   `-fcommon` make common symbols (`BUSTER_LINK_SYMBOL_COMMON`, `-c`'s objects'
-  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md).
+  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md). An alias
+  of a common symbol (`extern int x __attribute__((alias("y"))); int y;` at
+  `-c -fcommon`) is refused by name in `c_check_program_emit.c`, where clang's
+  integrated assembler errors ("Common symbol 'y' cannot be used in
+  assignment expr"; #2449).
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -4565,6 +4578,14 @@ take clang's words and places:
 Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
 fixtures compare each with clang.
+
+A block's thread-local object without `static` or `extern` (`_Thread_local int
+z;`, C23's `thread_local`, GNU's `__thread`, a `for`'s declaration too) is
+clang's "'_Thread_local' variables must have global storage" (`'__thread'` for
+GNU's) at the keyword (#2420, `CHECK_INPUT_THREAD_NON_GLOBAL`), and the report
+recovers: the reader goes on with the declaration, as clang does. With
+`register` beside it, clang's "cannot combine" comes first, and the reader
+still stops there (two errors of one specifier list, #1820 (c)).
 
 #### Invalid declarations (#1447)
 
@@ -8520,6 +8541,12 @@ arguments against the function. The checker now gives these as clang does.
     after the specifiers, with "'X' attribute ignored";
   - a list after a pointer's qualifiers (`int * const [[gnu::unused]] p`) is
     the parser's error "an attribute list cannot appear here".
+- **Before C23** (#2409), each list gives clang's parser's extension
+  warning "[[]] attributes are a C23 extension" at its first `[`, under
+  `-Wc23-extensions` (`-Wc2x-extensions`), off by default and given by
+  `-pedantic` (`CHECK_WARNING_ID_C23_ATTRIBUTES`): once, from the reader that
+  reads the list (`check_input_attributes`, `CHECK_WARNING_EVENT_C23_ATTRIBUTES`).
+  Clang's `-Wpre-c23-compat` warning of a list in C23 isn't given.
 - **Lists before a declarator's suffixes.** C23's direct-declarator takes a
   list after the name and after each suffix, before the next one:
   `int x [[gnu::unused]] [2];` and `void f [[gnu::cold]] (void) {}`. The

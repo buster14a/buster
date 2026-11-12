@@ -323,6 +323,84 @@ static const CheckX86LowerRule* check_x86_lower_rule(const char* name, uint32_t 
     return rule;
 }
 
+// How a 32-byte builtin runs on its vector's 16-byte halves where the target can't run its row (#2426): a
+// target_clones copy without AVX or AVX2 of a body whose builtins only an earlier version's features cover, which LLVM's
+// type legalization splits for clang's code. A row kind runs the 128-bit builtin `narrow` on each half, at the
+// immediate of that half: the same one (SAME: an in-lane operation's), or its bits for the half (NIBBLE: 4 bits a half,
+// PAIR: 2, TRIPLE: 3, mpsadbw's offsets). ELEMENT's index picks one half (vec_ext's and vec_set's), whose element the
+// narrow builtin takes; vec_set's other half is a's. The others move 16-byte halves or 8-byte quarters alone: a's half
+// by the immediate's bit 0 (LANE_EXTRACT), a's with b at the bit's half (LANE_INSERT), each half a's or b's half or zero
+// by its nibble (LANE_PERMUTE, vperm2f128's), and each quarter a's by its 2 bits (QUARTER_PERMUTE, vpermq's).
+typedef enum CheckX86SplitKind
+{
+    CHECK_X86_SPLIT_SAME,
+    CHECK_X86_SPLIT_NIBBLE,
+    CHECK_X86_SPLIT_PAIR,
+    CHECK_X86_SPLIT_TRIPLE,
+    CHECK_X86_SPLIT_ELEMENT,
+    CHECK_X86_SPLIT_LANE_EXTRACT,
+    CHECK_X86_SPLIT_LANE_INSERT,
+    CHECK_X86_SPLIT_LANE_PERMUTE,
+    CHECK_X86_SPLIT_QUARTER_PERMUTE,
+} CheckX86SplitKind;
+
+typedef struct CheckX86Split CheckX86Split;
+struct CheckX86Split
+{
+    const char* wide;
+    const char* narrow;
+    CheckX86SplitKind kind;
+};
+
+#define BUSTER_CHECK_X86_SPLIT(wide, narrow, kind) { "__builtin_ia32_" wide, "__builtin_ia32_" narrow, CHECK_X86_SPLIT_##kind },
+#define BUSTER_CHECK_X86_MOVE(wide, kind) { "__builtin_ia32_" wide, NULL, CHECK_X86_SPLIT_##kind },
+static const CheckX86Split check_x86_splits[] = {
+    BUSTER_CHECK_X86_SPLIT("pshufd256", "pshufd", SAME)
+    BUSTER_CHECK_X86_SPLIT("pshufhw256", "pshufhw", SAME)
+    BUSTER_CHECK_X86_SPLIT("pshuflw256", "pshuflw", SAME)
+    BUSTER_CHECK_X86_SPLIT("palignr256", "palignr128", SAME)
+    BUSTER_CHECK_X86_SPLIT("pslldqi256_byteshift", "pslldqi128_byteshift", SAME)
+    BUSTER_CHECK_X86_SPLIT("psrldqi256_byteshift", "psrldqi128_byteshift", SAME)
+    BUSTER_CHECK_X86_SPLIT("pblendw256", "pblendw128", SAME)
+    BUSTER_CHECK_X86_SPLIT("shufps256", "shufps", SAME)
+    BUSTER_CHECK_X86_SPLIT("vpermilps256", "vpermilps", SAME)
+    BUSTER_CHECK_X86_SPLIT("roundps256", "roundps", SAME)
+    BUSTER_CHECK_X86_SPLIT("roundpd256", "roundpd", SAME)
+    BUSTER_CHECK_X86_SPLIT("cmpps256", "cmpps", SAME)
+    BUSTER_CHECK_X86_SPLIT("cmppd256", "cmppd", SAME)
+    BUSTER_CHECK_X86_SPLIT("dpps256", "dpps", SAME)
+    BUSTER_CHECK_X86_SPLIT("blendps256", "blendps", NIBBLE)
+    BUSTER_CHECK_X86_SPLIT("pblendd256", "blendps", NIBBLE)
+    BUSTER_CHECK_X86_SPLIT("blendpd256", "blendpd", PAIR)
+    BUSTER_CHECK_X86_SPLIT("shufpd256", "shufpd", PAIR)
+    BUSTER_CHECK_X86_SPLIT("vpermilpd256", "vpermilpd", PAIR)
+    BUSTER_CHECK_X86_SPLIT("mpsadbw256", "mpsadbw128", TRIPLE)
+    BUSTER_CHECK_X86_SPLIT("vec_ext_v32qi", "vec_ext_v16qi", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_ext_v16hi", "vec_ext_v8hi", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_ext_v8si", "vec_ext_v4si", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_ext_v4di", "vec_ext_v2di", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_set_v32qi", "vec_set_v16qi", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_set_v16hi", "vec_set_v8hi", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_set_v8si", "vec_set_v4si", ELEMENT)
+    BUSTER_CHECK_X86_SPLIT("vec_set_v4di", "vec_set_v2di", ELEMENT)
+    BUSTER_CHECK_X86_MOVE("extract128i256", LANE_EXTRACT)
+    BUSTER_CHECK_X86_MOVE("vextractf128_pd256", LANE_EXTRACT)
+    BUSTER_CHECK_X86_MOVE("vextractf128_ps256", LANE_EXTRACT)
+    BUSTER_CHECK_X86_MOVE("vextractf128_si256", LANE_EXTRACT)
+    BUSTER_CHECK_X86_MOVE("insert128i256", LANE_INSERT)
+    BUSTER_CHECK_X86_MOVE("vinsertf128_pd256", LANE_INSERT)
+    BUSTER_CHECK_X86_MOVE("vinsertf128_ps256", LANE_INSERT)
+    BUSTER_CHECK_X86_MOVE("vinsertf128_si256", LANE_INSERT)
+    BUSTER_CHECK_X86_MOVE("vperm2f128_pd256", LANE_PERMUTE)
+    BUSTER_CHECK_X86_MOVE("vperm2f128_ps256", LANE_PERMUTE)
+    BUSTER_CHECK_X86_MOVE("vperm2f128_si256", LANE_PERMUTE)
+    BUSTER_CHECK_X86_MOVE("permti256", LANE_PERMUTE)
+    BUSTER_CHECK_X86_MOVE("permdi256", QUARTER_PERMUTE)
+    BUSTER_CHECK_X86_MOVE("permdf256", QUARTER_PERMUTE)
+};
+#undef BUSTER_CHECK_X86_MOVE
+#undef BUSTER_CHECK_X86_SPLIT
+
 // A mask of `bits` bits: its class, and the opmask moves to and from a general register (KMOVW for 8 and 16 bits, which
 // moves 16, the value's high bits zero either way; KMOVD and KMOVQ, AVX-512BW's, for 32 and 64).
 static uint8_t check_x86_lower_mask_class(uint32_t bits)
