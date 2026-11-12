@@ -1388,7 +1388,11 @@ they are the ordinary forms, the IR's `fadd` to `fdiv`.
 
 **Tier 1** selects the same record (`BUSTER_TIER1_VECTOR_FROUND`), the rounding
 in its decorations. Seven of the eight `_ER` forms had no Zen 5 row; they were
-measured on the 9700X (see below).
+measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-fround-1840-2026-11-12)), as
+their forms without rounding are: `vaddpd`, `vsubps` and `vsubpd` 2 cycles,
+`vmulps` and `vmulpd` 3, `vdivps` 10 and `vdivpd` 13, 2 per cycle for the
+first five, and a `vdivps` every 2.5 cycles and a `vdivpd` every 4.
 
 Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
 compiling this change's sources, against main (`2331a9be`):
@@ -1434,7 +1438,8 @@ One more unary `intrinsic` kind, `cvtt` (`BUSTER_IR_INTRINSIC_CVTT`), converts a
 one record of `vcvttss2si` or `vcvttsd2si`'s EVEX form, INTEGER_RESULT in reg
 and VECTOR(0) in rm. **Tier 1** selects the same record into the general
 destination (`BUSTER_TIER1_VECTOR_CVTT`). The four EVEX forms had no Zen 5 row;
-they were measured on the 9700X.
+they were measured on the 9700X in the same record: 7.5 cycles of latency
+across the register files, as the legacy forms', 2 per cycle, two macro-ops.
 
 Machine rows: `main_unit_backend.c` 177 → 167, after the floating operations
 above.
