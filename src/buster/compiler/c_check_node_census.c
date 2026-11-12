@@ -1773,8 +1773,12 @@ struct NodeShadow
     uint64_t taken_nodes;
     uint64_t taken_records;
     uint64_t entries;
-    // The taken expressions' calls, each compared with its row of the function's calls table.
+    // The taken expressions' calls, each compared with its row of the function's calls table, and their arguments.
     uint64_t calls;
+    uint64_t arguments;
+    // The argument memo's entries T filled and the arguments it took by the rule instead, over every expression's T.
+    uint64_t memo_fills;
+    uint64_t memo_rules;
     // Each refusal's expressions and their evaluated nodes, and the operators the code refusal stopped at.
     uint64_t refused_expressions[NODE_MACHINE_REFUSALS];
     uint64_t refused_nodes[NODE_MACHINE_REFUSALS];
@@ -1952,7 +1956,11 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
     const uint64_t row_nodes = machine->row_nodes;
     const uint64_t action_nodes = machine->action_nodes;
     const uint64_t twins = machine->twin_differences;
+    const uint64_t memo_fills = machine->memo_fills;
+    const uint64_t memo_rules = machine->memo_rules;
     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_run(machine, first, root, records, root_context, pop->target, object) : refusal;
+    shadow->memo_fills += machine->memo_fills - memo_fills;
+    shadow->memo_rules += machine->memo_rules - memo_rules;
     shadow->expressions += 1;
     shadow->nodes += nodes;
     shadow->records += walked;
@@ -1985,6 +1993,10 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         shadow->taken_records += machine->count;
         shadow->entries += machine->entry_count;
         shadow->calls += machine->call_count;
+        for (uint32_t c = 0; c < machine->call_count; c += 1)
+        {
+            shadow->arguments += node_machine_record_argument_count(machine, machine->call_records[c]);
+        }
         shadow->value_differences += !values;
         shadow->entry_differences += !entries;
         shadow->row_nodes += machine->row_nodes - row_nodes;
@@ -2060,12 +2072,15 @@ static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, ui
 }
 
 // The timing passes over the file's taken expressions (`nodes` evaluated nodes in them): each sweep set `passes` times,
-// interleaved, its least cycles, instructions and ticks added to the totals.
+// interleaved, its least cycles, instructions and ticks added to the totals. Each sweep set starts without the unit's call
+// answers (node_machine_forget), so that it pays their fills as one compile does; the machine's counts are the comparison's.
 static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t nodes)
 {
     const int cycles = node_shadow_counter(PERF_COUNT_HW_CPU_CYCLES);
     const int instructions = node_shadow_counter(PERF_COUNT_HW_INSTRUCTIONS);
     const bool verify = machine->verify;
+    const uint64_t memo_fills = machine->memo_fills;
+    const uint64_t memo_rules = machine->memo_rules;
     machine->verify = false;
     uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][3];
     memset(least, 0xff, sizeof(least));
@@ -2073,6 +2088,7 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
     {
         for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
         {
+            node_machine_forget(machine);
             const uint64_t c0 = node_shadow_read(cycles);
             const uint64_t i0 = node_shadow_read(instructions);
             const uint64_t t0 = __rdtsc();
@@ -2096,6 +2112,8 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
     shadow->timed_nodes += shadow->passes != 0 ? nodes : 0;
     shadow->counted = cycles >= 0;
     machine->verify = verify;
+    machine->memo_fills = memo_fills;
+    machine->memo_rules = memo_rules;
     if (cycles >= 0)
     {
         close(cycles);
@@ -2115,6 +2133,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     printf("node-shadow: differences values=%" PRIu64 " entries=%" PRIu64 " twin=%" PRIu64 " (row-typed nodes %" PRIu64 ", action-typed %" PRIu64 "%s)\n",
            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
            shadow->verify ? ", verified" : "");
+    printf("node-shadow: argument-memo filled=%" PRIu64 " by-rule=%" PRIu64 " (taken calls' arguments %" PRIu64 ")\n", shadow->memo_fills, shadow->memo_rules,
+           shadow->arguments);
     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
     {
         printf("node-shadow: refused=%s expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " (%.2f%%)\n", node_machine_refusal_names[r], shadow->refused_expressions[r],
