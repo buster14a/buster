@@ -1,4 +1,4 @@
-# buster
+# buster<!--A-->
 
 This file is the shared repository guide for coding agents. `CLAUDE.md` imports
 it. Keep always-needed rules here and command/module details in the linked
