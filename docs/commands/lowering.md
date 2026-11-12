@@ -126,3 +126,63 @@ from their source type before testing the arithmetic-width value. The regression
 includes negative signed char/short/int constants widened to U32/U64, their
 compound assignments, and positive narrow constants that still select shifts or
 masks. Source `_BitInt` values retain ordinary lowering in this optimization.
+
+## Node machine census (#2524)
+
+`./build/compiler measure-node-machine [--list N] [preprocessor options] file...`
+(`c_check_node_census.c`) is step 0 of [the node machine](../node-machine.md):
+what the machine's set and its silence tests would take, counted on the pipeline
+as it is, with no machine. Each file is prepared and lowered as `-c` does, with
+the tasks' log of pops (the inventory's, above); each full expression (a tree of
+pops under a root a statement's control pushed: an expression statement's, a
+condition's, a return's, a switch's, a scalar object's initializer's) is read
+again from the finished graph, stream and parser's tree by the tests the machine
+would make before it takes it. Its tests read every node of the root's subtree,
+unevaluated operands too; its counts are the evaluated nodes, the inventory's.
+
+- **The set** refuses a root of another control (a brace initializer's part, a
+  statement expression's), an operator without a code (the builtins, `va_arg`,
+  statement expressions, variable-length arrays, `_Generic`'s selection,
+  `__real__`, `__imag__`), a complex, `_BitInt`, atomic, vector, half-precision
+  or `__float128` value, a bit-field, a struct's or union's value copied, a
+  compound literal, a name whose declaration has a flag the tables don't model
+  (`register`, `overloadable`, `deprecated`, `unavailable`, `error`, `warning`,
+  `diagnose_if`, `enable_if`, `noderef`), a callee with semantics of its own (a
+  library builtin the catalogue folds, a printf-family name, `format`,
+  `format_arg`, `sentinel`, `returns_twice`, `pass_object_size` and the like, no
+  prototype, a `musttail` return), more than 4,096 nodes, a body that tracks its
+  stack and a node the tasks popped twice.
+- **The silence tests** refuse only where a warning they stand for is enabled in
+  the unit (`check_common_enabled`, each warning with its producer's default):
+  the actions' own warning bits (the baked rows', the folds' and the pointer
+  pairs' memo's answers), a kept warning event of the reader's or the graph's at
+  a token of the expression, two enumeration types meeting, a sign comparison, a
+  pointer cast to a narrower integer, a void pointer dereferenced, a string
+  literal plus an integer, an address of a packed member, sizeof's or alignof's
+  operand with an effect, constants (a narrowing conversion that changes one, a
+  division by zero, a shift out of range, a null dereference, a subscript past
+  its array, a comparison outside its operand's range in the comparison's
+  common type, a non-literal null), parentheses (an assignment as a condition,
+  a comparison in a bitwise operator, `!` before a comparison, a shift of a sum,
+  a chained comparison, a shift in a truth context), a discarded value without
+  an effect or a discarded call of a `warn_unused_result`, `const` or `pure`
+  callee, a self-assignment, a return of a local's address, a for statement's
+  clauses with `-Wfor-loop-analysis` on, an object written and named again
+  unsequenced, a system header's macro in a user's expression, and a body with a
+  diagnostic or floating-point pragma.
+
+The report gives the gate's two shares (the set's of the evaluated nodes, and
+the silence tests' refusals of all of them), the nodes taken by root kind, the
+bodies taken whole, and each test's expressions and nodes: any it refuses, those
+it alone refuses and those it refuses first in the list's order. `--list N`
+prints the first N expressions each test refuses, by file and line. It counts
+rather than times, so it needs no lock beyond the build's. `test-checker` runs
+`c_check_node_census_test.c`: a fixture of one warning a line, which the
+compiler reports with `-Wall -Wextra` and the census must refuse by the test that
+stands for it; clean idioms it must take (a library call's discarded result, two
+fields written in one expression, a conditional's arms, `&a[N]`, a same-width
+sign change, `size_t` against `(size_t)-1`); the set's refusals; and warnings
+off by default refusing nothing. A new warning reported inside an expression
+needs its test here and a line in that fixture: the census is where the
+machine's silence tests are written first. [The design](../node-machine.md)'s
+"Step 0: the census" has the results on `sqlite3.c`, Lua and musl.

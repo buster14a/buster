@@ -26,6 +26,7 @@ static bool ownership_fixture_name(const char* path)
         "c_preprocessor_oracle.c",
         "c_testsuite.c",
         "c_check_lower_inventory.c",
+        "c_check_node_census.c",
         "differential.c",
         "preprocessor_fuzz.c",
         "preprocessor_fuzz_generate.c",

@@ -771,6 +771,10 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_lower_inventory.c"
 #endif
+// #2524's measure-node-machine: the node machine's census, what its set and silence tests would take.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+#include "buster/compiler/c_check_node_census.c"
+#endif
 // #136's benchmark-backend-source: benchmark-backend's variants on the functions -c compiles of real units.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 // Both source-benchmark families use these counters; keep their first inclusion before the IR source helpers.
@@ -798,6 +802,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/c_check_lower_inventory_test.c"
+#include "buster/compiler/c_check_node_census_test.c"
 #endif
 // #1048's test-lowering-templates: node templates against the tasks' rules, function for function.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
@@ -2003,6 +2008,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-lowering-templates") == 0)
     {
         result = run_lowering_inventory(argc - 2, argv + 2);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-node-machine") == 0)
+    {
+        result = run_node_census(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
