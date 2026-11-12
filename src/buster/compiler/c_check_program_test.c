@@ -4174,6 +4174,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "mix(__builtin_mul_overflow(ua,(unsigned long)s,&ri));mix((unsigned)ri);mix(__builtin_add_overflow(ua,ub,&rb));mix(rb);\n"
             "mix(__builtin_mul_overflow(ua,(unsigned __int128)s,&ru200));raw(&ru200,32);\n"
             "}return (int)(h^(h>>32));}", "bit-int-past-128-overflow", clang);
+        // A switch on a _BitInt past 128 bits (#2220): its cases' values limb by limb, signed and unsigned, of 129, 200 and 256
+        // bits, with GNU ranges across limbs, negative values, a value only the top limb tells from another and one only a
+        // low limb does; each value's case, of boundary values around each case's, hashed.
+        check_test_program_source(test,
+            "typedef _BitInt(256) W;typedef unsigned _BitInt(200) U;typedef _BitInt(129) N;\n"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+            "static int f(W x){switch(x){case (W)1<<130:return 1;case -((W)1<<200):return 2;case 7:return 3;case -1:return 4;\n"
+            "case ((W)5<<180)...((W)9<<180):return 5;case -((W)9<<100)...-((W)5<<100):return 6;case ((W)1<<130)+7:return 7;default:return 0;}}\n"
+            "static int g(U x){switch(x){case (U)1<<199:return 1;case 0 ... 3:return 2;case (U)-1:return 3;case ((U)3<<64)...((U)3<<64)+5:return 4;}return 0;}\n"
+            "static int k(N x){switch(x){case -((N)1<<127)*2:return 1;case ((N)1<<127)+(((N)1<<127)-1):return 2;case 0:return 3;case -5 ... -1:return 4;}return 9;}\n"
+            "int tested(int n){h=(unsigned)n;W base[]={(W)1<<130,-((W)1<<200),7,-1,(W)5<<180,(W)9<<180,-((W)9<<100),-((W)5<<100),((W)1<<130)+7,0,(W)3<<64};\n"
+            "for(unsigned i=0;i<sizeof base/sizeof base[0];i++)for(int d=-2;d<=2;d++){W v=base[i]+d+(n&1);mix(f(v));mix(g((U)v));mix(k((N)v));\n"
+            "mix(f(-v));mix(g((U)-v));mix(k((N)-v));}\n"
+            "return (int)(h^(h>>32));}", "bit-int-past-128-switch", clang);
         // The generic and C23 bit builtins of _BitInts past 128 bits (#1447), limb by limb, of boundary values, single bits and
         // random ones: counts, reversals, byte swaps, bit_floor and bit_ceil, and rotations of a power of two's width by
         // counts of every width (clang's code generator can't compile another width's, which tier1-bits checks), and narrower
@@ -5693,6 +5707,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "__auto_type w=({int k=n;if(k>3)goto done;k=5;done:k*2L;});"
             "return(int)(m*100+p.y+q.x*q.y+c+s[n&3]+r+t+MAX(MAX(n,1),-n)+bias+u+(long)(d*4)+(long)sizeof(u)*1000+w*(long)sizeof(w));}",
             "auto-type", clang);
+        // A cast to an atomic type (#2230): an `_Atomic` rvalue, which __auto_type deduces, an _Atomic object takes (a
+        // static's as a constant) and the usual arithmetic conversions take as their left operand; and __auto_type's
+        // redeclarations of atomic entities (#1844), which take the earlier atomic types.
+        check_test_program_source(test,
+            "_Atomic int ar;__auto_type ar=5;_Atomic int*ap;__auto_type*ap=&ar;_Atomic double ad;_Atomic __auto_type ad=2.5;"
+            "static _Atomic int az=(_Atomic int)41;"
+            "int tested(int n){__auto_type a=(_Atomic char)(n*37);_Atomic long b=(_Atomic long)n;static _Atomic int q=(_Atomic int)3;"
+            "long r=(_Atomic long)n*3+n;double d=(_Atomic double)n/2-n;(void)(_Atomic int)n;ar+=n;"
+            "return a+(int)(b+r)+(int)(d*4)+q+az+ar+*ap+(int)ad+(int)sizeof((_Atomic int)n)+"
+            "_Generic(&a,_Atomic char*:100,default:200)+_Generic(&ar,_Atomic int*:300,default:400);}",
+            "atomic-casts", clang);
         // An _Alignas of __auto_type's variables against their deduced types (#840's review): past a double's, a char's below
         // int's and past a short's, their addresses and GNU's alignments of them.
         check_test_program_source(test,

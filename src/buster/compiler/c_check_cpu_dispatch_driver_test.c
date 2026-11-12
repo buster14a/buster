@@ -49,6 +49,11 @@ static void check_test_cpu_dispatch_diagnostics(CheckTest* test, const char* cla
         "__attribute__((cpu_specific(generic))) int f(void) { return 1; }\n__attribute__((cpu_specific(core_2_duo_ssse3))) int f(void) { return 2; }\n"
         "__attribute__((cpu_dispatch(generic, core_2_duo_ssse3))) int f(void);\nint main(void) { return f(); }\n",
         "__attribute__((cpu_specific(atom, generic, core_i7_sse4_2))) int f(int x) { return x; }\nint g(void) { return f(1); }\n",
+        // A version's redefinition is recovered and invalid (#2362): its version's later definition is quiet, another
+        // version's redefinition is reported, and the errors after them too.
+        "__attribute__((cpu_specific(atom))) int f(void) { return 0; }\n__attribute__((cpu_specific(atom))) int f(void) { return 1; }\n"
+        "__attribute__((cpu_specific(atom))) int f(void) { return 2; }\n__attribute__((cpu_specific(ivybridge))) int f(void) { return 3; }\n"
+        "__attribute__((cpu_specific(ivybridge))) int f(void) { return 4; }\nint main(void) { return undeclared; }\n",
         "__attribute__((cpu_specific(i386))) int f(void) { return 0; }\n",
         "static __attribute__((cpu_specific(generic))) int s(void) { return 1; }\nstatic __attribute__((cpu_dispatch(generic))) int s(void);\n"
         "int g(void) { return s(); }\n",

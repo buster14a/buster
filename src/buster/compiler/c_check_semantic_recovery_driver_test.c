@@ -788,6 +788,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void h(void) __attribute__((cleanup(qq)));\nstruct S { int m __attribute__((aligned(yyy))); int n; } s;\n"
         "void k(void) { int l __attribute__((aligned(xxx))) = 1; int unused; (void)l; }\nint y = 1/0;\n"
         "int f(void) { return undeclared_fn(1); }\n",
+        // Any name that stays undeclared before an operand (#2255): clang's "use of undeclared identifier", its expression
+        // invalid and its rest skipped as a keyword's typo's is, and the unit goes on. Before C23, `u8'a'` is the name `u8`
+        // and a character constant.
+        "/* gnu17 only */\n_Static_assert(u8'a' == 0, \"20\");\n_Static_assert('a' == 0, \"next\");\nint x = u8'b';\n"
+        "int f(void) { int y = u8'c'; return y + u8 'd' + 1; }\nint z = 1 / 0;\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        "int x = nosuch 5;\nint f(int a) { return (zzz a) + 1; }\nvoid h(int a) { a = yyy \"s\" + 2; www 1, a; }\n_Static_assert(0, \"after\");\n"
+        "int y = 1 / 0;\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
         // A block item's GNU attributes before a name that a correction takes as a value (#1447, check_driver_typo_tail):
         // clang's typo error, then "expected identifier or '('" there, the item skipped; the body's unused variable is quiet.
         "int counter;\nvoid f(int n)\n{\n    int value;\n    __attribute__((unused)) valu = 1;\n"
@@ -944,6 +951,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int a[-1]; int a[2]; float a;\nstruct S s1; int s1; float s1;\nstatic void v; int v;\nint f(void)[3]; int f(void); float f(int);\n"
         "int u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
         "int f(void)[3]; int f(void); float f(int);\nint u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
+        // A function's redefinition is clang's invalid declaration, kept in its chain (#2362): reported once, a third or
+        // a later declaration quiet, of any type, and so are its uses, a block's extern one's too; its body's errors and
+        // another kind's redeclaration (noted at it) are still reported.
+        "int g(void) { return 1; }\nint g(void) { return 2; }\nint g(void) { return 3; }\nlong g(void);\nint h(void) { return g(1); }\n"
+        "int k(void) { extern int g(void); return g(2); }\nint (*p)(int) = g;\nint y(void) { int unused; return undeclared; }\n",
+        "static int g(int a) { return 1; }\nstatic int g(int a) { return undeclared; }\nint g;\nint h(void) { return g(); }\n",
         // Another kind of entity's redeclaration after an invalid one is still clang's "redefinition of 'a' as different
         // kind of symbol" (review on #1884): an object after a function, a function after an object, and a typedef after
         // either.
