@@ -18,6 +18,10 @@
 #define BUSTER_IR_OPTIMIZE_CFG 4u
 // Tier 1 alone requests physical block placement; the shared optimizer's default preserves block order.
 #define BUSTER_IR_OPTIMIZE_LAYOUT 8u
+// Tier 1 alone requests identities' forwarding too (#2554, ir_optimize_identities): an integer operation that SCCP
+// proves returns one of its operands unchanged is that operand to its users, and is neither kept nor emitted.
+#define BUSTER_IR_OPTIMIZE_IDENTITY 16u
+#define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY)
 #define BUSTER_IR_OPTIMIZE_AUTO 0u
 #define BUSTER_IR_OPTIMIZE_VECTOR 1u
 #define BUSTER_IR_OPTIMIZE_SCALAR 2u
@@ -95,6 +99,9 @@ struct IrOptimizeWork
     uint32_t phi_head;
     uint32_t phi_tail;
     uint32_t phi_count;
+    // With BUSTER_IR_OPTIMIZE_IDENTITY (#2554), each instruction's forwarded operand, the value its users read in its
+    // place, or BUSTER_IR_NONE; null without the option or without any identity (ir_optimize_identities).
+    uint32_t* forward;
     IrOptimizeResult statistics;
 };
 
@@ -1250,12 +1257,167 @@ static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
     return result;
 }
 
+// The identities' operations (#2554, ir_optimize_identities), by the operand whose known value makes them return the
+// other one: the right's zero (x + 0, x - 0, x | 0, x ^ 0 and a shift by zero) or the left's (0 + x, 0 | x, 0 ^ x),
+// the right's one (x * 1 and a division by one) or the left's (1 * x), and the right's all-ones or the left's (x & -1).
+#define BUSTER_IR_OPTIMIZE_RIGHT_ZERO 1u
+#define BUSTER_IR_OPTIMIZE_LEFT_ZERO 2u
+#define BUSTER_IR_OPTIMIZE_RIGHT_ONE 4u
+#define BUSTER_IR_OPTIMIZE_LEFT_ONE 8u
+#define BUSTER_IR_OPTIMIZE_RIGHT_ONES 16u
+#define BUSTER_IR_OPTIMIZE_LEFT_ONES 32u
+static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
+    [IR_ADD] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO | BUSTER_IR_OPTIMIZE_LEFT_ZERO,
+    [IR_SUB] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO,
+    [IR_OR] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO | BUSTER_IR_OPTIMIZE_LEFT_ZERO,
+    [IR_XOR] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO | BUSTER_IR_OPTIMIZE_LEFT_ZERO,
+    [IR_SHL] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO,
+    [IR_LSHR] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO,
+    [IR_ASHR] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO,
+    [IR_MUL] = BUSTER_IR_OPTIMIZE_RIGHT_ONE | BUSTER_IR_OPTIMIZE_LEFT_ONE,
+    [IR_UDIV] = BUSTER_IR_OPTIMIZE_RIGHT_ONE,
+    [IR_SDIV] = BUSTER_IR_OPTIMIZE_RIGHT_ONE,
+    [IR_AND] = BUSTER_IR_OPTIMIZE_RIGHT_ONES | BUSTER_IR_OPTIMIZE_LEFT_ONES,
+};
+
+// The identities' candidates among `count` (at most 64) operations, a bit each: their opcodes' kinds by a 128-byte
+// table's lookup, of which the scalar loop is the exact twin. Only these few read their operands' lattice states.
+static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint32_t count, bool scalar)
+{
+    uint64_t candidates = 0;
+#if BUSTER_HOST_VECTOR
+    if (!scalar)
+    {
+        const __mmask64 valid = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+        const __m512i kinds = _mm512_permutex2var_epi8(_mm512_loadu_si512(ir_optimize_identity_kinds), op, _mm512_loadu_si512(ir_optimize_identity_kinds + 64));
+        candidates = _mm512_mask_test_epi8_mask(valid, kinds, kinds);
+    }
+    else
+#endif
+    {
+        for (uint32_t lane = 0; lane < count; lane += 1)
+        {
+            candidates |= (uint64_t)(ir_optimize_identity_kinds[operations[lane]] != 0) << lane;
+        }
+    }
+    (void)scalar;
+    return candidates;
+}
+
+// Whether SCCP knows `value`, of `type`'s bits (I1 to I64), is `expected` (zero, one or all ones) at those bits.
+static bool ir_optimize_known(const IrOptimizeWork* work, uint32_t value, uint32_t type, uint64_t expected)
+{
+    const uint32_t bits = ir_type_bits[type];
+    const uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    const bool result = work->states[value] == IROPT_CONSTANT && (work->values[value].low & mask) == (expected & mask);
+    return result;
+}
+
+// The operand instruction i returns unchanged by its kinds (ir_optimize_identity_kinds) and SCCP's facts, or
+// BUSTER_IR_NONE.
+static uint32_t ir_optimize_identity_source(const IrOptimizeWork* work, uint32_t i, uint32_t type)
+{
+    const IrFunction* f = work->function;
+    const uint32_t kind = ir_optimize_identity_kinds[f->op[i]];
+    const uint32_t a = f->a[i];
+    const uint32_t b = f->b[i];
+    const bool right = ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ZERO) != 0 && ir_optimize_known(work, b, type, 0)) || ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ONE) != 0 && ir_optimize_known(work, b, type, 1)) ||
+                       ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ONES) != 0 && ir_optimize_known(work, b, type, UINT64_MAX));
+    const bool left = ((kind & BUSTER_IR_OPTIMIZE_LEFT_ZERO) != 0 && ir_optimize_known(work, a, type, 0)) || ((kind & BUSTER_IR_OPTIMIZE_LEFT_ONE) != 0 && ir_optimize_known(work, a, type, 1)) ||
+                      ((kind & BUSTER_IR_OPTIMIZE_LEFT_ONES) != 0 && ir_optimize_known(work, a, type, UINT64_MAX));
+    const uint32_t result = right ? a : left ? b : BUSTER_IR_NONE;
+    return result;
+}
+
+// Identities' forwarding (#2554), after SCCP and before DCE: an integer operation, I1 to I64, of a reachable block that
+// returns one of its operands unchanged by SCCP's facts (ir_optimize_identity_kinds: a shift by zero, Lua's instruction
+// decoding's `>> 0`, a multiplication by one, a C `n * sizeof (char)`, and the rest) forwards that operand, of its own
+// type. Its users read the operand in its place (ir_optimize_rewrite), DCE marks the operand rather than it (a shift's
+// root with it, ir_optimize_dce) and it is gone. An operand defines a value that dominates the operation, which
+// dominates the operation's users, so every use stays dominated. A chain of them forwards its first operand that isn't
+// one, found with path compression. A result SCCP folded and a vector's stay as they are. False where the map (`count`
+// words, in scratch, made at the first identity) has no room; work->forward stays null where nothing forwards.
+static bool ir_optimize_identities(IrOptimizeWork* work, Arena* scratch)
+{
+    const IrFunction* f = work->function;
+    const uint32_t count = f->instruction_count;
+    bool ok = true;
+    uint32_t* forward = 0;
+    for (uint64_t first = 0; ok && first < count; first += 64)
+    {
+        const uint32_t lanes = count - first < 64 ? (uint32_t)(count - first) : 64;
+        uint64_t candidates = ir_optimize_identity_candidates(f->op + first, lanes, BUSTER_SCALAR_PATH(work->scalar));
+        while (ok && candidates != 0)
+        {
+            const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctzll(candidates);
+            candidates &= candidates - 1;
+            const uint32_t type = f->type[i];
+            uint32_t source = BUSTER_IR_NONE;
+            if (type >= IR_I1 && type <= IR_I64 && work->blocks[work->cfg.instruction_blocks[i]] != 0 && work->states[i] != IROPT_CONSTANT)
+            {
+                source = ir_optimize_identity_source(work, i, type);
+                source = source != BUSTER_IR_NONE && f->type[source] == type ? source : BUSTER_IR_NONE;
+            }
+            if (source != BUSTER_IR_NONE && forward == 0)
+            {
+                forward = ir_allocate(scratch, count, sizeof(uint32_t), &ok);
+                if (ok)
+                {
+                    memset(forward, 0xff, (uint64_t)count * sizeof(uint32_t));
+                }
+            }
+            if (ok && source != BUSTER_IR_NONE)
+            {
+                forward[i] = source;
+            }
+        }
+    }
+    for (uint32_t i = 0; ok && forward != 0 && i < count; i += 1)
+    {
+        if (forward[i] != BUSTER_IR_NONE)
+        {
+            uint32_t root = forward[i];
+            while (forward[root] != BUSTER_IR_NONE)
+            {
+                root = forward[root];
+            }
+            for (uint32_t at = i; forward[at] != root;)
+            {
+                const uint32_t next = forward[at];
+                forward[at] = root;
+                at = next;
+            }
+        }
+    }
+    work->forward = ok ? forward : 0;
+    return ok;
+}
+
+// The value that instruction `value`'s users read: its forwarded operand where it has one (#2554), else itself.
+static uint32_t ir_optimize_forwarded(const IrOptimizeWork* work, uint32_t value)
+{
+    const uint32_t result = work->forward != 0 && work->forward[value] != BUSTER_IR_NONE ? work->forward[value] : value;
+    return result;
+}
+
 static __attribute__((aligned(64))) bool ir_optimize_mark_operands(IrOptimizeWork* work, uint32_t i, bool queue)
 {
     const IrFunction* f = work->function;
     bool changed = false;
     const bool collapsed_branch = (f->op[i] == IR_CBR || f->op[i] == IR_SWITCH) && ir_optimize_single_successor(work, work->cfg.instruction_blocks[i]) != BUSTER_IR_NONE;
-    if ((work->states[i] != IROPT_CONSTANT || ir_optimize_simd_effect(f, i)) && !collapsed_branch)
+    const uint32_t forwarded = ir_optimize_forwarded(work, i);
+    if (forwarded != i)
+    {
+        // An identity (#2554): what its users read is its operand alone.
+        changed = work->live[forwarded] == 0;
+        work->live[forwarded] = 1;
+        if (changed && queue)
+        {
+            ir_optimize_enqueue(work, forwarded);
+        }
+    }
+    else if ((work->states[i] != IROPT_CONSTANT || ir_optimize_simd_effect(f, i)) && !collapsed_branch)
     {
         const uint64_t count = ir_operand_count(f, i);
         for (uint32_t number = 0; number < count; number += 1)
@@ -1331,6 +1493,11 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
                 }
             }
         }
+    }
+    // An identity is no root (a shift is one, #2554): only its users keep its operand.
+    for (uint32_t i = 0; work->forward != 0 && (options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0 && i < f->instruction_count; i += 1)
+    {
+        work->live[i] = work->forward[i] != BUSTER_IR_NONE ? 0 : work->live[i];
     }
     if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0)
     {
@@ -1505,7 +1672,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         uint32_t live = 0;
         for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
         {
-            live += work->live[i] != 0;
+            live += work->live[i] != 0 && ir_optimize_forwarded(work, i) == i;
         }
         const uint32_t target = ir_optimize_single_successor(work, block);
         if ((options.passes & BUSTER_IR_OPTIMIZE_CFG) != 0 && block != 0 && work->blocks[block] != 0 && live == 1 && target != BUSTER_IR_NONE && f->op[f->block_offsets[target]] != IR_PHI)
@@ -1553,7 +1720,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                 for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
                 {
                     const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
-                    if (work->live[i] != 0 && phi == (phase == 0))
+                    if (work->live[i] != 0 && phi == (phase == 0) && ir_optimize_forwarded(work, i) == i)
                     {
                         sizes.instruction_count += work->states[i] == IROPT_CONSTANT && ir_optimize_simd_effect(f, i);
                         values[i] = sizes.instruction_count++;
@@ -1594,6 +1761,18 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                 }
             }
         }
+    }
+    // What each operand reads: its value's new index, or an identity's operand's (#2554), which the identity's users read.
+    const uint32_t* operands = values;
+    if (error == IR_OK && work->forward != 0)
+    {
+        uint32_t* resolved = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
+        error = ok ? IR_OK : IR_ERROR_MEMORY;
+        for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)
+        {
+            resolved[i] = values[ir_optimize_forwarded(work, i)];
+        }
+        operands = resolved;
     }
     IrFunction candidate = { 0 };
     if (error == IR_OK)
@@ -1703,9 +1882,9 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                     candidate.type[effect] = f->type[i];
                                     candidate.flags[effect] = f->flags[i];
                                     candidate.alignment_log2[effect] = f->alignment_log2[i];
-                                    candidate.a[effect] = (mask & 1) != 0 ? values[f->a[i]] : f->a[i];
-                                    candidate.b[effect] = (mask & 2) != 0 ? values[f->b[i]] : f->b[i];
-                                    candidate.c[effect] = (mask & 4) != 0 ? values[f->c[i]] : f->c[i];
+                                    candidate.a[effect] = (mask & 1) != 0 ? operands[f->a[i]] : f->a[i];
+                                    candidate.b[effect] = (mask & 2) != 0 ? operands[f->b[i]] : f->b[i];
+                                    candidate.c[effect] = (mask & 4) != 0 ? operands[f->c[i]] : f->c[i];
                                     instructions += 1;
                                 }
                                 const bool vector = ir_vector_type(f->type[i]);
@@ -1737,15 +1916,15 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                 const uint32_t mask = ir_value_mask(f, i);
                                 if ((mask & 1) != 0)
                                 {
-                                    candidate.a[out] = values[f->a[i]];
+                                    candidate.a[out] = operands[f->a[i]];
                                 }
                                 if ((mask & 2) != 0)
                                 {
-                                    candidate.b[out] = values[f->b[i]];
+                                    candidate.b[out] = operands[f->b[i]];
                                 }
                                 if ((mask & 4) != 0)
                                 {
-                                    candidate.c[out] = values[f->c[i]];
+                                    candidate.c[out] = operands[f->c[i]];
                                 }
                                 const uint32_t kind = ir_optimize_rewrite_kinds[op];
                                 if (kind == 1)
@@ -1758,7 +1937,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                         if (work->edges[ir_optimize_edge(&work->cfg, predecessor, block)] != 0)
                                         {
                                             candidate.extra[extra++] = blocks[predecessor];
-                                            candidate.extra[extra++] = values[f->extra[f->a[i] + incoming * 2 + 1]];
+                                            candidate.extra[extra++] = operands[f->extra[f->a[i] + incoming * 2 + 1]];
                                             candidate.b[out] += 1;
                                         }
                                     }
@@ -1770,7 +1949,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                     candidate.calls[calls].argument_first = extra;
                                     for (uint32_t argument = 0; argument < f->calls[f->b[i]].argument_count; argument += 1)
                                     {
-                                        candidate.extra[extra++] = values[f->extra[f->calls[f->b[i]].argument_first + argument]];
+                                        candidate.extra[extra++] = operands[f->extra[f->calls[f->b[i]].argument_first + argument]];
                                     }
                                     calls += 1;
                                 }
@@ -1802,7 +1981,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                 {
                                     // A ternary intrinsic's third operand (#1840), at its new place in the extra array.
                                     candidate.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
-                                    candidate.extra[extra++] = values[ir_intrinsic_third(f, i)];
+                                    candidate.extra[extra++] = operands[ir_intrinsic_third(f, i)];
                                 }
                             }
                             instructions += 1;
@@ -1813,6 +1992,31 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         }
         candidate.block_offsets[candidate.block_count] = candidate.instruction_count;
         ir_debug_remap(f, &candidate, values, NULL, blocks);
+        if (candidate.debug != NULL && work->forward != 0)
+        {
+            // An identity's binding is its operand's value (#2554), of the same type and bits: the remap above gave its
+            // origin to nothing, since the identity has no instruction of its own.
+            for (uint32_t k = 0; k < candidate.debug->binding_count; k += 1)
+            {
+                const IrDebugBinding original = f->debug->bindings[k];
+                if (original.kind == IR_DEBUG_BIND_VALUE && ir_optimize_forwarded(work, original.value) != original.value && operands[original.value] != BUSTER_IR_NONE)
+                {
+                    candidate.debug->bindings[k].value = operands[original.value];
+                    candidate.debug->bindings[k].kind = IR_DEBUG_BIND_VALUE;
+                }
+            }
+            for (uint32_t k = 0; k < candidate.debug->region_count; k += 1)
+            {
+                const IrDebugRegion original = f->debug->regions[k];
+                IrDebugRegion* region = candidate.debug->regions + k;
+                if (region->block != BUSTER_IR_NONE && original.kind == IR_DEBUG_BIND_VALUE && ir_optimize_forwarded(work, original.value) != original.value &&
+                    operands[original.value] != BUSTER_IR_NONE)
+                {
+                    region->value = operands[original.value];
+                    region->kind = IR_DEBUG_BIND_VALUE;
+                }
+            }
+        }
         if (candidate.debug != NULL)
         {
             for (uint32_t k = 0; k < candidate.debug->binding_count; k += 1)
@@ -1912,7 +2116,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     // faster at every size (#786).
     const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
     (void)verify_scalar;
-    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT)) == 0)
+    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
@@ -1955,6 +2159,10 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
             }
         }
         check.error = work.simd_error;
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_IDENTITY) != 0 && !ir_optimize_identities(&work, scratch))
+        {
+            check.error = IR_ERROR_MEMORY;
+        }
         if (check.error == IR_OK)
         {
             ir_optimize_dce(&work, options);

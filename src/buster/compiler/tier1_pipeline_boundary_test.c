@@ -348,12 +348,20 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
             };
             if (source->label_count != 0)
             {
+                // The dispatch block's indirect jump, and each jump to it's copy of it (#2554, tier1_emit_cfg_dispatch): the
+                // same record every time.
                 uint32_t indirect = 0;
+                uint32_t first = BUSTER_IR_NONE;
+                bool same = true;
                 for (uint32_t r = 0; r < body->count; r += 1)
                 {
-                    indirect += (body->records[r].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_JMP_RM64;
+                    const bool jump = (body->records[r].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_JMP_RM64;
+                    same = same && (!jump || first == BUSTER_IR_NONE || memcmp(&body->records[r], &body->records[first], sizeof(X86Instruction)) == 0);
+                    first = jump && first == BUSTER_IR_NONE ? r : first;
+                    indirect += jump;
                 }
-                ok = tier1_pipeline_expect(test, body->label_count == source->label_count && indirect == 1, "boundary labels survive with exactly one indirect dispatch") && ok;
+                ok = tier1_pipeline_expect(test, body->label_count == source->label_count && indirect == emitted.dispatch_copies + 1 && same,
+                                           "boundary labels survive with one indirect dispatch and its jumps' copies of it") && ok;
             }
             if (source->call_count != 0)
             {

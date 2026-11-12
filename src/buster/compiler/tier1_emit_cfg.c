@@ -1875,6 +1875,47 @@ static Tier1EmitError tier1_emit_cfg_jump(Tier1EmitBuffer* buffer, uint16_t form
     return room ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
 
+// Each jump to a block whose first record is an indirect jump of a register takes a copy of that jump instead (#2554):
+// GNU C's computed goto reaches its labels through the one dispatch block (docs/ir.md's "Labels and br_indirect"), so
+// each jump there ran a jump and the indirect jump, and the branch predictor saw one indirect jump for every site, where
+// each copy is a branch of its own, as LLVM's tail duplication makes them. Nothing runs between the jump and the indirect
+// jump, the block's first record, so the copy reads the same registers; the label addresses it goes to are the block's
+// (an edge's stub among them). A conditional jump and a stub's goal stay. The copies leave the branch columns, which
+// keep their order; the code certificate takes a copy for the block's first record (tier1_cert_emitted_walk).
+static void tier1_emit_cfg_dispatch(Tier1EmitBuffer* buffer, const uint32_t* block_first, uint32_t blocks, const uint32_t* pending_branches, const uint32_t* pending_goals, uint32_t pending,
+                                    Tier1EmitResult* emitted)
+{
+    uint32_t copies = 0;
+    for (uint32_t k = 0; k < pending; k += 1)
+    {
+        const uint32_t goal = pending_goals[k];
+        const uint32_t branch = pending_branches[k];
+        const uint32_t record = buffer->branches[branch];
+        const uint32_t first = (goal & BUSTER_TIER1_EMIT_CFG_STUB) == 0 && goal < blocks ? block_first[goal] : UINT32_MAX;
+        const bool dispatch = first < buffer->count && buffer->records[record].form == X86_FORM_JMP_REL8 && buffer->records[first].form == X86_FORM_JMP_RM64 &&
+                              buffer->records[first].mode == 0;
+        if (dispatch)
+        {
+            buffer->records[record] = buffer->records[first];
+            buffer->targets[branch] = UINT32_MAX;
+            copies += 1;
+        }
+    }
+    uint32_t kept = 0;
+    for (uint32_t b = 0; copies != 0 && b < buffer->branch_count; b += 1)
+    {
+        if (buffer->targets[b] != UINT32_MAX)
+        {
+            buffer->branches[kept] = buffer->branches[b];
+            buffer->targets[kept] = buffer->targets[b];
+            kept += 1;
+        }
+    }
+    buffer->branch_count = copies != 0 ? kept : buffer->branch_count;
+    emitted->jumps -= copies;
+    emitted->dispatch_copies += copies;
+}
+
 // A conditional branch's records after its comparison: the jumps to its two successors' blocks or stubs, and the stubs
 // of its split edges, `e_true` and `e_true + 1` its edges and `b` its block.
 static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b, uint32_t e_true, uint16_t condition, Tier1EmitBuffer* buffer, uint32_t* stub_first, uint32_t* pending_branches, uint32_t* pending_goals, uint32_t* pending)
@@ -3316,6 +3357,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t base = 2 * added;
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
+    emitted->dispatch_copies = 0;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function, emitted->frame.probe_stack) +
                               tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + tier1_emit_cfg_x87_node_records(plan, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count +
@@ -3993,6 +4035,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         const uint32_t goal = pending_goals[k];
         buffer.targets[pending_branches[k]] = (goal & BUSTER_TIER1_EMIT_CFG_STUB) != 0 ? stub_first[goal & ~BUSTER_TIER1_EMIT_CFG_STUB] : block_first[goal];
+    }
+    if (error == TIER1_EMIT_OK)
+    {
+        tier1_emit_cfg_dispatch(&buffer, block_first, blocks, pending_branches, pending_goals, pending, emitted);
     }
     if (error == TIER1_EMIT_OK && certify)
     {

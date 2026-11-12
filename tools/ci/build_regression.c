@@ -1341,6 +1341,8 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/c_builtin_cpu.inc", ownership_checker_units, "production CPU builtin declarations", 0 },
     { "src/buster/compiler/ir_dataflow.c", ownership_backend_units, "production IR dataflow implementation", 0 },
     { "src/buster/compiler/ir_if_convert.c", ownership_backend_units, "production if-conversion pass; CHECKER retains its original include position", 0 },
+    { "src/buster/compiler/ir_thread.c", ownership_backend_units, "production truth-value threading pass; CHECKER includes it through the Tier 1 driver", 0 },
+    { "src/buster/compiler/ir_truth.c", ownership_backend_units, "production truth-value simplification; the threading fixtures reach it before the Tier 1 driver", 0 },
     { "src/buster/compiler/ir_optimize_verified.c", ownership_backend_units, "production verified optimizer pass; CHECKER retains its original include position", 0 },
 };
 
@@ -1353,6 +1355,8 @@ static const OwnershipException ownership_fuzz_exceptions[] = {
     { "src/buster/compiler/c_builtin_cpu.inc", "main.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c", "production CPU builtin declarations with fuzz source consumers", 0 },
     { "src/buster/compiler/ir_dataflow.c", "main.c main_unit_backend.c main_unit_checker.c", "production IR dataflow implementation with fuzz consumers", 0 },
     { "src/buster/compiler/ir_if_convert.c", "main.c main_unit_backend.c main_unit_checker.c", "production if-conversion pass with fuzz consumers", 0 },
+    { "src/buster/compiler/ir_thread.c", "main.c main_unit_backend.c main_unit_checker.c", "production truth-value threading pass with fuzz consumers", 0 },
+    { "src/buster/compiler/ir_truth.c", "main.c main_unit_backend.c main_unit_checker.c", "production truth-value simplification with fuzz consumers", 0 },
     { "src/buster/compiler/ir_optimize_verified.c", "main.c main_unit_backend.c main_unit_checker.c", "production verified optimizer pass with fuzz consumers", 0 },
 };
 
@@ -1990,11 +1994,13 @@ static void check_incremental(void)
         { "src/buster/compiler/ir_dataflow.c", backend_main_units },
         { "src/buster/compiler/ir_optimize_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_thread_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_text_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_verified_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_call_probe_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_address_coalesce_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert.c", backend_main_units },
+        { "src/buster/compiler/ir_thread.c", backend_main_units },
         { "src/buster/compiler/ir_optimize_verified.c", backend_main_units },
         { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c " },
         { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c " },

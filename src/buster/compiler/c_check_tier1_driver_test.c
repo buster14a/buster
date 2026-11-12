@@ -1960,22 +1960,28 @@ static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, c
 }
 
 // The labels fixture's function `name` in the object at `path`: its indirect jumps through a register and through
-// memory, into *registers and *memory, and into *trailing the direct jumps after its last indirect jump: its edges'
-// stubs, each of which ends in one to its label's block, since the dispatch block is laid out last (#1016's review).
-// Whether it was found.
+// memory, into *registers and *memory, into *same whether every one through a register reads the same register (a
+// dispatch block's indirect jump and the jumps' copies of it, #2554), and into *trailing the direct jumps after its last
+// indirect jump: its edges' stubs, each of which ends in one to its label's block, since the dispatch block is laid out
+// last (#1016's review). Whether it was found.
 static bool check_test_tier1_jumps(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* registers, uint32_t* memory,
-                                   uint32_t* trailing)
+                                   uint32_t* trailing, bool* same)
 {
     uint32_t relocations = 0;
     const uint32_t count = check_test_tier1_function(path, name, records, capacity, offsets, types, &relocations);
     *registers = 0;
     *memory = 0;
     *trailing = 0;
+    *same = true;
+    uint32_t first = UINT32_MAX;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint32_t form = records[i].instruction.form & BUSTER_X86_FORM_NUMBER;
         const bool jump = form == X86_FORM_JMP_RM64;
-        *registers += jump && records[i].instruction.mode == BUSTER_X86_REGISTER_DIRECT;
+        const bool direct = jump && records[i].instruction.mode == BUSTER_X86_REGISTER_DIRECT;
+        *same = *same && (!direct || first == UINT32_MAX || records[i].instruction.rm == first);
+        first = direct && first == UINT32_MAX ? records[i].instruction.rm : first;
+        *registers += direct;
         *memory += jump && records[i].instruction.mode != BUSTER_X86_REGISTER_DIRECT;
         *trailing = jump ? 0 : *trailing + (form == X86_FORM_JMP_REL8 || form == X86_FORM_JMP_REL32);
     }
@@ -1984,8 +1990,9 @@ static bool check_test_tier1_jumps(const char* path, const char* name, X86Decode
 
 // The labels fixture (#789): by --tier1, every function Tier 1's, by each path with and without rematerialization, and
 // its program prints what clang -O0's and Tier 0's builds of it print. Tier 1's indirect jumps are each function's own:
-// one through a register where computed gotos share their dispatch block or a switch's table dispatches, none where the
-// jump can go to one label alone, and one with a stub after it where an edge into a label has moves.
+// through one register where computed gotos share their dispatch block (its indirect jump, and each jump to it's copy of
+// it, #2554), one where a switch's table dispatches, none where the jump can go to one label alone, and a stub after the
+// dispatch block's where an edge into a label has moves.
 static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     enum
@@ -2044,16 +2051,17 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             uint32_t registers[5] = { 0 };
             uint32_t memory[5] = { 0 };
             uint32_t trailing[5] = { 0 };
+            bool same[5] = { false };
             bool decoded = compiled && records != NULL && offsets != NULL && types != NULL;
             for (uint32_t f = 0; decoded && f < BUSTER_ARRAY_LENGTH(names); f += 1)
             {
-                decoded = check_test_tier1_jumps(object, names[f], records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &registers[f], &memory[f], &trailing[f]);
+                decoded = check_test_tier1_jumps(object, names[f], records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &registers[f], &memory[f], &trailing[f], &same[f]);
             }
-            check_test_expect(test, decoded && registers[0] == 1 && memory[0] == 0 && registers[2] == 1 && memory[2] == 0,
-                              "a function's computed gotos share one indirect jump through a register, in their dispatch block");
+            check_test_expect(test, decoded && registers[0] >= 1 && memory[0] == 0 && same[0] && registers[2] >= 1 && memory[2] == 0 && same[2],
+                              "a function's computed gotos jump through their dispatch block's register: its indirect jump, or a jump's copy of it");
             check_test_expect(test, decoded && registers[1] == 1 && memory[1] == 0, "tier1_classify's switch is one indirect jump through a register");
             check_test_expect(test, decoded && registers[3] == 0 && memory[3] == 0, "tier1_single's jump to its one label is a direct jump");
-            check_test_expect(test, decoded && registers[4] == 1 && trailing[4] != 0, "tier1_both's indirect jump has a stub after it, for the label its edge moves into");
+            check_test_expect(test, decoded && registers[4] >= 1 && same[4] && trailing[4] != 0, "tier1_both's indirect jump has a stub after it, for the label its edge moves into");
             uint32_t table_relocations = 0;
             const uint32_t table_records = decoded ? check_test_tier1_function(object, "tier1_tables", records, CHECK_TEST_TIER1_LABELS_RECORDS, offsets, types, &table_relocations) : 0;
             uint32_t table_addresses = 0;
