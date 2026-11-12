@@ -823,7 +823,7 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
     check_test_program_source_native(test,
         "static void* buf[5];static volatile unsigned short msink;static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
         "__attribute__((noinline)) static void jump(void){__builtin_longjmp(buf,1);}__attribute__((noinline)) static int side(int x){return x+5;}\n"
-        "__attribute__((noinline,target(\"avx512f\"))) static int mrun(int k){int r=(int)__builtin_ia32_kandhi((unsigned short)(k*0x1111+1),(unsigned short)(0xff00|__builtin_setjmp(buf)));\n"
+        "__attribute__((noinline,target(\"avx512f\"))) static int mrun(int k){int r=(int)__builtin_ia32_kandhi((unsigned short)(k*0x1111+1),(unsigned short)(0xff00|__builtin_setjmp(buf)*0xff));\n"
         "if(r==((k*0x1111+1)&0xff00)){msink=__builtin_ia32_kandhi((unsigned short)side(3),(unsigned short)(0xf0f0|side(9)));jump();}return r;}\n"
         "int tested(int n){h=(unsigned)n;int k=(n&7)+1;mix((unsigned)mrun(k));mix(msink);return (int)(h^(h>>32));}\n",
         "generic-setjmp-held-mask", clang, masks_native);
