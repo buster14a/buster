@@ -113,7 +113,7 @@ Step 0's gate is the record's stage table
 within 3%, at `4c8c3c9c`, in two holds of under 30 s. The gauge ran it twice on
 12 November with the record's own executable (`8e609253…`): holds of 14.3 s and
 13.4 s, then 14.9 s and 13.4 s, with no strays, no lost samples and no
-multiplexed group. [Its record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/all-core-gauge-2536-2026-11-12)
+multiplexed group. [Its record](https://github.com/buster14a/buster-performance/tree/359dcadc4a98855be571e0e7b64c50c44d82c9c9/docs/measurements/all-core-gauge-2536-2026-11-12)
 has the raw files and both comparisons.
 
 | within 3% of the record | run 1 | run 2 |
