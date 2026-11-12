@@ -7,7 +7,7 @@
 // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
-//   build/compiler measure-node-machine [--list N] [preprocessor options] file...
+//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -51,10 +51,16 @@
 // silence tests refuse of all the nodes); the expressions and nodes taken by root kind; the bodies taken whole; and the
 // events' warnings found in expressions. --list N prints the first N expressions each test refuses, by file and line.
 //
+// --shadow is step 1 (below, node_shadow_expression): the node machine (c_check_node_machine.c) run on every expression
+// the census takes, compared with the pipeline's records and entries, and timed.
+//
 // This is a measurement outside the compile path: it runs the scalar task loop and reads the finished columns, and has
 // no vector path of its own.
 #ifndef BUSTER_C_CHECK_NODE_CENSUS_INCLUDED
 #define BUSTER_C_CHECK_NODE_CENSUS_INCLUDED
+
+#include <linux/perf_event.h>
+#include <sys/syscall.h>
 
 // The most nodes an expression the machine takes has (docs/node-machine.md, "The records and the tapes").
 #define BUSTER_NODE_CENSUS_MOST 4096u
@@ -424,6 +430,8 @@ struct NodeCensus
     uint64_t system_expressions;
     uint64_t system_nodes;
     uint64_t system_taken_nodes;
+    // --shadow: the node machine's step 1, run on every expression the census takes (NodeShadow), or null.
+    struct NodeShadow* shadow;
 };
 
 // --list N: the first N expressions each test refuses.
@@ -468,6 +476,19 @@ struct NodeCensusScratch
     uint32_t* times;
     uint32_t* expression_nodes;
     uint64_t* expression_tests;
+    // The current expression's least node and its greatest but its root (its walk's), for the shadow's range of records.
+    uint32_t lowest_node;
+    uint32_t inner_node;
+    // --shadow's: the machine, the current body's function and its entries' owners, and per object and per local the
+    // body's map between them (each stamped with the body's number plus one).
+    NodeMachine* machine;
+    const Tier0Function* function;
+    const uint32_t* owners;
+    uint32_t* object_locals;
+    uint32_t* object_stamps;
+    uint32_t* local_objects;
+    uint32_t* local_stamps;
+    uint32_t body_stamp;
 };
 
 static double node_census_share(uint64_t part, uint64_t whole)
@@ -1504,10 +1525,17 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
         }
     }
     uint64_t tests = 0;
+    uint32_t lowest_node = root;
+    uint32_t inner_node = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        tests |= node_census_node(s, s->list[i], root, context);
+        const uint32_t node = s->list[i];
+        tests |= node_census_node(s, node, root, context);
+        lowest_node = node < lowest_node ? node : lowest_node;
+        inner_node = node != root && node > inner_node ? node : inner_node;
     }
+    s->lowest_node = lowest_node;
+    s->inner_node = count > 1 ? inner_node : root;
     tests |= count > BUSTER_NODE_CENSUS_MOST ? UINT64_C(1) << NODE_CENSUS_SIZE : 0;
     tests |= context == NODE_CENSUS_ROOT_OTHER || context == NODE_CENSUS_ROOT_BRACE ? UINT64_C(1) << NODE_CENSUS_CONTROL : 0;
     tests |= (flags & BUSTER_CHECK_LOWER_OWNER_TRACKED) != 0 ? UINT64_C(1) << NODE_CENSUS_TRACKED : 0;
@@ -1695,6 +1723,376 @@ static void node_census_mark_controls(NodeCensusScratch* s, const CheckProgramBo
     }
 }
 
+// #2524's step 1, the shadow (--shadow): the node machine (c_check_node_machine.c) run on every expression the census
+// takes, after the pipeline, its records compared with the stream's values and conversions node by node and its tape
+// with the lowering's entries entry by entry, then timed. --scalar types every node by the action, --verify checks T's
+// rows and rules against the action at every node they type, and --passes N times each file's taken expressions N times
+// a sweep set.
+
+// One expression the machine took, for the timing passes.
+typedef struct NodeShadowExpression NodeShadowExpression;
+struct NodeShadowExpression
+{
+    uint32_t first;
+    uint32_t root;
+    uint32_t count;
+    uint32_t object;
+    TypeId target;
+    uint8_t context;
+};
+
+// The sweeps timed: T alone, T and C, and all three.
+#define BUSTER_NODE_SHADOW_SWEEPS 3u
+
+// One expression's result, for the shadow's tests (NodeShadow.records_out): its root's line and the machine's refusal.
+typedef struct NodeShadowRecord NodeShadowRecord;
+struct NodeShadowRecord
+{
+    uint32_t line;
+    NodeMachineRefusal refusal;
+};
+
+typedef struct NodeShadow NodeShadow;
+struct NodeShadow
+{
+    // Optional: each expression's result, up to `record_capacity` of them (c_check_node_census_test.c's).
+    NodeShadowRecord* records_out;
+    uint32_t record_count;
+    uint32_t record_capacity;
+    bool scalar;
+    bool verify;
+    uint32_t passes;
+    // The expressions the census took and their evaluated nodes, and of them those the machine took.
+    uint64_t expressions;
+    uint64_t nodes;
+    uint64_t records;
+    uint64_t taken_expressions;
+    uint64_t taken_nodes;
+    uint64_t taken_records;
+    uint64_t entries;
+    // Each refusal's expressions and their evaluated nodes, and the operators the code refusal stopped at.
+    uint64_t refused_expressions[NODE_MACHINE_REFUSALS];
+    uint64_t refused_nodes[NODE_MACHINE_REFUSALS];
+    uint64_t refused_codes[CHECK_OP_COUNT];
+    uint64_t refused_templates[CHECK_OP_COUNT];
+    // The taken expressions with a record whose value, conversions or member offset differ from the stream's, and those
+    // whose tape differs from the lowering's entries.
+    uint64_t value_differences;
+    uint64_t entry_differences;
+    uint64_t listed;
+    // T's nodes by row and by action, and the row-typed nodes the action types otherwise (--verify).
+    uint64_t row_nodes;
+    uint64_t action_nodes;
+    uint64_t twin_differences;
+    uint64_t action_ops[CHECK_OP_COUNT];
+    // The timing: each file's least cycles, instructions and TSC ticks over the passes for each sweep set, summed, and
+    // the evaluated nodes and records they took. `counted`: whether the cycle counter could be opened.
+    uint64_t cycles[BUSTER_NODE_SHADOW_SWEEPS];
+    uint64_t instructions[BUSTER_NODE_SHADOW_SWEEPS];
+    uint64_t ticks[BUSTER_NODE_SHADOW_SWEEPS];
+    uint64_t timed_nodes;
+    bool counted;
+    // The current file's taken expressions, and their evaluated nodes.
+    NodeShadowExpression* timed;
+    uint64_t file_nodes;
+    uint32_t timed_count;
+    uint32_t timed_capacity;
+};
+
+// Whether a local's entry: its value is a local's number in the stream and its object on the tape.
+static bool node_shadow_local_kind(uint8_t kind)
+{
+    return kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+}
+
+// Whether the tape's local `object` is the stream's local `local` in the current body: the first time either is met it is
+// the other's, and every later time it must be.
+static bool node_shadow_same_local(NodeCensusScratch* s, uint64_t object, uint64_t local)
+{
+    const uint32_t stamp = s->body_stamp;
+    const bool fits = object < s->program->object_count && local < s->function->local_count;
+    bool same = fits;
+    if (fits && s->object_stamps[object] != stamp && s->local_stamps[local] != stamp)
+    {
+        s->object_stamps[object] = stamp;
+        s->object_locals[object] = (uint32_t)local;
+        s->local_stamps[local] = stamp;
+        s->local_objects[local] = (uint32_t)object;
+    }
+    else if (fits)
+    {
+        same = s->object_stamps[object] == stamp && s->local_stamps[local] == stamp && s->object_locals[object] == local && s->local_objects[local] == object;
+    }
+    return same;
+}
+
+// Whether record `r`'s value, conversions and member offset are the stream's for its node.
+static bool node_shadow_same_value(const NodeMachine* machine, uint32_t r)
+{
+    const CheckStream* stream = machine->program->stream;
+    const uint32_t node = node_machine_node(machine, r);
+    const CheckValue expected = check_stream_value(stream, node);
+    const CheckValue* value = machine->values + r;
+    bool same = expected.type == value->type && expected.category == value->category && expected.flags == value->flags &&
+                expected.constant_kind == value->constant_kind && expected.object == value->object && expected.offset == value->offset &&
+                expected.fault == value->fault && expected.overload_head == value->overload_head && expected.bit_width == value->bit_width;
+    same = same && (expected.constant_kind == CHECK_CONSTANT_NONE || expected.integer == value->integer);
+    same = same && (expected.constant_kind != CHECK_CONSTANT_FLOATING || memcmp(expected.floating_storage, value->floating_storage, 10) == 0);
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        same = same && stream->conversions[node].operands[k].type == machine->converted[2 * r + k] &&
+               stream->conversions[node].operands[k].flags == machine->conversion_flags[2 * r + k];
+    }
+    same = same && stream->member_offsets[node] == machine->member_offsets[r];
+    return same;
+}
+
+// Whether the tape is the lowering's entries for the expression whose root pop is `pop`: the entries its nodes' tasks and
+// their conversions own, from the root's pop on.
+static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* machine, const CheckLowerOwnerPop* pop, uint32_t* compared)
+{
+    const Tier0Function* function = s->function;
+    const uint32_t first = machine->first;
+    const uint32_t last = first + machine->count - 2;
+    const uint32_t root = machine->root;
+    uint32_t e = pop->entry;
+    uint32_t t = 0;
+    bool same = true;
+    bool inside = e < function->count;
+    while (inside)
+    {
+        const uint32_t owner = s->owners[e];
+        const uint32_t node = owner & ~BUSTER_CHECK_LOWER_OWNER_CONVERSION;
+        inside = (owner & BUSTER_CHECK_LOWER_OWNER_CONTROL) == 0 && ((node >= first && node <= last && machine->count > 1) || node == root);
+        if (inside)
+        {
+            const uint8_t kind = function->kinds[e];
+            same = same && t < machine->entry_count && machine->kinds[t] == kind && machine->classes[t] == function->classes[e] &&
+                   (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) : machine->tape[t] == function->values[e]);
+            t += 1;
+            e += 1;
+            inside = e < function->count;
+        }
+    }
+    *compared = t;
+    return same && t == machine->entry_count;
+}
+
+// The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
+// walk reached `walked` nodes, `nodes` of them evaluated.
+static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
+                                   uint32_t nodes)
+{
+    NodeMachine* machine = s->machine;
+    const CheckProgram* program = s->program;
+    const CheckLowerOwnerPop* pop = pops + p;
+    const uint32_t root = pop->node;
+    const uint32_t first = s->lowest_node;
+    // Its records: one range of the graph's nodes, and its root, the next node or a later one.
+    const uint32_t records = walked == 1 ? 1 : s->inner_node - first + 2;
+    uint32_t object = 0;
+    if (context == NODE_CENSUS_ROOT_INITIALIZER)
+    {
+        const uint32_t control = s->node_controls[root];
+        const uint32_t declaration = control != BUSTER_CHECK_NONE ? program->controls[control].token : BUSTER_CHECK_NONE;
+        object = declaration < program->input->token_count ? program->input->objects[declaration] : 0;
+    }
+    // The root's context, as its control's task gives it: an address, a discard, or neither.
+    const uint8_t flags = pop->flags & (uint8_t)~BUSTER_CHECK_LOWER_OWNER_TRACKED;
+    const uint8_t root_context = flags & (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS | BUSTER_CHECK_LOWER_TEMPLATE_DISCARD);
+    NodeMachineRefusal refusal = walked != records ? NODE_MACHINE_REFUSED_SHAPE : (flags & ~root_context) != 0 ? NODE_MACHINE_REFUSED_ROOT : NODE_MACHINE_TAKEN;
+    const uint64_t row_nodes = machine->row_nodes;
+    const uint64_t action_nodes = machine->action_nodes;
+    const uint64_t twins = machine->twin_differences;
+    refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_run(machine, first, root, records, root_context, pop->target, object) : refusal;
+    shadow->expressions += 1;
+    shadow->nodes += nodes;
+    shadow->records += walked;
+    if (shadow->records_out != NULL && shadow->record_count < shadow->record_capacity)
+    {
+        shadow->records_out[shadow->record_count++] = (NodeShadowRecord){
+            .line = node_census_line(s->pp, program->parser, program->input->graph.tokens[root]),
+            .refusal = refusal,
+        };
+    }
+    shadow->refused_expressions[refusal] += 1;
+    shadow->refused_nodes[refusal] += nodes;
+    const CheckOp stopped = machine->stopped < machine->count ? program->input->graph.ops[node_machine_node(machine, machine->stopped)] : CHECK_OP_COUNT;
+    shadow->refused_codes[refusal == NODE_MACHINE_REFUSED_CODE && stopped < CHECK_OP_COUNT ? stopped : 0] += refusal == NODE_MACHINE_REFUSED_CODE;
+    shadow->refused_templates[refusal == NODE_MACHINE_REFUSED_TEMPLATE && stopped < CHECK_OP_COUNT ? stopped : 0] += refusal == NODE_MACHINE_REFUSED_TEMPLATE;
+    if (refusal == NODE_MACHINE_TAKEN)
+    {
+        bool values = true;
+        uint32_t different = UINT32_MAX;
+        for (uint32_t r = 0; r < machine->count; r += 1)
+        {
+            const bool same = node_shadow_same_value(machine, r);
+            different = !same && different == UINT32_MAX ? r : different;
+            values = values && same;
+        }
+        uint32_t compared = 0;
+        const bool entries = node_shadow_same_entries(s, machine, pop, &compared);
+        shadow->taken_expressions += 1;
+        shadow->taken_nodes += nodes;
+        shadow->taken_records += machine->count;
+        shadow->entries += machine->entry_count;
+        shadow->value_differences += !values;
+        shadow->entry_differences += !entries;
+        shadow->row_nodes += machine->row_nodes - row_nodes;
+        shadow->action_nodes += machine->action_nodes - action_nodes;
+        shadow->twin_differences += machine->twin_differences - twins;
+        if ((!values || !entries || machine->twin_differences != twins) && shadow->listed < node_census_list)
+        {
+            const uint32_t at = different != UINT32_MAX ? node_machine_node(machine, different) : root;
+            shadow->listed += 1;
+            printf("node-shadow: difference file=%s line=%u root=%s values=%s entries=%s (tape %u, stream %u) twin=%s node=%u op=%s\n", s->file,
+                   node_census_line(s->pp, program->parser, program->input->graph.tokens[at]), node_census_root_names[context], values ? "same" : "DIFFERENT",
+                   entries ? "same" : "DIFFERENT", machine->entry_count, compared, machine->twin_differences != twins ? "DIFFERENT" : "same", at,
+                   lower_inventory_op_names[program->input->graph.ops[at]] != NULL ? lower_inventory_op_names[program->input->graph.ops[at]] : "?");
+        }
+        if (shadow->timed_count < shadow->timed_capacity)
+        {
+            shadow->file_nodes += nodes;
+            shadow->timed[shadow->timed_count++] = (NodeShadowExpression){
+                .first = first,
+                .root = root,
+                .count = records,
+                .object = object,
+                .target = pop->target,
+                .context = root_context,
+            };
+        }
+    }
+}
+
+// A cycle or instruction counter of this thread's user code (`config`, PERF_COUNT_HW_*), or -1.
+static int node_shadow_counter(uint64_t config)
+{
+    struct perf_event_attr attribute;
+    memset(&attribute, 0, sizeof(attribute));
+    attribute.type = PERF_TYPE_HARDWARE;
+    attribute.size = sizeof(attribute);
+    attribute.config = config;
+    attribute.exclude_kernel = 1;
+    attribute.exclude_hv = 1;
+    return (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, 0);
+}
+
+static uint64_t node_shadow_read(int counter)
+{
+    uint64_t value = 0;
+    if (counter >= 0 && read(counter, &value, sizeof(value)) != (ssize_t)sizeof(value))
+    {
+        value = 0;
+    }
+    return value;
+}
+
+// Each of the file's taken expressions through the sweeps of set `sweeps` (0: T, 1: T and C, 2: all three).
+static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, uint32_t sweeps)
+{
+    for (uint32_t i = 0; i < shadow->timed_count; i += 1)
+    {
+        const NodeShadowExpression* expression = shadow->timed + i;
+        NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
+        if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
+        {
+            refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
+        }
+        if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
+        {
+            node_machine_expand(machine, expression->object);
+        }
+    }
+}
+
+// The timing passes over the file's taken expressions (`nodes` evaluated nodes in them): each sweep set `passes` times,
+// interleaved, its least cycles, instructions and ticks added to the totals.
+static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t nodes)
+{
+    const int cycles = node_shadow_counter(PERF_COUNT_HW_CPU_CYCLES);
+    const int instructions = node_shadow_counter(PERF_COUNT_HW_INSTRUCTIONS);
+    const bool verify = machine->verify;
+    machine->verify = false;
+    uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][3];
+    memset(least, 0xff, sizeof(least));
+    for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+    {
+        for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+        {
+            const uint64_t c0 = node_shadow_read(cycles);
+            const uint64_t i0 = node_shadow_read(instructions);
+            const uint64_t t0 = __rdtsc();
+            node_shadow_sweep(machine, shadow, sweeps);
+            const uint64_t t1 = __rdtsc();
+            const uint64_t i1 = node_shadow_read(instructions);
+            const uint64_t c1 = node_shadow_read(cycles);
+            const uint64_t measured[3] = { c1 - c0, i1 - i0, t1 - t0 };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                least[sweeps][k] = measured[k] < least[sweeps][k] ? measured[k] : least[sweeps][k];
+            }
+        }
+    }
+    for (uint32_t sweeps = 0; shadow->passes != 0 && sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+    {
+        shadow->cycles[sweeps] += least[sweeps][0];
+        shadow->instructions[sweeps] += least[sweeps][1];
+        shadow->ticks[sweeps] += least[sweeps][2];
+    }
+    shadow->timed_nodes += shadow->passes != 0 ? nodes : 0;
+    shadow->counted = cycles >= 0;
+    machine->verify = verify;
+    if (cycles >= 0)
+    {
+        close(cycles);
+    }
+    if (instructions >= 0)
+    {
+        close(instructions);
+    }
+}
+
+static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_ops)
+{
+    printf("node-shadow: census-taken expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " records=%" PRIu64 "\n", shadow->expressions, shadow->nodes, shadow->records);
+    printf("node-shadow: machine-taken expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%) records=%" PRIu64 " entries=%" PRIu64 "\n",
+           shadow->taken_expressions, node_census_share(shadow->taken_expressions, shadow->expressions), shadow->taken_nodes,
+           node_census_share(shadow->taken_nodes, shadow->nodes), shadow->taken_records, shadow->entries);
+    printf("node-shadow: differences values=%" PRIu64 " entries=%" PRIu64 " twin=%" PRIu64 " (row-typed nodes %" PRIu64 ", action-typed %" PRIu64 "%s)\n",
+           shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
+           shadow->verify ? ", verified" : "");
+    for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
+    {
+        printf("node-shadow: refused=%s expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " (%.2f%%)\n", node_machine_refusal_names[r], shadow->refused_expressions[r],
+               shadow->refused_nodes[r], node_census_share(shadow->refused_nodes[r], shadow->nodes));
+    }
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        if (shadow->refused_codes[op] != 0 || shadow->refused_templates[op] != 0)
+        {
+            printf("node-shadow: refused-at op=%s code=%" PRIu64 " template=%" PRIu64 "\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?",
+                   shadow->refused_codes[op], shadow->refused_templates[op]);
+        }
+    }
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        if (action_ops[op] != 0)
+        {
+            printf("node-shadow: action-typed op=%s nodes=%" PRIu64 "\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", action_ops[op]);
+        }
+    }
+    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X" };
+    for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
+    {
+        printf("node-shadow: time sweeps=%s passes=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
+               "ticks=%.1f%s\n",
+               sweep_names[k], shadow->passes, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
+               (double)shadow->instructions[k] / (double)shadow->timed_nodes, (double)shadow->ticks[k] / (double)shadow->timed_nodes,
+               shadow->counted ? "" : " (no cycle counter)");
+    }
+}
+
 // Body `b`'s pops (`pops`, `count` of them), counted into `census`.
 static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t b, const CheckLowerOwnerPop* pops, uint32_t count)
 {
@@ -1741,6 +2139,10 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             tests |= region ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
             census->largest = walked > census->largest ? walked : census->largest;
             node_census_count(census, s, tests, s->expression_nodes[p], context, pops[p].node);
+            if (census->shadow != NULL && tests == 0)
+            {
+                node_shadow_expression(census->shadow, s, pops, p, context, walked, s->expression_nodes[p]);
+            }
             whole = whole && tests == 0;
             body_nodes += s->expression_nodes[p];
         }
@@ -1803,6 +2205,32 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
         }
         s.expression_tests = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, (uint64_t)widest + 1) : 0;
         room = room && s.expression_tests != 0;
+        NodeShadow* shadow = census->shadow;
+        NodeMachine machine;
+        if (room && shadow != NULL)
+        {
+            uint32_t locals = 1;
+            for (uint32_t b = 0; b < selected.program.body_count; b += 1)
+            {
+                locals = lowered.entry_tokens[b] != 0 && lowered.functions[b].local_count > locals ? lowered.functions[b].local_count : locals;
+            }
+            const uint32_t objects = selected.program.object_count + 1;
+            s.object_locals = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, objects);
+            s.object_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, objects);
+            s.local_objects = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+            s.local_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+            shadow->timed_capacity = (uint32_t)(owners.count < UINT32_MAX ? owners.count : UINT32_MAX);
+            shadow->timed = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeShadowExpression, (uint64_t)shadow->timed_capacity + 1);
+            shadow->timed_count = 0;
+            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && shadow->timed != NULL &&
+                   node_machine_begin(&machine, &selected.program, shadow->scalar, shadow->verify, &scratch);
+            if (room)
+            {
+                memset(s.object_stamps, 0, (uint64_t)objects * sizeof(uint32_t));
+                memset(s.local_stamps, 0, (uint64_t)locals * sizeof(uint32_t));
+                s.machine = &machine;
+            }
+        }
         if (room)
         {
             memset(s.marks, 0, ((uint64_t)nodes + 1) * sizeof(uint32_t));
@@ -1818,9 +2246,21 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 }
                 if (lowered.entry_tokens[b] != 0)
                 {
+                    s.function = lowered.functions + b;
+                    s.owners = lowered.entry_tokens[b];
+                    s.body_stamp = b + 1;
                     node_census_body(census, &s, b, owners.pops + first, (uint32_t)(end - first));
                 }
                 first = end;
+            }
+            if (shadow != NULL)
+            {
+                for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+                {
+                    shadow->action_ops[op] += machine.action_ops[op];
+                }
+                node_shadow_time(shadow, &machine, shadow->file_nodes);
+                shadow->file_nodes = 0;
             }
             census->files += 1;
         }
@@ -1894,6 +2334,8 @@ static int run_node_census(int count, char** arguments)
     uint32_t option_count = 0;
     uint32_t file_count = 0;
     bool valid = options != 0 && files != 0;
+    bool shadowed = false;
+    NodeShadow shadow = { .passes = 5 };
     for (int i = 0; valid && i < count; i += 1)
     {
         if (strcmp(arguments[i], "--list") == 0)
@@ -1901,6 +2343,24 @@ static int run_node_census(int count, char** arguments)
             uint64_t number = 0;
             valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number <= UINT32_MAX;
             node_census_list = (uint32_t)number;
+        }
+        else if (strcmp(arguments[i], "--shadow") == 0)
+        {
+            shadowed = true;
+        }
+        else if (strcmp(arguments[i], "--scalar") == 0)
+        {
+            shadow.scalar = true;
+        }
+        else if (strcmp(arguments[i], "--verify") == 0)
+        {
+            shadow.verify = true;
+        }
+        else if (strcmp(arguments[i], "--passes") == 0)
+        {
+            uint64_t number = 0;
+            valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number <= 1000;
+            shadow.passes = (uint32_t)number;
         }
         else if (strcmp(arguments[i], "--no-default-config") == 0)
         {
@@ -1920,8 +2380,8 @@ static int run_node_census(int count, char** arguments)
             }
         }
     }
-    valid = valid && file_count != 0;
-    NodeCensus census = { 0 };
+    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify));
+    NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         valid = node_census_file(&census, files[i], options, option_count);
@@ -1930,14 +2390,19 @@ static int run_node_census(int count, char** arguments)
     if (valid)
     {
         node_census_report(&census);
+        if (shadowed)
+        {
+            node_shadow_report(&shadow, shadow.action_ops);
+        }
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
-    return valid && census.failures == 0 && census.files != 0 ? 0 : 1;
+    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0);
+    return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 
 #endif
