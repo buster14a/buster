@@ -7,7 +7,8 @@
 // keep or lose clang's designator (through `void *`, to or from another type) and literals' whatever the casts (#1843); and a FILE builtin's call in a unit without a
 // file-scope FILE (check_input_file_type), clang's "use of unknown builtin"; and memcpy_inline's and memset_inline's size
 // that is no integer constant expression, clang's error at the call; and __builtin_complex's arguments of no real floating
-// type or of two types, clang's errors at the argument (check_semantic_expression). The errors are compared, their places and
+// type or of two types, clang's errors at the argument (check_semantic_expression); and __builtin_clear_padding's argument
+// of no pointer or to a pointee it refuses (#2414). The errors are compared, their places and
 // messages, in order, with the exit status, by both paths of -fsyntax-only (each function's first error alone, as the
 // checker reports them). Warnings aren't compared. Include after c_check_label_attribute_driver_test.c.
 
@@ -123,6 +124,20 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
           "void g5(void) { (void)__builtin_complex(1.0q, 1.0); }\nvoid g6(void) { (void)__builtin_complex((__bf16)1, (_Float16)1); }\n"
           "void g7(void) { (void)__builtin_complex(cdd, ff); }\nvoid g9(float f) { (void)__builtin_complex(f, (D)2); }\n"
           "void g8(void) { (void)__builtin_complex(cd, dd); (void)__builtin_complex(1.0f, (F)2); (void)__builtin_complex(cdd, dd); }\n" },
+        // __builtin_clear_padding's argument refused (#2414, check_semantic_clear_padding): no pointer (an array as written,
+        // a typedef's), a function pointer, an incomplete pointee with its tag's note, and a const one, at the argument's
+        // first token.
+        { "clear_padding of no pointer",
+          "struct S { char c; int i; };\ntypedef struct S A[2];\n"
+          "void f(void) { struct S b[2]; __builtin_clear_padding(b); }\nvoid g(void) { A a; __builtin_clear_padding(a); }\n"
+          "void h(int x) { __builtin_clear_padding((x)); }\nvoid k(void) { __builtin_clear_padding(1.0); }\n"
+          "void m(struct S s) { __builtin_clear_padding(s); }\nvoid e(int x) { __builtin_clear_padding(x + 1); }\n" },
+        { "clear_padding of a function pointer, an incomplete or a const pointee",
+          "struct X;\nstruct S { char c; int i; };\ntypedef const struct S CS;\n"
+          "void a(struct X *p) { __builtin_clear_padding(p); }\nvoid b(void (*fp)(void)) { __builtin_clear_padding(fp); }\n"
+          "void c(const struct S *p) { __builtin_clear_padding(p + 1); }\nvoid g(const int *p) { __builtin_clear_padding((p)); }\n"
+          "void h(CS *p) { __builtin_clear_padding(p); }\nvoid o(void *p) { __builtin_clear_padding(p); }\n"
+          "void i(void) { struct S b[2]; __builtin_clear_padding(&b); __builtin_clear_padding(b + 0); }\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/generic-builtins.c", directory);
