@@ -71,7 +71,8 @@ static void check_test_driver_register_variables(CheckTest* test, const char* cl
     free(expected_lines);
     free(actual_lines);
     unlink(source);
-    // The program: rsp read near a local's address, written back with its own value (the assignment's value too), named
+    // The program: rsp read near a local's address, written back with its own value (the assignment's value too), updated,
+    // named
     // by templates as an input and as `+` and `=` outputs; rbp read as a frame pointer above a local and named by a
     // template; esp and ebp as rsp's and rbp's low halves.
     static const char program[] =
@@ -85,7 +86,14 @@ static void check_test_driver_register_variables(CheckTest* test, const char* cl
         "static int named(void) { unsigned long r; __asm__(\"mov %1, %0\" : \"=r\"(r) : \"r\"(sp)); __asm__ volatile(\"\" : \"+r\"(sp)); __asm__(\"\" : \"=r\"(sp)); return r == sp; }\n"
         "static int frame(void) { char local; void *r; __asm__(\"mov %1, %0\" : \"=r\"(r) : \"r\"(bp)); long d = (long)((char *)r - &local); return d >= 0 && d < 4096 && r == bp; }\n"
         "static int halves(void) { return esp4 == (unsigned int)sp && (unsigned int)ebp4 == (unsigned int)(unsigned long)bp; }\n"
-        "int main(void) { printf(\"%d %d %d %d %d\\n\", near(), kept(), named(), frame(), halves()); return 0; }\n";
+        // A signed one's assignment of a local's value, and its updates (#2432): compound assignments, increments and
+        // decrements of both, the expressions' values the new ones and a postfix one's the old one.
+        "register long ssp __asm__(\"rsp\");\n"
+        "static int assigned(void) { long a = ssp; ssp = a; long r = (ssp = a); return ssp == a && r == a; }\n"
+        "static int updated(int d) { long a = ssp; ssp -= 64; long b = ssp; long s = (ssp += 64); long o = ssp--; long n = --ssp; ssp++; ++ssp; long c = ssp;\n"
+        "    ssp &= ~0L; unsigned long u = sp; sp -= (unsigned)d * 16u; unsigned long v = sp; sp += (unsigned)d * 16u;\n"
+        "    return a - b == 64 && s == a && o == a && a - n == 2 && c == a && u - v == (unsigned long)d * 16 && sp == u; }\n"
+        "int main(void) { printf(\"%d %d %d %d %d %d %d\\n\", near(), kept(), named(), frame(), halves(), assigned(), updated(3)); return 0; }\n";
     char unit[PATH_MAX];
     char reference[PATH_MAX];
     char built[PATH_MAX];

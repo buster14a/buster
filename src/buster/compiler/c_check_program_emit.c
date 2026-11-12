@@ -130,10 +130,119 @@ struct CheckProgramCode
     SymbolId cpu_first;
     // The first of the symbols the groups of multiversioning by target strings add (#1838, check_program_target_symbols).
     SymbolId target_first;
+    // References that take another symbol of the unit's (#2204, check_program_label_forwards): keys of the referring
+    // symbol in the high half and the one its fixups take in the low; null in a unit without them, the usual one.
+    uint64_t* label_forwards;
+    uint32_t label_forward_count;
 };
 
 #include "c_check_program_cpu_dispatch.c"
 #include "c_check_program_target_versions.c"
+
+// Whether symbol `t` is named as `s` is.
+static bool check_program_label_same_name(const Link* link, SymbolId s, SymbolId t)
+{
+    const NameId name = link->symbols.name[s];
+    const NameId other = link->symbols.name[t];
+    return t != s && name != 0 && other != 0 && link->names.hash[other] == link->names.hash[name] && link->names.length[other] == link->names.length[name] &&
+           memcmp(link->names.bytes[other], link->names.bytes[name], link->names.length[name]) == 0;
+}
+
+// The made symbol of multiversioning named as `s` that the unit defines (#2204), or 0: a target version's own or a
+// target_clones body's (CheckProgram.target_symbols), a copy's (clone_symbols), a cpu_specific version's (cpu_symbols),
+// or one of the names their groups add at their bodies, after the program's symbols (from `first`, the program's source).
+static SymbolId check_program_label_made(const CheckProgramCode* code, const CheckProgram* program, SymbolId s, SymbolId first)
+{
+    const Link* link = &code->link;
+    SymbolId found = 0;
+    for (uint32_t i = 0; found == 0 && program->target_symbols != NULL && i < program->target_version_count + program->target_group_count; i += 1)
+    {
+        found = program->target_symbols[i] != 0 && check_program_label_same_name(link, s, program->target_symbols[i]) ? program->target_symbols[i] : 0;
+    }
+    for (uint32_t i = 0; found == 0 && program->clone_symbols != NULL && i < program->clone_option_count; i += 1)
+    {
+        found = program->clone_symbols[i] != 0 && check_program_label_same_name(link, s, program->clone_symbols[i]) ? program->clone_symbols[i] : 0;
+    }
+    for (uint32_t i = 0; found == 0 && program->cpu_symbols != NULL && i < program->cpu_version_count + program->cpu_group_count; i += 1)
+    {
+        found = program->cpu_symbols[i] != 0 && check_program_label_same_name(link, s, program->cpu_symbols[i]) ? program->cpu_symbols[i] : 0;
+    }
+    for (SymbolId t = first; found == 0 && first != 0 && t < link->symbols.count; t += 1)
+    {
+        found = link->symbols.source[t] == BUSTER_LINK_SOURCE_PROGRAM && check_program_label_same_name(link, s, t) ? t : 0;
+    }
+    return found;
+}
+
+// The references of a declaration whose asm label names a symbol the unit makes and defines (#2204): a target version's
+// (f.avx2), a target_clones body's or version's (f.avx2.0, f.default.1), a cpu_specific version's. clang's module has one
+// global per name, so the declaration's references are the definition's; here each program symbol of an object the
+// unit doesn't define whose name is such a symbol's is forwarded to it (CheckProgramCode.label_forwards), as its source
+// the program's, so that no runtime binds it; check_program_sections moves its fixups once every atom exists. With no
+// fixup left, neither -c's object nor the executable has it. Only a name with a '.' can be made, so only such a symbol
+// is looked for. Returns false where there was no room.
+static bool check_program_label_forwards(CheckProgramCode* code, const CheckProgram* program, Arena* output)
+{
+    Link* link = &code->link;
+    const SymbolId first = code->cpu_first != 0 && (code->target_first == 0 || code->cpu_first < code->target_first) ? code->cpu_first : code->target_first;
+    uint32_t count = 0;
+    uint64_t* forwards = NULL;
+    bool valid = true;
+    // Twice: count, then write.
+    for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+    {
+        count = 0;
+        for (SymbolId s = 1; s <= program->symbol_count && s < link->symbols.count; s += 1)
+        {
+            const uint32_t object = program->symbol_objects[s - 1];
+            const NameId name = link->symbols.name[s];
+            const bool dotted = name != 0 && memchr(link->names.bytes[name], '.', link->names.length[name]) != NULL;
+            const SymbolId target = dotted && object != 0 && !check_program_cpu_defined(program, object) ? check_program_label_made(code, program, s, first) : 0;
+            if (target != 0 && forwards != NULL)
+            {
+                forwards[count] = (uint64_t)s << 32 | target;
+                link->symbols.source[s] = BUSTER_LINK_SOURCE_PROGRAM;
+            }
+            count += target != 0;
+        }
+        if (pass == 0)
+        {
+            forwards = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count) : NULL;
+            valid = count == 0 || forwards != NULL;
+            pass += count == 0;
+        }
+    }
+    code->label_forwards = forwards;
+    code->label_forward_count = valid ? count : 0;
+    if (!valid)
+    {
+        code->status = CHECK_PROGRAM_RESOURCE;
+        code->reason = "an asm label naming a multiversioned function's symbol couldn't be joined to it";
+    }
+    return valid;
+}
+
+// Moves the fixups of each forwarded symbol (CheckProgramCode.label_forwards, #2204) to the symbol it takes.
+static void check_program_label_forward_fixups(CheckProgramCode* code)
+{
+    Link* link = &code->link;
+    for (uint32_t f = 0; code->label_forward_count != 0 && f < link->fixups.count; f += 1)
+    {
+        const SymbolId target = link->fixups.target[f];
+        for (uint32_t k = 0; k < code->label_forward_count; k += 1)
+        {
+            link->fixups.target[f] = code->label_forwards[k] >> 32 == target ? (SymbolId)code->label_forwards[k] : link->fixups.target[f];
+        }
+    }
+    // No fixup refers to them now: an undefined reference no object lists, as no runtime bound it, and weak, which an
+    // executable resolves to nothing rather than refuse.
+    for (uint32_t k = 0; k < code->label_forward_count; k += 1)
+    {
+        const SymbolId symbol = (SymbolId)(code->label_forwards[k] >> 32);
+        link->symbols.source[symbol] = BUSTER_LINK_SOURCE_NONE;
+        link->symbols.flags[symbol] = (uint8_t)((link->symbols.flags[symbol] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_WEAK);
+    }
+}
 
 // The local symbols whose names the compiler makes are named as clang names them, so that tools and #129's comparison
 // with clang's objects (c_lowering_symbols.c) read them alike: a block-scope static is "function.name", its function's
@@ -528,7 +637,7 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
     }
     // An asm statement placed in its caller (#1059, #1839): its X86 entry or its asm body, once per statement as its
     // helper's call would be.
-    for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < program->input->asm_count; s += 1)
+    for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < lowered->asms.plan_count; s += 1)
     {
         report->direct[CHECK_PROGRAM_HELPER_ASM] += lowered->asms.plans[s].planned && (lowered->asms.plans[s].row != 0 || lowered->asms.plans[s].inlined);
     }
@@ -3789,9 +3898,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint64_t unit_names = 0;
     uint64_t unit_fixups = 0;
     uint64_t unit_wide = 0;
-    for (uint32_t s = 0; valid && s < program->input->asm_count; s += 1)
+    for (uint32_t s = 0; valid && asms->plans != 0 && s < asms->plan_count; s += 1)
     {
-        const CheckProgramAsm* plan = asms->plans != 0 ? asms->plans + s : 0;
+        const CheckProgramAsm* plan = asms->plans + s;
         if (plan != 0 && plan->unit_assembled)
         {
             unit_atoms += plan->unit.link.atoms.count != 0 ? plan->unit.link.atoms.count - 1 : 0;
@@ -3946,6 +4055,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     base[context_length] = '.';
                     memcpy(base + context_length + 1, intern_bytes(identifiers, identifier), own_length);
                     name = check_program_emit_made_name(&result->link, &names, base, (uint32_t)base_length, scratch);
+                }
+                // An asm label naming the static's own name, `f.n` (#2439), which a given name takes first, so that the
+                // static is renamed: clang's module joins the label to the static where it emits the static's function
+                // before the label's first use, and doesn't otherwise. The emission doesn't model that order: refused by
+                // name (its name 0, which ends the symbols' loop). Only a renamed static looks.
+                for (uint32_t t = 0; base != 0 && name != 0 && result->link.names.length[name] != base_length && t < program->symbol_count; t += 1)
+                {
+                    const String8 label = symbol_names[t + 1];
+                    if (label.length == base_length && memcmp(label.pointer, base, base_length) == 0)
+                    {
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order";
+                        result->token = declaration;
+                        name = 0;
+                    }
                 }
             }
             else if (given != 0)
@@ -4158,6 +4282,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_symbols(result, program, output));
     // Multiversioning by target strings' (#1838).
     valid = valid && (program->target_group_count == 0 || check_program_target_symbols(result, program, output));
+    // Declarations whose asm labels name the made symbols of those groups (#2204).
+    valid = valid && ((program->target_group_count == 0 && program->cpu_group_count == 0) || check_program_label_forwards(result, program, output));
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -4277,7 +4403,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
     }
     // The templates of alignment and section directives alone: their data atoms and labels, without a helper to call.
-    for (uint32_t s = 0; valid && asms->plans != 0 && s < program->input->asm_count; s += 1)
+    for (uint32_t s = 0; valid && asms->plans != 0 && s < asms->plan_count; s += 1)
     {
         const CheckProgramAsm* plan = asms->plans + s;
         if (plan->unit_assembled && plan->helper == BUSTER_CHECK_NONE)
@@ -5131,6 +5257,8 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         }
     }
     valid = valid && check_program_define_aliases(code, program) && check_program_define_pragma_aliases(code, program);
+    // Every atom exists: the forwarded references take their symbols (#2204).
+    check_program_label_forward_fixups(code);
     // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
     // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
     // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.
