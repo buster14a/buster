@@ -75,7 +75,31 @@ patterns are:
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
   offset. Memory operands can fold this leaf even when it has several users;
-  an escaping address still materializes. A memory operand also takes a pure
+  an escaping address still materializes. A direct symbol's address
+  (`IR_SYMBOL_ADDR`) ends the walk the same way (#2573), from any block, since
+  it reads no value either: the operand is rip-relative, the symbol plus the
+  walked displacement, and the CFG consumer gives the access's one rip-relative
+  record a `PC32` reference whose addend is that displacement
+  (`tier1_emit_cfg_kernel`; `link_add_code_fixups` takes off the distance to
+  the instruction's end, an immediate's bytes after the field among it, 5 for
+  `cmp byte ptr [rip + x], 3`). SQLite's `mem5`, `sqlite3Config` and
+  `sqlite3Stat` fields are then one `mov` from `mem5+off(%rip)`, as clang's,
+  rather than a `lea` of the symbol and an access through its register. Only a
+  symbol the unit's access column reaches directly folds: the column reaches
+  selection with the plan (`tier1_select_plan_access`,
+  `tier1_select_plan_verified`), and a GOT slot's or a thread-local's address
+  keeps its sequence, its accesses going through the register it leaves. A
+  rip-relative operand has no index, so a table reached through one
+  (`yy_lookahead`, `sqlite3Stat.nowValue[op]`) keeps its symbol's `lea` as the
+  base. An address-valued root takes the leaf under the single-use rule:
+  `&g.member` is one `lea g+off(%rip)`, which a CFG fragment recomputes as it
+  does a symbol's own `lea`. The pattern carries the symbol in `stack_object`
+  with `rip`; the symbol's node keeps the register leaf's class in the
+  bottom-up grammar, and a load's or a store's walked candidate, the only one
+  through the leaf, is its rule's. The consumer refuses a folded symbol its own
+  column doesn't reach directly, and the straight-line consumer, which the
+  chain rule never gives a function with a symbol's address, refuses one too.
+  A memory operand also takes a pure
   address node (an address, a 64-bit addition or a conversion) of an earlier
   block when every user of that node takes it as an address, a load's or a
   store's or another such node's (`tier1_select_sinkable`, #1217): SSA makes the
