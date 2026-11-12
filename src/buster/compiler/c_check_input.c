@@ -6839,6 +6839,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     }
     CheckInputAttributes parsed = { 0 };
     bool valid = check_input_attributes(reader, cursor, end, &parsed);
+    // (Whether an attribute was dropped for an undeclared name in its arguments, #2251.)
+    bool names_dropped = false;
     for (uint32_t i = 0; valid && i < parsed.count; i += 1)
     {
         CheckInputAttribute* attribute = &parsed.records[i];
@@ -6852,7 +6854,30 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                  attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
         if (expressions && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS)
         {
+            const uint32_t reported = reader->output->report_count;
+            const CheckInputAttributeError error_before = parsed.error;
+            const uint32_t error_first_before = parsed.error_first;
+            const uint32_t error_end_before = parsed.error_end;
             valid = check_input_attribute_expressions(reader, &parsed, attribute);
+            // An argument's name that names nothing (#2251): clang's parser drops the attribute after its "use of undeclared
+            // identifier" and the declaration goes on, with the list's other attributes.
+            bool undeclared = !valid && !reader->output->resource && reader->output->report_count > reported;
+            for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
+            {
+                undeclared = reader->output->reports[r].message == CHECK_INPUT_UNDECLARED;
+            }
+            if (undeclared && check_input_recover_reports(reader, reported))
+            {
+                names_dropped = true;
+                parsed.error = error_before;
+                parsed.error_first = error_first_before;
+                parsed.error_end = error_end_before;
+                memmove(parsed.records + i, parsed.records + i + 1, (uint64_t)(parsed.count - i - 1) * sizeof(CheckInputAttribute));
+                parsed.count -= 1;
+                i -= 1;
+                valid = true;
+                continue;
+            }
             if (!valid)
             {
                 break;
@@ -7091,10 +7116,12 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             valid = true;
         }
     }
-    CheckInputAttributes* combined = valid ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
-    reader->output->resource |= valid && combined == 0;
-    valid &= combined != 0;
-    if (valid)
+    // (A list whose every attribute was dropped adds nothing, #2251.)
+    const bool emptied = valid && parsed.count == 0 && parsed.repeats == NULL && names_dropped;
+    CheckInputAttributes* combined = valid && !emptied ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
+    reader->output->resource |= valid && !emptied && combined == 0;
+    valid &= emptied || combined != 0;
+    if (valid && !emptied)
     {
         const CheckInputAttributes empty = { 0 };
         valid = check_input_attribute_merge(reader, *attributes != 0 ? *attributes : &empty, &parsed, combined);
