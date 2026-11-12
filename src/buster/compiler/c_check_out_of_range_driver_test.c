@@ -57,6 +57,25 @@ static const CheckDriverDefaultWarningFixture check_driver_out_of_range_fixtures
         .warnings = 15,
         .compare_warning_text = true,
     },
+    {
+        // Forty comparisons across the candidate pass's 16-node blocks (check_common_range_candidates): constants out of
+        // and in a narrow operand's range on either side, both sides constant, neither, and a known boolean's.
+        .name = "constants out of range across vector blocks",
+        .source = "int f(unsigned char c, signed char s, int i, short h)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    r += c == 300; r += -1 < c; r += s > 2; r += i < 3; r += h == 200;\n"
+                  "    r += c < i; r += 1 < 129; r += c != 'x'; r += s <= -70000; r += (c == 1) == 9;\n"
+                  "    r += c == 300; r += -1 < c; r += s > 2; r += i < 3; r += h == 200;\n"
+                  "    r += c < i; r += 1 < 129; r += c != 'x'; r += s <= -70000; r += (c == 1) == 9;\n"
+                  "    r += c == 300; r += -1 < c; r += s > 2; r += i < 3; r += h == 200;\n"
+                  "    r += c < i; r += 1 < 129; r += c != 'x'; r += s <= -70000; r += (c == 1) == 9;\n"
+                  "    r += c == 300; r += -1 < c; r += s > 2; r += i < 3; r += h == 200;\n"
+                  "    r += c < i; r += 1 < 129; r += c != 'x'; r += s <= -70000; r += (c == 1) == 9;\n"
+                  "    return r;\n"
+                  "}\n",
+        .warnings = 16,
+    },
 };
 
 static void check_test_driver_out_of_range(CheckTest* test, const char* clang, const char* executable, const char* directory)
