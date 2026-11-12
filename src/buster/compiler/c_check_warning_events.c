@@ -724,6 +724,8 @@ struct CheckWarningEvent
     uint32_t completion_kind;
     // Parser token for AT_TOKEN/AFTER_DELIMITER; NO_SOURCE for TU_END. Attached notes inherit this completion.
     uint32_t completion;
+    // A kind's extra datum, in what was the padding before suborder: an -Winteger-overflow MESSAGE's result's high half.
+    uint32_t detail;
     // Optional order inside a completed construct, independent of its source location and publication boundary.
     uint64_t suborder;
     CheckWarningPayload payload;

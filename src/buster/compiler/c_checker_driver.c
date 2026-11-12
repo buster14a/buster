@@ -2687,6 +2687,66 @@ static const char* check_driver_shift_message(const Parser* parser, Preprocessor
     return result;
 }
 
+// A folded -Winteger-overflow as clang's HandleOverflow words it (#2217): "overflow in expression; result is V with type
+// 'T'", V the wrapped result GNU folding keeps on the node (check_wide_text's digits at any width), grouped by three
+// with ' as APInt::toString's InsertSeparators does for radix 10. A node the stream doesn't hold keeps the generic text.
+static const char* check_driver_overflow_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                 const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, Arena* scratch)
+{
+    const char* result = check_diagnostic_message(CHECK_WARNING_INTEGER_OVERFLOW);
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool folded = types != NULL && stream != NULL && stream->graph != NULL && node < stream->count &&
+                        check_stream_constant_kind(stream, node) == CHECK_CONSTANT_INTEGER;
+    CheckValue value = folded ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    // The constant reader's (an enumerator's, a file-scope bound's): its overflow's event keeps a result up to 64 bits
+    // wide (check_input_warning_add_value). The last one at the token is the final reading's.
+    for (uint32_t i = 0; !folded && types != NULL && i < input->warning_events.count; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + i;
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_INTEGER_OVERFLOW && event->token == token &&
+            event->payload.first_type != 0)
+        {
+            value = (CheckValue){
+                .type = event->payload.first_type,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = (unsigned __int128)((uint64_t)event->detail << 32 | event->payload.name),
+            };
+        }
+    }
+    const char* digits = value.type != 0 ? check_wide_text(types, &value, scratch) : NULL;
+    const uint64_t length = digits != NULL ? strlen(digits) : 0;
+    const uint64_t sign = length != 0 && digits[0] == '-';
+    const uint64_t significant = length - sign;
+    const uint64_t separators = significant != 0 ? (significant - 1) / 3 : 0;
+    char* grouped = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, length + separators + 1) : NULL;
+    // The result's type keeps an operand's typedef when only that operand has it (UsualArithmeticConversions' converted
+    // side); two operands of the type take their common sugar, which this leaves canonical.
+    const CheckGraph* graph = folded ? stream->graph : NULL;
+    const uint32_t left = graph != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t right = graph != NULL ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    const bool left_kept = left < stream->count && check_stream_type(stream, left) == value.type;
+    const bool right_kept = right < stream->count && check_stream_type(stream, right) == value.type;
+    const uint32_t spelling = left_kept && !right_kept ? check_input_operand_type_spelling(input, parser, left) :
+                              right_kept && !left_kept ? check_input_operand_type_spelling(input, parser, right) : 0;
+    const String8 name = grouped != NULL ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling) : (String8){ 0 };
+    if (name.length != 0)
+    {
+        uint64_t written = 0;
+        for (uint64_t i = 0; i < length; i += 1)
+        {
+            const uint64_t left = length - i;
+            const bool separate = i > sign && left % 3 == 0;
+            grouped[written] = '\'';
+            written += separate;
+            grouped[written] = digits[i];
+            written += 1;
+        }
+        grouped[written] = 0;
+        result = check_warning_text(scratch, "overflow in expression; result is %s with type %.*s", grouped, (int)name.length, name.pointer);
+    }
+    return result;
+}
+
 // A legacy warning's command-line and source policy: the same sparse group mapping the event warnings use, so
 // -Wno-NAME, -Werror=NAME and -Wno-everything reach the dense warning bits too.
 static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
@@ -4517,6 +4577,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                               check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
                                               (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                               check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
+                                              warning_flag == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                              check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                               check_diagnostic_message(warning_flag);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                         const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
