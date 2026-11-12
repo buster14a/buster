@@ -132,6 +132,14 @@ __attribute__((noinline)) long symbols_table_sum(long i)
     return symbols_table[i & 7] + symbols_table[3];
 }
 
+// Three indexed accesses of one table in one block: one lea of its address and one extension of the index (#2601),
+// which the lowering makes for each access.
+__attribute__((noinline)) long symbols_indexed(int i, long x)
+{
+    symbols_table[i & 3] += x;
+    return symbols_table[i & 3] + symbols_table[(i & 3) + 4];
+}
+
 // An address of the symbol plus an offset: one lea from rip.
 __attribute__((noinline)) long* symbols_address(void)
 {
@@ -242,6 +250,7 @@ extern volatile long symbols_taken;
 double symbols_float(double x);
 void symbols_float_store(double x);
 long symbols_table_sum(long i);
+long symbols_indexed(int i, long x);
 long* symbols_address(void);
 void symbols_atomic(long value);
 long symbols_loop(long n);
@@ -329,6 +338,8 @@ int main(void)
         const long seven = symbols_table[0] + symbols_table[6];
         valid = symbols_table_sum((long)s) == (((long)s & 7) == 7 ? seven : symbols_table[s & 7]) + symbols_table[3] && symbols_table[7] == seven && valid;
         valid = symbols_address() == &symbols_table[5] && valid;
+        const long element = symbols_table[s & 3] + value;
+        valid = symbols_indexed((int)s, value) == element + symbols_table[(s & 3) + 4] && symbols_table[s & 3] == element && valid;
         symbols_atomic(value ^ 0x55);
         valid = symbols_g_i64 == (value ^ 0x55) && valid;
         symbols_g_i32 = (int)value;
@@ -421,9 +432,10 @@ static const char* const symbols_sequences[] = {
     "R_X86_64_GOTTPOFF\tsymbols_oracle_tls-",
 };
 
-// objdump -dr's text: every function but symbols_address, symbols_got and symbols_tls without a lea from rip, and
-// symbols_address with one; every PC32 naming a symbol the unit defines and not a thread-local; each direct function
-// with at least one PC32 on a memory operand; and the GOT's and thread-locals' sequences present.
+// objdump -dr's text: every function but symbols_address, the indexed tables', symbols_got and symbols_tls without a lea
+// from rip, and symbols_address and each indexed table's with exactly one (#2601: symbols_indexed's three accesses
+// share it); every PC32 naming a symbol the unit defines and not a thread-local; each direct function with at least
+// one PC32 on a memory operand; and the GOT's and thread-locals' sequences present.
 static bool symbols_shape(const char* path)
 {
     FILE* stream = fopen(path, "r");
@@ -448,10 +460,11 @@ static bool symbols_shape(const char* path)
         {
             const bool address = strcmp(function, "symbols_address") == 0;
             const bool indirect = strcmp(function, "symbols_got") == 0 || strcmp(function, "symbols_tls") == 0;
-            const bool table = strcmp(function, "symbols_table_sum") == 0;
+            const bool table = strcmp(function, "symbols_table_sum") == 0 || strcmp(function, "symbols_indexed") == 0;
             const bool branch = strncmp(function, "symbols_branch_", strlen("symbols_branch_")) == 0;
             const bool leas_valid = indirect || function_leas == (address || table ? 1u : 0u);
-            const bool references_valid = indirect || address || function_references != 0;
+            // symbols_indexed reaches its table through an index alone: no rip-relative operand.
+            const bool references_valid = indirect || address || strcmp(function, "symbols_indexed") == 0 || function_references != 0;
             // A branch's comparison of its symbol's memory with the constant feeds a conditional jump: no setcc or cmov.
             const bool branch_valid = !branch || (function_jumps != 0 && function_selects == 0);
             if (!leas_valid || !references_valid || !branch_valid)
@@ -526,9 +539,9 @@ static bool symbols_shape(const char* path)
             valid = false;
         }
     }
-    // Seven functions of each width, two of each operation and the ten others, each seen once.
+    // Seven functions of each width, two of each operation and the eleven others, each seen once.
 #define BUSTER_SYMBOLS_COUNT(...) +1
-    const unsigned expected = 7 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 10;
+    const unsigned expected = 7 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 11;
 #undef BUSTER_SYMBOLS_COUNT
     if (functions != expected || direct_references < expected - 3)
     {

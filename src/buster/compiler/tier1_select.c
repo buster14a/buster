@@ -3099,6 +3099,11 @@ struct Tier1SelectForest
     // directly, as Tier1EmitOptions.symbol_access's null does.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
+    // By node, for a leaf the lowering repeats (a symbol's address, or an extension, tier1_select_repeated_leaf) that
+    // another of the same operation, type and operand precedes in its block, that first one's node plus one; 0 for any
+    // other node. Null where no block repeats one (#2601, tier1_select_symbol_firsts): every pattern reads the first
+    // instead (tier1_select_add_candidate).
+    const uint32_t* symbol_first;
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
     bool vectors;
@@ -4450,6 +4455,14 @@ static inline __attribute__((always_inline)) void tier1_select_add_candidate(con
 {
     assert(candidates->count < BUSTER_TIER1_SELECT_MAX_CANDIDATES);
     pattern.intrinsic_cost += pattern.sign_result;
+    // A symbol's address or an extension the pattern reads is its block's first of the same (#2601): the lowering makes
+    // one for every access, and an indexed access, which needs its base and index in registers, would make each one's
+    // lea and move.
+    for (uint32_t k = 0; forest->symbol_first != 0 && k < BUSTER_TIER1_SELECT_VALUES; k += 1)
+    {
+        const uint32_t value = pattern.values[k];
+        pattern.values[k] = value < forest->function->instruction_count && forest->symbol_first[value] != 0 ? forest->symbol_first[value] - 1 : value;
+    }
     candidates->patterns[candidates->count] = pattern;
     candidates->costs[candidates->count] = tier1_select_pattern_cost(forest, node, &pattern);
     candidates->count += 1;
@@ -4675,6 +4688,62 @@ static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
             sinkable[index < count ? index : function->a[node]] |= BUSTER_TIER1_SELECT_KEPT;
         }
     }
+}
+
+// Whether `node` is one of the pure leaves the lowering makes again at each use (#2601): a symbol's address, or a sign or
+// zero extension (an index's, which every access of an array extends again).
+static bool tier1_select_repeated_leaf(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    return op == IR_SYMBOL_ADDR || op == IR_SEXT || op == IR_ZEXT;
+}
+
+// Each repeated leaf's first in its block (#2601, Tier1SelectForest.symbol_first): the first node of the same operation,
+// type and operand (a symbol's address's symbol), by an open-addressed table of them, a power of two at least twice the
+// function's leaves, in `scratch`, which the plan keeps until it is made. Null where no block repeats one. The first
+// precedes the others in their block, so it dominates their users, and a leaf is pure, so it is their value.
+static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, Arena* scratch, bool* ok)
+{
+    const uint32_t count = function->instruction_count;
+    uint32_t leaves = 0;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        leaves += tier1_select_repeated_leaf(function, node);
+    }
+    uint32_t capacity = 4;
+    while (capacity < 2 * (uint64_t)leaves)
+    {
+        capacity *= 2;
+    }
+    const bool candidates = leaves >= 2;
+    uint32_t* firsts = candidates ? ir_allocate(scratch, count, 4, ok) : 0;
+    // Each slot's node plus one, 0 for an empty slot.
+    uint32_t* slots = candidates ? ir_allocate(scratch, capacity, 4, ok) : 0;
+    bool repeated = false;
+    for (uint32_t node = 0; *ok && candidates && node < count; node += 1)
+    {
+        if (tier1_select_repeated_leaf(function, node))
+        {
+            const uint32_t block = blocks[node];
+            const uint32_t op = function->op[node];
+            const uint32_t type = function->type[node];
+            const uint32_t operand = function->a[node];
+            uint32_t slot = (block * 0x9e3779b1u ^ operand * 0x85ebca77u ^ (op << 8 | type) * 0xc2b2ae3du) & (capacity - 1);
+            while (slots[slot] != 0)
+            {
+                const uint32_t first = slots[slot] - 1;
+                if (blocks[first] == block && function->op[first] == op && function->type[first] == type && function->a[first] == operand)
+                {
+                    break;
+                }
+                slot = (slot + 1) & (capacity - 1);
+            }
+            firsts[node] = slots[slot];
+            repeated |= slots[slot] != 0;
+            slots[slot] = slots[slot] != 0 ? slots[slot] : node + 1;
+        }
+    }
+    return repeated && *ok ? firsts : 0;
 }
 
 // A memory operand's address: base + index * 2^scale + displacement, the frame object the walk reached instead of a
@@ -6836,6 +6905,14 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             level_nodes[positions[depths[node]]++] = node;
         }
     }
+    // A symbol's address or an extension read in place of another of its block's (#2601).
+    const uint32_t* symbol_first = 0;
+    if (error == TIER1_SELECT_OK)
+    {
+        bool ok = true;
+        symbol_first = tier1_select_symbol_firsts(function, blocks, scratch, &ok);
+        error = ok ? error : TIER1_SELECT_ERROR_MEMORY;
+    }
     const Tier1SelectForest forest =
     {
         .function = function,
@@ -6848,6 +6925,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .sinkable = sinkable,
         .symbol_access = plan.symbol_access,
         .symbol_count = plan.symbol_count,
+        .symbol_first = symbol_first,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
     // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,
