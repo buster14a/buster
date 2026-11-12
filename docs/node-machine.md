@@ -3,7 +3,7 @@
 Status: step 0, the census, is built and its gate holds
 ([below](#step-0-the-census)). Step 1, the shadow, is built
 ([below](#step-1-the-shadow)): the machine's entries are the pipeline's on every
-corpus, `-g` included, but its sweeps cost 171 cycles a taken node where the
+corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120, and it codes only part of the set (no calls yet). No compile
 takes it. Its gains are estimates that its first two steps exist to confirm or
 refute; a prototype of its three sweeps has been run over the compile's real
@@ -710,8 +710,8 @@ compound assignments. They are the next constructs, one a pull request.
 
 ### What it measured
 
-On the 9700X at main `2db047f3` (CPU 2, under the lock;
-[the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-shadow-2524-2026-11-12)).
+On the 9700X at `c3494a5f`, on main `2db047f3` (CPU 2, under the lock;
+[the record](https://github.com/buster14a/buster-performance/tree/f600821bcda26690dac3d240151ea7d18da7d3b7/docs/measurements/node-machine-shadow-2524-2026-11-12)).
 Every taken expression's records and entries are compared:
 
 | | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
@@ -732,8 +732,8 @@ pointer difference, an unsigned division by a power of two).
 
 The sweeps' cost on `sqlite3.c`, in cycles and instructions a taken evaluated
 node (the least of 11 passes, each sweep set timed on its own, the user-mode
-counters), as the machine was built, at main `eedbdece`, and last at
-`2db047f3`:
+counters). The first six rows are the machine as it was built, at main
+`eedbdece`; the last two are at `2db047f3`:
 
 | version | T | C | X | all three | instructions |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -744,14 +744,19 @@ counters), as the machine was built, at main `eedbdece`, and last at
 | one word a type | 99.4 | 39.6 | 31.1 | 170.1 | 695.7 |
 | each record's value written as two halves | 96.1 | 42.9 | 31.9 | 170.9 | 693.1 |
 | the same, at main `2db047f3` | 95.7 | 43.7 | 31.9 | 171.3 | 693.1 |
+| the commit, `c3494a5f` | 96.5 | 39.7 | 30.4 | 166.6 | 693.1 |
 
-Lua's is 182.3 cycles. **The gate's first half holds** (no difference on the
-corpora, with `-g` too). **The second doesn't**: 171 cycles a taken node
-against 120. That is about 80 cycles a body token, against the estimate's 55
-expected and 90 conservative, so the design isn't refuted: its threshold is
-250, and step 2's projected gain is about 1.3 times at this cost and the
-estimate's coverage. The coverage is now half the census's, though, and calls
-are what that lacks.
+The last two rows run the same instructions: about 3% is the placement's.
+Lua's is 182.9 cycles. `-c sqlite3.c` is unchanged: 123.9 ms against main's
+123.9 ms, with the same instructions. The machine's code and table add 458 KB
+to the executable.
+
+**The gate's first half holds** (no difference on the corpora, with `-g`
+too). **The second doesn't**: 167 cycles a taken node against 120. That is
+about 78 cycles a body token, against the estimate's 55 expected and 90
+conservative, so the design isn't refuted: its threshold is 250, and step 2's
+projected gain is about 1.3 times at this cost and the estimate's coverage. The
+coverage is now half the census's, though, and calls are what that lacks.
 
 What the profiles say (`perf record` of 40 passes, the shares of the whole
 run, which the sweeps are most of):
