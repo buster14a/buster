@@ -269,7 +269,15 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool const_variable = file_scope && check_input_type_const(reader->types, reader->declared_types[token]);
         // An invalid declaration (#1447, a recovered parameter's) is never unused, as clang's ShouldDiagnoseUnusedDecl skips it.
         const bool invalid_declaration = output->invalid_declarations != NULL && output->invalid_declarations[token] != 0;
-        const bool declaration_used = invalid_declaration || (parameter || local || local_typedef ? used_tokens[token] != 0 : used[event] != 0);
+        bool declaration_used = invalid_declaration || (parameter || local || local_typedef ? used_tokens[token] != 0 : used[event] != 0);
+        // A typedef's name in a declaration's specifiers is no use event: a later token of its scope that names it is a use.
+        // Only a block's typedef no use event named asks, and only its scope's tokens are read.
+        const uint32_t typedef_scope = local_typedef && !declaration_used ?
+                                       check_input_cached_ancestor(parser, parser->tree.parents[token], NULL, true, &scope_work) : BUSTER_CHECK_NONE;
+        for (uint32_t at = token + 1; !declaration_used && typedef_scope < count && at < typedef_scope; at += 1)
+        {
+            declaration_used = output->declarations[at] == token;
+        }
         // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
         // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
         // local's is one without linkage (#1447).
