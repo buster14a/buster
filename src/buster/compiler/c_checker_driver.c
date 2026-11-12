@@ -10605,6 +10605,16 @@ static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lane
     arena_discard_past(scratch, kept, lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane));
 }
 
+// #2531's census (measure-attested, c_check_attested.c), the only command that sets check_driver_attested: a unit's
+// reader beside the design's passes (check_input_run as check_input_compile calls it, with its environment published),
+// and each declaration's record at the unit's end. Null in every other command, which tests it once at each place.
+typedef struct CheckAttested CheckAttested;
+static CheckAttested* check_driver_attested;
+static bool check_attested_input(CheckAttested* census, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, const char* path);
+static void check_attested_after(CheckAttested* census, const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, bool valid,
+                                 bool complete);
+
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
@@ -10823,6 +10833,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 deferred->every_lane = lanes->every_lane;
                 input_valid = check_input_deferred_compile(deferred, &input, checking, checking_pp, &types, arena, scratch, deferred_lanes);
                 deferred->flow = NULL;
+            }
+            else if (__builtin_expect(check_driver_attested != NULL, 0))
+            {
+                input_valid = check_attested_input(check_driver_attested, &input, checking, checking_pp, &types, arena, scratch, !prefix_only,
+                                                   repairing ? repair.original_end : checking->tokens.count, selected, path);
             }
             else
             {
@@ -11632,6 +11647,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     driver_fatal = true;
                 }
                 original_pragmas_printed = true;
+            }
+            if (__builtin_expect(check_driver_attested != NULL, 0))
+            {
+                check_attested_after(check_driver_attested, checking, pp, &input, &types, input_valid && result == 0 && !driver_fatal && !pp->fatal, !prefix_only);
             }
         }
         if (parse_failed)
