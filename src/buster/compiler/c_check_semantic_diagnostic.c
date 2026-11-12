@@ -209,6 +209,10 @@ static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp,
             }
             texts[1] = report->detail == 7 ? texts[1] : "no corresponding enumerator here";
         } break;
+        case 9: // CHECK_TAG_MISMATCH_KIND (#1826): the earlier unnamed record, its kind
+            texts[0] = check_warning_text(scratch, "'%.*s' is a %s here", (int)first_name.length, first_name.pointer,
+                                          report->value != 0 ? "union" : "struct");
+            break;
         default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
         {
             const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,

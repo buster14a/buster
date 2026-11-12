@@ -4859,7 +4859,10 @@ do:
     compatible there unless one is unnamed and written in its definition: two
     named records, a struct and a union, or two typedefs' unnamed records are,
     as in clang. Such a pair is queued and compared member by member after the
-    definition's own members, breadth first.
+    definition's own members, breadth first. Two unnamed records written in
+    their definitions, one a struct and the other a union, are clang's error
+    at the second's record, noted "'' is a struct here" at the earlier one,
+    with no notes at the outer member (#1826, `CHECK_TAG_MISMATCH_KIND`).
   - The first difference is clang's "type 'struct S' has incompatible
     definitions", with its two notes at the differing members (name,
     bit-field, type, a member with no counterpart). An unnamed member's note
@@ -4869,7 +4872,10 @@ do:
     f.c:2:21)`, an anonymous member's `(anonymous at ...)`).
   - The errors are published where the second body ends, after what its
     members report. A member whose record is itself an incompatible
-    redefinition reads as an `int`, as clang's invalid declaration does.
+    redefinition reads as an `int` in its place, as clang's invalid
+    declaration does: the pointers, atomics and arrays around it stay
+    (`_Atomic(int) *`, #1826). A record after a specifier that heads its
+    subtree (`_Atomic struct T { ... }`) is found by its own keyword.
 
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.
