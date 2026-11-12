@@ -788,15 +788,18 @@ them in full; `--report` prints a plan's parts, files and largest functions):
   executable is the one a clean build of the same sources makes.
 
 **The benchmark units are built on demand**: Develop's executable leaves out
-the 28 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
+the 27 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
 (`cmake/BusterSettings.cmake`) names, whose only entry is a benchmark command's
-`run_*` function: the correctness inventory runs none of them. Their object
+`run_*` function and that no test runs: the correctness inventory runs none of
+them. Their object
 libraries have no source in Develop, so Develop's executable doesn't wait for
 them, and `cmake/BusterDevelopAbsent.cmake` writes `Develop/develop/absent.o`
 from their sources, a stand-in for each `run_*` entry, which says that the
 command is Release's and Debug's and fails. `floors_benchmark.c` also holds
-`test-floors-input`'s tests and stays, as do `tier1_model_measure.c` and the two
-test units.
+`test-floors-input`'s tests and stays, as does `c_preprocessor_benchmark.c`,
+whose `benchmark-preprocessor` `test-preprocessor` runs for its location
+option, and `tier1_model_measure.c` and the two test units. A test that comes to
+run another benchmark command needs its unit taken off the list.
 
 **What it costs.** Develop's executable runs the compile path 1% to 2% slower
 than Release's (#2559's measurements) and writes the same outputs; its debug
