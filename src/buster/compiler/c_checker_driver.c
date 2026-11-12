@@ -170,6 +170,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
         case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
         case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_CASE_OUTSIDE_SWITCH: result = "'case' statement not in switch statement"; break;
+        case CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH: result = "'default' statement not in switch statement"; break;
         case CHECK_INPUT_JUMP_ASM: result = "cannot jump from this asm goto statement to one of its possible targets"; break;
         case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
         case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;

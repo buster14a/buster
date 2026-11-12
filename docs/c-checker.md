@@ -4513,6 +4513,14 @@ take clang's words and places:
   binary expression". Other failures keep the generic error. A bound's
   failure before its first undeclared name is reported with it, in source
   order.
+- **Statement checks in clang's words** (#2406): a `case` or a `default`
+  outside any switch is "'case' statement not in switch statement" (or
+  'default') at its keyword (`CHECK_INPUT_CASE_OUTSIDE_SWITCH`, the control
+  pass); a subscript of neither an array, a pointer nor a vector is
+  "subscripted value is not an array, pointer, or vector" at its `[`; and a
+  subscript of a function's name or pointer is "subscript of pointer to
+  function type 'int (void)'" at that operand, a typedef'd pointee as written
+  (`check_semantic_constraint`).
 - **A member access** whose base is no structure or union, anywhere else
   (#2288, `check_semantic_constraint`'s member branch): clang's "member
   reference base type 'int' is not a structure or union" at the operator,
