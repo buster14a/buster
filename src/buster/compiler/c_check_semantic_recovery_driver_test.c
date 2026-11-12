@@ -692,6 +692,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int typeof(int) _Atomic(int) unsigned unsigned v;\nint a4 = u4;\n_Complex _Complex int _Bool cb;\nint a5 = u5;\n"
         "unsigned float unsigned y;\nint a6 = u6;\nint _Atomic(int) z;\nint a7 = u7;\n"
         "void f(void) { int float char x; char *p = &x; int typeof(long) y; p = &y; }\n",
+        // A block's object with linkage beside one without (#2441): clang's extern, non-extern, static and non-static
+        // wordings and notes, then the unit goes on.
+        "void a(void) { int q; extern int q; }\n"
+        "void b(void) { static int r; extern int r; }\n"
+        "void c(void) { extern int s; static int s; }\n"
+        "void d(void) { extern int t; int t; }\n"
+        "void e(void) { extern int u; extern float u; }\n"
+        "void f(void) { extern int v; float v; }\n"
+        "void g(void) { extern int q; int q = 2; }\n"
+        "void h(void) { extern int r; static int r; }\n"
+        "int s;\n"
+        "void k(void) { extern int s; int s; (void)s; }\n"
+        "int z = undeclared;\n",
         // A definition that is also an alias or ifunc (#2449): clang's handler drops the attribute, and the declaration stays a
         // valid definition, its later uses quiet.
         "int x __attribute__((alias(\"y\")));\n"

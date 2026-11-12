@@ -5404,7 +5404,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && token < count &&
                                  (((kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) &&
-                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_AUTO_TYPE_EXTERN) ||
+                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_NON_EXTERN) ||
                                   (kind == CHECK_INPUT_ENUMERATOR_REDEFINITION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)))
                         {
                             const CheckInputReport* conflict = input->reports + index;
@@ -10175,6 +10175,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // leave the whole stream. Either remains a rejected unit, independent of publication's cutoff.
             pp->fatal = false;
             ready = true;
+        }
+        if (ready && pp->output.count == 0)
+        {
+            pp_diagnose_empty_unit(pp);
         }
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);

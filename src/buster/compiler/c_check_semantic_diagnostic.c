@@ -423,6 +423,12 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                                  "non-thread-local declaration of '%.*s' follows thread-local declaration";
             result = check_warning_text(scratch, format, (int)name.length, name.pointer);
         }
+        else if (report->detail == CHECK_REDECLARATION_EXTERN || report->detail == CHECK_REDECLARATION_NON_EXTERN)
+        {
+            const char* format = report->detail == CHECK_REDECLARATION_EXTERN ? "extern declaration of '%.*s' follows non-extern declaration" :
+                                 "non-extern declaration of '%.*s' follows extern declaration";
+            result = check_warning_text(scratch, format, (int)name.length, name.pointer);
+        }
         else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_NON_STATIC)
         {
             const char* format = report->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
