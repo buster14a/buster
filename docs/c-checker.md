@@ -10542,7 +10542,15 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   the warning is published with the body's queued diagnostics at its end
   (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it;
   at file scope it precedes the declarator's fold warning
-  (`c_check_vla_fold_driver_test.c`).
+  (`c_check_vla_fold_driver_test.c`). A variable bound that no graph walk
+  reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s type
+  name, `check_input_vla_bound`) takes the same pass. Left: in a function
+  body, a constant's comma (an enumerator's, a typedef's bound) is published
+  before the body's other queued diagnostics, where clang queues it in source
+  order, as the reader's events reach the body's end first; and in a unit
+  with errors, a file-scope declaration's comma whose initializer is an error
+  (`int b = sizeof(int[(6, 2)]);`) comes after that error, where clang gives
+  it first.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
