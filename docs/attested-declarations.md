@@ -1,7 +1,9 @@
 # Attested declarations: a file-scope declaration is read once per command (#2531): design
 
-Status: design only. Nothing below is implemented, and its gains are estimates
-from an emulation that its first two steps exist to confirm or refute. It is
+Status: design only. Nothing below is implemented. Its skip has been run in
+the compiler's own reader by a measurement patch, with the decisions made
+outside; the rest of its gains are estimates that its first two steps exist to
+confirm or refute. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -10,7 +12,7 @@ tree to the typed stream. The issue is
 [#2531](https://github.com/buster14a/buster/issues/2531). The names of
 existing code are main's at `ecaf57b5`, and every figure not attributed
 otherwise is that revision's on the 9700X (CPU 2, under the lock), from
-[the measurement record](https://github.com/buster14a/buster-performance/tree/18047f95f4d780404e240f3710e1180068fba703/docs/measurements/file-scope-design-672-2026-11-12).
+[the measurement record](https://github.com/buster14a/buster-performance/tree/c679fea7246dbea68cb312d132a60af79cf9deb2/docs/measurements/file-scope-design-672-2026-11-12).
 
 **In one paragraph.** Outside the bodies' path, the largest part of a compile
 is reading the file scope's declarations: 32% of the cycles of musl's 1,336
@@ -23,9 +25,11 @@ of the declarations the lane's earlier units read without a diagnostic, and
 find the declarations the unit's own code reaches by name. A declaration that
 the memo attests and nothing reaches isn't read. Everything else is read as
 today, by the same reader, which is also the exact twin. An emulation on the
-real units skips 87% of musl's file-scope declaration tokens with every object
-and diagnostic the same bytes. Expected on musl's command: about 1.3 times
-faster; on a command of one unit, nothing.
+real units skips 87% of musl's file-scope declaration tokens; with those skips
+made in the compiler's own reader, every object and diagnostic is the same
+bytes and musl's command is 1.25 times faster. Expected with the passes' cost:
+1.23 times, and 1.30 once the unit-wide passes skip those tokens too; on a
+command of one unit, nothing.
 
 ## The problem
 
@@ -44,11 +48,11 @@ compile's cycles of both modes if that part were free:
 | **reading the file scope's declarations** | 1,796 | 32.1% | **1.47 times** | 81 | 11.8% | 1.13 times |
 | the kernel: pages and system calls | 1,061 | 19.0% | 1.23 | 86 | 12.6% | 1.14 |
 | the preprocessor and the lexer | 892 | 16.0% | 1.19 | 53 | 7.8% | 1.08 |
-| the asm matcher's index, a unit with asm | 556 | 10.0% | 1.11 | 0 | | |
 | a unit's own start and end | 523 | 9.4% | 1.10 | 2 | 0.3% | 1.00 |
+| the asm matcher's index, a unit with asm | 443 | 7.9% | 1.09 | 0 | | |
 | the parser and the tree's columns | 321 | 5.8% | 1.06 | 40 | 5.8% | 1.06 |
 | the emission, Tier 0 to the object | 219 | 3.9% | 1.04 | 56 | 8.2% | 1.09 |
-| *#2524's, for reference: the bodies between the parser and Tier 0* | *1,318* | *23.6%* | *1.31* | *453* | *66.0%* | *2.94* |
+| *#2524's, for reference: the bodies between the parser and Tier 0* | *1,431* | *25.6%* | *1.34* | *453* | *66.0%* | *2.94* |
 
 The compiles are 5,587 M and 686 M cycles. The file scope's reading is the
 checker's stages from `type-table` to `select` on the units compiled without
@@ -274,7 +278,9 @@ pre-passes ran, before `check_input_resolve_range`:
   declaration's specifiers and declarators are once read, so that the
   expressions' walk acts at none of them. That is how a body deferred by
   `-flazy-system-headers` is passed (`deferred_tokens`), for a declaration's
-  whole range.
+  whole range. The measurement patch does exactly this from a list made
+  outside ("The skip in the compiler's own reader" below), and every later
+  pass took what it left.
 - **The record is a comparison.** At a file-scope declaration's start the
   reader notes its counters (reports, warning events, recoveries, binding
   events, and the tables whose entries have consequences later: objects to
@@ -375,7 +381,9 @@ The chain and the reach stay one declaration at a time, and this is why:
 If the chain became the limit, the lever is several declarations' own hashes
 and probes in flight (more chains at once), not wider vectors.
 
-## The evidence so far: an emulation on the units
+## The evidence so far
+
+### An emulation on the units
 
 The rule was emulated on the units' preprocessed text (`attest.py` in the
 record: its own lexer and its own rules of C's declaration syntax, a memo
@@ -395,18 +403,23 @@ read silently.
 | objects, a `;` a skipped token | 1,336 the same bytes | 512 the same bytes |
 | diagnostics | the same bytes (321 warnings) | the same (none) |
 | `-c` of the preprocessed units, CPU ms | 810.7 | 582.1 |
-| … a `;` a skipped token: more than the design leaves | 587.7 | 246.5 |
+| … a `;` a skipped token | 587.7 | 246.5 |
 | … the skipped tokens gone: less than the design leaves | 537.8 | 161.1 |
 
 - **The objects.** With the tokens blanked, 109 of musl's objects differ, each
   in a string literal's symbol alone; with the placeholders, none. With a
   warm memo (a second command), 265,754 declarations are skipped and the
   1,336 objects are again the same bytes, and so is `sqlite3.c`'s.
-- **The two times are brackets.** The design lexes and parses a skipped
-  declaration's tokens as they were and reads nothing; the placeholder units
-  also read an empty declaration a token, and the blanked units also drop the
-  tokens' lexing and parse. `check-input` is 1,930 M user cycles for the units
-  as they are, 897 M with the placeholders and 761 M with the tokens gone.
+- **The two times.** The design lexes and parses a skipped declaration's
+  tokens as they were and reads nothing; the placeholder units read an empty
+  declaration a token instead, and the blanked units drop the tokens' lexing
+  and parse too. `check-input` is 1,930 M user cycles for the units as they
+  are, 897 M with the placeholders and 761 M with the tokens gone. The
+  placeholders were meant as the design's upper bracket and aren't one: the
+  reader's own skip, next, takes 613.0 ms on musl's preprocessed units and
+  273.4 on the glibc units', since a token the reader passes still costs the
+  unit-wide passes more than an empty declaration costs to read. The blanked
+  units remain the floor of steps 2 and 3.
 - **What stays ineligible** in musl: `static` declarations (212,270 tokens,
   most of them the units' own tables' initializers), initializers (10,240)
   and aliases (5,166); in the glibc units, asm labels (54,675), objects
@@ -414,18 +427,75 @@ read silently.
   (16,145), each a rule the emulation keeps wider than the reader's own test
   would.
 
+### The skip in the compiler's own reader
+
+The emulation replaces tokens. A measurement patch then made the skip as
+"Where it sits" describes it: a side file lists each unit's skipped
+declarations (the emulation's), and the reader clears their tokens' visit
+marks and sets them ignored before its walk. The tokens stay, lexed and parsed
+as they were. The decisions are made outside, and no pass of the design runs.
+The patch's own count of what it passed is the emulation's to the token.
+
+| | musl, 1,336 units | 512 units over glibc's headers | `sqlite3.c` preprocessed, a warm memo's skips |
+| --- | ---: | ---: | ---: |
+| declarations the reader passed | 263,177 | 272,276 | 2,579 |
+| their tokens | 2,954,264 | 4,737,766 | 46,014 |
+| objects, read against skipped | 1,336 the same bytes | 512 the same bytes | the same bytes |
+| diagnostics | the same bytes (321 warnings) | the same (none) | the same (none) |
+| `-c`, every declaration read: M cycles (CPU ms) | 5,547 (1,003.3) | 4,297 (775.7) | 641 (115.8) |
+| … with the skip | 4,448 (803.7) | 2,594 (468.4) | 607 (109.6) |
+| times faster | **1.247** | **1.657** | 1.056 |
+
+- **What moved.** `check-input` goes from 2,035 M to 1,059 M user cycles on
+  musl and from 2,138 M to 616 M on the glibc units; by function, the reader's
+  declaration steps from 953 M to 245 M on musl, the type table from 99 M to
+  23 M. The preprocessed units alone are 1.33 and 2.12 times faster.
+- **What it adds to the emulation.** Every later pass ran on what the skip
+  leaves (a skipped declaration's columns empty, its names unbound), and no
+  object and no diagnostic of 1,849 units changed.
+- **What it doesn't have.** The memo's own test of a reading, the lists from
+  the parser's roles and the passes' cost in the compile; a unit with an
+  error; `-g`; more than one lane. Steps 0 and 1 are for those.
+- **The rounds compared are of one page state.** A run of musl's command in
+  three is given no huge pages, by its randomized layout, and is 2.3% slower
+  whichever way it compiles (the record, section 13). Every gate below is
+  measured the same way, or with the randomization off.
+
+### What a skipped token still costs
+
+The preprocessed units with the reader's skip, less the same units with those
+tokens gone from the text, by stage, in user cycles a skipped token:
+
+| stage | musl | the glibc units |
+| --- | ---: | ---: |
+| its lexing | 9 | 11 |
+| its parse | 30 | 30 |
+| **the reader (`check-input`)** | **68** | **60** |
+| the checker's other stages | 12 | 8 |
+| the lowering and the object | 4 | 2 |
+| all | 123 | 110 |
+
+The design keeps the first two rows. The reader's row is its unit-wide passes,
+which read every token of a unit whether the walk does or not:
+`check_input_intrinsic_initialize` (12.5 cycles for each token of a unit: it
+looks every operand's name up among the intrinsics', each unit again),
+`check_input_run`'s own loops and fills (11), the warnings' graph, the token
+counts, the controls and the system tokens' map (8 together), and the
+columns' clearing (libc's `memset` is 108 M cycles of the skipped command).
+Step 3 is this row and the two under it.
+
 ## The steps and their gates
 
-Each step is measured on the 9700X before the next begins. `--scalar` keeps
-today's path throughout.
+Each step is measured on the 9700X before the next begins, on rounds of one
+page state. `--scalar` keeps today's path throughout.
 
 | step | what is built | gate |
 | --- | --- | --- |
 | 0. Census | `measure-attested`: the pipeline as it is, with the lists, the chain, a memo over the command's units and the reach computed beside it, and after each declaration's reading what it did (silent, pure, its events against its list). Counts by reason, per declaration and per token. | No reading declares an unlisted name on the corpora. The reader's own test makes at least 75% of musl's and of the glibc units' file-scope declaration tokens skippable (the emulation: 87% and more). The passes cost at most 25 cycles a token in the compile. |
 | 1. Shadow | `--verify`'s mode, on by an option: the passes decide and everything is read; each would-be skipped declaration's reading is checked. No compile skips. | No failure on the corpora as many-unit commands, with `-g` and with `-Wall -Wextra`, on 1 and 8 lanes, with the bodies deferred. |
-| 2. Skip | The walk passes the skipped declarations; the units' ends fill the memo. | musl's command on one lane at least 1.15 times faster (expected 1.29) and not slower on 8; every unit's object and diagnostics its own alone and `--scalar`'s; `-c sqlite3.c` and a small unit's process within the A/A floor. |
-| 3. Out of the unit-wide passes | A skipped declaration's tokens leave the per-token passes that still read them and the tree's derived columns; the reach is offered to `-flazy-system-headers`' plan (#1364), which needs the same graph without a second parse. | At least 1.25 times cumulative on musl (expected 1.35). |
-| 4. A memo that outlives the process | Opt-in, and the owner's decision: the set of hashes kept in a file a build names, keyed by the compiler's build and the options, its hashes over spellings where a lane's are over its intern table's ids. | A process a unit: musl at least 1.15 times (the emulation's bound is 1.27); `-c sqlite3.c` at least 1.04 (bound 1.07). |
+| 2. Skip | The walk passes the skipped declarations; the units' ends fill the memo. | musl's command on one lane at least 1.15 times faster (expected 1.23; the reader's skip alone measures 1.247) and the glibc units at least 1.4 (expected 1.62), neither slower on 8 lanes; every unit's object and diagnostics its own alone and `--scalar`'s; `-c sqlite3.c` and a small unit's process within the A/A floor. |
+| 3. Out of the unit-wide passes | The reader's unit-wide passes and its columns' fills take the unit's read ranges (the complement of the marks) where they take every token, and the program's passes after them; the reach is offered to `-flazy-system-headers`' plan (#1364), which needs the same graph without a second parse. | A skipped token costs `check-input` at most 20 user cycles (68 after the skip alone, by the experiment); cumulative at least 1.26 on musl (expected 1.30) and 1.7 on the glibc units (expected 1.83). |
+| 4. A memo that outlives the process | Opt-in, and the owner's decision: the set of hashes kept in a file a build names, keyed by the compiler's build and the options, its hashes over spellings where a lane's are over its intern table's ids. | A process a unit: musl's preprocessed units at least 1.08 times (expected 1.12; the emulation's bound with the tokens gone is 1.27); `-c sqlite3.c` at least 1.02 (the reader's skip alone measures 1.056). |
 
 Step 4 is where a command of one unit gains. It is last because it is a
 decision about files a compiler writes, not because it is hard: the memo is a
@@ -434,29 +504,33 @@ declaration nothing names.
 
 ## Expected gains
 
-From the emulation's measured compiles, on the two many-unit workloads
-(`gains.py` in the record), in times faster for `-c` of the sources as one
-command on one lane:
+From the skip measured in the reader, the prototype's passes and what a
+skipped token still costs (`gains.py` in the record), in times faster for `-c`
+of the sources as one command on one lane:
 
 | | musl, 1,336 units | 512 units over glibc's headers |
 | --- | ---: | ---: |
-| conservative | 1.20 | 1.51 |
-| expected | 1.29 | 1.80 |
-| optimistic | 1.35 | 2.06 |
+| measured: the reader's skip alone, its decisions made outside | 1.247 | 1.657 |
+| step 2, conservative | 1.17 | 1.45 |
+| step 2, expected | 1.23 | 1.62 |
+| step 3, expected | 1.30 | 1.83 |
+| step 3, optimistic | 1.32 | 1.91 |
 | the bound: the file scope's reading free | 1.47 | |
 
-- **Conservative:** the placeholder units' saving at 85% of the emulation's
-  coverage (the reader's test may refuse more than the emulation's rules),
-  less the prototype's passes as measured, 22.3 cycles a token.
-- **Expected:** the blanked units' saving, with the skipped tokens' parse and
-  lexing put back (134 M and 248 M cycles, from the stage counters), 20 cycles
-  a skipped token for the unit-wide passes that still see it, and the passes
-  at 12 cycles a token with their lists from the roles.
-- **Optimistic:** step 3: the lexing alone put back, and the passes at the
-  prototype's 6.8 cycles a token without its scan.
+- **Step 2, conservative:** 85% of the measured saving (the reader's own test
+  may refuse more than the emulation's rules), less the prototype's passes as
+  measured with their own scan, 22.3 cycles a token.
+- **Step 2, expected:** the measured saving, less the passes at 12 cycles a
+  token with their lists from the roles.
+- **Step 3, expected:** and the reader's part of what a skipped token still
+  costs, 77 cycles of both modes on musl and 66 on the glibc units.
+- **Step 3, optimistic:** the passes at the prototype's 6.8 cycles a token
+  without its scan, and everything a skipped token still costs outside its
+  lexing and its parse (100 and 80 cycles).
 - **`-c sqlite3.c`, and any command of one unit: 1.00.** Nothing is skipped
-  and nothing runs. With step 4's memo warm, the bound is 1.07 (46,014 of its
-  tokens skipped; 115.3 to 107.4 ms with those tokens gone).
+  and nothing runs. With step 4's memo warm the reader's skip measures 1.056
+  on it (46,014 of its tokens passed), before the passes' 4 to 17 M cycles:
+  1.03 to 1.05.
 - **Lanes.** Each lane has a memo, so a lane's first units read what another
   lane's did; at 167 units a lane the hits barely change. What a skipped
   declaration doesn't write is also memory the eight-worker compile doesn't
@@ -473,8 +547,9 @@ command on one lane:
 - **The shadow (step 1)** finds a would-be skipped declaration whose reading
   matters by a path no test names (an object or a diagnostic that differs
   with every check passing).
-- **Step 2's compile** gains less than the placeholder bracket says: the
-  reader's cost was then not in reading declarations.
+- **Step 2's compile** gains under 1.15 on musl, where the reader's skip
+  alone measures 1.25: the passes in the compile, or the memo's own test, then
+  cost or refuse several times what the prototype and the emulation say.
 
 Each ends the work with a record.
 
@@ -518,33 +593,52 @@ Each ends the work with a record.
 
 ## What it leaves
 
-After step 3 the expected command is 4,100 to 4,300 M cycles on musl, and the
-ranking's other rows are what is left, none of them designed here:
+With the reader's skip alone musl's command is 4,448 M cycles where it is
+5,547 M; after step 3 the expected command is about 4,200 to 4,300 M. The
+ranking's other rows are what is left, none of them designed here. By the
+stage counters of the command with the skip:
 
-- **The kernel's 19%.** musl's command makes 28,599 `madvise` calls and takes
-  343,028 page faults, 21 and 257 a unit: a unit's arenas given back and
-  faulted in again by the next, a megabyte each time. Page faults are 47% of
-  the kernel's cycles and `madvise` 35%; a quarter of them fall between two
-  units. An empty unit in a command costs 72 µs, 149,000 user and 246,000
-  kernel cycles. [#1213](https://github.com/buster14a/buster/issues/1213) has
-  the lanes' side of it; on one lane a lane that keeps its small units' pages
-  is the lever.
-- **The preprocessor's 16%.** 705 M user cycles for the command. 116 M of
-  them are what 1,336 empty units' preprocessing costs (the predefined macros
-  and the stage's own setup, a unit); the rest is each inclusion's directives
-  and expansions over the cached tokens.
-- **The asm matcher's index, 10%**:
+- **The kernel, 23% of that command** (1,038 M cycles). musl's command makes
+  28,599 `madvise` calls and takes 343,028 page faults, 21 and 257 a unit: a
+  unit's arenas given back and faulted in again by the next, a megabyte each
+  time. Page faults are 47% of the kernel's cycles and `madvise` 35%; a
+  quarter of them fall between two units. An empty unit in a command costs
+  72 µs, 149,000 user and 246,000 kernel cycles.
+  [#1213](https://github.com/buster14a/buster/issues/1213) has the lanes'
+  side of it; on one lane a lane that keeps its small units' pages is the
+  lever. And a run in three is given no huge pages at all, by its randomized
+  layout, for 75,000 more page faults and 2.3% of the command (the record,
+  section 13); which mapping decides isn't known.
+- **The preprocessor, 20%** (884 M), and 46% of the glibc units' command with
+  the skip (1,177 M of 2,585 M): what is left of a header-heavy unit is its
+  preprocessing, each inclusion's directives and expansions over the cached
+  tokens, 175 and 219 cycles for each token it puts out. 116 M user cycles of
+  musl's are what 1,336 empty units' preprocessing costs. The memo's idea
+  applies one level up (an inclusion that reads the same macros' same
+  definitions puts out the same tokens and makes the same definitions); it is
+  not designed or measured here beyond the stage's size.
+- **The asm matcher's index, 8%**:
   [#2532](https://github.com/buster14a/buster/issues/2532). Made once a
-  process, musl's command takes 929 ms where it takes 1,029.
-- **The declarations still read**, about 480 M cycles: the reached, the
-  unattested and the ineligible, the units' own tables first.
+  process, musl's command takes 929 ms where it takes 1,008.
+- **The declarations still read**, about 470 M cycles after step 3: the
+  reached, the unattested and the ineligible, the units' own tables first.
+- **The skipped tokens' parse**, 30 user cycles each: 89 M on musl (2% of the
+  command with the skip) and 141 M on the glibc units (5%). A declaration's
+  parse depends on its tokens and on which of its identifiers are typedef
+  names, both of which the semantic hash already covers; whether the parse is
+  attested too is open. 11 of the 30 are the tree's derived columns
+  (`parse_tree_columns`), which could be made for the read ranges alone once
+  the marks come before them.
 - **A unit's own setup in the reader.** Each unit clears seven arrays as long
   as the lane's intern table, which grows with the command
   (`check_input_run`'s `parameter_seen`, `member_seen`, the linked and
   library declarations, the builtins' names and the binding table's heads: 34
-  bytes a name a unit); `memset` is 112 M of the command's user cycles. A
-  stamp a unit, as the passes' own per-name state has, would leave them
-  alone.
+  bytes a name a unit); `memset` is 108 M of the skipped command's user
+  cycles. A stamp a unit, as the passes' own per-name state has, would leave
+  them alone. `check_input_intrinsic_initialize` is 63 M: every unit looks
+  its operands' names up among the intrinsics' again, and the answer is a
+  name's, which the lane's intern table could keep (step 3 takes the skipped
+  tokens' share of it).
 - **The parser (6%) and the emission (4%; 8% of `sqlite3.c`)**, which no
   measurement here puts above the others.
 
@@ -563,12 +657,15 @@ ranking's other rows are what is left, none of them designed here:
   the reader's walk. A header-heavy unit of a command then reads its own code
   and what that code names.
 - **Together.** On `-c sqlite3.c`: #2524's expected 2.0 times, unchanged (this
-  design does nothing for one unit before step 4, whose bound there is 1.07).
-  On musl's command: this design's expected 1.29 alone. #2524 puts its own
-  step 4 at about 1.1 there, which together is about 1.45; these counters put
-  the bodies' part between the parser and Tier 0 at 23.6% of the command, so
-  with the coverage #2524 expects on `sqlite3.c` (three quarters of that part)
-  the two together are about 1.7, and about 2.0 with #2532's index made once.
+  design does nothing for one unit before step 4, which measures 1.056 there
+  before its passes' cost). On musl's command: this design's expected 1.23 at
+  its step 2 and 1.30 at its step 3, alone. #2524 puts its own step 4 at
+  about 1.1 there, which with this design's steps is 1.4 to 1.5; these
+  counters put the bodies' part between the parser and Tier 0 at 25.6% of the
+  command, so with the coverage #2524 expects on `sqlite3.c` (three quarters
+  of that part) the two together are about 1.7, and about 2.0 with #2532's
+  index made once. The savings add: the two designs take disjoint tokens'
+  work.
 
 What this design is not:
 
