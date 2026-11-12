@@ -3886,15 +3886,36 @@ static bool tier1_select_body_call(const IrFunction* function, uint32_t node)
 
 // Whether the CFG consumer writes a body call's asm body (#1839, TIER1_RULE_ASM): its block, where it has one, an
 // IR_STACK_ADDR of a frame object, whose place in the frame its records' block base becomes, and none of the registers
-// that hold the frame (rsp, rbp, r15) among those it touches, as the producer has them (tier0_asm_bodies_check).
+// that hold the frame (rsp, rbp, r15) among those it touches, as the producer has them (tier0_asm_bodies_check); and each
+// register operand (#2144, IrAsmBody.locations), which the consumer moves into its register: an I32's, an I64's or a
+// ptr's in a general register but the scratch one, which the moves take, or a float's or a double's in xmm0 to xmm14
+// (xmm15 is the floating moves' scratch).
 static bool tier1_select_asm_supported(const IrFunction* function, uint32_t node)
 {
     const IrCall* call = tier1_select_body_call(function, node) ? &function->calls[function->b[node]] : 0;
     const IrAsmBody* body = call != 0 && call->body <= function->asm_body_count ? &function->asm_bodies[call->body - 1] : 0;
-    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    const uint32_t block = body != 0 ? ir_asm_body_block(function, call, body) : BUSTER_IR_NONE;
     const uint32_t frame = (1u << X86_REGISTER_RSP) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R15);
-    return body != 0 && call->argument_count <= 1 && (call->argument_count == 0 || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR)) &&
-           (body->touched & frame) == 0;
+    bool supported = body != 0 && call->argument_count >= body->passed && call->argument_count - body->passed <= 1 &&
+                     (block == BUSTER_IR_NONE || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR)) && (body->touched & frame) == 0;
+    const uint32_t skipped = supported ? call->argument_count - body->passed : 0;
+    // Each register taken once (their moves are one parallel move), and no more of them than a call's arguments.
+    uint64_t taken = 0;
+    supported = supported && body->passed <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
+    for (uint32_t k = 0; supported && k < body->passed; k += 1)
+    {
+        const uint32_t value = function->extra[call->argument_first + skipped + k];
+        const uint8_t reg = body->locations[k].registers[0];
+        const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const uint32_t n = reg & 0x1fu;
+        const uint8_t type = value < function->instruction_count ? function->type[value] : IR_VOID;
+        supported = vector ? (type == IR_F32 || type == IR_F64) && n < BUSTER_TIER1_SELECT_FLOAT_SCRATCH :
+                             (type == IR_I32 || type == IR_I64 || type == IR_PTR) && (reg & 0xe0) == 0 && n < 16 && n != BUSTER_TIER1_SELECT_SCRATCH && ((frame >> n) & 1) == 0;
+        const uint64_t bit = 1ull << (vector ? 32 + n : n);
+        supported = supported && (taken & bit) == 0;
+        taken |= bit;
+    }
+    return supported;
 }
 
 // Which of a machine row's operands its records write (#141, a bit per operand), through a field that names the operand's
@@ -6219,16 +6240,24 @@ static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, 
     return pending_count + (fresh && passed);
 }
 
+// The arguments of a node's call that are no effective use: a body call's block (#2144, TIER1_RULE_ASM), its first where it
+// has one, whose address no register holds; none of another call's.
+static uint32_t tier1_select_asm_skipped(const IrFunction* function, const Tier1SelectPattern* pattern, const IrCall* call)
+{
+    const bool body = pattern->rule == TIER1_RULE_ASM && call->body != 0 && call->body <= function->asm_body_count;
+    return body && call->argument_count > function->asm_bodies[call->body - 1].passed ? 1 : 0;
+}
+
 // Marks needed the values a needed `node`'s pattern reads: a call's arguments and an indirect call's callee, or its
 // pattern's values. A value the walk back has passed (`walked`, or one past `node`, a later block's value that an
 // earlier block reads, #789) goes on `pending`.
 static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count)
 {
-    // A row call's (#141) are its arguments too.
-    if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW)
+    // A row call's (#141) are its arguments too, and a body call's its register operands (#2144), past its block.
+    if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW || pattern->rule == TIER1_RULE_ASM)
     {
         const IrCall call = function->calls[function->b[node]];
-        for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
+        for (uint32_t argument = tier1_select_asm_skipped(function, pattern, &call); argument < call.argument_count; argument += 1)
         {
             const uint32_t value = function->extra[call.argument_first + argument];
             pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
@@ -6238,7 +6267,7 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
             pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
         }
     }
-    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && operand < 3; operand += 1)
+    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < 3; operand += 1)
     {
         const uint32_t value = pattern->values[operand];
         if (value != BUSTER_IR_NONE)
@@ -6594,10 +6623,10 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 const Tier1SelectPattern* pattern = &plan.patterns[node];
                 plan.estimated_cost += pattern->intrinsic_cost;
-                if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW)
+                if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW || pattern->rule == TIER1_RULE_ASM)
                 {
                     const IrCall call = function->calls[function->b[node]];
-                    for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
+                    for (uint32_t argument = tier1_select_asm_skipped(function, pattern, &call); argument < call.argument_count; argument += 1)
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->extra[call.argument_first + argument];
                     }

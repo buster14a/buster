@@ -250,13 +250,16 @@ item 2), and the C driver's `--tier1` places every statement it places in its
 caller as one, none as a row (`CheckProgramOptions.asm_bodies`), so that Tier 1's
 code runs the statements in their places, as Tier 0's does. The lowering to the IR
 makes the body's `CALL` a body call ([the IR guide](ir.md)'s "Asm bodies"): an
-opaque call of the operand block's address, which every pass takes as an unknown
+opaque call of the operand block's address and its register operands, which every pass takes as an unknown
 callee's of an escaped object, so that the block's stores stay before it and no
 access moves across it. Tier 1's selection makes it `TIER1_RULE_ASM` and its CFG
 consumer writes its records in place ([the selection guide](tier1-selection.md)'s
-"Asm bodies"): the values live past it in the registers it touches saved into
-their rows around it, its block's base the frame's base register, its branches
-the function's, and the callee-saved registers it touches pushed by the prologue.
+"Asm bodies"): its register operands moved into their registers, as Tier 0's
+call row passes them (#2144: the body call's arguments past its block), the
+values live past it kept out of the registers it touches where the allocation
+can, and the rest saved into their rows around it, its block's base the frame's
+base register, its branches the function's, and the callee-saved registers it
+touches pushed by the prologue.
 A function whose body returns (`Tier0AsmBody.leaves`) is still Tier 0's
 (`ir_lower`'s `IR_ERROR_UNSUPPORTED`, which `--tier1` falls back from), as one
 that calls `__builtin_setjmp` is. A template that writes opmask registers is a
