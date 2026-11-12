@@ -5703,9 +5703,21 @@ The later phases are left:
   file-scope declaration's or a definition's head, still
   leaves the unit without its common warnings.
 - **Errors an edited reading meets.** A reading of the view that finds an error
-  of its own isn't taken (its body is left out whole instead), so a body with
-  two walk-ending errors (`struct T1 t; struct U1 v;`) loses the second, and
-  its warnings with it.
+  takes it as the unit's only where the view can't have made it
+  (`check_driver_rejected_trusted`, #2120): the statement that holds it (its
+  nearest terminator, condition or `for` header) is kept whole, with no cast
+  of the view's and no known error, names no declaration the view changed,
+  and the view leaves out no tag's definition or label. So a body's errors
+  after a declaration constant's (`typeof(k()) u;`, whose uses the view
+  leaves out with it) are given, round after round, while a statement
+  expression whose last statement the view leaves out, its value void, gives
+  no error of the view's. Another error of such a reading isn't taken (its
+  body is left out whole instead), so a body with two walk-ending errors
+  (`struct T1 t; struct U1 v;`) loses the second, and its warnings with it.
+  Differences left: a later error in a statement the view edits (one that
+  uses the left-out declaration, `int v = u + h(1, 2);`), or anywhere after
+  a left-out tag's definition or label (`struct S { int m; } s[sizeof(k())];`),
+  is still lost.
 
 ### What the lowering costs (#531)
 
@@ -7814,11 +7826,11 @@ __attribute__((cleanup))", "… of VLA typedef"). Clang checks jumps in
 complete past the body's `}`, after its unused variables' warnings, and count
 in no scope (`check_driver_error_scoped`). A computed goto's and an asm goto's
 errors don't take their notes yet ("possible target of indirect goto
-statement"). The errors clang gives in the body after such a jump are still
-lost: the rounds' edited reading that would find them isn't taken. Nor is
-clang's `void` value of a statement expression whose last statement is a
-`case` (`x = ({ case 1: 2; })`'s "assigning to 'int' from incompatible type
-'void'") given.
+statement"). The errors clang gives in the body after such a jump are given
+where the rounds' edited reading finds them in a statement it keeps whole
+(#2120, `check_driver_rejected_trusted`). Clang's `void` value of a
+statement expression whose last statement is a `case` (`x = ({ case 1: 2;
+})`'s "assigning to 'int' from incompatible type 'void'") isn't given yet.
 
 `test-checker` compares both walks for every pair of tokens in nested and sibling
 regions, including boundaries and absent tokens, on scalar/vector normal and

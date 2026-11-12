@@ -7014,6 +7014,98 @@ static uint32_t check_driver_prototype_scope(const Parser* parser, uint32_t toke
     return list;
 }
 
+// Whether a declaration the first reading bound at `declaration` is one an edited view changed (#2120): its tokens, or its
+// initializer's, hold a part left out, or its name's other declarations (a function's) are left out.
+static bool check_driver_rejected_changed(const Parser* parser, const CheckInput* input, const uint8_t* edits, uint32_t declaration)
+{
+    const uint32_t count = parser->tokens.count;
+    bool changed = declaration < count && edits[declaration] != CHECK_DRIVER_EDIT_KEEP;
+    // Its statement, where it is one of a body's: the nearest terminator, not past its body or block.
+    uint32_t statement = declaration;
+    for (uint32_t steps = 0; !changed && statement < count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[statement];
+        statement = role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK ? BUSTER_CHECK_NONE : parser->tree.parents[statement];
+    }
+    const uint32_t first = !changed && statement < count ? check_driver_subtree_start(parser, 0, statement) : BUSTER_CHECK_NONE;
+    for (uint32_t at = first; !changed && statement < count && at <= statement; at += 1)
+    {
+        changed = edits[at] != CHECK_DRIVER_EDIT_KEEP;
+    }
+    const uint32_t name = declaration < count ? parser->tokens.names[declaration] : 0;
+    for (uint32_t at = 0; !changed && declaration < count && at < count; at += 1)
+    {
+        changed = edits[at] != CHECK_DRIVER_EDIT_KEEP && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name &&
+                  input->declarations[at] == at;
+    }
+    return changed;
+}
+
+// Whether a reader's report is one clang makes of the whole function at its end (#2120): its labels' (each undeclared one
+// once, at its first use), its jumps', and its analysis' (a misplaced fallthrough, which runs only in a body without an
+// earlier error). A view that leaves out a part of the body changes them.
+static bool check_driver_rejected_function_wide(CheckInputMessage message)
+{
+    return message == CHECK_INPUT_FALLTHROUGH_PLACEMENT || message == CHECK_INPUT_LABEL_UNDECLARED || message == CHECK_INPUT_LABEL_REDEFINITION ||
+           message == CHECK_INPUT_LABEL_AMBIGUOUS || (message >= CHECK_INPUT_JUMP_GOTO && message <= CHECK_INPUT_JUMP_ASM);
+}
+
+// Whether an edited view's reading's error at the unit's `token` is the unit's own (#2120), which the next round leaves out
+// in turn, where a view's reading's errors may be the view's own otherwise. It is where the statement that holds it (the
+// nearest terminator, condition or for header) is kept whole, with no cast of the view's, and names no declaration the view
+// changed, and the view leaves out no tag's definition or label, whose later uses its reading would read differently.
+// Nor does it hold a known error (`errors`), which the reading may find at another of its tokens; nor, for an error clang
+// makes of the whole function (`analysed`, check_driver_rejected_function_wide), does its body. So a body's later errors
+// past a declaration's error (`typeof(k()) u;`, whose uses the view leaves out too) are given,
+// and a statement expression's left-out last statement, which makes its value void, gives no error of the view's.
+static bool check_driver_rejected_trusted(const Parser* parser, const CheckInput* input, const uint8_t* edits, const uint8_t* casts, const uint32_t* errors,
+                                          uint32_t error_count, uint32_t token, bool analysed)
+{
+    const uint32_t count = parser->tokens.count;
+    bool trusted = token < count && input->declarations != NULL;
+    // An error clang makes of the whole function (check_driver_rejected_function_wide): not in a body that holds a known
+    // one, a part of which the view left out.
+    uint32_t body = analysed ? token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; body < count && parser->tree.roles[body] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        body = parser->tree.parents[body];
+    }
+    const uint32_t opened = body < count ? check_driver_subtree_start(parser, 0, body) : body;
+    for (uint32_t e = 0; trusted && analysed && e < error_count; e += 1)
+    {
+        trusted = body < count && (errors[e] < opened || errors[e] > body);
+    }
+    for (uint32_t at = 0; trusted && at < count; at += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        trusted = edits[at] == CHECK_DRIVER_EDIT_KEEP ||
+                  (role != PARSE_ROLE_OPEN_STRUCT && role != PARSE_ROLE_OPEN_ENUM && role != PARSE_ROLE_LABEL);
+    }
+    uint32_t statement = token;
+    for (uint32_t steps = 0; trusted && statement < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[statement];
+        const bool found = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR;
+        trusted = role != PARSE_ROLE_CLOSE_BODY && role != PARSE_ROLE_CLOSE_BLOCK;
+        steps = found ? count : steps;
+        statement = found ? statement : parser->tree.parents[statement];
+    }
+    trusted = trusted && statement < count;
+    const uint32_t first = trusted ? check_driver_subtree_start(parser, 0, statement) : statement;
+    for (uint32_t at = first; trusted && at <= statement; at += 1)
+    {
+        const uint32_t declaration = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER ? input->declarations[at] : BUSTER_CHECK_NONE;
+        trusted = edits[at] == CHECK_DRIVER_EDIT_KEEP && (casts == NULL || casts[at] == 0) &&
+                  (declaration >= count || !check_driver_rejected_changed(parser, input, edits, declaration));
+    }
+    // Nor does the statement hold a known error (an error the first reading found at another of its tokens).
+    for (uint32_t e = 0; trusted && e < error_count; e += 1)
+    {
+        trusted = errors[e] < first || errors[e] > statement;
+    }
+    return trusted;
+}
+
 // Whether an error's token is among the unit's known ones.
 static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
 {
@@ -7179,12 +7271,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     const bool checked = valid && !errored_reading && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
     errored_reading = valid && (errored_reading || (!checked && program.status == CHECK_PROGRAM_INVALID));
     valid = valid && (errored_reading || checked);
-    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own.)
-    if (errored_reading && edited && !whole)
-    {
-        valid = false;
-    }
-    else if (errored_reading)
+    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own, and
+    // only those check_driver_rejected_trusted finds the unit's are, #2120.)
+    const bool trusting = errored_reading && edited && !whole;
+    if (errored_reading)
     {
         // The reading's errors the unit's earlier ones don't hold, published as the first reading's are: its reader's and
         // its graph's reports, and its controls' constraints, each in clang's words, in source order.
@@ -7212,7 +7302,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const bool literal = phase == 0 && at < count && at >= unit_stop &&
                                  (input.reports[index].message == CHECK_INPUT_LITERAL || input.reports[index].message == CHECK_INPUT_WIDE_LITERAL);
             const bool fresh = at < count && !literal && !check_driver_rejected_known(errors, error_count, at) &&
-                               !check_driver_rejected_known(found, *found_count, at) && (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
+                               !check_driver_rejected_known(found, *found_count, at) &&
+                               (trusting ? check_driver_rejected_trusted(unit, first_input, edits, casts, errors, error_count, at,
+                                                                         phase == 0 && check_driver_rejected_function_wide(input.reports[index].message)) :
+                                           !edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
             valid = !fresh || *found_count < found_capacity;
             if (fresh && valid)
             {
