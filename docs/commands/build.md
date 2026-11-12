@@ -701,6 +701,11 @@ source-only edits, one-part private data edits, missing pieces, deterministic
 regeneration, late assembly warnings and failed-stage recovery. The full build
 regression also builds the real opt-in compiler once and runs its baking checks.
 
+The parts are made after the optimizer, so a unit's `-O3` pipeline is still one
+serial job. [A faster stage 1 build](../stage1-build-design.md) is the design,
+with its measurements, that moves the split in front of the optimizer in a
+configuration of its own; it isn't implemented.
+
 ## A profile-guided build
 
 `BUSTER_PGO=1` builds the Release executable, and `shifts`' executables, with a
