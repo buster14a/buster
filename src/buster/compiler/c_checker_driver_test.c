@@ -9179,9 +9179,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_initializer_warnings(&test, clang, executable, directory);
             check_test_driver_initializer_fields(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        // A long sweep that deals its own fixtures.
+        if (!lazy)
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             if (executable != NULL)
             {
                 check_test_driver_redefinitions(&test, clang, executable, directory);

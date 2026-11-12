@@ -2811,8 +2811,10 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
 };
 
-static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
-                                               const CheckDriverDefaultWarningFixture* fixtures, uint32_t fixture_count)
+// A warning sweep of `fixtures`. With `deal`, it is a long sweep (test-checker-driver --part, check_test_driver_takes):
+// each fixture is a unit of its own, which the caller doesn't deal; without it, the sweep is its caller's unit.
+static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                     const CheckDriverDefaultWarningFixture* fixtures, uint32_t fixture_count, bool deal)
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
@@ -2825,8 +2827,14 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
     {
         snprintf(objects[route], sizeof(objects[route]), "%s/default-warning-%u.o", directory, route);
     }
+    uint64_t swept = 0;
     for (uint32_t f = 0; f < fixture_count; f += 1)
     {
+        if (deal && !check_test_driver_takes())
+        {
+            continue;
+        }
+        swept += 1;
         const CheckDriverDefaultWarningFixture* fixture = fixtures + f;
         const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
         bool mismatch_printed = false;
@@ -2942,13 +2950,21 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
         }
     }
     unlink(source);
-    check_driver_run_modes.sweep_fixtures += fixture_count;
+    check_driver_run_modes.sweep_fixtures += swept;
     check_driver_run_modes.sweep_nanoseconds += check_test_driver_nanoseconds() - began;
 }
 
+static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                               const CheckDriverDefaultWarningFixture* fixtures, uint32_t fixture_count)
+{
+    check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, fixtures, fixture_count, false);
+}
+
+// The default warnings' sweep, the driver's longest: a long sweep, one unit per fixture, which its caller doesn't deal.
 static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_default_warning_fixtures, BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures));
+    check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, check_driver_default_warning_fixtures,
+                                             BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures), true);
 }
 
 // -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its
