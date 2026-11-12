@@ -315,13 +315,21 @@ typedef enum IrOp
 // then vpshufd 0x4e and, of doublewords, 0xb1), each half combined with the other, which leaves every lane of the last
 // 16 bytes the result; lane_extract's lane 0 then takes it.
 #define BUSTER_IR_INTRINSIC_REDUCE 34u
-#define BUSTER_IR_INTRINSIC_COUNT 35u
 #define BUSTER_IR_REDUCE_ADD 4u
 #define BUSTER_IR_REDUCE_MUL 5u
 #define BUSTER_IR_REDUCE_AND 6u
 #define BUSTER_IR_REDUCE_OR 7u
 #define BUSTER_IR_REDUCE_XOR 8u
 #define BUSTER_IR_REDUCE_OPERATIONS 9u
+// A unary operation of each of a vector's integer lanes (#1840), a of the result's type: its flags the lanes' bytes'
+// log2 in bits 0 and 1 and the operation in bits 2 and 3 (BUSTER_IR_LANE_UNARY_*): each lane's set bits (0: vpopcntb to
+// vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), or its conflicts, bit j set
+// for each lane j below it that equals it (2: vpconflictd, vpconflictq); the last two of doublewords and quadwords.
+#define BUSTER_IR_INTRINSIC_LANE_UNARY 35u
+#define BUSTER_IR_INTRINSIC_COUNT 36u
+#define BUSTER_IR_LANE_UNARY_POPCOUNT 0u
+#define BUSTER_IR_LANE_UNARY_LZCNT 1u
+#define BUSTER_IR_LANE_UNARY_CONFLICT 2u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -879,6 +887,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_insert",
     "movemask",
     "reduce",
+    "lane_unary",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2128,6 +2137,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 {
                     // A reduction of doublewords or quadwords into each lane of 16 bytes.
                     valid = b == BUSTER_IR_NONE && type == IR_V4I32 && ir_vector_type(ta) && (part & 3) >= 2 && (part >> 2) < BUSTER_IR_REDUCE_OPERATIONS;
+                }
+                else if (c == BUSTER_IR_INTRINSIC_LANE_UNARY)
+                {
+                    // A population count of any lanes; a leading zero count or conflicts of doublewords or quadwords.
+                    valid = b == BUSTER_IR_NONE && ir_vector_type(type) && ta == type && (part >> 2) <= BUSTER_IR_LANE_UNARY_CONFLICT &&
+                            ((part >> 2) == BUSTER_IR_LANE_UNARY_POPCOUNT || (part & 3) >= 2);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_INSERT)
                 {
@@ -3596,7 +3611,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
                                 c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
-                                c == BUSTER_IR_INTRINSIC_REDUCE)
+                                c == BUSTER_IR_INTRINSIC_REDUCE || c == BUSTER_IR_INTRINSIC_LANE_UNARY)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

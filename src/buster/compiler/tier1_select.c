@@ -337,6 +337,9 @@ typedef enum Tier1SelectRule
 // values[1] its operands, values[2] the mask and values[3] the passthrough w, which the destination takes first unless
 // it holds it; none where w is a zero vector, the zeroing form.
 #define BUSTER_TIER1_VECTOR_MASKED_BINARY 25
+// A unary operation of each of values[0]'s lanes (#1840): `immediate` the IR's flags, one record of
+// ir_simd_lane_unary_forms' (vpopcntb to vpopcntq, vplzcntd, vplzcntq, vpconflictd, vpconflictq).
+#define BUSTER_TIER1_VECTOR_LANE_UNARY 28
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -2318,6 +2321,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_REDUCE)
         {
             tier1_select_reduce(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_LANE_UNARY)
+        {
+            const uint32_t flags = (uint32_t)holes->immediate;
+            const uint16_t form = ir_simd_lane_unary_forms[(flags >> 2) % 3][flags & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
+            tier1_select_append(&result, tier1_select_register_record(form, x, left));
         }
         else if (kind == BUSTER_TIER1_VECTOR_AES)
         {
@@ -4762,7 +4771,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
-                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
+                                                                           c == BUSTER_IR_INTRINSIC_LANE_UNARY)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4883,6 +4893,17 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_REDUCE;
             base.source_width = (uint8_t)tier1_select_vector_width(function->type[a]);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_UNARY)
+        {
+            // A unary operation of each lane (#1840): its lanes and operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_LANE_UNARY;
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.intrinsic_cost = 1;
