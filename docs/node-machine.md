@@ -5,8 +5,8 @@ Status: step 0, the census, is built and its gate holds
 ([below](#step-1-the-shadow)): the machine's entries are the pipeline's on every
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
-on its own, their expressions costing more a node), and it codes only part of the
-set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
+on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cost
+more a node), and it codes only part of the set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
 and the compound assignments). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
@@ -906,6 +906,23 @@ behavior. On the 9700X at `34748d68`, on main `0af27a30`
 - **All three:** 659.9 against 669.9. Main's X formed and spilled each record's
   value address before its template's branch; the accessors form it only where
   a value field is read.
+
+The split merged as `f5b919f2`, after #2569's `&&`, `||` and `?:` were ported into
+its files and #2575's calls (below) merged with them. Calls take a template of
+their own after the logical operators' three, and a label's subtree starts at
+T's `lowest` record, which counts a call's arguments. On the 9700X
+([the record's "The merged head"](https://github.com/buster14a/buster-performance/tree/9a7d2b01a26dfe47410eebac3e5d993f50b503a2/docs/measurements/node-machine-split-2524-2026-11-12)):
+
+- **The port costs nothing.** Ported over main `f2faf255` (`3878feb1`), the
+  machine takes main's set with no difference, at 371.5 instructions a node for
+  T (main 371.5), 575.4 for T and C (575.3) and 687.9 for all three (695.3).
+- **With calls too,** it takes 93.0% of `sqlite3.c`'s census-taken nodes (Lua
+  87.2%, musl 82.1%), with no difference, `-g` included. It compares 7,346
+  labels on `sqlite3.c` against main's 5,438, because the expressions that mix
+  calls with the logical operators are taken now.
+- **Its cost** is 222.6 cycles and 764.1 instructions a taken node on
+  `sqlite3.c` (T 446.7, T and C 651.1). As #2569 and #2575 each found, the
+  newly taken expressions cost more a node than those taken before.
 
 ### Calls
 
