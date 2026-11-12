@@ -3820,6 +3820,70 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
     }
 }
 
+// The uses of counted_by and counted_by_or_null pointer members whose pointee type is incomplete where they are read or
+// assigned (#1842's 3d, CHECK_DIAG_COUNTED_INCOMPLETE): a `.` or `->` of such a member, unless it is `&`'s operand, reports
+// at itself, and an assignment to one at the assignment, as clang's errors are; added to the sorted reports in token
+// order, past the node's own. Only where some member counts a pointer at all, which few units have.
+static void check_graph_counted_uses(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, Arena* scratch)
+{
+    bool counted = false;
+    for (uint32_t m = 1; !counted && m < types->members.count; m += 1)
+    {
+        const uint32_t kind = (types->members.flags[m] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT;
+        counted = (kind == BUSTER_TYPE_COUNTED_BY || kind == BUSTER_TYPE_COUNTED_BY_OR_NULL) &&
+                  type_kind(types, type_strip_aligned(types, types->members.type[m])) == BUSTER_TYPE_KIND_POINTER;
+    }
+    const uint64_t mark = scratch->length;
+    // Each node's consumer, where it is `&`'s operand or an assignment's target.
+    uint32_t* consumers = counted && graph->members != NULL && graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
+    for (uint32_t node = 0; consumers != NULL && node < graph->count; node += 1)
+    {
+        consumers[node] = BUSTER_CHECK_NONE;
+    }
+    for (uint32_t node = 0; consumers != NULL && node < graph->count; node += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t operand = graph->operand0[node];
+        if ((op == CHECK_OP_ADDRESS || op == CHECK_OP_ASSIGN) && operand < graph->count)
+        {
+            consumers[operand] = node;
+        }
+    }
+    for (uint32_t node = 0; consumers != NULL && node < graph->count && stream->report_count < graph->count; node += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t base = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        const uint32_t consumer = base != BUSTER_CHECK_NONE ? consumers[node] : BUSTER_CHECK_NONE;
+        const bool address = consumer != BUSTER_CHECK_NONE && graph->ops[consumer] == CHECK_OP_ADDRESS;
+        const TypeId base_type = base < stream->count && !address ? type_unqualified(type_strip_aligned(types, stream->value_types[base])) : 0;
+        const TypeId record = op == CHECK_OP_ARROW && base_type != 0 && type_kind(types, base_type) == BUSTER_TYPE_KIND_POINTER ?
+                              type_unqualified(type_strip_aligned(types, type_element(types, base_type))) : op == CHECK_OP_MEMBER ? base_type : 0;
+        const uint8_t record_kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_NONE;
+        uint64_t offset = 0;
+        const uint32_t member = record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION ? type_find_member(types, record, graph->members[node], &offset) : 0;
+        const uint32_t kind = member != 0 ? (types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT : BUSTER_TYPE_COUNT_NONE;
+        const TypeId pointer = kind == BUSTER_TYPE_COUNTED_BY || kind == BUSTER_TYPE_COUNTED_BY_OR_NULL ? type_strip_aligned(types, types->members.type[member]) : 0;
+        const TypeId pointee = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(types, pointer) : 0;
+        const CheckContext context = check_graph_context(graph, node, false);
+        const bool assigned = consumer != BUSTER_CHECK_NONE && graph->ops[consumer] == CHECK_OP_ASSIGN;
+        const uint32_t at = assigned ? consumer : node;
+        if (pointee != 0 && !check_context_source_complete(types, pointee, &context) && stream->diagnostics[at] == CHECK_DIAG_NONE)
+        {
+            // In token order among the sorted reports, after those at the same token.
+            const uint32_t token = graph->tokens != NULL ? graph->tokens[at] : at;
+            uint32_t place = stream->report_count;
+            while (place > 0 && stream->reports[place - 1].token > token)
+            {
+                stream->reports[place] = stream->reports[place - 1];
+                place -= 1;
+            }
+            stream->reports[place] = (CheckReport){ .node = at, .token = token, .message = CHECK_MESSAGE_ACTION, .diagnostic = CHECK_DIAG_COUNTED_INCOMPLETE };
+            stream->report_count += 1;
+        }
+    }
+    arena_pop_to(scratch, mark);
+}
+
 static void check_graph_reports(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
 {
     (void)scalar;
@@ -4174,6 +4238,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             if (result)
             {
                 check_graph_reports(types, graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_counted_uses(types, graph, stream, scratch);
             }
         }
     }
