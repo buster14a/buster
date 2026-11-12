@@ -209,6 +209,10 @@ static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp,
             }
             texts[1] = report->detail == 7 ? texts[1] : "no corresponding enumerator here";
         } break;
+        case 9: // CHECK_TAG_MISMATCH_KIND (#1826): the earlier unnamed record, its kind
+            texts[0] = check_warning_text(scratch, "'%.*s' is a %s here", (int)first_name.length, first_name.pointer,
+                                          report->value != 0 ? "union" : "struct");
+            break;
         default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
         {
             const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
@@ -1827,8 +1831,20 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     return result;
 }
 
-// A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
-// (check_semantic_note_count counts them): const assignment's are several (#1447).
+// The first token of call `node`'s argument `argument`, its parentheses included: clang's getBeginLoc of it.
+static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument)
+{
+    const uint32_t value = graph->argument_nodes[graph->argument_offsets[node] + argument];
+    uint32_t first = graph->argument_tokens[graph->argument_offsets[node] + argument];
+    const uint32_t token = value < graph->count ? graph->tokens[value] : first;
+    while (first > 0 && first < parser->tokens.count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN &&
+           parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first - 1] > token)
+    {
+        first -= 1;
+    }
+    return first;
+}
+
 // __builtin_clear_padding's argument refused (#2414, clang's BuiltinClearPadding), at its first token, its parentheses
 // included: no pointer, "passing 'T' to parameter of incompatible type pointer: type mismatch at 1st parameter ('T' vs
 // pointer)", the argument's type as written (an array isn't decayed); a function pointer, "argument to
@@ -1842,13 +1858,7 @@ static const char* check_semantic_clear_padding(const Parser* parser, Preprocess
     const CheckGraph* graph = &input->graph;
     const uint32_t node = report->node;
     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node]];
-    uint32_t first = graph->argument_tokens[graph->argument_offsets[node]];
-    const uint32_t value_token = argument < graph->count ? graph->tokens[argument] : first;
-    while (first > 0 && first < parser->tokens.count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN &&
-           parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first - 1] > value_token)
-    {
-        first -= 1;
-    }
+    const uint32_t first = check_semantic_argument_begin(parser, graph, node, 0);
     const TypeId written = argument < stream->count ? check_stream_type(stream, argument) : 0;
     const TypeId bare = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
     const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
@@ -1877,6 +1887,9 @@ static const char* check_semantic_clear_padding(const Parser* parser, Preprocess
     return result;
 }
 
+// A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
+// (check_semantic_note_count counts them): const assignment's are several (#1447).
+
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
@@ -1899,6 +1912,21 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     if (overloaded != NULL)
     {
         result = overloaded;
+    }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING &&
+             graph->argument_counts[node] == 1 && report->diagnostic == CHECK_DIAG_INCOMPATIBLE)
+    {
+        // CFString's argument that converts but is no ordinary literal (#2189, clang's CheckObjCString), at its first token.
+        CheckBuiltinMiscConstraint constraint = CHECK_BUILTIN_MISC_CONSTRAINT_NONE;
+        for (uint32_t i = 0; i < stream->misc_count; i += 1)
+        {
+            constraint = stream->misc[i].node == node ? stream->misc[i].constraint : constraint;
+        }
+        if (constraint == CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT)
+        {
+            result = "CFString literal is not a string constant";
+            *location = check_semantic_argument_begin(parser, graph, node, 0);
+        }
     }
     else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CLEAR_PADDING &&
              graph->argument_counts[node] == 1 &&
@@ -2227,6 +2255,21 @@ static const char* check_semantic_control(Preprocessor* pp, const TypeTable* typ
                 text[--at] = '-';
             }
             result = check_warning_text(scratch, "duplicate case value '%s'", text + at);
+        }
+        else if (failure->wide != NULL && check_wide_type(types, failure->type, &width, &sign))
+        {
+            // A _BitInt's past 128 bits (#2220): its limbs' decimal digits.
+            const CheckValue value = {
+                .type = failure->type,
+                .category = CHECK_RVALUE,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = failure->value,
+                .floating_storage = { (uint64_t)(uintptr_t)failure->wide, 0 },
+            };
+            const uint32_t capacity = width / 3 + 3;
+            char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, capacity + 1);
+            const uint32_t length = text != NULL ? check_wide_decimal(types, &value, text, capacity) : 0;
+            result = length != 0 ? check_warning_text(scratch, "duplicate case value '%.*s'", (int)length, text) : result;
         }
     }
     return check_semantic_text(pp, result);
