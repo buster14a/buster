@@ -2209,6 +2209,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
             result = "'_BitInt' suffix for literals is a C23 extension";
             break;
+        case CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO:
+        {
+            // The label's decoded string, as clang's warn_asm_label_on_auto_decl prints it (#2370).
+            const String8 label = check_warning_strings_value(parser, pp, payload->token, scratch);
+            result = check_warning_text(scratch, "ignored asm label '%.*s' on automatic variable", (int)label.length, label.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :
@@ -2520,6 +2527,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 "relational comparison result unused",
             };
             result = messages[payload->data < BUSTER_ARRAY_LENGTH(messages) ? payload->data : 0];
+            break;
+        }
+        case CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = type.length != 0 ? check_warning_text(scratch, "C99 forbids casting nonscalar type %.*s to the same type", (int)type.length, type.pointer) : NULL;
             break;
         }
         case CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION:

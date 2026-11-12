@@ -2622,9 +2622,10 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
 // (BUSTER_TIER0_ASM_BLOCK) addressing the block's frame object from the frame base register, by the frame's layout; and
 // compares them with the emitted ones, which carry no reference. The body's own branches are exactly its branches, each
 // to its target's record (its end's for one to the body's end), and no other branch leaves its records. The records
-// are one ORIGINAL, of no use and no definition: they read the block's memory, which isn't a value the allocation keeps,
-// and kill every register the body touches (IrAsmBody.touched and .masks: callee-saved ones too, which the prologue
-// saved) and the frame bytes their stores write.
+// are one ORIGINAL of no definition, whose uses are its register operands (#2144, IrAsmBody.locations), each read in its
+// own register, where the operands' moves before it left it: they read the block's memory too, which isn't a value the
+// allocation keeps, and kill every register the body touches (IrAsmBody.touched and .masks: callee-saved ones too, which
+// the prologue saved) and the frame bytes their stores write.
 static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, uint32_t r, uint32_t end)
 {
     const IrFunction* function = build->plan->function;
@@ -2632,7 +2633,7 @@ static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, 
     const uint32_t index = (uint32_t)build->plan->patterns[node].immediate;
     const IrCall* call = function->op[node] == IR_CALL ? &function->calls[function->b[node]] : 0;
     const IrAsmBody* body = call != 0 && call->body != 0 && index < function->asm_body_count && call->body == index + 1 ? &function->asm_bodies[index] : 0;
-    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    const uint32_t block = body != 0 ? ir_asm_body_block(function, call, body) : BUSTER_IR_NONE;
     int32_t offset = 0;
     bool valid = body != 0 && end >= r && end - r == body->count &&
                  (block == BUSTER_IR_NONE || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[block], &offset)));
@@ -2660,6 +2661,17 @@ static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, 
         .condition = X86_FORM_NONE,
         .body = body,
     };
+    // Its register operands, its effective uses in order, each in its register.
+    const uint32_t offset_uses = build->plan->effective_use_offsets[node];
+    valid = valid && build->plan->effective_use_offsets[node + 1] - offset_uses == body->passed;
+    for (uint32_t k = 0; valid && k < body->passed; k += 1)
+    {
+        const uint32_t value = emitted->node_values[build->plan->effective_use_values[offset_uses + k]];
+        const uint8_t reg = body->locations[k].registers[0];
+        const uint32_t where = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR ? 32 * BUSTER_TIER1_ALLOCATE_VECTOR + (reg & 0x1fu) : 32 * BUSTER_TIER1_ALLOCATE_GPR + reg;
+        valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_register(build, value, where));
+    }
+    valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
     // The emitted records, each now its placement's.
     return valid && tier1_cert_emitted_originals(build, node, &kernel, emitted->code.records + r, body->count);
 }

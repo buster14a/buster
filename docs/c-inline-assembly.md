@@ -250,13 +250,16 @@ item 2), and the C driver's `--tier1` places every statement it places in its
 caller as one, none as a row (`CheckProgramOptions.asm_bodies`), so that Tier 1's
 code runs the statements in their places, as Tier 0's does. The lowering to the IR
 makes the body's `CALL` a body call ([the IR guide](ir.md)'s "Asm bodies"): an
-opaque call of the operand block's address, which every pass takes as an unknown
+opaque call of the operand block's address and its register operands, which every pass takes as an unknown
 callee's of an escaped object, so that the block's stores stay before it and no
 access moves across it. Tier 1's selection makes it `TIER1_RULE_ASM` and its CFG
 consumer writes its records in place ([the selection guide](tier1-selection.md)'s
-"Asm bodies"): the values live past it in the registers it touches saved into
-their rows around it, its block's base the frame's base register, its branches
-the function's, and the callee-saved registers it touches pushed by the prologue.
+"Asm bodies"): its register operands moved into their registers, as Tier 0's
+call row passes them (#2144: the body call's arguments past its block), the
+values live past it kept out of the registers it touches where the allocation
+can, and the rest saved into their rows around it, its block's base the frame's
+base register, its branches the function's, and the callee-saved registers it
+touches pushed by the prologue.
 A function whose body returns (`Tier0AsmBody.leaves`) is still Tier 0's
 (`ir_lower`'s `IR_ERROR_UNSUPPORTED`, which `--tier1` falls back from), as one
 that calls `__builtin_setjmp` is. A template that writes opmask registers is a
@@ -534,17 +537,35 @@ repaired view keeps it, the statement's `)` being the original's
 
 Differences left: a `target` attribute on an earlier declaration alone, not
 the definition, doesn't widen an operand's limit, where clang's
-`getFunctionFeatureMap` reads the inherited attribute; and
-clang's "ignored asm label 'X' on automatic variable" warning is missing
-(#2370).
+`getFunctionFeatureMap` reads the inherited attribute.
+
+An asm label on a block-scope object of automatic storage (none or `auto`,
+C23's inferred `auto` and `constexpr` too), not `register`, is clang's
+"ignored asm label 'X' on automatic variable" (#2370,
+`warn_asm_label_on_auto_decl`, in no group: `-Werror` makes it an error, `-w`
+silences it), at the label's first string, X its decoded text
+(`check_input_asm_labels`, `CHECK_WARNING_ID_ASM_LABEL_ON_AUTO`). A static,
+extern, function or typedef label is not warned, as clang's. A `for`
+statement's declarations take asm labels as a block's do (#2419: the scalar
+parser's declarator reads one in the for header's frame too). Left: a
+block-scope `_Thread_local` object's error is "invalid or unsupported
+declaration", not clang's (#2420).
 
 Such a variable has no object and no symbol (an initializer is ignored, as
 clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
 `FRAME_ADDRESS`, which gives its function a frame pointer (clang's code reads rbp
 in one; under `--tier1`, such a function is Tier 0's, as `__builtin_frame_address`'s
 is), the low half for esp and ebp; an assignment of rsp or esp sets rsp
-(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does). An
-assignment of rbp or ebp, and an update (`sp += 8`, `sp++`), are refused by name.
+(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does), the value
+kept in a temporary, the expression's after the write. An update of an integer
+one (`sp += 8`, `sp &= ~15L`, `sp++`, `--esp`, #2432) is clang -O0's read, the
+operation in the calculation's type and the write, its value the new one (the
+old one for a postfix increment or decrement): `check_lower_global_register_update`.
+An assignment or an update of rbp or ebp is refused by name: clang's code
+writes the frame pointer of a function that has one, which its epilogue's
+`popq %rbp` happens to undo, where Tier 0's `mov %rbp, %rsp` would take the
+written value as the frame. An update of a pointer one (whose arithmetic
+scales) is refused by name too.
 As an asm operand it is the register itself (`CheckAsmPlace.global`): the
 template names `%rsp` or `%rbp`, and nothing is loaded or stored, since clang's
 code moves the register's own value into it and back (but for esp and ebp

@@ -1,0 +1,14 @@
+function (ptr) -> i64 {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v8i32 %0 align=32
+  %3 = load.v16i32 %0 align=64
+  %4 = intrinsic.v4i32 %1 reduce 2
+  %5 = intrinsic.v4i32 %2 reduce 7
+  %6 = intrinsic.v4i32 %3 reduce 14
+  %7 = intrinsic.v4i32 %3 reduce 35
+  %8 = intrinsic.v4i32 %2 reduce 22
+  %9 = intrinsic.i64 %8 lane_extract 3
+  %10 = ret.void %9
+}
