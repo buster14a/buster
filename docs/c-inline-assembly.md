@@ -555,8 +555,16 @@ clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
 `FRAME_ADDRESS`, which gives its function a frame pointer (clang's code reads rbp
 in one; under `--tier1`, such a function is Tier 0's, as `__builtin_frame_address`'s
 is), the low half for esp and ebp; an assignment of rsp or esp sets rsp
-(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does). An
-assignment of rbp or ebp, and an update (`sp += 8`, `sp++`), are refused by name.
+(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does), the value
+kept in a temporary, the expression's after the write. An update of an integer
+one (`sp += 8`, `sp &= ~15L`, `sp++`, `--esp`, #2432) is clang -O0's read, the
+operation in the calculation's type and the write, its value the new one (the
+old one for a postfix increment or decrement): `check_lower_global_register_update`.
+An assignment or an update of rbp or ebp is refused by name: clang's code
+writes the frame pointer of a function that has one, which its epilogue's
+`popq %rbp` happens to undo, where Tier 0's `mov %rbp, %rsp` would take the
+written value as the frame. An update of a pointer one (whose arithmetic
+scales) is refused by name too.
 As an asm operand it is the register itself (`CheckAsmPlace.global`): the
 template names `%rsp` or `%rbp`, and nothing is loaded or stored, since clang's
 code moves the register's own value into it and back (but for esp and ebp
