@@ -61,6 +61,12 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   `EXCLUSIVE_OWNER=<name> EXCLUSIVE_TITLE=<title> EXCLUSIVE_LINK=<link> ~/buster-fast-bench/exclusive.sh COMMAND...`,
   per run, never around a series: a CI job waits at most 10 minutes for it.
   `cat /var/lib/buster-9700x/owner` shows who holds it.
+- As it takes the lock, `exclusive.sh` lists on stderr the other processes
+  that have used half a CPU or more over their lives (`exclusive.sh: other
+  processes busy as the lock is taken`, then a line each, with no command
+  lines), and appends them to `/var/lib/buster-9700x/busy.log`. Keep those
+  lines in a record, and trace a listed process as "A command by hand" says.
+  Nothing is printed when there are none (#2555).
 - Keep a task's trees and results in `~/buster-fast-bench/<issue>-<agent>/`
   (`1282-claude`, `615-codex`): a clone of the repository at the commit it
   measures, its scripts and its results. Don't build in another session's
@@ -78,3 +84,44 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
 - The raw results go to
   [buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements),
   never to this repository (AGENTS.md's "Issue ownership").
+- Write the busiest processes and `/proc/loadavg` into the record before and
+  after each run, inside its hold
+  (`ps -eo psr,pcpu,pid,etimes,user,comm --sort=-pcpu | head`), so that the
+  record shows what else ran: the lock covers only what runs through it.
+
+## A command by hand
+
+A test program or a one-off command run there by hand counts as a run. On 12
+November a fixture's program, started by hand outside the lock, looped for 5.6
+hours beside a dozen sessions' measurements (#2555).
+
+- **Under the lock, with a `timeout`:**
+  `EXCLUSIVE_OWNER=<name> EXCLUSIVE_TITLE=<title> EXCLUSIVE_LINK=<link> ~/buster-fast-bench/exclusive.sh timeout -k 5 60 ./run`.
+  Inside `exclusive.sh`, `timeout` limits the command, not its wait for the
+  lock. A program that may not terminate, such as a new test fixture's, always
+  gets one.
+- **A dropped connection doesn't stop it.** When a `tailscale ssh` call ends,
+  because the client was killed, a tool call timed out or the network dropped,
+  benchpress sends the remote command no SIGHUP. It runs on under PID 1, and
+  keeps the lock if it holds it. Before you leave, list what you left running,
+  `ps -u david -o pid,ppid,etimes,pcpu,args --sort=-pcpu | grep -F DIR`, and
+  kill what is yours by PID: the queue, then `exclusive.sh`, then its command.
+- **Tracing a busy process to its session:**
+  1. `ps -eo pid,psr,pcpu,etimes,user,comm --sort=-pcpu | head` lists the
+     busiest processes. `%CPU` is an average over the process's life.
+  2. `cat /proc/PID/cgroup` names its login session, `…/session-cNNN.scope`.
+     Each `tailscale ssh` call is a session of its own.
+  3. `loginctl show-session cNNN -p Timestamp -p RemoteHost -p Leader` gives
+     when the session started and the tailnet address it came from.
+  4. Tailscale logs each call's command to the journal. Search the minute of
+     that `Timestamp`:
+     `journalctl -q -t tailscaled --since 'YYYY-MM-DD HH:MM' --until 'YYYY-MM-DD HH:MM' | grep 'starting non-pty command'`.
+     Each line has the command (`--cmd=`), the address (`--remote-ip=`) and
+     the caller's tag (`--remote-user=`; agent sessions are `tag:llm`).
+     `tailscale status` names the node at that address while it is up.
+  5. After the session ends, the journal's `session-cNNN.scope: Consumed …
+     CPU time` line says what it used.
+
+  Don't kill another session's process. Report it on its issue or pull request
+  (the command's directory usually names one), or to the owner, with what these
+  steps found.

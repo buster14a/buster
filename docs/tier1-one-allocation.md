@@ -97,29 +97,36 @@ placements' files didn't. The expected case was 393 ms on `sqlite3.c` and
 Main `c5f0efb2`, Release, the default host; whole processes pinned to CPU 2
 (one lane) or CPUs 0 to 7 (eight), each configuration writing its objects in a
 directory of its own, in a Williams design's order. Medians of 7 runs (musl: 5)
-with the range of the wall times; peaks from a pass without `perf`.
+with the range of the wall times; peaks from a pass without `perf`. The
+eight-lane rows are from [a second record](https://github.com/buster14a/buster-performance/tree/c7e42f773b04c88f8030103e3bcf396b556e12fa/docs/measurements/tier1-eight-lanes-2555-2026-11-12),
+which ran the same commit, scripts and inputs again once
+[#2555](https://github.com/buster14a/buster/issues/2555)'s stray process was
+gone. That process had looped on core 0 beside the first record's eight-lane
+runs, which read 3% (`sqlite3.c`) to 36% (Lua) high. In the second record one
+run of musl's eight-lane default row spent about 250 ms off the CPUs, hence its
+range; that row's second round ranges from 204.3 to 208.4 ms.
 
 | corpus | lanes | compile | wall ms | user cycles, M | user instructions, M | peak MB |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | `sqlite3.c` | 1 | default | 124.0 (123.4 to 149.3) | 599.3 | 1,347.5 | 235.1 |
 | | 1 | `--tier1` | 426.1 (425.5 to 426.9) | 2,257.1 | 5,278.7 | 295.8 |
-| | 8 | default | 115.8 (114.5 to 116.9) | 631.1 | 1,348.4 | 275.6 |
-| | 8 | `--tier1` | 176.4 (174.3 to 177.2) | 2,324.4 | 5,280.8 | 455.4 |
+| | 8 | default | 112.2 (111.8 to 113.4) | 636.0 | 1,348.4 | 279.7 |
+| | 8 | `--tier1` | 166.7 (166.0 to 168.2) | 2,339.3 | 5,280.7 | 454.1 |
 | Lua 5.4.8, 33 units | 1 | default | 91.7 (91.5 to 104.7) | 439.9 | 1,165.0 | 64.5 |
 | | 1 | `--tier1` | 167.5 (167.4 to 180.8) | 827.7 | 2,014.2 | 103.1 |
-| | 8 | default | 34.6 (28.5 to 39.6) | 605.8 | 1,200.7 | 221.4 |
-| | 8 | `--tier1` | 54.6 (46.2 to 71.4) | 966.8 | 2,049.4 | 241.8 |
+| | 8 | default | 27.2 (26.8 to 27.6) | 666.7 | 1,201.2 | 217.9 |
+| | 8 | `--tier1` | 40.1 (39.8 to 41.1) | 1,019.2 | 2,048.7 | 231.1 |
 | musl, 1,336 units | 1 | default | 1,052.9 (1,052.3 to 1,080.4) | 4,747.0 | 12,756.1 | 142.8 |
 | | 1 | `--tier1` | 1,352.4 (1,350.9 to 1,354.1) | 6,208.1 | 15,145.0 | 148.7 |
-| | 8 | default | 242.0 (241.2 to 251.3) | 5,511.5 | 12,777.8 | 286.4 |
-| | 8 | `--tier1` | 296.1 (295.0 to 313.1) | 6,988.8 | 15,168.0 | 293.7 |
+| | 8 | default | 206.2 (205.0 to 453.4) | 5,645.7 | 12,780.0 | 289.3 |
+| | 8 | `--tier1` | 253.0 (251.4 to 257.8) | 7,112.5 | 15,166.9 | 293.5 |
 
 Tier 1 compiles 2,668 of `sqlite3.c`'s 2,668 functions, 1,087 of Lua's 1,088
 and 2,755 of musl's 2,756. On one lane `--tier1` is 3.44 times the default
 compile on `sqlite3.c`, 1.83 on Lua and 1.28 on musl, where 1,336 units' front
-ends dilute it. On eight lanes it adds 60.6 ms to `sqlite3.c`'s compile (176.4
-against 115.8) where it adds 302.1 ms on one, since the pipeline runs per
-function on the lanes; the cycles are the same.
+ends dilute it. On eight lanes it adds 54.5 ms to `sqlite3.c`'s compile (166.7
+against 112.2) where it adds 302.1 ms on one, since the pipeline runs per
+function on the lanes; the cycles it adds are about the same.
 
 ### Where the pipeline's time goes
 
@@ -627,8 +634,8 @@ there before any order is switched on, which every row carries. Against the
 patched executable's own order the inline one is −1.4% on musl.
 
 Eight lanes should gain the same cycles and less wall time: there the
-pipeline adds 60.6 ms to `sqlite3.c`'s compile, so the expected case's 11% of
-its work is about 7 ms of 176.4. It isn't measured: the prototype keeps its
+pipeline adds 54.5 ms to `sqlite3.c`'s compile, so the expected case's 11% of
+its work is about 6 ms of 166.7. It isn't measured: the prototype keeps its
 state in globals and runs on one lane.
 
 Generated code does not change in any case.

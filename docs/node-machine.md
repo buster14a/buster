@@ -676,8 +676,8 @@ takes it.
   reader answered at their tokens: a leaf's value (its declaration's or its
   literal's), a cast's and a sizeof's type name, a member's name. It never reads
   the graph run's output, the stream or the lowering's state. In step 2 it reads
-  the parser's tree in their place. A record holds a whole `CheckValue` (96
-  bytes), not the design's 28.
+  the parser's tree in their place. A record's value is the design's columns,
+  not a whole 96-byte `CheckValue` ("T's records as columns", below).
 - **T** types each record in one of four ways:
   - a leaf, by the reader's leaf;
   - an arithmetic or bitwise operator, a comparison or `-` and `~` of builtin
@@ -808,7 +808,8 @@ So the gate asks for fewer instructions a node, about a fifth fewer at the
 sweeps' IPC. The levers, in order:
 
 1. **The design's 28-byte records** in place of whole values, with the leaf's
-   class and standing read once from its declaration, as step 2 reads them.
+   class and standing read once from its declaration, as step 2 reads them
+   (done, below: worth less than this expected).
 2. **The context and template tables baked** in place of C's and X's branches.
    Measured on today's records, they cost more than the branches
    ([below](#the-baked-tables-measured)): they wait for the first lever's
@@ -1011,6 +1012,100 @@ on `sqlite3.c`, against the split's 171.0 and 659.9. The nodes calls add cost
 
 `-c sqlite3.c` is unchanged: 124.1 ms against 124.0 ms, with the same
 instructions.
+
+### T's records as columns
+
+T's records are the design's columns now, not a whole `CheckValue` a record
+([the guide](commands/lowering.md#the-shadow-step-1) lists them). A record's
+value is its type, flags and object, a standing byte (its category, its
+constant kind and which field its payload holds) and a 64-bit payload (its
+integer, its offset or its floating value's significand, beside a 16-bit
+exponent). A value the columns can't hold whole goes whole to a side array:
+88 of `sqlite3.c`'s 142,196 records (two payload fields, mostly an
+integer-to-pointer cast's).
+
+- **The rows and the rules** read their operands' columns and write their
+  records'. The discard, the store, the address, the dereference and the truth
+  test convert on the columns in the common case. They make a value whole only
+  for the action's own conversion: a floating constant's, a null pointer's, a
+  `_Bool` constant's.
+- **The action is still the twin.** A value is made whole only where a node
+  goes to it, where `--verify` compares it, and where the shadow compares a
+  record with the stream.
+- **Nothing else changed.** The same nodes go by a row or a rule (75,973) and
+  by the action (7,238). `--verify` shows no difference on `sqlite3.c`, Lua,
+  musl and `main.c`, with `-g` too.
+- **The columns are one block** (`NodeMachineColumns`): every field of a
+  record is one load from one base. A pointer a column in `NodeMachine` had to
+  be loaded again after every store, since the build's `-fno-strict-aliasing`
+  lets any store change it: three instructions a field, which cost C 19 a node.
+- **The columns are staggered:** each array starts 128 bytes past the one
+  before, modulo 4 KB. Arrays of 4,096 elements one after another had each begun
+  on a 4 KB boundary. That put every array's first records, all an expression
+  of five nodes touches, in one set of the first-level cache, more lines than
+  its 12 ways, and each record's fields 4 KB apart, which the load-store unit
+  takes for aliases. Main's whole values had the same layout.
+
+On the 9700X at `2044025c`, on #2571's split (`27ee009a`) and main `0af27a30`
+(`sqlite3.c`, CPU 2, under the lock, the least of 11 passes, a taken evaluated
+node;
+[the record](https://github.com/buster14a/buster-performance/tree/6eb0a054b6f07132d12569ad1d275422084594f1/docs/measurements/node-machine-records-2524-2026-11-12)):
+
+| | T: cycles, instructions | all three: cycles, instructions | all three, warm |
+| --- | ---: | ---: | ---: |
+| main | 94.8, 368.1 | 170.1, 669.9 | 159.8 |
+| the split | 95.2, 368.1 | 169.4, 659.9 | 150.3 |
+| the split, staggered | 92.5, 368.1 | 152.9, 659.9 | 130.5 |
+| T's columns, a pointer each, not staggered (on main) | 135.1, 347.1 | 285.0, 680.6 | 342.3 |
+| T's columns, a pointer each, staggered (`a7554651`) | 88.1, 347.0 | 156.7, 658.9 | 124.9 |
+| T's columns in one block, staggered (`2044025c`) | **87.3, 344.0** | **150.2, 627.1** | **123.4** |
+
+"Warm" is the second of two runs in a row (`--repeat 2`). Warm, T costs 68.2
+cycles a node, C 35.1 and X 20.1 (main: 79.9, 49.5 and 30.4). Lua's three sweeps
+go from 178.6 cycles a node to 169.8, and to 162.2 with the stagger alone.
+
+- **The stagger is most of the gain:** 16.5 cycles of all three sweeps' 169.4
+  in one run and 19.8 of 150.3 warm, with no instruction fewer. Without it the
+  columns were slower than the whole values: 285 cycles, at an IPC of 2.4.
+- **The columns are worth 24 of T's 368 instructions and 33 of all three
+  sweeps' 660:** 2.7 cycles in one run and 7.1 warm, against the staggered
+  whole values. On Lua they cost 7.6 (169.8 against 162.2): a quarter of its
+  typed operators go to the action, which takes and gives whole values. A
+  value's copies were never where T's instructions go. By the
+  profile of retired instructions they spread over the loop and its context
+  test, the leaves' records, the operands' search, the type words and the
+  rules' type-table queries, none of them a tenth of T. Holding T's loop inputs
+  in locals, and `restrict`, changed nothing measurable.
+- **The gate: 150.2 cycles for one run and 123.4 warm, against 120.** The warm
+  figure is the reader's position in step 2, and it is 3% over.
+- **What T has left is the action and its inputs.** The 7,238 nodes the action
+  types are about a fifth of T's cycles (`node_machine_action` and its callees,
+  11% of the profile against `node_machine_type`'s 39%). They are casts but
+  discards (2,870), a global's member (2,110), constant folds (`-x` 1,316, `|`
+  755), pointer comparisons (1,056) and `sizeof` (912). Rules of their own would
+  take them off the action. The rest of T is its inputs, cold in one run: the
+  leaves' records, the per-type words and the graph's columns, which step 2
+  replaces with the parser's tree.
+
+**With the new codes** (calls, `&&`, `||` and `?:`, at `04abc91b`, which merges
+#2571's `f5b919f2`), the machine takes 93.0% of `sqlite3.c`'s evaluated nodes,
+not 50.2%, and the figures move:
+
+| | T: cycles, instructions | all three: cycles, instructions | all three, warm |
+| --- | ---: | ---: | ---: |
+| #2571's `f5b919f2` | 119.1, 446.7 | 212.4, 764.1 | 167.1 |
+| the same, staggered alone | 119.0, 446.7 | 209.6, 764.1 | 159.3 |
+| T's columns (`04abc91b`) | **116.2, 434.5** | **211.3, 733.1** | **160.5** |
+
+- **The stagger is worth 2.8 cycles in one run and 7.8 warm**, a sixth of what
+  it was. The calls' 43 cycles a node more are mostly elsewhere.
+- **The columns still cut 31 of the 764 instructions, but no cycles:** 1.7
+  more in one run and 1.2 warm than the staggered whole values, and 4.0 on Lua.
+  The action types more nodes now (12,942 of 147,250), and a call's arguments
+  are made whole for the action's conversions.
+- **The gate is further off:** 211.3 cycles in one run and 160.5 warm against
+  120. `--verify` at `04abc91b` shows no difference on the corpora, with `-g`
+  too.
 
 ### Increments and compound assignments
 

@@ -153,7 +153,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
   don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
-  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
