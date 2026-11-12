@@ -339,7 +339,7 @@ it could be, and by [the model](#the-model) where it is a design's estimate.
 | **The lanes' kernel time**, [#1213](https://github.com/buster14a/buster/issues/1213) | Nothing: no lanes. | 848 M kernel cycles and 457 M user cycles a pass against the same units as eight processes: **1.20 times**. |
 | **A process's start**, [#1444](https://github.com/buster14a/buster/issues/1444) | 0.3%. | Nothing in one command. Of a process a unit, eight at a time: 45% of 12,054 M cycles. |
 | **The peak**, [#1701](https://github.com/buster14a/buster/issues/1701) | 1.4 M kernel cycles a megabyte: the 190.7 MB are 276 M, a fifth of the compile. | The kernel is 2,265 M of a pass's 7,941 M, 29%. |
-| The asm matcher's index, [#2532](https://github.com/buster14a/buster/issues/2532) | Nothing: no asm statement. | 7.9% of the command alone (its issue); not measured on lanes. |
+| The asm matcher's index, [#2532](https://github.com/buster14a/buster/issues/2532) | Nothing: no asm statement. | 7.9% of the command alone (its issue); baked since, 1.07 times alone at `0af27a30`; not measured on lanes. |
 
 So at eight workers the node machine ranks first for `sqlite3.c` (2.15 times
 after its last step), the windows second (1.96), and no design in hand removes
