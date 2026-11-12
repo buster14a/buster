@@ -1956,25 +1956,35 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
 }
 
 // The index the templates' instructions are matched against: every form the assembler's syntax takes, whatever the
-// unit's target, as GNU as and clang's integrated assembler take a template's instructions. Made on `scratch` once per
-// lowering of a unit with asm statements (the assembler guide measures its initialization), or 0 without room.
-static const X86MatchIndex* check_asm_matches(Arena* scratch)
+// unit's target, as GNU as and clang's integrated assembler take a template's instructions. It depends on the form table
+// alone, so it is made once (#2532): baked into the executable (baked.h, #590) in the checker's unit, the C driver's, and
+// where it isn't baked (a PIE, BUSTER_BAKE=0, another unit's copy), by check_asm_index_initialize, which a command of
+// several units runs before its lanes start (c_checker_units.c) and a unit's planning otherwise runs at its first asm
+// statement. Making it was 0.76 million user cycles a unit with asm statements: 6.9% of musl's 1,336 units as one
+// command's cycles on the 9700X, 537 of them with asm statements.
+static BUSTER_BAKED_UNIT X86MatchIndex check_asm_index;
+static BUSTER_BAKED_UNIT bool check_asm_index_ready;
+
+// Makes check_asm_index, once: before any lane may read it. The encoder's and the semantics' tables come first
+// (x86_match_initialize reads them), each built only where it isn't: x86_semantics_initialize rebuilds its tables
+// unconditionally, which would write a baked executable's pages.
+static bool check_asm_index_initialize(void)
 {
-    X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(scratch, X86MatchIndex, 1);
-    if (index != 0)
+    const bool tables = (x86_encoder_initialized || x86_encoder_initialize()) && (x86_semantics_initialized || x86_semantics_initialize());
+    if (tables && !check_asm_index_ready)
     {
         const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
-        if (!x86_encoder_initialized)
-        {
-            x86_encoder_initialize();
-        }
-        if (!x86_semantics_initialized)
-        {
-            x86_semantics_initialize();
-        }
-        x86_match_initialize(index, &everything);
+        x86_match_initialize(&check_asm_index, &everything);
+        check_asm_index_ready = true;
     }
-    return index;
+    return tables && check_asm_index_ready;
+}
+
+// The index, made where it isn't yet, or 0 if the tables it needs can't be built.
+static const X86MatchIndex* check_asm_matches(void)
+{
+    const bool ready = check_asm_index_ready || check_asm_index_initialize();
+    return ready ? &check_asm_index : 0;
 }
 
 // The text being written at the top of `output` for a template that takes directives (check_asm_unit_helper): appends
@@ -4220,7 +4230,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     {
         file_count += input->asm_statements[s].body == BUSTER_CHECK_NONE;
     }
-    const X86MatchIndex* index = valid && (statements != 0 || naked_count != 0 || file_count != 0) ? check_asm_matches(scratch) : 0;
+    const X86MatchIndex* index = valid && (statements != 0 || naked_count != 0 || file_count != 0) ? check_asm_matches() : 0;
     uint32_t count = 0;
     if ((statements != 0 && (result->plans == 0 || firsts == 0 || added == 0 || index == 0)) || (naked_count != 0 && (result->naked == 0 || index == 0)) ||
         (file_count != 0 && index == 0))

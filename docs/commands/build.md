@@ -245,9 +245,10 @@ checks that `backtrace` walks them. The compiler needs no libm either way
 The post-link step has each executable write itself with the backend's tables
 built (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
 `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
-`unwind_initialize`, `tier1_select_initialize` and
+`unwind_initialize`, `tier1_select_initialize`,
 `check_lower_runtime_names_initialize` (the lowering's runtime functions' names'
-lengths and hashes, #442) write is in a section of its own (`buster_baked`:
+lengths and hashes, #442) and `check_asm_index_initialize` (the asm matcher's
+index of every form, #2532) write is in a section of its own (`buster_baked`:
 `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
 module's statics, baked in the checker's unit, the C driver's), so a compile
 starts with them built; the file's build ID is recomputed over the baked
@@ -680,7 +681,11 @@ beside the configured Clang or on `PATH`, at its version: `llvm-config` with
 LLVM's C API headers and library (the splitter is built in the tree, at
 `codegen-tools/split`, with the flags it gives), `clang++`, `llvm-nm`,
 `llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
-where `llvm-config` finds them, else static, as in CI's hosted release. The Debug configuration compiles
+where `llvm-config` finds them, else static, as the official release's
+archives do in CI, hosted and on the 9700X. A system library `llvm-config`
+names by a path the host lacks links by its name instead: the release names
+Ubuntu's `/usr/lib/x86_64-linux-gnu/libzstd.a`, and the 9700X, an Arch host,
+links `-lzstd`. The Debug configuration compiles
 the units as before; the final link still uses any supported `BUSTER_LINKER`.
 
 An unrelated edit reuses both units' native objects. A change to a split unit
@@ -698,7 +703,9 @@ translation units with identically named private functions, data and TLS, distin
 hidden public entries, and shared strong and weak external references. It checks
 runtime isolation across threads, the source compilation database, unchanged and
 source-only edits, one-part private data edits, missing pieces, deterministic
-regeneration, late assembly warnings and failed-stage recovery. The full build
+regeneration, late assembly warnings and failed-stage recovery. It also checks
+the mapping of `llvm-config`'s system libraries (`cmake -P`): hosted runners
+have the release's paths, so only the 9700X's build maps one. The full build
 regression also builds the real opt-in compiler once and runs its baking checks.
 
 The parts are made after the optimizer, so a unit's `-O3` pipeline is still one

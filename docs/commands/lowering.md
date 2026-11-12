@@ -212,16 +212,22 @@ takes its entries.
   the checker unit, before `baked.c`. C, X and the shadow's comparison read a
   record only through the accessors (`node_machine_record_*`, below), so that
   a new record layout changes the machine's file and T alone.
-- **The record accessors,** each `(machine, r)` and one load or store today:
-  - what T wrote: `_op`, `_left`, `_right` (operand records, `UINT32_MAX` for
-    none), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
-    low 64 bits), `_floating`, `_object`, `_offset`, `_fault`, `_overloaded`,
-    `_facts`, `_class`, `_converted(machine, r, k)`,
+- **The record accessors,** each `(machine, r)`, and all but `_third` and
+  `_truth` one load or store today:
+  - what T wrote: `_op`, `_left`, `_right`, `_third` (operand records,
+    `UINT32_MAX` for none; `_third` is a conditional's second arm, from the
+    graph), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
+    low 64 bits), `_floating`, `_object`, `_offset`, `_truth(machine, r,
+    &truth)` (whether `check_action_truth` knows the value's truth),
+    `_fault`, `_overloaded`, `_facts`, `_class`, `_converted(machine, r, k)`,
     `_conversion_flags(machine, r, k)` and `_member_offset`;
-  - C's own: `_evaluated`, `_context`, `_target` and `_template`, written by
-    `node_machine_records_set_unevaluated(machine, count)` and
-    `node_machine_record_set_evaluated`, `_set_context`, `_set_target` and
-    `_set_template`;
+  - C's own: `_evaluated`, `_state` (with `BUSTER_NODE_MACHINE_AFTER_CONDITION`
+    and `_AFTER_ARM`, a consumer's segment after the record's row), `_context`,
+    `_target`, `_template`, `_hook` (that consumer) and `_label_base`, written
+    by `node_machine_records_set_unevaluated(machine, count)` and
+    `node_machine_record_set_evaluated`, `_set_context`, `_set_target`,
+    `_set_template`, `_set_hook(machine, r, consumer, hook)` and
+    `_set_label_base`;
   - the shadow's: `node_machine_record_value(machine, r, &value)`, the whole
     value, which its comparison with the stream reads with `_converted`,
     `_conversion_flags` and `_member_offset`.
@@ -242,14 +248,22 @@ takes its entries.
   (`node_machine_rows`), the lookups by direct rules that are their actions'
   own steps for the common case, and the rest by the action itself on the
   machine's records. **C** and **X** are the node templates' rules
-  (`c_check_program_templates.c`) read from the records. The machine's set is
-  the census's within the templates': calls, `&&`, `||`, `?:`, the increments
-  and the compound assignments are refused by code.
+  (`c_check_program_templates.c`) read from the records, and
+  `check_lower_logical`'s for `&&`, `||` and `?:`, whose test, branch and jump
+  X writes as a segment after an operand's row. Their labels are numbered from
+  the expression's first, in the order the tasks number them, with each
+  label's place in the tape. The machine's set is the census's within those
+  rules: calls, the increments and the compound assignments are refused by
+  code, and `a ?: b` by its template.
 - **The comparison**, for every expression the machine takes: each record's
   value (every field), its operands' conversions and a member's offset against
   the stream's, and its tape against the lowering's entries that the
   expression's tasks own (the inventory's log), a local's numbered by a map of
-  the body's that must stay one to one.
+  the body's that must stay one to one. A branch's target, an entry after
+  `check_lower_resolve_labels`, is compared by label: the log keeps each pop's
+  next label and each body's labels' entries, so each of the expression's
+  labels must be the lowering's of the same number counted from the
+  expression's first, at the same entry.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps
@@ -265,7 +279,8 @@ takes its entries.
 The report gives the expressions and evaluated nodes taken, each refusal's
 (shape, code, leaf, context, diagnostic, template, row, root), the operators
 the code and template refusals stopped at, the differences (values, entries,
-twin), T's nodes by row or rule and by the action, by operator, and the times.
+twin), the labels compared, T's nodes by row or rule and by the action, by
+operator, and the times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`

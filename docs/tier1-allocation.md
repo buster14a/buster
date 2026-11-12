@@ -654,15 +654,34 @@ frames went from 1.49× clang -O2's to 0.89× on `sqlite3.c`, and from 1.45× to
 record](https://github.com/buster14a/buster-performance/pull/260)).
 
 Where the allocation puts it in a callee-saved register,
-the prologue saves that register once instead (`tier1_emit_cfg_callee`). `rbp`
+the prologue saves that register once instead (`tier1_emit_cfg_preference`). `rbp`
 is the sixth callee-saved register where the frame keeps no frame pointer in it.
 The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
 `reserved_registers`).
 
-That preference is a second, whole `tier1_cfg_allocate` over the first one's
-intervals. What the two calls cost a compile, and the design that makes them
-one call with the same result, are in
-[tier1-one-allocation.md](tier1-one-allocation.md) (#2538).
+The preference is a second problem over the same values: the values that cross
+a call allowed the callee-saved registers alone, the others the caller-saved
+ones. Without a fixed range a value's intervals don't depend on the registers
+it may take, so the CFG consumer allocates both problems in one call (#2538,
+`tier1_emit_cfg_one_call`). `tier1_cfg_prepare` builds the intervals once
+(validation, homes, hints, liveness, block lists, intervals). The preference
+reads them: an interval crosses a call where the calls before its end and before
+its start differ, two loads of a prefix count of the calls (the binary search
+it replaced stays in the reference order). The preferred problem's column
+(`tier1_cfg_column`) is assigned with the plain problem's verdict inside the
+same call (`tier1_allocate_verdict`), from the plain problem's scans over the
+events before the last bound definition ends; where that verdict is a
+constraint, every parameter is freed and the preferred problem assigned again.
+`tier1_cfg_finish` makes the lookup columns, slot sharing and edge moves once,
+for the allocation that stands, the preferred one where `tier1_cfg_taken` takes
+it; the plain problem is assigned whole only where it isn't
+(`tier1_cfg_order_run`). The order before, two whole `tier1_cfg_allocate` calls
+with the preference between them, stays as `tier1_emit_cfg_two_calls`: the path
+for a problem with fixed ranges, and the reference that `--verify` runs after
+the one-call order on every function, comparing the allocations field by field
+(`tier1_cfg_differs`), the problems each left and the values each moved. What
+the two calls cost, the design and what the one call measured are in
+[tier1-one-allocation.md](tier1-one-allocation.md).
 
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's
@@ -822,6 +841,20 @@ before a recomputation takes over, or that only definitions left out read, is
 left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
 the C front end's address chains define each link right before the allocator
 evicts it, a write nothing read.
+
+The same holds where control enters a block (`tier1_cfg_entry_unread`, #1217):
+a recomputed value whose register fragment at the block's start serves no use
+before its next fragment, the recipe's, takes over, before the block's last
+position, enters as its recipe. Its edges then move nothing for it, where they
+recomputed it into a register the block overwrote before any read: on the
+edges into Lua's `luaV_execute` dispatch tails and `sqlite3VdbeExec`'s, mostly
+a frame object's address (the measurements are #1217's record, linked from
+[the Tier 1 guide](commands/tier1.md)). Only a block's start
+counts: a split's piece starts inside its block, and the verifier checks that
+each piece holds its value whether or not a use reads it. Neither a use nor an
+edge leaving the block can read the register, since the fragment ends inside
+it; the verifier, which simulates every block from these entry locations, and
+the certificate take the same entry location.
 
 Recomputing a value live across a call instead of saving its register around
 it wouldn't pay: in speedtest1's scalar-path build every one of the 9,887

@@ -28,9 +28,17 @@ patterns are:
   3, 5 or 9; add/shift and three-operand addition through `lea`. After
   allocation, an unscaled base-plus-index sum with zero displacement uses
   `add` when the destination is either input register (#1217), removing the
-  SIB byte. Flags are dead between IR nodes. Folded frame operands have their
-  final base and object offset before this decision; a nonzero displacement
-  or an `rsp` base keeps `lea`.
+  SIB byte, and a base plus a nonzero displacement whose destination is the
+  base's register is an `add` of the displacement (or the `inc` or `sub` the
+  immediate's batch chooses), as clang writes `p += c` and `i + 1` in place: of
+  Tier 1's dynamic non-frame `lea`s at `33f3f442`, 57.4 M of speedtest1's 182.2 M
+  and 52.3 M of Lua's scripts' 311.5 M were these. The instruction count is the
+  same; the address cause shrinks and the arithmetic grows by as much.
+  A signed power-of-two division adds its bias in place the same way
+  (`TIER1_RULE_DIVIDE_POWER`, a pointer difference's division by its element's
+  size). Flags are dead between IR nodes. Folded frame operands have their
+  final base and object offset before this decision; any other displacement
+  form or an `rsp` base keeps `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. An address whose
@@ -67,8 +75,20 @@ patterns are:
   walk's block: the producer materializes every slot address in the preheader,
   which dominates every use, and the address is pure with a function-global
   offset. Memory operands can fold this leaf even when it has several users;
-  an escaping address still materializes. Longer cross-block chains stay unfolded. A displacement the object's
-  offset pushes past 32 bits refuses emission rather than truncating.
+  an escaping address still materializes. A memory operand also takes a pure
+  address node (an address, a 64-bit addition or a conversion) of an earlier
+  block when every user of that node takes it as an address, a load's or a
+  store's or another such node's (`tier1_select_sinkable`, #1217): SSA makes the
+  node and the values it reads dominate the access, the effective uses keep those
+  values live to it, and no node computes the address any more. Lua's `ra =
+  RA(i)`, computed at a handler's start and stored through in the arms its type
+  tests choose, is then `base + index` in each store. An address some other
+  user keeps (a phi's operand, a call's argument, an integer) stays computed and
+  its accesses read its value: folding it would only lengthen its inputs' lives
+  past it, which cost speedtest1 37 M instructions in spills before this rule.
+  The index walk (`tier1_select_index`) stays within the access's tree. A
+  displacement the object's offset pushes past 32 bits refuses emission rather
+  than truncating.
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source

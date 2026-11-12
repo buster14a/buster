@@ -1,8 +1,11 @@
-# Tier 1 allocates each function once (#2538): design
+# Tier 1 allocates each function once (#2538)
 
-Status: design only. Nothing below is implemented in the compiler. Its
-measurements, and the prototypes that back its gains, are in
-[the measurement record](https://github.com/buster14a/buster-performance/tree/94aadb4968b7523793291ee41fbafd2aa09a9c75/docs/measurements/tier1-compile-cost-138-2026-11-12),
+Status: implemented, all four steps; "What was built and what it measured"
+below has the code and its 9700X figures, in
+[the implementation's record](https://github.com/buster14a/buster-performance/tree/5c7dcf7c68f18a9ec722368af6e53737546a081e/docs/measurements/tier1-one-allocation-2538-2026-11-12).
+The design follows as it was written. Its measurements, and the prototypes that
+back its gains, are in
+[the design's record](https://github.com/buster14a/buster-performance/tree/94aadb4968b7523793291ee41fbafd2aa09a9c75/docs/measurements/tier1-compile-cost-138-2026-11-12),
 whose patches are measurement code, not this design's implementation. It is the
 compile-cost side of [#138](https://github.com/buster14a/buster/issues/138):
 what Tier 1's pipeline costs a compile, by stage, and the change that the
@@ -29,6 +32,63 @@ the plain assignment kept whole, and at 393.0 ms (−8.3%) with its verdict take
 from a prefix of the events inside the preferred assignment's call; the objects
 are byte-identical on `sqlite3.c`, Lua's 33 units and musl's 1,336. Today's
 order stays as the twin and the oracle.
+
+## What was built and what it measured
+
+Four commits, one per step, steps 1, 2, 4 and 3 in that order:
+
+1. `tier1_cfg_allocate` is `tier1_cfg_prepare`, `tier1_cfg_assign` and
+   `tier1_cfg_finish` in a row, the preparation's state on the scratch arena in
+   a `Tier1CfgPrepared` until `tier1_cfg_release`.
+2. The CFG consumer allocates both problems in one call
+   (`tier1_emit_cfg_one_call`): another problem's column over the prepared
+   intervals (`tier1_cfg_column`, with `tier1_cfg_input_valid`'s two checks on a
+   value's registers as a vector kernel and a scalar twin), and lookup columns,
+   slot sharing and edge moves once, for the allocation that stands. Today's
+   order is `tier1_emit_cfg_two_calls`: the path for fixed ranges, and the
+   reference `--verify` runs after the one-call order on every function,
+   comparing the allocations field by field (`tier1_cfg_differs`), the problems
+   each left and the values each moved.
+4. The preference counts the calls before each position
+   (`tier1_emit_cfg_calls_before_vector`, a prefix sum with a running-count twin)
+   and tests each interval with two loads; the reference order keeps the search.
+3. `tier1_allocate_verdict` takes the plain problem's verdict inside the
+   preferred assignment's call, from the events below the last bound
+   definition's end, or all of them where the class has fewer registers than its
+   most required uses at one position; `tier1_cfg_order_prepare` and
+   `tier1_cfg_order_run` are the order, the plain problem assigned whole only
+   where the preferred allocation isn't taken. The preference gives each value's
+   set without its definition's registers, which `tier1_cfg_preferred` adds while
+   the definition is bound.
+
+`test-tier1-cfg` and `test-tier1-cfg-source` run every case as two problems,
+in one call and in two, on both host paths, with definitions unbound, bound at
+random and bound in clashing pairs (two values required at one position given
+one register), which drives the constraint path. The constraint path is taken in
+3 functions of `sqlite3.c`, 2 of Lua and none of musl, as the design counted.
+
+On the 9700X (main `33f3f442`, each tree at four placements of the backend's
+code, CPU 2, one lane, the record's method), the objects are main's, byte for
+byte, on `sqlite3.c`, Lua's 33 units and musl's 1,336. User cycles against
+main's, paired by placement, and wall time:
+
+| corpus | main | step 2 | and step 4 | and step 3 |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 427.0 ms | 400.9 ms, −6.31% | 398.9 ms, −6.83% | 391.7 ms, −8.63% |
+| Lua, 33 units | 168.4 ms | 163.5 ms, −2.86% | 163.0 ms, −3.21% | 162.5 ms, −3.59% |
+| musl, 1,336 units | 1,377.8 ms | 1,365.5 ms, −0.94% | 1,363.5 ms, −1.23% | 1,359.1 ms, −1.48% |
+
+Step 1 alone is −0.18% on `sqlite3.c` (−0.14% to −0.21% over placements);
+step 3 takes 1.93% more of `sqlite3.c`'s cycles than step 4. Step 4 takes
+11.8 M cycles and 2.0 ms from the compile, of the callee-saved step's 20.0 M
+and 3.5 ms above, which leaves about 1.5 ms: inferred from the whole compile,
+not measured by stage. Peak resident memory falls on all three: `sqlite3.c`
+299,048 to 292,744 KiB, Lua 102,692 to 90,764, musl 149,314 to 148,544, each the
+median over a tree's four executables. A peak counts the executable's own file
+pages, which differ by about a megabyte between two files of the same code; one
+executable per tree read musl's 1.4 MB higher with step 2, which the four
+placements' files didn't. The expected case was 393 ms on `sqlite3.c` and
+162.2 ms on Lua; the optimistic, 389 ms.
 
 ## The problem
 

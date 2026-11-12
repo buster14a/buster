@@ -8,8 +8,8 @@
 // - a leaf, by the reader's leaf record (node_machine_leaf);
 // - an operator of builtin arithmetic operands, by its row of the transition table (node_machine_row), which
 //   node_machine_tables_initialize makes from the actions and baked.c bakes;
-// - the lookups, by direct rules (node_machine_rule: node_machine_discard, _member, _truth, _store_rule, _address_rule,
-//   _dereference and _pointer_rule), each its action's own steps for the common case behind a guard;
+// - the lookups, by direct rules (node_machine_rule: node_machine_discard, _member, _truth, _logic, _store_rule,
+//   _address_rule, _dereference and _pointer_rule), each its action's own steps for the common case behind a guard;
 // - everything else, by the action itself (node_machine_action), the rows' and the rules' exact twin, which --scalar
 //   takes for every node and --verify compares with them (node_machine_same_as_action).
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
@@ -357,7 +357,8 @@ static bool node_machine_code(CheckOp op)
         case CHECK_OP_VALUE: case CHECK_OP_POSITIVE: case CHECK_OP_NEGATIVE: case CHECK_OP_NOT: case CHECK_OP_BIT_NOT: case CHECK_OP_ADD:
         case CHECK_OP_SUBTRACT: case CHECK_OP_MULTIPLY: case CHECK_OP_DIVIDE: case CHECK_OP_REMAINDER: case CHECK_OP_SHIFT_LEFT:
         case CHECK_OP_SHIFT_RIGHT: case CHECK_OP_LESS: case CHECK_OP_LESS_EQUAL: case CHECK_OP_GREATER: case CHECK_OP_GREATER_EQUAL:
-        case CHECK_OP_EQUAL: case CHECK_OP_NOT_EQUAL: case CHECK_OP_BIT_AND: case CHECK_OP_BIT_OR: case CHECK_OP_BIT_XOR: case CHECK_OP_CAST:
+        case CHECK_OP_EQUAL: case CHECK_OP_NOT_EQUAL: case CHECK_OP_BIT_AND: case CHECK_OP_BIT_OR: case CHECK_OP_BIT_XOR: case CHECK_OP_LOGICAL_AND:
+        case CHECK_OP_LOGICAL_OR: case CHECK_OP_CONDITIONAL: case CHECK_OP_CAST:
         case CHECK_OP_ADDRESS: case CHECK_OP_DEREFERENCE: case CHECK_OP_ASSIGN: case CHECK_OP_COMMA: case CHECK_OP_SUBSCRIPT: case CHECK_OP_SIZEOF:
         case CHECK_OP_ALIGNOF: case CHECK_OP_MEMBER: case CHECK_OP_ARROW: case CHECK_OP_INITIALIZE: case CHECK_OP_CONVERT: case CHECK_OP_CONDITION:
         case CHECK_OP_SELECT:
@@ -637,6 +638,46 @@ static bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uin
     return taken;
 }
 
+// T's logical operator, `&&` or `||` at record `r` of records `a` and `b`, by check_action_logic's steps for operands the
+// common conversions take, both scalars without a fault (the machine refuses a node of a floating-point environment
+// before, whose promotion the action would make): whether it typed the node. The action is its twin, as for the rules.
+static bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+{
+    TypeTable* types = machine->types;
+    CheckValue left;
+    CheckValue right;
+    CheckConversion conversions[2];
+    const bool taken = b < r && node_machine_operand_value(machine, a, &left, conversions) && node_machine_operand_value(machine, b, &right, conversions + 1) &&
+                       check_action_is_scalar(types, left.type) && check_action_is_scalar(types, right.type) && left.fault == CHECK_FAULT_NONE &&
+                       right.fault == CHECK_FAULT_NONE;
+    if (taken)
+    {
+        const bool conjunction = op == CHECK_OP_LOGICAL_AND;
+        bool left_truth = false;
+        bool right_truth = false;
+        const bool left_known = check_action_truth(types, &left, &left_truth);
+        const bool right_known = check_action_truth(types, &right, &right_truth);
+        // A condition that decides the value leaves the second operand unevaluated: its effects aren't the value's.
+        const bool skips_right = left_known && (conjunction ? !left_truth : left_truth);
+        CheckValue inherited = { 0 };
+        check_action_inherit(&inherited, &left);
+        if (!skips_right)
+        {
+            check_action_inherit(&inherited, &right);
+        }
+        const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
+        const bool right_ice = (right.flags & BUSTER_CHECK_ICE) != 0 || (skips_right && (right.flags & (BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM)) != 0);
+        const bool ice = (left.flags & BUSTER_CHECK_ICE) != 0 && right_ice;
+        const bool right_form = (right.flags & forms) != 0 || (skips_right && (right.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
+        const uint32_t flags = inherited.flags | (ice ? BUSTER_CHECK_ICE : (left.flags & forms) != 0 && right_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+        const bool constant = left_known && (skips_right || right_known);
+        const bool value = conjunction ? left_truth && right_truth : left_truth || right_truth;
+        node_machine_put_value(machine->values + r, BUSTER_TYPE_INT, CHECK_RVALUE, flags, constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE, constant && value, 0);
+        node_machine_set(machine, r, op, conversions, conversions + 1, 0);
+    }
+    return taken;
+}
+
 // Whether the conversion of `source` to `target` is one a direct assignment takes as the action would: a builtin
 // arithmetic type to another, or a pointer to the same pointer type.
 static bool node_machine_assignable(const NodeMachine* machine, TypeId target, const CheckValue* source)
@@ -808,6 +849,10 @@ static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, C
     else if (op == CHECK_OP_CONDITION || op == CHECK_OP_NOT)
     {
         typed = node_machine_truth(machine, r, op, a);
+    }
+    else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        typed = node_machine_logic(machine, r, op, a, b);
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
     {
