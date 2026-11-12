@@ -81,6 +81,9 @@ static bool check_input_in_main_file(const CheckInputReader* reader, uint32_t to
 
 // A declaration clang's unused warnings leave alone: one the source marks unused or used, a typedef or enumerator,
 // a label or tag, or a name whose object is never emitted. Parameters are marked from their definitions' chains.
+// c_check_comma_input.c's: whether a separator chain's root is an expression's, its separators comma operators.
+static bool check_input_expression_comma_seed(const Parser* parser, uint32_t token);
+
 // Whether the use at `token` is one clang's MaybeDecrementCount takes back from the references that keep a variable from
 // -Wunused-but-set-variable (#2409): the bare left operand of an assignment, a compound assignment, an increment or a
 // decrement (not through parentheses) that is discarded: an expression statement (not a statement expression's last,
@@ -101,7 +104,16 @@ static bool check_input_discarded_set(const Parser* parser, uint32_t token, bool
     const bool bare = (assignment && op == token + 1) || (step && (op == token + 1 || op + 1 == token));
     const uint32_t holder = bare ? parser->tree.parents[op] : count;
     const uint8_t role = holder < count && holder != op ? parser->tree.roles[holder] : PARSE_ROLE_NONE;
-    bool discarded = role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_CLOSE_FOR || (role == PARSE_ROLE_COMMA && op < holder);
+    // A list's separator (an argument's, an initializer's) is a comma operator only where its chain's root is an
+    // expression's (check_common_comma_operator's test); its operand before it is discarded.
+    uint32_t root = holder;
+    for (uint32_t steps = 0; role == PARSE_ROLE_SEPARATOR && root < count && parser->tree.roles[root] == PARSE_ROLE_SEPARATOR && steps < count; steps += 1)
+    {
+        root = parser->tree.parents[root];
+    }
+    const bool comma_operator = role == PARSE_ROLE_COMMA ||
+                                (role == PARSE_ROLE_SEPARATOR && root < count && check_input_expression_comma_seed(parser, root));
+    bool discarded = role == PARSE_ROLE_CLOSE_FOR || (comma_operator && op < holder);
     const uint32_t header = role == PARSE_ROLE_TERMINATOR ? parser->tree.parents[holder] : count;
     if (header < count && header != holder && parser->tree.roles[header] == PARSE_ROLE_CLOSE_FOR)
     {

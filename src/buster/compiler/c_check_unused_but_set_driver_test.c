@@ -54,6 +54,18 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_but_set_fixtur
         .compare_warning_text = true,
     },
     {
+        // A step or an assignment as a call's argument or an initializer's element is read; a comma operator's left
+        // operand isn't.
+        .name = "variables stepped in argument and initializer lists",
+        .source = "int g(int, int);\n"
+                  "int h(int);\n"
+                  "void f(void) { int c = 0; g(c++, 1); int d = 0; g(1, d++); int e = 0; h(e = 1); int k = 0; int a[2] = { k++, 1 }; (void)a;\n"
+                  "  int m = 0; (void)(m++, 1); }\n",
+        .options = { "-Wall" },
+        .warnings = 1,
+        .compare_warning_text = true,
+    },
+    {
         .name = "variables set but not used in a rejected unit",
         .source = "void f(int c) { int x; x = 1; c = undeclared; }\n"
                   "void h(void) { int a; a = 1; }\n",
