@@ -151,7 +151,8 @@ static uint8_t* tier1_symbol_fold_load(Tier1EmitTest* test, const Tier1EmitResul
     *bytes = code_bytes + 4096;
     uint8_t* mapping = mmap(0, *bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
-    uint32_t* ends = malloc(((uint64_t)emitted->reference_count + 1) * sizeof(uint32_t));
+    // x86_encode's vector path stores the marked ends 16 lanes at a time: its contract's capacity, not the count.
+    uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count) * sizeof(uint32_t));
     bool ready = mapping != MAP_FAILED && offsets != 0 && ends != 0;
     tier1_emit_test_expect(test, ready, "a folded symbol's code and data mapping");
     *data = ready ? mapping + code_bytes : 0;
