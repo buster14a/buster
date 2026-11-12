@@ -69,11 +69,12 @@ static void check_action_set_fault(CheckValue* value, CheckFault fault, uint32_t
     value->imaginary = 0;
 }
 
+// The flags an evaluated operand passes to its operator's value (check_action_inherit): its effects and provenance.
+#define BUSTER_CHECK_INHERITED (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_MODIFICATION | BUSTER_CHECK_DISCARDED_UNEVALUABLE)
+
 static void check_action_inherit(CheckValue* value, const CheckValue* operand)
 {
-    value->flags |= operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION |
-                                      BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ |
-                                      BUSTER_CHECK_MODIFICATION | BUSTER_CHECK_DISCARDED_UNEVALUABLE);
+    value->flags |= operand->flags & BUSTER_CHECK_INHERITED;
     if (value->fault == CHECK_FAULT_NONE && operand->fault != CHECK_FAULT_NONE)
     {
         value->fault = operand->fault;
