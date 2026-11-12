@@ -523,6 +523,9 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // A division or remainder by a constant zero in a counted_by family's argument (#1842, check_input_counted_division),
+    // at its operator: payload.data 0 for "division by zero is undefined", 1 for "remainder by zero is undefined".
+    CHECK_WARNING_EVENT_DIVISION_BY_ZERO,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

@@ -2544,6 +2544,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNUSED_PARAMETER:
             result = check_warning_text(scratch, "unused parameter '%.*s'", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_EVENT_DIVISION_BY_ZERO:
+            result = payload->data != 0 ? "remainder by zero is undefined" : "division by zero is undefined";
+            break;
         default: break;
     }
     return result;
