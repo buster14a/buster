@@ -2234,6 +2234,10 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_C23_ATTRIBUTES:
             result = "[[]] attributes are a C23 extension";
             break;
+        case CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT:
+            result = check_warning_text(scratch, (payload->data & 2u) != 0 ? "%s without named members is a GNU extension" : "empty %s is a GNU extension",
+                                        (payload->data & 1u) != 0 ? "union" : "struct");
+            break;
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :
@@ -2570,7 +2574,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;
         case CHECK_WARNING_EVENT_UNUSED_VARIABLE:
-            result = check_warning_text(scratch, "unused variable '%.*s'", (int)name.length, name.pointer);
+            result = check_warning_text(scratch, payload->data != 0 ? "variable '%.*s' set but not used" : "unused variable '%.*s'", (int)name.length,
+                                        name.pointer);
             break;
         case CHECK_WARNING_EVENT_UNUSED_FUNCTION:
             result = check_warning_text(scratch, "unused function '%.*s'", (int)name.length, name.pointer);

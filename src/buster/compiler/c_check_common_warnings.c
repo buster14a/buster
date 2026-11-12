@@ -49,6 +49,66 @@ static void check_common_exhausted(Preprocessor* pp)
     pp->fatal = true;
 }
 
+// A rejected unit's repaired view (check_repair_make, #2406, #2431): its original tokens [0, end) and the synthetic closers
+// after them. A warning reports only at a token of a complete original statement (`complete`, CheckRepair.warning_complete,
+// as the view's other warnings: check_repair_warning_token). The view's first closers may be the original's own, its
+// tokens of the same kinds at the same places after the same tokens, which close the same braces: to `closed`. A warning
+// publishes where the original's tokens put it, through `closed`; one past it, at a synthetic closer's lookahead, is the
+// body's that the parse error ended, after every diagnostic of the unit's. A rejected unit's reading of the view
+// (check_driver_rejected_read) edits its tokens: `to_unit` takes the reading's to the view's (BUSTER_CHECK_NONE at one the
+// reading adds), `count` tokens. Null `complete` for any other unit: the driver sets it around a repaired view's common
+// warnings alone.
+typedef struct CheckCommonView CheckCommonView;
+struct CheckCommonView
+{
+    const uint8_t* complete;
+    const Parser* original;
+    const uint32_t* to_unit;
+    uint32_t count;
+    uint32_t end;
+    uint32_t closed;
+};
+static _Thread_local CheckCommonView check_common_view;
+
+// The view's token that a reading's `token` is (itself where the reading edits nothing); past the reading's last, the view's
+// end.
+static uint32_t check_common_view_token(const CheckCommonView* view, const Parser* parser, uint32_t token)
+{
+    const uint32_t result = view->to_unit == NULL ? token : token < parser->tokens.count ? view->to_unit[token] : view->count;
+    return result;
+}
+
+// Whether a warning may report at `token` (CheckCommonView): any in a unit that isn't a repaired view.
+static bool check_common_view_keeps(const Parser* parser, uint32_t token)
+{
+    const CheckCommonView* view = &check_common_view;
+    const uint32_t at = view->complete != NULL ? check_common_view_token(view, parser, token) : 0;
+    const bool result = view->complete == NULL || (at < view->end && view->complete[at] != 0);
+    return result;
+}
+
+// Whether the token `close` of a repaired view's reading is a synthetic closer (CheckCommonView): its body is the one the parse
+// error ended.
+static bool check_common_view_synthetic(const Parser* parser, uint32_t close)
+{
+    const CheckCommonView* view = &check_common_view;
+    const bool result = view->complete != NULL && check_common_view_token(view, parser, close) >= view->closed;
+    return result;
+}
+
+// The output position a warning publishes at, after the token `publication` (the unit's end past its last).
+static uint32_t check_common_publication_source(const Parser* parser, const Preprocessor* pp, uint32_t publication)
+{
+    const CheckCommonView* view = &check_common_view;
+    const uint32_t at = view->complete != NULL ? check_common_view_token(view, parser, publication) : publication;
+    // (A token a reading adds publishes as the reading's sources put it.)
+    const bool own = view->complete == NULL || at < view->end || (at == BUSTER_CHECK_NONE && publication < parser->tokens.count);
+    const bool synthetic = !own && at > view->closed;
+    const uint32_t result = own ? (publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count) :
+                            !synthetic && at < view->original->tokens.count ? view->original->tokens.sources[at] : pp->output.count;
+    return result;
+}
+
 // A sparse token column's entry, or BUSTER_CHECK_NONE where the input left the column absent.
 static uint32_t check_common_sparse_get(CheckSparseColumn column, uint32_t token)
 {
@@ -82,6 +142,8 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
     }
     // None inside a direct call's full expression, of an interrupt service routine (#1447, check_driver_interrupt_kept).
     severity = input->interrupt_range_count != 0 && !check_driver_interrupt_kept(input, token) ? CHECK_WARNING_IGNORE : severity;
+    // None in a repaired view's synthetic or incomplete statements (CheckCommonView).
+    severity = !check_common_view_keeps(parser, token) ? CHECK_WARNING_IGNORE : severity;
     return severity;
 }
 
@@ -112,7 +174,7 @@ static void check_common_report_published_phase(const Parser* parser, Preprocess
 static void check_common_report_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
                                    uint32_t id, bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
 {
-    const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+    const uint32_t publication_source = check_common_publication_source(parser, pp, publication);
     check_common_report_published(parser, pp, input, token, publication_source, id, default_ignored, message, notes, note_count, scratch);
 }
 
@@ -866,7 +928,7 @@ static void check_common_report_evaluated(const Parser* parser, Preprocessor* pp
         if (severity != CHECK_WARNING_IGNORE && !check_common_unevaluated(parser, pp, input, token, scratch) &&
             !(check_common_runtime_id(id) && check_common_bound(parser, pp, input, token, scratch)) && !pp->fatal)
         {
-            const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+            const uint32_t publication_source = check_common_publication_source(parser, pp, publication);
             check_common_publish(parser, pp, token, publication_source, phase, id, severity, message, notes, note_count, scratch);
         }
     }
@@ -5751,7 +5813,7 @@ static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp
         const uint32_t id = single ? CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION : CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION;
         if (initialization)
         {
-            const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+            const uint32_t publication_source = check_common_publication_source(parser, pp, publication);
             check_common_report_published_phase(parser, pp, input, token, publication_source, PP_DIAGNOSTIC_DEFERRED, id, false, message, NULL, 0, scratch);
         }
         else

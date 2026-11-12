@@ -801,6 +801,32 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix((unsigned long long)(wsink>>64));V v=vrun(k);for(int i=0;i<8;i++)mix((unsigned)v[i]);mix((unsigned)vsink[3]);W q=wvrun(k);for(int i=0;i<16;i++)mix((unsigned long long)(q[i]*2));\n"
         "mix((unsigned long long)wvsink[5]);mix((unsigned long long)(mixed(k)*2));return (int)(h^(h>>32));}\n",
         "generic-setjmp-held-wide", clang);
+    // A deep expression's values held across __builtin_setjmp's call in their deep slots, integer and floating, and a mask
+    // on the mask stack in its slot (#2465), which expressions before the longjmp reuse: the call snapshots them and puts
+    // them back. The mask's runs where AVX-512F is.
+    check_test_program_source(test,
+        "static void* buf[5];static volatile int sink;static volatile double dsink;static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "__attribute__((noinline)) static void jump(void){__builtin_longjmp(buf,1);}__attribute__((noinline)) static int side(int x){return x+5;}\n"
+        "__attribute__((noinline)) static int deep(int a){int b=a+1,c=a+2,d=a+3,e=a+4,f=a+5,g=a+6,i=a+7,j=a+8,k=a+9,l=a+10,m=a+11,o=a+12,p=a+13,q=a+14,s=a+15,t=a+16,u=a+17;\n"
+        "int r=a+(b*(c-(d+(e*(f-(g+(i*(j-(k+(l*(m-(o+(p*(q-(s+(t*(u-__builtin_setjmp(buf))))))))))))))))));\n"
+        "if(r==a+(b*(c-(d+(e*(f-(g+(i*(j-(k+(l*(m-(o+(p*(q-(s+(t*u))))))))))))))))){sink=u+(t*(s-(q+(p*(o-(m+(l*(k-(j+(i*(g-(f+(e*(d-(c+(b*side(a)))))))))))))))));jump();}return r;}\n"
+        "__attribute__((noinline)) static double fdeep(int a){double b=a+0.5,c=a+1.5,d=a+2.5,e=a+3.5,f=a+4.5,g=a+5.5,i=a+6.5,j=a+7.5,k=a+8.5,l=a+9.5,m=a+10.5,o=a+11.5,p=a+12.5,q=a+13.5,s=a+14.5,t=a+15.5,u=a+16.5,v=a+17.5;\n"
+        "double r=b+(c*(d-(e+(f*(g-(i+(j*(k-(l+(m*(o-(p+(q*(s-(t+(u*(v-(double)__builtin_setjmp(buf))))))))))))))))));\n"
+        "if(r==b+(c*(d-(e+(f*(g-(i+(j*(k-(l+(m*(o-(p+(q*(s-(t+(u*v))))))))))))))))){dsink=v+(u*(t-(s+(q*(p-(o+(m*(l-(k+(j*(i-(g+(f*(e-(d+(c*(double)side(a)))))))))))))))));jump();}return r;}\n"
+        "int tested(int n){h=(unsigned)n;int k=(n&15)+1;mix((unsigned)deep(k));mix((unsigned)sink);mix((unsigned long long)(fdeep(k)*4));mix((unsigned long long)(dsink*4));return (int)(h^(h>>32));}\n",
+        "generic-setjmp-held-deep", clang);
+    const bool masks_native = (x86_target_native().features & BUSTER_X86_FEATURE(AVX512F)) != 0;
+    if (!masks_native)
+    {
+        printf("test-checker: generic-setjmp-held-mask: AVX-512F unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
+        "static void* buf[5];static volatile unsigned short msink;static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "__attribute__((noinline)) static void jump(void){__builtin_longjmp(buf,1);}__attribute__((noinline)) static int side(int x){return x+5;}\n"
+        "__attribute__((noinline,target(\"avx512f\"))) static int mrun(int k){int r=(int)__builtin_ia32_kandhi((unsigned short)(k*0x1111+1),(unsigned short)(0xff00|__builtin_setjmp(buf)*0xff));\n"
+        "if(r==((k*0x1111+1)&0xff00)){msink=__builtin_ia32_kandhi((unsigned short)side(3),(unsigned short)(0xf0f0|side(9)));jump();}return r;}\n"
+        "int tested(int n){h=(unsigned)n;int k=(n&7)+1;mix((unsigned)mrun(k));mix(msink);return (int)(h^(h>>32));}\n",
+        "generic-setjmp-held-mask", clang, masks_native);
     // Builtins called through their names in parentheses (#1242's review), whose arguments run once.
     check_test_program_source(test,
         "static int calls;static unsigned next(unsigned v){calls++;return v;}\n"

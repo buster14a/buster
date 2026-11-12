@@ -45,7 +45,7 @@ and enum switches, with Clang's messages, places, notes and
 `-Wno-error=` forms promote them. The remaining gaps are the full
 `-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
 computed `case` expressions in `-Wswitch`, and several rarer
-`-Wparentheses`/`-Wreturn-stack-address` shapes and `-Wunused-but-set-variable`,
+`-Wparentheses`/`-Wreturn-stack-address` shapes,
 so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
 their boundaries and their differential tests are described in "Common
 warnings (#823)" below; the remaining work stays tracked in
@@ -5256,6 +5256,25 @@ a label, a goto, a label's address or a local tag's definition) with clang 23 un
 -Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
 with errors mid-body among warnings before and after them.
 
+A unit whose parse error the driver reads through a repaired view
+(`check_repair_make`: its original tokens through the last complete statement,
+then synthetic closers) gets the common warnings of the view's complete
+original statements too (#2406, #2431): `check_program` runs on the view
+where it has no other error (without its initializers' and asms' runs, which
+the repair leaves out), and `check_driver_rejected_common`'s readings where it
+has. `CheckCommonView`, which the driver sets around those passes, selects
+their reports by `CheckRepair.warning_complete`, as the view's other warnings
+are, and places them by the original's tokens: a body whose `}` the repair
+writes again where the original has it publishes its deferred warnings before
+the parse error, and one the error left open after it, without its flow
+analysis (`check_driver_flushed_bodies`) or `-Wreturn-type`. A reading's
+fresh error at a synthetic or incomplete statement isn't taken, and nor is a
+program failure there. `c_check_repaired_view_driver_test.c` compares
+fixtures with clang 23 as the structural ones are. Differences left: an
+unused variable of a scope the parse error leaves open is still given
+(clang's isn't), and one of a body the repair closes again publishes after
+the parse error; both predate the repaired view's common warnings.
+
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
 first alone. `check_initializers_diagnose_warnings` already visited every
@@ -5283,7 +5302,8 @@ report): an undeclared name in it isn't shielded by a statement expression,
 or the initializer's outermost node is diagnosed, of no valid type or
 incomplete as the initializers' diagnosis counts it. An initializer with no
 node keeps its report: a rejected unit's retained graph ends at its first
-missing name, so a later valid initializer has none. A statement expression
+missing name where its reader doesn't recover from the name (a whole unit's
+and a parse error's prefix's do, #1799), so a later valid initializer has none. A statement expression
 shields a name in a statement before its last, its value
 (`check_init_undeclared_poisons`). The report keeps its initializer's first
 token (`value`) for this; only a unit with another error drops one. A
@@ -5373,7 +5393,17 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name `u8` and a character constant. A view that reads past every parse
   error of the unit (`Parser.whole_view`) recovers from its missing names as a
   complete unit does (`check_input_diagnostic_recover`), so the unit's later
-  diagnostics stay.
+  diagnostics stay. So does the prefix view of a unit with a parse error
+  (`Parser.prefix_view`, `check_prefix_make`, #1799): C declares a name before
+  its uses, so a name its complete declarations before the error don't declare
+  the whole unit doesn't either, and a graph error past the name (`x = 1, y =
+  x()`'s called `int`, `3 + (void)0`'s operands) is clang's, an unsized
+  array's list error giving way to its initializer's own. Differences left: an
+  error the prefix's first reading doesn't reach, which a unit without the
+  parse error takes from its second readings (`check_driver_rejected_common`,
+  which a prefix view doesn't run), such as one in a function body or a
+  struct's initializer list after the name, and one past the parse error
+  (#2509).
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5554,16 +5584,35 @@ a member, a cast's and `sizeof`'s type name). What is dropped:
   `long long`, `long _Bool` a `long`.
 - **`_Complex` with a type it doesn't take.**
 
-The reader finds the error where a specifier makes the list invalid. Only then
-does `check_declspec_scan` work out which token clang drops: once over the list,
-then again without that token, to check that nothing else is wrong. The
+A list can have several errors (#1820 (c)), and clang gives each and goes on.
+A specifier whose kind's slot is taken is an error at it and is dropped, so
+the list goes on without it: `int float char` gives two errors and is an
+`int`, `long long long long` two and is a `long long`. Then come the list's
+end's errors, in `DeclSpec::Finish`'s chain, each unsetting what it is about
+before the next check: a sign the type doesn't take (every sign is dropped),
+then a width (the type becomes `int`), then `_Complex` (every `_Complex` is
+dropped). So `unsigned long float double` gives "cannot combine" at `double`,
+then the sign's error, then "'long float' is invalid", and is a `long`.
+
+The reader finds the first error where a specifier makes the list invalid.
+Only then does `check_declspec_scan` work out every error and the set of
+specifiers clang drops (`CheckDeclspecDrops`: a bit per token from the list's
+first, at most 256 of them, and the sign and `_Complex` slots), once over the
+list, then again without them, to check that nothing else is wrong. The
 recovery applies where:
 
-- the dropped specifier is a keyword;
-- the list without it has no other error;
+- the dropped specifiers are keywords, or, in a declaration's own list, types
+  of no keyword (`int typeof(int)`, `int _BitInt(8)`, `int _Atomic(int)`,
+  `int struct S`), which the reader has read past already;
+- the list without them has no other error;
 - the reader's state up to the error can be rebuilt from the scan's slots: a
-  keyword's type, or a tag's, typedef name's or `typeof`'s type that the
+  keyword's type, or a tag's, typedef name's or `typeof`'s type that a
   dropped token didn't replace.
+
+Every error is reported there, recovered; the reader then leaves out the
+dropped keywords after that point, warning for a repeated sign or `_Complex`
+among them as clang does (`unsigned float unsigned`), and a later refusal at a
+dropped type of no keyword rebuilds the state again without a report.
 
 A `_Complex` the type doesn't take is dropped at the list's end too, where the
 reader checks it (`_Complex _Bool` is a `_Bool`), with every `_Complex` of the
@@ -5572,9 +5621,10 @@ keyword too (`typeof(_Bool) _Complex`, `struct S _Complex`).
 
 The operand readers recover the same way. A `typeof`'s or an `_Atomic`'s type
 name (`check_constant_specifiers`) and an enum's fixed underlying type
-(`check_input_enum_underlying`) are read again without the dropped specifier
-(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`
-and `enum E : long float` a `long`.
+(`check_input_enum_underlying`) are read again without the dropped specifiers
+(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`,
+`typeof(int float char)` an `int` and `enum E : long float` a `long`. They
+take dropped keywords only.
 
 An error of the list's end (a sign, a width or a `_Complex` the type doesn't
 take) is published at the token after the list. It comes after the list's
@@ -5583,11 +5633,11 @@ repeated specifiers' warnings, in clang's discovery order:
 
 Still stopping the reader:
 
-- a list with a second error (`int float char x;`, `_Complex _Bool int y;`,
-  `unsigned float unsigned x;`), where clang reports both;
-- a storage class's conflict;
-- a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
-  `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
+- a storage class's conflict (`register _Thread_local int r;` in a block);
+- a type of no keyword dropped in an operand reader's type name
+  (`typeof(int typeof(int))`);
+- an enum's base of no integer type (`enum E : float`, clang's "non-integral
+  type 'float' is an invalid underlying type").
 
 Error-free lists never reach this. The semantic-recovery fixtures cover each
 kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
@@ -6210,7 +6260,16 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+them. `-Wunused-but-set-variable` (#2409, in `-Wunused` and `-Wall`) is an
+unused variable's event of `payload.data` 1, "variable 'x' set but not used",
+given with them at its scope's end, in their order: a local's, a static
+local's too, whose every use only sets it, as clang's `RefsMinusAssignments`
+counts them (`check_input_discarded_set`): the bare left operand of an
+assignment, a compound assignment, an increment or a decrement that is an
+expression statement (not a statement expression's last), a `for` header's
+first or third clause, or a comma's left operand; a volatile variable's
+compound assignment and step read it. A parameter's is
+`-Wunused-but-set-parameter`'s (the `-Wuninitialized` pass's). `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
 const object without an initializer, at its name, with its type as declared.
 - **Automatic storage:**
   - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
@@ -6688,7 +6747,12 @@ declarator, at file scope and for a member), the ungrouped plain `_Complex` assu
 `-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
 for an unnamed parameter before C23. Since then (#147), `-Wextern-initializer` warns of a file-scope extern
 variable's initializer at its name, after its attributes' warnings, as clang's `AddInitializerToDecl` does (a block
-scope's is an error). Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+scope's is an error). `-Wgnu-empty-struct` (#2409, off by default, `-pedantic`'s and `-Wgnu`'s) warns of a
+struct's or union's definition without named members at its keyword, as clang's `ActOnFields` does when it
+completes the record: "empty struct is a GNU extension", or "struct without named members is a GNU extension" where
+its members are unnamed bit-fields alone (an anonymous member counts as named). Left: clang's off-by-default
+`-Wc++-compat` "empty struct has size 0 in C, size 1 in C++" and `-Wzero-length-array` aren't given. Command-line
+options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
 compares the driver's complete diagnostics with clang's for every producer and policy, and
@@ -7898,12 +7962,18 @@ __attribute__((cleanup))", "… of VLA typedef"). Clang checks jumps in
 `ActOnFinishFunctionBody`, once the body's scopes have closed. So these errors
 complete past the body's `}`, after its unused variables' warnings, and count
 in no scope (`check_driver_error_scoped`). A computed goto's and an asm goto's
-errors don't take their notes yet ("possible target of indirect goto
-statement"). The errors clang gives in the body after such a jump are given
-where the rounds' edited reading finds them in a statement it keeps whole
-(#2120, `check_driver_rejected_trusted`). Clang's `void` value of a
-statement expression whose last statement is a `case` (`x = ({ case 1: 2;
-})`'s "assigning to 'int' from incompatible type 'void'") isn't given yet.
+error that enters such a scope takes clang's two notes: "possible target of
+indirect goto statement" (or "… asm goto statement") at the first label whose
+scope it enters, then the bypassed declaration's (`check_input_report_indirect_jump`).
+One that only leaves a cleanup's scope has no note yet. Every jump's report stops
+nothing: it is recovered (`check_input_recover_reports`), as clang checks the
+body whole before it reports its jumps, and a case the switch may not jump to is
+still the switch's case, whose value is checked. So the errors in the body
+after such a jump stay (as the rounds' edited reading also finds them in a
+statement it keeps whole, #2120, `check_driver_rejected_trusted`), and a statement expression whose last statement is a
+`case` is `void` (`x = ({ case 1: 2; })`'s "assigning to 'int' from
+incompatible type 'void'"). Left: clang drops a switch's jump errors once
+the switch has a duplicate case value, and buster still gives them (#2498).
 
 `test-checker` compares both walks for every pair of tokens in nested and sibling
 regions, including boundaries and absent tokens, on scalar/vector normal and
@@ -8813,6 +8883,15 @@ arguments against the function. The checker now gives these as clang does.
   It counts each visited token's bracket levels and parameter lists from
   64-token masks by popcount. Both paths run the same step at each token they
   visit (`check_input_availability_token`, `check_input_deprecated_use`).
+
+  A unit a parse error rejects runs the pass over the view its checking
+  reads (a prefix, a repair, a whole resumed parse; #2202), so the uses
+  before the error keep their warnings, which publish as the view's other
+  warnings do. An unavailable use's error, and a member's use (which the
+  graph reads), stay a complete unit's (`CheckInputDeprecatedPass.errors`):
+  the view's reports select no error of its own. Differences left: a use
+  after the parse error that the view doesn't hold, and an unavailable use
+  before it, get nothing.
 - **Deprecated and unavailable members** (`check_input_member_uses`). A
   struct's or union's member that such an attribute marks is recorded when
   its record is completed, by its index in the type table's members
@@ -9989,8 +10068,7 @@ arguments against the function. The checker now gives these as clang does.
   on with the declaration: the view drops the tokens from the error to that
   `)` (`ParseDiagnostic.resume_delete`), so the list's earlier attributes and
   the unit's later declarations are checked, by both paths. Differences left:
-  the warnings a rejected unit drops still drop (`-Wdeprecated-declarations`
-  among them), and the caret display's "expanded from macro '__clang__'" note.
+  the warnings a rejected unit drops still drop, and the caret display's "expanded from macro '__clang__'" note.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original

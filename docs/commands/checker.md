@@ -120,8 +120,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `target_clones` section alone, #1838; `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
-  `c_check_type_attribute_recovery_driver_test.c` and
-  `c_check_structural_recovery_driver_test.c` alone, the whole output and status
+  `c_check_type_attribute_recovery_driver_test.c`,
+  `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447; `--type-sugar-only` runs
