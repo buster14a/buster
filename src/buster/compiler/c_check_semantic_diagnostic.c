@@ -556,6 +556,9 @@ static const char* check_semantic_builtin_spelling(const String8* parts, uint32_
     return result;
 }
 
+// c_check_common_warnings.c's test of a separator that is a comma operator, which that file defines later in the unit.
+static bool check_common_comma_operator(const Parser* parser, uint32_t separator);
+
 // Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace, and its character
 // constants by their values (check_semantic_character). This is a bounded token pass, including macro expansions; it never
 // walks the expression recursively. `spelled`, where not NULL, holds a token's replacement as clang's printer spells it
@@ -626,7 +629,12 @@ static const char* check_semantic_requirement(const Parser* parser, Preprocessor
         const uint8_t previous = prior != UINT32_MAX ? parser->tree.roles[first + prior] : PARSE_ROLE_NONE;
         const bool word = prior != UINT32_MAX && pp_word_character((uint8_t)parts[prior].pointer[parts[prior].length - 1], pp_dollar_punctuation(&pp->options)) &&
                                                  pp_word_character((uint8_t)parts[i].pointer[0], pp_dollar_punctuation(&pp->options));
-        if (prior != UINT32_MAX && (check_semantic_binary(role) || check_semantic_binary(previous) || word))
+        // A list's separator (a call's arguments, an initializer list's, a selection's) is followed by a space, as clang's
+        // printer writes ", " between them (#2382); a comma operator a group holds is a binary operator, " , ".
+        const bool comma = role == PARSE_ROLE_SEPARATOR && check_common_comma_operator(parser, first + i);
+        const bool previous_comma = previous == PARSE_ROLE_SEPARATOR && check_common_comma_operator(parser, first + prior);
+        const bool separated = previous == PARSE_ROLE_SEPARATOR;
+        if (prior != UINT32_MAX && (check_semantic_binary(role) || check_semantic_binary(previous) || word || separated || comma || previous_comma))
         {
             result[at++] = ' ';
         }
@@ -2182,6 +2190,21 @@ static const char* check_semantic_control(Preprocessor* pp, const TypeTable* typ
                 text[--at] = '-';
             }
             result = check_warning_text(scratch, "duplicate case value '%s'", text + at);
+        }
+        else if (failure->wide != NULL && check_wide_type(types, failure->type, &width, &sign))
+        {
+            // A _BitInt's past 128 bits (#2220): its limbs' decimal digits.
+            const CheckValue value = {
+                .type = failure->type,
+                .category = CHECK_RVALUE,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = failure->value,
+                .floating_storage = { (uint64_t)(uintptr_t)failure->wide, 0 },
+            };
+            const uint32_t capacity = width / 3 + 3;
+            char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, capacity + 1);
+            const uint32_t length = text != NULL ? check_wide_decimal(types, &value, text, capacity) : 0;
+            result = length != 0 ? check_warning_text(scratch, "duplicate case value '%.*s'", (int)length, text) : result;
         }
     }
     return check_semantic_text(pp, result);
