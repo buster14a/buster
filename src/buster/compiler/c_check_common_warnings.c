@@ -2286,9 +2286,11 @@ static bool check_common_range_out(const CheckGraph* graph, const CheckStream* s
 // -Wtautological-constant-out-of-range-compare (check_common_range_out), a bit each, for the comparison walk's reach where
 // -Wsign-compare doesn't take every comparison. The comparisons' lanes gather both operands' value flags from the stream's
 // flag column: one of them an integer constant expression's, which every candidate has, and, where only one is, the other
-// operand no int or long class builtin that covers the constant's type (the TypeIds' builtin codes, gathered too) and no
-// boolean operator's, which no candidate's is; only the lanes left take the scalar test. A stream without the columns tests
-// every comparison, as the scalar path, the twin and oracle, does through check_common_own_reach.
+// operand neither an int or long class builtin that covers the constant's type (the TypeIds' builtin codes, gathered too)
+// nor a narrow builtin compared with an int or unsigned int constant in its range (the constant's value gathered from its
+// payload row), but for a boolean operator's, which no candidate's is; only the lanes left take the scalar test. A stream
+// without the columns tests every comparison, as the scalar path, the twin and oracle, does through
+// check_common_own_reach.
 static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t first, __m512i ops,
                                          __mmask16 lanes)
 {
@@ -2329,7 +2331,36 @@ static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStr
                                    _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT - BUSTER_TYPE_CODE_BOOL));
         const __mmask16 long_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG)), _mm512_set1_epi32(3)) &
                                     _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_ULLONG - BUSTER_TYPE_CODE_BOOL));
-        const __mmask16 covered = (__mmask16)(one & ~boolean & (int_wide | long_wide));
+        // A narrow builtin (_Bool to unsigned short) compared with an int or unsigned int constant inside its range (char's
+        // taken as 0 to 127, whichever its signedness): the constant's value, the low 32 bits of its payload row's integer
+        // (none for no row, a zero), gathered too. An unsigned constant is in range up to the type's maximum.
+        const __mmask16 narrow_other = (__mmask16)(_mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, bool_code),
+                                                                                _mm512_set1_epi32(BUSTER_TYPE_CODE_USHORT - BUSTER_TYPE_CODE_BOOL)) & ~boolean);
+        const __mmask16 int_constant = _mm512_mask_cmple_epu32_mask(narrow_other, _mm512_sub_epi32(constant_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_INT)),
+                                                                     _mm512_set1_epi32(1));
+        const bool rows_fit = stream->payload_rows != NULL && stream->payloads != NULL &&
+                              (uint64_t)stream->payload_count * sizeof(CheckValue) < (UINT64_C(1) << 31);
+        __mmask16 in_range = 0;
+        if (int_constant != 0 && rows_fit)
+        {
+            const __m512i constant_nodes = _mm512_mask_blend_epi32(left_ice, right, left);
+            const __m512i rows = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), int_constant, constant_nodes, stream->payload_rows, 4);
+            const __mmask16 rowed = _mm512_mask_cmpneq_epu32_mask(int_constant, rows, _mm512_setzero_si512());
+            const __m512i offsets = _mm512_mullo_epi32(_mm512_sub_epi32(rows, _mm512_set1_epi32(1)), _mm512_set1_epi32((int)sizeof(CheckValue)));
+            const __m512i values = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), rowed, offsets,
+                                                               (const char*)stream->payloads + offsetof(CheckValue, integer), 1);
+            // The ranges of codes 2 to 7: _Bool, char, signed char, unsigned char, short and unsigned short.
+            static const int32_t lows[16] = { 0, 0, -128, 0, -32768, 0 };
+            static const int32_t highs[16] = { 1, 127, 127, 255, 32767, 65535 };
+            const __m512i slot = _mm512_sub_epi32(other_code, bool_code);
+            const __m512i low = _mm512_permutexvar_epi32(slot, _mm512_loadu_si512(lows));
+            const __m512i high = _mm512_permutexvar_epi32(slot, _mm512_loadu_si512(highs));
+            const __mmask16 unsigned_constant = _mm512_mask_cmpeq_epi32_mask(int_constant, constant_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT));
+            const __mmask16 signed_in = _mm512_mask_cmple_epi32_mask(_mm512_mask_cmpge_epi32_mask(int_constant & ~unsigned_constant, values, low), values, high);
+            const __mmask16 unsigned_in = _mm512_mask_cmple_epu32_mask(unsigned_constant, values, high);
+            in_range = (__mmask16)(signed_in | unsigned_in);
+        }
+        const __mmask16 covered = (__mmask16)((one & ~boolean & (int_wide | long_wide)) | in_range);
         selected = (uint32_t)(left_ice | right_ice) & ~(uint32_t)covered;
     }
     uint32_t result = 0;
