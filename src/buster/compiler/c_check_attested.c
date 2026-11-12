@@ -582,10 +582,12 @@ typedef struct CheckAttestedListing CheckAttestedListing;
 struct CheckAttestedListing
 {
     const uint8_t* kinds;
+    const uint8_t* roles;
     const uint32_t* names;
-    // The names' states, which the chain reads two passes on: each identifier's is fetched where the lists meet it, so
-    // that the chain finds the lines the compile between two units evicted.
-    const CheckAttestedKey* keys;
+    const uint32_t* parents;
+    // A function definition's body's closing, set at its opening: the lists' callers hand its inside to
+    // check_attested_list_body and go on at it; BUSTER_ATTESTED_NONE outside one.
+    uint32_t body_end;
     uint32_t* firsts;
     uint32_t* lasts;
     uint8_t* flags;
@@ -628,7 +630,6 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
             stack_flags[depth] = level_flags & ~BUSTER_ATTESTED_LEVEL_ENUMERATOR;
             listing->name_entries[listing->names_count] = (id * 2 + (tag ? 1u : 0u)) | (uint32_t)name_class << BUSTER_ATTESTED_CLASS_SHIFT;
             listing->names_count += 1;
-            _mm_prefetch((const char*)(listing->keys + id * 2 + (tag ? 1u : 0u)), _MM_HINT_T0);
         }
         else if ((action & BUSTER_ATTESTED_ACT_STRING) != 0 && listing->symbol_groups != 0)
         {
@@ -664,6 +665,8 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
             stack_flags[depth] = base == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
             listing->symbol_groups += check_attested_symbol_group(role) ? 1u : 0u;
             listing->declaration_flags |= role == PARSE_ROLE_OPEN_BODY ? BUSTER_ATTESTED_DEFINITION : 0;
+            // A function definition's body: its inside is check_attested_list_body's, up to its closing.
+            listing->body_end = role == PARSE_ROLE_OPEN_BODY && depth == 1 ? listing->parents[t] : BUSTER_ATTESTED_NONE;
         }
         else if ((action & BUSTER_ATTESTED_ACT_CLOSE) != 0 && depth != 0)
         {
@@ -673,14 +676,8 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
     }
     if (root)
     {
-        // A definition's every name counts as declared by it (a block's extern declaration, an implicit function's):
-        // the superset without reading its body.
         const uint32_t declaration = listing->declaration;
         const bool definition = (listing->declaration_flags & BUSTER_ATTESTED_DEFINITION) != 0 || role == PARSE_ROLE_CLOSE_BODY;
-        for (uint32_t n = listing->name_starts[declaration]; definition && n < listing->names_count; n += 1)
-        {
-            listing->name_entries[n] |= (BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP) << BUSTER_ATTESTED_CLASS_SHIFT;
-        }
         listing->firsts[declaration] = listing->first;
         listing->lasts[declaration] = t;
         listing->flags[declaration] = listing->declaration_flags | (definition ? BUSTER_ATTESTED_DEFINITION : 0);
@@ -694,6 +691,96 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
         stack_flags[0] = 0;
     }
     listing->depth = depth;
+}
+
+// A function definition's body's inside, tokens [begin, end) of declaration `listing->declaration`: each identifier
+// looks its name up, and declares it at file scope where the body can: a callee (an implicit function's declaration) and,
+// in a body with an `extern` declaration, every name (a block's extern declaration's, without telling which). Any other
+// name a body names has an earlier declaration, which the reach's earlier edge reaches and whose later edge reaches the
+// later ones; the binding events check the lists of definitions as of every declaration. A body with an asm statement
+// gives its every string as one that may name symbols. No stack: a body's inside makes no file-scope structure. The
+// vector path 64 tokens at a time (the identifiers' entries compressed into the list, a callee by its next token's
+// role); the scalar path, its twin, a token at a time.
+static void check_attested_list_body(CheckAttestedListing* listing, uint32_t begin, uint32_t end, bool scalar)
+{
+    const uint8_t* const kinds = listing->kinds;
+    const uint8_t* const roles = listing->roles;
+    const uint32_t* const names = listing->names;
+    bool externs = false;
+    bool asms = false;
+    uint32_t u = begin;
+    for (; !BUSTER_SCALAR_PATH(scalar) && u < end; u += 64)
+    {
+        const __mmask64 lanes = end - u < 64 ? _bzhi_u64(UINT64_MAX, end - u) : UINT64_MAX;
+        const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + u);
+        asms |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_ASM)) != 0;
+        uint64_t storage = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_STORAGE));
+        while (storage != 0)
+        {
+            externs |= names[u + _tzcnt_u64(storage)] == C_NAME_EXTERN;
+            storage &= storage - 1;
+        }
+    }
+    for (; u < end; u += 1)
+    {
+        asms |= kinds[u] == PARSE_KIND_ASM;
+        externs |= kinds[u] == PARSE_KIND_STORAGE && names[u] == C_NAME_EXTERN;
+    }
+    const uint32_t declares = externs ? BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT : 0;
+    uint32_t count = listing->names_count;
+    uint32_t strings = listing->strings;
+    u = begin;
+    for (; !BUSTER_SCALAR_PATH(scalar) && u < end; u += 64)
+    {
+        const __mmask64 lanes = end - u < 64 ? _bzhi_u64(UINT64_MAX, end - u) : UINT64_MAX;
+        const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + u);
+        const __m512i role = _mm512_maskz_loadu_epi8(lanes, roles + u);
+        // The next tokens' roles (the body's closing is the last one read).
+        const __m512i next = _mm512_maskz_loadu_epi8(lanes, roles + u + 1);
+        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER));
+        const uint64_t tags = identifiers & (_mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_TAG)) | _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_LEAF_RIGHT)));
+        const uint64_t callees = identifiers & (_mm512_cmpeq_epi8_mask(next, _mm512_set1_epi8(PARSE_ROLE_OPEN_CALL)) | _mm512_cmpeq_epi8_mask(next, _mm512_set1_epi8(PARSE_ROLE_OPEN_FUNCTION)));
+        for (uint32_t g = 0; g < 4; g += 1)
+        {
+            const __mmask16 group = (__mmask16)(identifiers >> (16 * g));
+            const __mmask16 tagged = (__mmask16)(tags >> (16 * g));
+            const __mmask16 called = (__mmask16)(callees >> (16 * g));
+            const __m512i ids = _mm512_maskz_loadu_epi32(group, names + u + 16 * g);
+            __m512i entries = _mm512_add_epi32(_mm512_slli_epi32(ids, 1), _mm512_maskz_set1_epi32(tagged, 1));
+            entries = _mm512_or_si512(entries, _mm512_set1_epi32((int32_t)(BUSTER_ATTESTED_LOOKS_UP << BUSTER_ATTESTED_CLASS_SHIFT | declares)));
+            entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32(tagged, (int32_t)(BUSTER_ATTESTED_TAG << BUSTER_ATTESTED_CLASS_SHIFT)));
+            entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32(called, (int32_t)(BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT)));
+            _mm512_mask_compressstoreu_epi32(listing->name_entries + count, group, entries);
+            count += (uint32_t)__builtin_popcount(group);
+        }
+        uint64_t texts = asms ? _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_STRING)) : 0;
+        while (texts != 0)
+        {
+            listing->string_tokens[strings] = u + (uint32_t)_tzcnt_u64(texts);
+            listing->string_declarations[strings] = listing->declaration;
+            strings += 1;
+            texts &= texts - 1;
+        }
+    }
+    for (; u < end; u += 1)
+    {
+        const bool identifier = kinds[u] == PARSE_KIND_IDENTIFIER;
+        const bool tag = roles[u] == PARSE_ROLE_TAG || roles[u] == PARSE_ROLE_LEAF_RIGHT;
+        const bool callee = roles[u + 1] == PARSE_ROLE_OPEN_CALL || roles[u + 1] == PARSE_ROLE_OPEN_FUNCTION;
+        listing->name_entries[count] = (names[u] * 2 + (tag ? 1u : 0u)) | BUSTER_ATTESTED_LOOKS_UP << BUSTER_ATTESTED_CLASS_SHIFT | declares |
+                                       (tag ? BUSTER_ATTESTED_TAG << BUSTER_ATTESTED_CLASS_SHIFT : 0) |
+                                       (callee ? BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT : 0);
+        count += identifier ? 1u : 0u;
+        if (asms && kinds[u] == PARSE_KIND_STRING)
+        {
+            listing->string_tokens[strings] = u;
+            listing->string_declarations[strings] = listing->declaration;
+            strings += 1;
+        }
+    }
+    listing->declaration_flags |= strings != listing->strings ? BUSTER_ATTESTED_STRINGS : 0;
+    listing->names_count = count;
+    listing->strings = strings;
 }
 
 // The lists of `parser`'s unit into the census's unit arrays; whether there was room. One pass in source order, with a
@@ -710,8 +797,10 @@ static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census
     const uint64_t mark = census->unit_arena.length;
     CheckAttestedListing listing = {
         .kinds = kinds,
+        .roles = roles,
         .names = parser->tokens.names,
-        .keys = census->keys,
+        .parents = parents,
+        .body_end = BUSTER_ATTESTED_NONE,
         .firsts = census->firsts,
         .lasts = census->lasts,
         .flags = census->flags,
@@ -736,8 +825,9 @@ static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census
     const __m512i role_low = _mm512_loadu_si512(role_actions);
     const __m512i role_high = _mm512_loadu_si512(role_actions + 64);
     const __m512i none = _mm512_set1_epi32(-1);
+    const bool scalar = parser->options.scalar;
     uint32_t t = 0;
-    for (; valid && !BUSTER_SCALAR_PATH(parser->options.scalar) && t < count; t += 64)
+    while (valid && !BUSTER_SCALAR_PATH(scalar) && t < count)
     {
         const uint32_t length = count - t < 64 ? count - t : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -756,16 +846,33 @@ static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census
         _mm512_storeu_si512(part, actions);
         _mm512_storeu_si512(role_bytes, role);
         uint64_t steps = (_mm512_test_epi8_mask(actions, actions) & lanes) | root_bits;
+        uint32_t next = t + length;
         while (steps != 0)
         {
             const uint32_t k = (uint32_t)_tzcnt_u64(steps);
             check_attested_list_token(&listing, t + k, role_bytes[k], part[k], (root_bits >> k & 1) != 0);
             steps &= steps - 1;
+            if (listing.body_end != BUSTER_ATTESTED_NONE)
+            {
+                // A body: its inside, then the lists go on at its closing.
+                check_attested_list_body(&listing, t + k + 1, listing.body_end, scalar);
+                next = listing.body_end;
+                listing.body_end = BUSTER_ATTESTED_NONE;
+                steps = 0;
+            }
         }
+        t = next;
     }
-    for (; valid && t < count; t += 1)
+    while (valid && t < count)
     {
         check_attested_list_token(&listing, t, roles[t], kind_actions[kinds[t]] | role_actions[roles[t]], parents[t] == BUSTER_PARSE_ROOT);
+        t += 1;
+        if (listing.body_end != BUSTER_ATTESTED_NONE)
+        {
+            check_attested_list_body(&listing, t, listing.body_end, scalar);
+            t = listing.body_end;
+            listing.body_end = BUSTER_ATTESTED_NONE;
+        }
     }
     uint32_t declaration = listing.declaration;
     if (valid && listing.first < count)
@@ -1112,19 +1219,13 @@ static __attribute__((noinline)) void check_attested_chain(CheckAttested* census
         census->semantics[d] = hash;
         const bool eligible = (census->flags[d] & (BUSTER_ATTESTED_DEFINITION | BUSTER_ATTESTED_PRAGMA)) == 0;
         census->hits[d] = eligible && check_attested_memo_has(census, hash);
-        // Its declared names, each once (a body names its locals again and again): a name whose list's last declarer is
-        // this declaration is declared already.
         for (uint32_t n = name_starts[d]; n < end; n += 1)
         {
             const uint32_t entry = name_entries[n];
-            const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
-            const CheckAttestedKey* state = census->keys + key;
-            const bool again = state->stamp == census->stamp && state->local != BUSTER_ATTESTED_NONE &&
-                               census->entry_declarations[census->lists[state->local].last] == d;
-            if ((entry >> BUSTER_ATTESTED_CLASS_SHIFT & BUSTER_ATTESTED_DECLARES) != 0 && !again)
+            if ((entry >> BUSTER_ATTESTED_CLASS_SHIFT & BUSTER_ATTESTED_DECLARES) != 0)
             {
-                check_attested_declare(census, key, hash);
-                check_attested_declarer(census, key, d, &entries, &distinct);
+                check_attested_declare(census, entry & BUSTER_ATTESTED_KEY_MASK, hash);
+                check_attested_declarer(census, entry & BUSTER_ATTESTED_KEY_MASK, d, &entries, &distinct);
             }
         }
     }
@@ -1738,7 +1839,7 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         const bool file_declare = operation == C_BINDING_DECLARE && bindings->depth[e] == 0 && space <= C_BINDING_TAG;
         const bool use = operation == C_BINDING_USE && space <= C_BINDING_TAG;
         const uint32_t d = file_declare || use ? check_attested_declaration_of(census, bindings->point[e]) : declarations;
-        if (d < declarations && (census->flags[d] & BUSTER_ATTESTED_DEFINITION) == 0)
+        if (d < declarations)
         {
             const uint32_t key = id * 2 + (space == C_BINDING_TAG ? 1u : 0u);
             const bool held = check_attested_lists_hold(census, d, key, file_declare ? BUSTER_ATTESTED_DECLARES : BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP);
