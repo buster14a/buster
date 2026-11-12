@@ -1777,8 +1777,9 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
 }
 
 // A sequence of entries in the order they run, which check_lower_sequence_push pushes last first: an element's
-// arithmetic written as it reads (check_lower_transport_bit_builtin).
-#define BUSTER_CHECK_LOWER_SEQUENCE 96u
+// arithmetic written as it reads (check_lower_transport_bit_builtin): 1024 entries hold a 128-bit bit deposit's rounds
+// (#2410).
+#define BUSTER_CHECK_LOWER_SEQUENCE 1024u
 
 typedef struct CheckLowerSequence CheckLowerSequence;
 struct CheckLowerSequence
@@ -1800,10 +1801,33 @@ static void check_lower_sequence_add(CheckLowerSequence* sequence, uint8_t kind,
     sequence->count += 1;
 }
 
-// `local` op= constant: LOCAL, CONST, the operation, SET_LOCAL.
+// Whether a class is a 128-bit integer's (#2410): its shift counts are of a narrower class, and a CONST of it has 64 bits,
+// so a wider constant is built of its halves (check_lower_sequence_halves).
+static bool check_lower_sequence_wide(uint8_t class)
+{
+    return class == BUSTER_TYPED_CLASS_I128 || class == BUSTER_TYPED_CLASS_U128;
+}
+
+// The value on the stack op= constant: CONST, then the operation; a 128-bit value's shift by a U32 count.
 static void check_lower_sequence_constant(CheckLowerSequence* sequence, uint8_t class, uint8_t kind, uint64_t constant)
 {
-    check_lower_sequence_add(sequence, BUSTER_TYPED_CONST, class, constant);
+    const bool count = check_lower_sequence_wide(class) && (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR);
+    check_lower_sequence_add(sequence, BUSTER_TYPED_CONST, count ? BUSTER_TYPED_CLASS_U32 : class, constant);
+    check_lower_sequence_add(sequence, kind, class, 0);
+}
+
+// The value on the stack op= the constant of `low` and `high` halves: `low` alone, zero-extended, where `high` is 0 (as
+// it is for every class of 64 bits or fewer), else low | (high << 64), of a 128-bit class (an unsigned one, whose CONST
+// zero-extends).
+static void check_lower_sequence_halves(CheckLowerSequence* sequence, uint8_t class, uint8_t kind, uint64_t low, uint64_t high)
+{
+    check_lower_sequence_add(sequence, BUSTER_TYPED_CONST, class, low);
+    if (high != 0)
+    {
+        check_lower_sequence_add(sequence, BUSTER_TYPED_CONST, class, high);
+        check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHL, 64);
+        check_lower_sequence_add(sequence, BUSTER_TYPED_OR, class, 0);
+    }
     check_lower_sequence_add(sequence, kind, class, 0);
 }
 
@@ -1819,11 +1843,18 @@ static void check_lower_sequence_push(CheckLowerWriter* writer, const CheckLower
     }
 }
 
-// A constant of a byte `pattern` repeated through `bits` bits.
+// A constant of a byte `pattern` repeated through `bits` bits (64 of them at most: a 128-bit one's halves are each this).
 static uint64_t check_lower_bits_pattern(uint8_t pattern, uint32_t bits)
 {
     const uint64_t repeated = UINT64_C(0x0101010101010101) * pattern;
-    return bits == 64 ? repeated : repeated & ((UINT64_C(1) << bits) - 1);
+    return bits >= 64 ? repeated : repeated & ((UINT64_C(1) << bits) - 1);
+}
+
+// The value on the stack op= a byte `pattern` repeated through `bits` bits, 128 of them too.
+static void check_lower_sequence_pattern(CheckLowerSequence* sequence, uint8_t class, uint8_t kind, uint8_t pattern, uint32_t bits)
+{
+    const uint64_t half = check_lower_bits_pattern(pattern, bits);
+    check_lower_sequence_halves(sequence, class, kind, half, bits == 128 ? half : 0);
 }
 
 // The population count of local `t` (of `bits` bits, its value's bits past `width` clear), on the stack, by SWAR: t -=
@@ -1834,23 +1865,41 @@ static void check_lower_sequence_population(CheckLowerSequence* sequence, uint8_
     check_lower_sequence_add(sequence, BUSTER_TYPED_LOCAL, class, t);
     check_lower_sequence_add(sequence, BUSTER_TYPED_LOCAL, class, t);
     check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHR, 1);
-    check_lower_sequence_constant(sequence, class, BUSTER_TYPED_AND, check_lower_bits_pattern(0x55, bits));
+    check_lower_sequence_pattern(sequence, class, BUSTER_TYPED_AND, 0x55, bits);
     check_lower_sequence_add(sequence, BUSTER_TYPED_SUB, class, 0);
     check_lower_sequence_add(sequence, BUSTER_TYPED_SET_LOCAL, class, t);
     check_lower_sequence_add(sequence, BUSTER_TYPED_LOCAL, class, t);
-    check_lower_sequence_constant(sequence, class, BUSTER_TYPED_AND, check_lower_bits_pattern(0x33, bits));
+    check_lower_sequence_pattern(sequence, class, BUSTER_TYPED_AND, 0x33, bits);
     check_lower_sequence_add(sequence, BUSTER_TYPED_LOCAL, class, t);
     check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHR, 2);
-    check_lower_sequence_constant(sequence, class, BUSTER_TYPED_AND, check_lower_bits_pattern(0x33, bits));
+    check_lower_sequence_pattern(sequence, class, BUSTER_TYPED_AND, 0x33, bits);
     check_lower_sequence_add(sequence, BUSTER_TYPED_ADD, class, 0);
     check_lower_sequence_add(sequence, BUSTER_TYPED_SET_LOCAL, class, t);
     check_lower_sequence_add(sequence, BUSTER_TYPED_LOCAL, class, t);
     check_lower_sequence_add(sequence, BUSTER_TYPED_LOCAL, class, t);
     check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHR, 4);
     check_lower_sequence_add(sequence, BUSTER_TYPED_ADD, class, 0);
-    check_lower_sequence_constant(sequence, class, BUSTER_TYPED_AND, check_lower_bits_pattern(0x0f, bits));
-    check_lower_sequence_constant(sequence, class, BUSTER_TYPED_MUL, check_lower_bits_pattern(0x01, bits));
+    check_lower_sequence_pattern(sequence, class, BUSTER_TYPED_AND, 0x0f, bits);
+    check_lower_sequence_pattern(sequence, class, BUSTER_TYPED_MUL, 0x01, bits);
     check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHR, bits - 8);
+}
+
+// The value on the stack (of `class`, `bits` wide) with its bits past `width` cleared: an AND of them, or of 128 bits,
+// shifted up past them and back.
+static void check_lower_sequence_kept(CheckLowerSequence* sequence, uint8_t class, uint32_t bits, uint32_t width)
+{
+    if (check_lower_sequence_wide(class))
+    {
+        if (width < bits)
+        {
+            check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHL, bits - width);
+            check_lower_sequence_constant(sequence, class, BUSTER_TYPED_SHR, bits - width);
+        }
+    }
+    else
+    {
+        check_lower_sequence_constant(sequence, class, BUSTER_TYPED_AND, width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1);
+    }
 }
 
 // x's sign as all ones or zero: local `x` (of `class`, its element's bits at its top) as the signed class of its
@@ -1891,6 +1940,182 @@ static void check_lower_sequence_compare(CheckLowerSequence* sequence, uint8_t c
     check_lower_sequence_add(sequence, BUSTER_TYPED_NEG, class, 0);
 }
 
+// local `into` = the parallel prefix of local `from` by xor, from bit 0 up: from ^ (from << 1), then each step's value
+// xor'ed with itself shifted up by 2, 4 and on to half of `bits` (Hacker's Delight 7-4's mp).
+static void check_lower_sequence_prefix_xor(CheckLowerSequence* q, uint8_t class, uint32_t bits, uint32_t from, uint32_t into)
+{
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, from);
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, from);
+    check_lower_sequence_constant(q, class, BUSTER_TYPED_SHL, 1);
+    check_lower_sequence_add(q, BUSTER_TYPED_XOR, class, 0);
+    check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, into);
+    for (uint32_t shift = 2; shift < bits; shift *= 2)
+    {
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, into);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, into);
+        check_lower_sequence_constant(q, class, BUSTER_TYPED_SHL, shift);
+        check_lower_sequence_add(q, BUSTER_TYPED_XOR, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, into);
+    }
+}
+
+// local `into` = (local `a` ^ local `b`) | (local `b` >> shift): Hacker's Delight 7-4's and 7-5's moves of the bits the
+// round's mask selects.
+static void check_lower_sequence_move_bits(CheckLowerSequence* q, uint8_t class, uint32_t a, uint32_t b, uint32_t shift, uint32_t into)
+{
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, a);
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, b);
+    check_lower_sequence_add(q, BUSTER_TYPED_XOR, class, 0);
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, b);
+    check_lower_sequence_constant(q, class, BUSTER_TYPED_SHR, shift);
+    check_lower_sequence_add(q, BUSTER_TYPED_OR, class, 0);
+    check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, into);
+}
+
+// The locals of a bit deposit's or extraction's sequence (check_lower_sequence_deposit): the mask's bits still to place
+// (`mk`), its prefix (`mp`), the bits a round moves (`mv`), the mask as given (`m0`), and each round's mv for the
+// deposit's second pass (`moves`, one of each of `bits`' log2 rounds, 7 at most).
+typedef struct CheckLowerDepositLocals CheckLowerDepositLocals;
+struct CheckLowerDepositLocals
+{
+    uint32_t mk;
+    uint32_t mp;
+    uint32_t mv;
+    uint32_t m0;
+    uint32_t moves[7];
+};
+
+// __builtin_elementwise_pext (`deposit` false) and _pdep of local `x` by the mask in local `m`, both of `class` (32, 64 or
+// 128 bits, their values' bits past the element's width clear), without BMI2 or past 64 bits (#2410), on the stack:
+// Hacker's Delight's compress (7-4) and expand (7-5), the parallel suffix method LLVM expands both by. Compress: x &= m,
+// mk = ~m << 1, then each round i of log2(bits) moves the mask's bits that have an odd number of zeros (mp's) to their
+// right by 2^i, in the mask and in x. Expand computes the same rounds' moves of the mask, then undoes them on x in
+// reverse, x = (x & ~mv) | ((x << 2^i) & mv), and keeps the mask's bits. `x`, `m` and `t` are overwritten.
+static void check_lower_sequence_deposit(CheckLowerSequence* q, uint8_t class, uint32_t bits, bool deposit, uint32_t x, uint32_t m, uint32_t t,
+                                         const CheckLowerDepositLocals* locals)
+{
+    uint32_t rounds = 0;
+    for (uint32_t b = bits; b > 1; b /= 2)
+    {
+        rounds += 1;
+    }
+    if (deposit)
+    {
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, m);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, locals->m0);
+    }
+    else
+    {
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, m);
+        check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, x);
+    }
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, m);
+    check_lower_sequence_add(q, BUSTER_TYPED_NOT, class, 0);
+    check_lower_sequence_constant(q, class, BUSTER_TYPED_SHL, 1);
+    check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, locals->mk);
+    for (uint32_t i = 0; i < rounds; i += 1)
+    {
+        const uint32_t mv = deposit ? locals->moves[i] : locals->mv;
+        check_lower_sequence_prefix_xor(q, class, bits, locals->mk, locals->mp);
+        // mv = mp & m; m = (m ^ mv) | (mv >> 2^i).
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, locals->mp);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, m);
+        check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, mv);
+        check_lower_sequence_move_bits(q, class, m, mv, 1u << i, m);
+        if (!deposit)
+        {
+            // t = x & mv; x = (x ^ t) | (t >> 2^i).
+            check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
+            check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, mv);
+            check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+            check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, t);
+            check_lower_sequence_move_bits(q, class, x, t, 1u << i, x);
+        }
+        // mk &= ~mp.
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, locals->mk);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, locals->mp);
+        check_lower_sequence_add(q, BUSTER_TYPED_NOT, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, locals->mk);
+    }
+    for (uint32_t i = rounds; deposit && i-- > 0;)
+    {
+        // x = (x & ~mv) | ((x << 2^i) & mv).
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, locals->moves[i]);
+        check_lower_sequence_add(q, BUSTER_TYPED_NOT, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
+        check_lower_sequence_constant(q, class, BUSTER_TYPED_SHL, 1u << i);
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, locals->moves[i]);
+        check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_OR, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, x);
+    }
+    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
+    if (deposit)
+    {
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, locals->m0);
+        check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
+    }
+}
+
+// __builtin_elementwise_clmul of locals `a` and `b` of `class` (`bits` 32, 64 or 128), without PCLMUL or past 64 bits
+// (#2410), on the stack, as LLVM expands the carry-less product: each operand split into `c` classes of its bits, those
+// at positions i mod c (masks 0x11..., 0x22... at c = 4), and the integer products of every pair of classes, the pair
+// (i, j)'s xor'ed into accumulator (i + j) mod c (`sums`), of which only the positions of that class are kept and or'ed
+// together. A class has n = bits / c bits, rounded up, so a position of the product sums at most n of its pairs' bits,
+// whose carries reach no position of the class while n < 2^c: c is 4 for 32 bits and 5 for 64 and 128.
+static void check_lower_sequence_clmul(CheckLowerSequence* q, uint8_t class, uint32_t bits, uint32_t a, uint32_t b, const uint32_t sums[5])
+{
+    const uint32_t c = bits == 32 ? 4 : 5;
+    uint64_t low[5] = { 0 };
+    uint64_t high[5] = { 0 };
+    for (uint32_t bit = 0; bit < bits; bit += 1)
+    {
+        if (bit < 64)
+        {
+            low[bit % c] |= UINT64_C(1) << bit;
+        }
+        else
+        {
+            high[bit % c] |= UINT64_C(1) << (bit - 64);
+        }
+    }
+    for (uint32_t k = 0; k < c; k += 1)
+    {
+        check_lower_sequence_add(q, BUSTER_TYPED_CONST, class, 0);
+        check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, sums[k]);
+    }
+    for (uint32_t i = 0; i < c; i += 1)
+    {
+        for (uint32_t j = 0; j < c; j += 1)
+        {
+            const uint32_t k = (i + j) % c;
+            check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, sums[k]);
+            check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_sequence_halves(q, class, BUSTER_TYPED_AND, low[i], high[i]);
+            check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_sequence_halves(q, class, BUSTER_TYPED_AND, low[j], high[j]);
+            check_lower_sequence_add(q, BUSTER_TYPED_MUL, class, 0);
+            check_lower_sequence_add(q, BUSTER_TYPED_XOR, class, 0);
+            check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, sums[k]);
+        }
+    }
+    for (uint32_t k = 0; k < c; k += 1)
+    {
+        check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, sums[k]);
+        check_lower_sequence_halves(q, class, BUSTER_TYPED_AND, low[k], high[k]);
+        if (k != 0)
+        {
+            check_lower_sequence_add(q, BUSTER_TYPED_OR, class, 0);
+        }
+    }
+}
+
 // An integer elementwise builtin's arithmetic on one element (#2216): add_sat, sub_sat, abs, max and min of locals `x`
 // and `y` (of `class`, `bits` wide, zero-extended from the element's `width` bits), first shifted up by bits - width,
 // so that the element's sign bit is the class's and a carry out of it is one out of the class; then computed as
@@ -1903,7 +2128,8 @@ static void check_lower_sequence_compare(CheckLowerSequence* sequence, uint8_t c
 static void check_lower_sequence_arithmetic(CheckLowerSequence* q, CBuiltinId builtin, uint8_t class, uint32_t bits, uint32_t width, bool is_signed, uint32_t x,
                                             uint32_t y, uint32_t t)
 {
-    const uint8_t signed_class = class == BUSTER_TYPED_CLASS_U64 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+    const uint8_t signed_class = class == BUSTER_TYPED_CLASS_U128 ? BUSTER_TYPED_CLASS_I128 : class == BUSTER_TYPED_CLASS_U64 ? BUSTER_TYPED_CLASS_I64 :
+                                 BUSTER_TYPED_CLASS_I32;
     const uint32_t up = bits - width;
     const bool binary = builtin != CBUILTIN_ELEMENTWISE_ABS;
     const bool sum = builtin == CBUILTIN_ELEMENTWISE_ADD_SAT;
@@ -1961,7 +2187,18 @@ static void check_lower_sequence_arithmetic(CheckLowerSequence* q, CBuiltinId bu
         check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
         check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
         check_lower_sequence_sign(q, class, signed_class, bits, x);
-        check_lower_sequence_constant(q, class, BUSTER_TYPED_XOR, largest);
+        if (check_lower_sequence_wide(class))
+        {
+            // The largest of 128 bits, ~0 >> 1.
+            check_lower_sequence_add(q, BUSTER_TYPED_CONST, class, 0);
+            check_lower_sequence_add(q, BUSTER_TYPED_NOT, class, 0);
+            check_lower_sequence_constant(q, class, BUSTER_TYPED_SHR, 1);
+            check_lower_sequence_add(q, BUSTER_TYPED_XOR, class, 0);
+        }
+        else
+        {
+            check_lower_sequence_constant(q, class, BUSTER_TYPED_XOR, largest);
+        }
         check_lower_sequence_add(q, BUSTER_TYPED_XOR, class, 0);
         check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
         check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, sum ? t : y);
@@ -1983,7 +2220,8 @@ static void check_lower_sequence_arithmetic(CheckLowerSequence* q, CBuiltinId bu
 // Whether an integer elementwise builtin is computed element by element by check_lower_transport_bit_builtin's
 // sequences besides the bit builtins (check_lower_bits_elements, #2216): add_sat and sub_sat of vectors of 32- and
 // 64-bit elements, which no row takes; and add_sat, sub_sat, abs, max, min and the bit builtins of an integer scalar of
-// 1, 2, 4 or 8 bytes (but bool, whose builtins clang refuses), which clang's code computes by scalar instructions.
+// 1, 2, 4 or 8 bytes (but bool, whose builtins clang refuses), which clang's code computes by scalar instructions; and
+// pdep, pext and clmul where no instruction takes them (#2410).
 static bool check_lower_integer_elements(const CheckLowerWriter* writer, CBuiltinId builtin, TypeId result)
 {
     const TypeTable* types = writer->program->types;
@@ -1991,20 +2229,34 @@ static bool check_lower_integer_elements(const CheckLowerWriter* writer, CBuilti
     const bool arithmetic = saturating || builtin == CBUILTIN_ELEMENTWISE_ABS || builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_ELEMENTWISE_MIN;
     const bool bits = builtin == CBUILTIN_ELEMENTWISE_POPCOUNT || builtin == CBUILTIN_ELEMENTWISE_BITREVERSE || builtin == CBUILTIN_ELEMENTWISE_CLZG ||
                       builtin == CBUILTIN_ELEMENTWISE_CTZG || builtin == CBUILTIN_ELEMENTWISE_FSHL || builtin == CBUILTIN_ELEMENTWISE_FSHR;
+    // pdep and pext without BMI2, clmul without PCLMUL (a vector's without AVX and PCLMUL), and a scalar's of more than 64
+    // bits, which no instruction takes (#2410): clang's code expands them.
+    const bool deposit = builtin == CBUILTIN_ELEMENTWISE_PDEP || builtin == CBUILTIN_ELEMENTWISE_PEXT;
+    const bool clmul = builtin == CBUILTIN_ELEMENTWISE_CLMUL;
+    const uint64_t features = writer->target.features;
+    const uint64_t vector_clmul = BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(PCLMUL);
+    const bool expanded = (deposit && (features & BUSTER_X86_FEATURE(BMI2)) == 0) || (clmul && (features & BUSTER_X86_FEATURE(PCLMUL)) == 0);
     bool result_elements = false;
     if (check_lower_transport_is_vector(types, result))
     {
         const CheckVectorShape shape = check_vector_builtin_shape(types, result);
-        result_elements = saturating && shape.integer && shape.element >= 4 && !check_lower_bool_vector(types, result);
+        const bool vector_expanded = (deposit && (features & BUSTER_X86_FEATURE(BMI2)) == 0) || (clmul && (features & vector_clmul) != vector_clmul);
+        result_elements = (saturating || vector_expanded) && shape.integer && (vector_expanded ? shape.element != 0 : shape.element >= 4) && !check_lower_bool_vector(types, result);
     }
-    else if (arithmetic || bits)
+    else if (arithmetic || bits || deposit || clmul)
     {
         const TypeId base = type_unqualified(type_strip_aligned(types, result));
         const uint64_t size = type_size(types, base);
         uint32_t width = 0;
         bool is_signed = false;
-        result_elements = base != BUSTER_TYPE_BOOL && type_kind(types, base) == BUSTER_TYPE_KIND_INTEGER && check_action_integer_type(types, base, &width, &is_signed) &&
-                          width == size * 8 && (size == 1 || size == 2 || size == 4 || size == 8);
+        // A _BitInt of up to 128 bits and an __int128 (#2410) too, a _BitInt's width any: the sequences take its bits
+        // zero-extended, those past 64 bits in the 128-bit classes.
+        const uint8_t kind = type_kind(types, base);
+        result_elements = base != BUSTER_TYPE_BOOL && (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) &&
+                          check_action_integer_type(types, base, &width, &is_signed) &&
+                          (kind == BUSTER_TYPE_KIND_BIT_INT ? width >= 1 + (is_signed ? 1u : 0u) && width <= 128 :
+                                                              width == size * 8 && (size == 1 || size == 2 || size == 4 || size == 8 || size == 16)) &&
+                          (arithmetic || bits || expanded || width > 64);
     }
     return result_elements;
 }
@@ -2053,18 +2305,21 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
     const TypeId element = vector ? check_lower_transport_element(types, result) : type_unqualified(type_strip_aligned(types, result));
     uint32_t width = 0;
     bool is_signed = false;
-    const bool integer = check_action_integer_type(types, element, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64);
+    // A scalar's width is any up to 128 (check_lower_integer_elements, #2410).
+    const bool integer = check_action_integer_type(types, element, &width, &is_signed) &&
+                         (width == 8 || width == 16 || width == 32 || width == 64 || (!vector && width >= 1 && width <= 128));
     if (count == 0 || count > graph->argument_counts[node] || lanes == 0 || lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES || !integer)
     {
         check_lower_unsupported(writer, "elementwise vector builtins of these operands");
     }
     else
     {
-        const bool wide = width == 64;
-        const uint32_t bits = wide ? 64 : 32;
-        const uint8_t class = wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
-        const TypeId computed = wide ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_UINT;
-        const uint64_t kept = wide ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        const bool wide = width > 32;
+        const bool double_wide = width > 64;
+        const uint32_t bits = double_wide ? 128 : wide ? 64 : 32;
+        const uint8_t class = double_wide ? BUSTER_TYPED_CLASS_U128 : wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+        const TypeId computed = double_wide ? BUSTER_TYPE_UINT128 : wide ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_UINT;
+        const uint64_t kept = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
         uint32_t sources[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t values[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         for (uint32_t a = 0; a < count; a += 1)
@@ -2073,16 +2328,46 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
             values[a] = check_lower_temporary(writer, class);
         }
         const uint32_t t = check_lower_temporary(writer, class);
+        // A bit deposit's or extraction's own locals (#2410).
+        CheckLowerDepositLocals deposit = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, { 0 } };
+        if (builtin == CBUILTIN_ELEMENTWISE_PDEP || builtin == CBUILTIN_ELEMENTWISE_PEXT)
+        {
+            deposit.mk = check_lower_temporary(writer, class);
+            deposit.mp = check_lower_temporary(writer, class);
+            deposit.mv = check_lower_temporary(writer, class);
+            deposit.m0 = check_lower_temporary(writer, class);
+            for (uint32_t r = 0; builtin == CBUILTIN_ELEMENTWISE_PDEP && r < 7 && (2u << r) <= bits; r += 1)
+            {
+                deposit.moves[r] = check_lower_temporary(writer, class);
+            }
+        }
+        // A carry-less product's accumulators (#2410).
+        uint32_t products[5] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t k = 0; builtin == CBUILTIN_ELEMENTWISE_CLMUL && k < 5; k += 1)
+        {
+            products[k] = check_lower_temporary(writer, class);
+        }
         const uint32_t out = vector ? check_lower_transport_result(writer, result) : BUSTER_CHECK_NONE;
         const uint32_t x = values[0];
         for (uint32_t i = lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
-            CheckLowerSequence sequence = { 0 };
+            // Its entries are written before they are read (check_lower_sequence_push reads `count` of them): only the count
+            // is cleared, not the 1024 entries' storage.
+            CheckLowerSequence sequence;
+            sequence.count = 0;
             CheckLowerSequence* q = &sequence;
             if (builtin == CBUILTIN_ELEMENTWISE_ADD_SAT || builtin == CBUILTIN_ELEMENTWISE_SUB_SAT || builtin == CBUILTIN_ELEMENTWISE_ABS ||
                 builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_ELEMENTWISE_MIN)
             {
                 check_lower_sequence_arithmetic(q, builtin, class, bits, width, is_signed, x, values[1] != BUSTER_CHECK_NONE ? values[1] : x, t);
+            }
+            else if (builtin == CBUILTIN_ELEMENTWISE_PDEP || builtin == CBUILTIN_ELEMENTWISE_PEXT)
+            {
+                check_lower_sequence_deposit(q, class, bits, builtin == CBUILTIN_ELEMENTWISE_PDEP, x, values[1], t, &deposit);
+            }
+            else if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
+            {
+                check_lower_sequence_clmul(q, class, bits, x, values[1], products);
             }
             else if (builtin == CBUILTIN_ELEMENTWISE_POPCOUNT)
             {
@@ -2095,19 +2380,22 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
                 static const uint8_t patterns[3] = { 0x55, 0x33, 0x0f };
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, x);
                 check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, t);
-                for (uint32_t step = 0; step < 5 + (wide ? 1u : 0u); step += 1)
+                for (uint32_t step = 0; step < 5 + (wide ? 1u : 0u) + (double_wide ? 1u : 0u); step += 1)
                 {
-                    // t = ((t >> k) & m) | ((t & m) << k), m the low k bits of each 2k.
+                    // t = ((t >> k) & m) | ((t & m) << k), m the low k bits of each 2k (of each 64-bit half too, but
+                    // the last step's of 128 bits, the low half).
                     const uint32_t k = 1u << step;
                     const uint64_t m = step < 3 ? check_lower_bits_pattern(patterns[step], bits) :
                                        step == 3 ? (wide ? UINT64_C(0x00ff00ff00ff00ff) : UINT64_C(0x00ff00ff)) :
                                        step == 4 ? (wide ? UINT64_C(0x0000ffff0000ffff) : UINT64_C(0x0000ffff)) :
-                                                   UINT64_C(0x00000000ffffffff);
+                                       step == 5 ? UINT64_C(0x00000000ffffffff) :
+                                                   UINT64_MAX;
+                    const uint64_t high = double_wide && step < 6 ? m : 0;
                     check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
                     check_lower_sequence_constant(q, class, BUSTER_TYPED_SHR, k);
-                    check_lower_sequence_constant(q, class, BUSTER_TYPED_AND, m);
+                    check_lower_sequence_halves(q, class, BUSTER_TYPED_AND, m, high);
                     check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
-                    check_lower_sequence_constant(q, class, BUSTER_TYPED_AND, m);
+                    check_lower_sequence_halves(q, class, BUSTER_TYPED_AND, m, high);
                     check_lower_sequence_constant(q, class, BUSTER_TYPED_SHL, k);
                     check_lower_sequence_add(q, BUSTER_TYPED_OR, class, 0);
                     check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, t);
@@ -2125,7 +2413,7 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
                     check_lower_sequence_add(q, BUSTER_TYPED_NEG, class, 0);
                     check_lower_sequence_add(q, BUSTER_TYPED_AND, class, 0);
                     check_lower_sequence_constant(q, class, BUSTER_TYPED_SUB, 1);
-                    check_lower_sequence_constant(q, class, BUSTER_TYPED_AND, kept);
+                    check_lower_sequence_kept(q, class, bits, width);
                     check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, t);
                     check_lower_sequence_population(q, class, bits, t);
                 }
@@ -2165,19 +2453,47 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
             }
             else
             {
-                // s = c & (width - 1) into t, then the funnel.
+                // s = c & (width - 1), or a _BitInt's c % width where its width is no power of two, into t, then the funnel.
+                // A count of 128 bits is c % width of its 64-bit halves', (hi % w) * (2^64 % w) + lo % w, modulo w again.
                 const bool left = builtin == CBUILTIN_ELEMENTWISE_FSHL;
-                check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, values[2]);
-                check_lower_sequence_constant(q, class, BUSTER_TYPED_AND, width - 1);
+                const bool power = (width & (width - 1)) == 0;
+                const uint8_t count_class = double_wide ? BUSTER_TYPED_CLASS_U32 : class;
+                if (double_wide && !power)
+                {
+                    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, values[2]);
+                    check_lower_sequence_constant(q, class, BUSTER_TYPED_SHR, 64);
+                    check_lower_sequence_add(q, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_sequence_constant(q, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_MOD, width);
+                    check_lower_sequence_constant(q, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_MUL, (UINT64_MAX % width + 1) % width);
+                    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, values[2]);
+                    check_lower_sequence_add(q, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_sequence_constant(q, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_MOD, width);
+                    check_lower_sequence_add(q, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_sequence_constant(q, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_MOD, width);
+                    check_lower_sequence_add(q, BUSTER_TYPED_CONVERT, class, 0);
+                }
+                else
+                {
+                    check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, values[2]);
+                    check_lower_sequence_constant(q, class, power ? BUSTER_TYPED_AND : BUSTER_TYPED_MOD, power ? width - 1 : width);
+                }
                 check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, t);
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, left ? values[0] : values[1]);
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
+                if (double_wide)
+                {
+                    check_lower_sequence_add(q, BUSTER_TYPED_CONVERT, count_class, 0);
+                }
                 check_lower_sequence_add(q, left ? BUSTER_TYPED_SHL : BUSTER_TYPED_SHR, class, 0);
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, left ? values[1] : values[0]);
                 check_lower_sequence_constant(q, class, left ? BUSTER_TYPED_SHR : BUSTER_TYPED_SHL, 1);
                 check_lower_sequence_add(q, BUSTER_TYPED_CONST, class, width - 1);
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
                 check_lower_sequence_add(q, BUSTER_TYPED_SUB, class, 0);
+                if (double_wide)
+                {
+                    check_lower_sequence_add(q, BUSTER_TYPED_CONVERT, count_class, 0);
+                }
                 check_lower_sequence_add(q, left ? BUSTER_TYPED_SHR : BUSTER_TYPED_SHL, class, 0);
                 check_lower_sequence_add(q, BUSTER_TYPED_OR, class, 0);
             }
@@ -2198,8 +2514,19 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
             {
                 const TypeId type = stream->argument_conversions[first + a].type;
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, values[a]);
-                check_lower_instruction(writer, BUSTER_TYPED_AND, class, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_CONST, class, kept);
+                if (double_wide)
+                {
+                    // Its bits past the width cleared: shifted up and back (no CONST of 128 bits).
+                    CheckLowerSequence mask;
+                    mask.count = 0;
+                    check_lower_sequence_kept(&mask, class, bits, width);
+                    check_lower_sequence_push(writer, &mask);
+                }
+                else
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_AND, class, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, class, kept);
+                }
                 if (vector)
                 {
                     check_lower_transport_read(writer, sources[a], type, i, computed);

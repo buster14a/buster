@@ -1076,7 +1076,8 @@ static const char check_test_tier1_vectors_header[] =
     "V4 a_v4(V4 a, int k);\n"
     "U8 a_u8(U8 a, U8 b);\n"
     "V16 a_v16(V16 a, long k, V4 c);\n"
-    "unsigned long a_fold(V16 v, U8 u, V4 w);\n";
+    "unsigned long a_fold(V16 v, U8 u, V4 w);\n"
+    "unsigned long a_member(int k);\n";
 
 static const char check_test_tier1_vectors_other_source[] =
     "#include \"tier1-vectors.h\"\n"
@@ -1091,6 +1092,8 @@ static const char check_test_tier1_vectors_source[] =
     "U8 a_u8(U8 a, U8 b) { U8 m = a >= b; return a * b - (a | b) + m; }\n"
     "V16 a_v16(V16 a, long k, V4 c) { V16 s = { 7, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987 }; V16 m = a != s; return a * s + (m & ~a) - (V16){ c[0], c[1], c[2], c[3] }; }\n"
     "unsigned long a_fold(V16 v, U8 u, V4 w) { unsigned long h = 0; for (int i = 0; i < 16; i += 1) h = h * 31 + v[i]; for (int i = 0; i < 8; i += 1) h = h * 37 + u[i]; for (int i = 0; i < 4; i += 1) h = h * 41 + w[i]; return h; }\n"
+    "typedef float F4 __attribute__((vector_size(16)));\n"
+    "unsigned long a_member(int k) { struct { V4 v; F4 f; } x; union { V4 v; F4 f; } u; x.v = (V4){ 1, -2, 3, k }; x.f = (F4){ 1.0f, 4.0f, 9.0f, (float)(k * k) }; u.v = x.v; V4 r[] = { __builtin_elementwise_abs(x.v), x.v }; F4 q[] = { __builtin_elementwise_sqrt(x.f), x.f }; V4 s[] = { __builtin_elementwise_max(u.v, (V4){ 0 }), u.v }; u.f = x.f; F4 t[] = { __builtin_elementwise_floor(u.f), u.f }; unsigned long h = sizeof r + sizeof q + sizeof s + sizeof t; for (int i = 0; i < 4; i += 1) h = h * 43 + (unsigned)r[1][i] + 7u * (unsigned)r[0][i] + 11u * (unsigned)s[1][i] + 13u * (unsigned)s[0][i] + (unsigned)(q[0][i] + q[1][i] + t[0][i] + t[1][i]); return h; }\n"
     "int main(void)\n"
     "{\n"
     "    for (int k = 0; k < 4; k += 1)\n"
@@ -1100,6 +1103,7 @@ static const char check_test_tier1_vectors_source[] =
     "        V16 v = { k, 1, -2, 3, 4, -5, 6, 7, 8, 9, -10, 11, 12, 13, 14, 15 };\n"
     "        printf(\"%lu %lu\\n\", a_fold(a_v16(v, k, w), a_u8(u, b_u8(u, u)), a_v4(w, k)), b_back(k));\n"
     "        printf(\"%lu\\n\", a_fold(b_v16(v, k, w), b_u8(u, u), b_v4(w, k)));\n"
+    "        printf(\"%lu\\n\", a_member(k));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
@@ -2996,9 +3000,10 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // register variables) on system calls whose results don't vary, the x87's fsqrt on `+t` and fprem's loop with the
 // status word in %ax, flag outputs, a template's own loop (`1: decl; jnz 1b`), a bswap and an lfence (Tier 0's rows,
 // asm bodies under --tier1), callee-saved clobbers inside a loop of live values across a call, xmm clobbers beside live
-// floating values, rsp's alignment at the template, rsp's explicit register variable read and moved back, and 16-byte
-// vectors through their addresses, in an explicit register variable's XMM register and as a matching input (#1846).
-// Clang -O0's build is its oracle.
+// floating values, rsp's alignment at the template, rsp's explicit register variable read and moved back, 16-byte
+// vectors through their addresses, in an explicit register variable's XMM register and as a matching input (#1846), and
+// register operands passed in their registers (#2144): mulq's in a loop whose values keep out of the registers it
+// touches, and an xmm operand's. Clang -O0's build is its oracle.
 static const char check_test_tier1_asm_source[] =
     "int printf(const char* format, ...);\n"
     "static inline __attribute__((always_inline)) unsigned long tier1_rdtsc(void)\n"
@@ -3130,6 +3135,25 @@ static const char check_test_tier1_asm_source[] =
     "    __asm__(\"mulps %1, %0\" : \"=x\"(b) : \"x\"(r), \"0\"(a + a));\n"
     "    return b[0] + b[3] * 10.0f;\n"
     "}\n"
+    "__attribute__((noinline)) unsigned long tier1_mulq(long n)\n"
+    "{\n"
+    "    unsigned long s = 0;\n"
+    "    for (long i = 0; i < n; i++)\n"
+    "    {\n"
+    "        unsigned long lo, hi;\n"
+    "        __asm__(\"mulq %3\" : \"=a\"(lo), \"=d\"(hi) : \"0\"((unsigned long)i), \"r\"(0x9e3779b97f4a7c15ul));\n"
+    "        s += lo ^ hi;\n"
+    "    }\n"
+    "    return s;\n"
+    "}\n"
+    "static double tier1_addsd(double d, int n)\n"
+    "{\n"
+    "    for (int i = 0; i < n; i++)\n"
+    "    {\n"
+    "        __asm__(\"addsd %1, %0\" : \"+x\"(d) : \"x\"((double)(i & 7)));\n"
+    "    }\n"
+    "    return d;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    printf(\"cpuid %u\\n\", tier1_cpuid(7, 1, 2, 3, 4, 5, 6, 7));\n"
@@ -3140,6 +3164,7 @@ static const char check_test_tier1_asm_source[] =
     "    printf(\"saved %ld\\n\", tier1_callee_saved(9));\n"
     "    printf(\"vectors %.3f aligned %d\\n\", tier1_vectors(1.25, 4), tier1_aligned());\n"
     "    printf(\"stack %d packed %.2f\\n\", tier1_stack(), (double)tier1_packed(1.25f));\n"
+    "    printf(\"mulq %lu addsd %.2f\\n\", tier1_mulq(1000), tier1_addsd(0.5, 100));\n"
     "    return 0;\n"
     "}\n";
 
@@ -3177,7 +3202,7 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             char message[256];
             snprintf(message, sizeof(message), "the asm bodies' fixture's code is certified but the long doubles' functions' (%" PRIu64 " certified, %" PRIu64 " not)", build.code_certified,
                      build.code_uncertified);
-            check_test_expect(test, compiled && build.code_certified == 12 && build.code_uncertified == 4, message);
+            check_test_expect(test, compiled && build.code_certified == 14 && build.code_uncertified == 4, message);
             char actual[4096] = { 0 };
             check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                               "Tier 1's asm bodies print clang -O0's build's output");
@@ -3207,6 +3232,21 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
         snprintf(message, sizeof(message), "asm bodies (%s path, --tier1): tier1_cpuid's own records hold %u cpuids and %u calls, rbx %s by its prologue", path != 0 ? "scalar" : "vector", cpuids,
                  calls, pushed ? "pushed" : "not pushed");
         check_test_expect(test, compiled && decoded != 0 && cpuids == 2 && calls == 0 && pushed, message);
+        // tier1_mulq's operands are its body call's arguments, moved into rax and their register (#2144), and its loop's
+        // values keep out of rax, rcx and rdx: of its frame stores, only the outputs' addresses into the operand block
+        // are left, none of an input's and none of a save's.
+        const uint32_t mulq_decoded = compiled ? check_test_tier1_function(object, "tier1_mulq", records, 512, offsets, types, &relocations) : 0;
+        uint32_t muls = 0;
+        uint32_t frame_stores = 0;
+        for (uint32_t r = 0; r < mulq_decoded; r += 1)
+        {
+            const X86Instruction* record = &records[r].instruction;
+            const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && (record->mode & BUSTER_X86_MODE_BASE) != 0;
+            muls += record->form == X86_FORM_MUL_RM64;
+            frame_stores += memory && record->form == X86_FORM_MOV_RM64_R64 && (record->rm == X86_REGISTER_RSP || record->rm == X86_REGISTER_RBP);
+        }
+        snprintf(message, sizeof(message), "asm bodies (%s path, --tier1): tier1_mulq holds %u mul and %u frame stores", path != 0 ? "scalar" : "vector", muls, frame_stores);
+        check_test_expect(test, compiled && mulq_decoded != 0 && muls == 1 && frame_stores <= 2, message);
         unlink(object);
     }
     unlink(unit);
@@ -4563,9 +4603,9 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // into the IR's permutes and its widening conversion into the IR's extend, which leaves 45 rows and 26 moves by Tier
     // 1 (75 and 39 before). #1840's later families decode rows that took no move (its shifts by an int: 39 rows left; its
     // masks' conversions and lane operations: 33; its permutes of two tables: 27; its bitwise functions, compresses and
-    // AES rounds: 24; its masked loads and stores: 16; its one-lane moves: 13), so the bound counts the unit's 45 rows as of
-    // the conversions, as it counts the compares. The floor of 10 rows keeps the unit a machine rows' test as #1840
-    // decodes more of them.
+    // AES rounds: 24; its masked loads and stores: 16; its one-lane moves: 13; its reductions: 9), so the bound counts the
+    // unit's 45 rows as of the conversions, as it counts the compares. The floor of 5 rows keeps the unit a machine rows'
+    // test as #1840 decodes more of them.
     const uint64_t compares = 11;
     const uint64_t rows = 45;
     char header[512];
@@ -4585,7 +4625,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 10 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 5 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
         unlink(object);
     }
     unlink(unit);

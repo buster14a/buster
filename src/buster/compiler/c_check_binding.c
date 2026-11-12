@@ -497,7 +497,11 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         const uint32_t declaration = events->operation[event] == C_BINDING_USE && token < count ? output->declarations[token] : BUSTER_CHECK_NONE;
         const uint32_t pair = declaration < count && reader->ambiguous_index != NULL ? reader->ambiguous_index[declaration] : 0;
         const bool ambiguous = pair != 0 && token < reader->ambiguous_ends[pair - 1];
-        if (ambiguous || (invalid && declaration < count && reader->output->invalid_declarations[declaration] != 0))
+        // (Not a version of a function multiversioned by target strings, whose use is its overload set's, #2362: clang's
+        // resolution goes on with its other versions.)
+        const bool quiet = invalid && declaration < count && reader->output->invalid_declarations[declaration] != 0 &&
+                           !(reader->target_versions && check_target_versions_since(reader, reader->objects[declaration]) != BUSTER_CHECK_NONE);
+        if (ambiguous || quiet)
         {
             output->declarations[token] = BUSTER_CHECK_NONE;
             reader->declared_types[token] = 0;

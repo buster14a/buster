@@ -307,7 +307,21 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_LANE_EXTRACT 31u
 #define BUSTER_IR_INTRINSIC_LANE_INSERT 32u
 #define BUSTER_IR_INTRINSIC_MOVEMASK 33u
-#define BUSTER_IR_INTRINSIC_COUNT 34u
+// A reduction of a vector's integer lanes (#1840), unary: its result a 16-byte vector (V4I32) each of whose lanes is
+// the operation of all of a's lanes, a a vector of 16, 32 or 64 bytes; its flags the lanes' bytes' log2 in bits 0 and 1
+// (2 or 3: doublewords or quadwords) and the operation in bits 2 to 5 (BUSTER_IR_REDUCE_*): the unsigned (0) and signed
+// (1) minimum, the unsigned (2) and signed (3) maximum, as lane_op's, then the wrapping sum (4) and product (5), and
+// the and (6), or (7) and xor (8). Clang's __builtin_reduce_* code halves the vector (vextracti64x4, vextracti32x4,
+// then vpshufd 0x4e and, of doublewords, 0xb1), each half combined with the other, which leaves every lane of the last
+// 16 bytes the result; lane_extract's lane 0 then takes it.
+#define BUSTER_IR_INTRINSIC_REDUCE 34u
+#define BUSTER_IR_INTRINSIC_COUNT 35u
+#define BUSTER_IR_REDUCE_ADD 4u
+#define BUSTER_IR_REDUCE_MUL 5u
+#define BUSTER_IR_REDUCE_AND 6u
+#define BUSTER_IR_REDUCE_OR 7u
+#define BUSTER_IR_REDUCE_XOR 8u
+#define BUSTER_IR_REDUCE_OPERATIONS 9u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -399,10 +413,13 @@ struct IrCall
 // An asm statement placed in its caller (#1839, Tier0AsmBody): the records a body call runs in its place, which read the
 // statement's operand block through BUSTER_TIER0_ASM_BLOCK's base, their own branches (relative to the first record; a
 // target may be `count`, the body's end) and the registers they write (`touched`, BUSTER_TIER0_XMM's layout: rax to r15
-// in bits 0 to 15, xmm0 to xmm15 in bits 16 to 31). The block is the call's one argument, a ptr that is the block's
+// in bits 0 to 15, xmm0 to xmm15 in bits 16 to 31). The block is the call's first argument, a ptr that is the block's
 // IR_STACK_ADDR, and a body without one has none: every pass takes the call as an unknown callee's of that pointer, so
-// the block escapes into it, its stores stay before it and no access moves across it. The records are borrowed from the
-// producer, trusted as a row's are; the verifier checks the columns' shape.
+// the block escapes into it, its stores stay before it and no access moves across it. The register operands follow it
+// (#2144, CheckProgramAsm.inline_passed): `passed` arguments, the call's last, each a value its records read in its
+// register, `locations[k].registers[0]` (a general register's number, or BUSTER_ABI_REGISTER_VECTOR | n for xmm n), as
+// Tier 0's call row has them. The records and locations are borrowed from the producer, trusted as a row's are; the
+// verifier checks the columns' shape.
 typedef struct IrAsmBody IrAsmBody;
 struct IrAsmBody
 {
@@ -418,7 +435,11 @@ struct IrAsmBody
     // Whether it moves an input into rsp (#1846: rsp's explicit register variable, Tier0AsmBody.stack): its function's
     // frame is then the program's, which the code certificate leaves uncertified.
     bool stack;
+    // Its register operands' registers (#2144), one location per argument past the block, `passed` of them.
+    const AbiLocation* locations;
+    uint32_t passed;
 };
+
 
 typedef struct IrSizes IrSizes;
 struct IrSizes
@@ -857,6 +878,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_extract",
     "lane_insert",
     "movemask",
+    "reduce",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1715,15 +1737,30 @@ static bool ir_row_call_valid(const IrFunction* f, const IrCall* call)
     return valid;
 }
 
+// A body call's block argument (#1839, IrAsmBody): its first, where it has more arguments than register operands, or
+// BUSTER_IR_NONE.
+static uint32_t ir_asm_body_block(const IrFunction* f, const IrCall* call, const IrAsmBody* body)
+{
+    return call->argument_count > body->passed ? f->extra[call->argument_first] : BUSTER_IR_NONE;
+}
+
 // Whether a body call's descriptor fits its asm body (#1839): within the bodies, of no row, no ABI records and no variadic
-// arguments, void, and of one ptr argument, its block's address, or of none; and the body's branch columns in order, each
-// branch a record of it and each target one of its records or its end.
+// arguments, void, and of one ptr argument, its block's address, or of none, then one argument of a scalar type per
+// register operand (#2144), each in a register; and the body's branch columns in order, each branch a record of it and
+// each target one of its records or its end.
 static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
 {
     const IrAsmBody* body = call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : 0;
-    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->result_type == IR_VOID && call->argument_count <= 1 &&
-                 call->parameter_count == call->argument_count && (call->argument_count == 0 || f->call_types[call->type_first] == IR_PTR) &&
+    const bool block = body != 0 && call->argument_count > body->passed;
+    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->result_type == IR_VOID && call->argument_count - body->passed <= 1 &&
+                 call->argument_count >= body->passed && call->parameter_count == call->argument_count && (!block || f->call_types[call->type_first] == IR_PTR) &&
+                 (body->passed == 0 || body->locations != 0) &&
                  (body->count == 0 || body->records != 0) && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+    for (uint32_t k = 0; valid && k < body->passed; k += 1)
+    {
+        const uint8_t type = f->call_types[call->type_first + (block ? 1 : 0) + k];
+        valid = body->locations[k].kind == BUSTER_ABI_LOCATION_REGISTERS && type != IR_VOID && type < IR_TYPE_COUNT;
+    }
     for (uint32_t k = 0; valid && k < body->branch_count; k += 1)
     {
         valid = body->branches[k] < body->count && (k == 0 || body->branches[k - 1] < body->branches[k]) && body->targets[k] <= body->count;
@@ -2086,6 +2123,11 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     valid = b == BUSTER_IR_NONE && lanes != 0 &&
                             (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
                                                                     type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_REDUCE)
+                {
+                    // A reduction of doublewords or quadwords into each lane of 16 bytes.
+                    valid = b == BUSTER_IR_NONE && type == IR_V4I32 && ir_vector_type(ta) && (part & 3) >= 2 && (part >> 2) < BUSTER_IR_REDUCE_OPERATIONS;
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_INSERT)
                 {
@@ -3553,7 +3595,8 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
-                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK)
+                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
+                                c == BUSTER_IR_INTRINSIC_REDUCE)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

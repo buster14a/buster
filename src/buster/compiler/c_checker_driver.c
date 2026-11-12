@@ -95,6 +95,7 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_ADDRESS_SPACE_OVERLAP: result = "pointers to non-overlapping address spaces"; break;
         case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_OVERFLOW_BIT_INT: result = "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits"; break;
+        case CHECK_DIAG_COUNTED_INCOMPLETE: result = "cannot use a '__counted_by' attributed pointer whose pointee type is incomplete"; break;
         case CHECK_DIAG_NONE: break;
     }
     return result;
@@ -134,6 +135,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_ASM_LABEL_CONFLICT: result = "conflicting asm label"; break;
+        case CHECK_INPUT_THREAD_NON_GLOBAL: result = "'_Thread_local' variables must have global storage"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
         case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
@@ -170,6 +172,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
         case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
         case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_CASE_OUTSIDE_SWITCH: result = "'case' statement not in switch statement"; break;
+        case CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH: result = "'default' statement not in switch statement"; break;
         case CHECK_INPUT_JUMP_ASM: result = "cannot jump from this asm goto statement to one of its possible targets"; break;
         case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
         case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;
@@ -807,6 +811,7 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 0 ?
            "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]" :
            report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 1 ? "a type specifier is required for all declarations" :
+           report->message == CHECK_INPUT_THREAD_NON_GLOBAL && report->detail == 1 ? "'__thread' variables must have global storage" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
@@ -2395,9 +2400,10 @@ static CBuiltinLibraryNamed check_driver_library_named(Preprocessor* pp, const T
 // C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
 // with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
 // and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
-// note naming the header that declares it, where its row has one.
+// note naming the header that declares it, where its row has one. `promoted` is "-Werror," where -Werror made the warning
+// before C99 an error, else "".
 static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
-                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
+                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, const char* promoted, Arena* scratch)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
     const uint64_t mark = scratch->length;
@@ -2428,7 +2434,8 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
     else
     {
         pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
-                                    "implicitly declaring library function '%.*s' with type %s [-Wimplicit-function-declaration]", (int)length, name, type);
+                                    "implicitly declaring library function '%.*s' with type %s [%s-Wimplicit-function-declaration]", (int)length, name, type,
+                                    promoted);
     }
 }
 
@@ -2680,6 +2687,66 @@ static const char* check_driver_shift_message(const Parser* parser, Preprocessor
     return result;
 }
 
+// A folded -Winteger-overflow as clang's HandleOverflow words it (#2217): "overflow in expression; result is V with type
+// 'T'", V the wrapped result GNU folding keeps on the node (check_wide_text's digits at any width), grouped by three
+// with ' as APInt::toString's InsertSeparators does for radix 10. A node the stream doesn't hold keeps the generic text.
+static const char* check_driver_overflow_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                 const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, Arena* scratch)
+{
+    const char* result = check_diagnostic_message(CHECK_WARNING_INTEGER_OVERFLOW);
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool folded = types != NULL && stream != NULL && stream->graph != NULL && node < stream->count &&
+                        check_stream_constant_kind(stream, node) == CHECK_CONSTANT_INTEGER;
+    CheckValue value = folded ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    // The constant reader's (an enumerator's, a file-scope bound's): its overflow's event keeps a result up to 64 bits
+    // wide (check_input_warning_add_value). The last one at the token is the final reading's.
+    for (uint32_t i = 0; !folded && types != NULL && i < input->warning_events.count; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + i;
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_INTEGER_OVERFLOW && event->token == token &&
+            event->payload.first_type != 0)
+        {
+            value = (CheckValue){
+                .type = event->payload.first_type,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = (unsigned __int128)((uint64_t)event->detail << 32 | event->payload.name),
+            };
+        }
+    }
+    const char* digits = value.type != 0 ? check_wide_text(types, &value, scratch) : NULL;
+    const uint64_t length = digits != NULL ? strlen(digits) : 0;
+    const uint64_t sign = length != 0 && digits[0] == '-';
+    const uint64_t significant = length - sign;
+    const uint64_t separators = significant != 0 ? (significant - 1) / 3 : 0;
+    char* grouped = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, length + separators + 1) : NULL;
+    // The result's type keeps an operand's typedef when only that operand has it (UsualArithmeticConversions' converted
+    // side); two operands of the type take their common sugar, which this leaves canonical.
+    const CheckGraph* graph = folded ? stream->graph : NULL;
+    const uint32_t left = graph != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t right = graph != NULL ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    const bool left_kept = left < stream->count && check_stream_type(stream, left) == value.type;
+    const bool right_kept = right < stream->count && check_stream_type(stream, right) == value.type;
+    const uint32_t spelling = left_kept && !right_kept ? check_input_operand_type_spelling(input, parser, left) :
+                              right_kept && !left_kept ? check_input_operand_type_spelling(input, parser, right) : 0;
+    const String8 name = grouped != NULL ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling) : (String8){ 0 };
+    if (name.length != 0)
+    {
+        uint64_t written = 0;
+        for (uint64_t i = 0; i < length; i += 1)
+        {
+            const uint64_t left = length - i;
+            const bool separate = i > sign && left % 3 == 0;
+            grouped[written] = '\'';
+            written += separate;
+            grouped[written] = digits[i];
+            written += 1;
+        }
+        grouped[written] = 0;
+        result = check_warning_text(scratch, "overflow in expression; result is %s with type %.*s", grouped, (int)name.length, name.pointer);
+    }
+    return result;
+}
+
 // A legacy warning's command-line and source policy: the same sparse group mapping the event warnings use, so
 // -Wno-NAME, -Werror=NAME and -Wno-everything reach the dense warning bits too.
 static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
@@ -2820,14 +2887,18 @@ static bool check_driver_in_body(const Parser* parser, uint32_t token)
 }
 
 // Whether a recovered report is one whose declaration stays valid (#1835): a dropped attribute's
-// (check_input_attribute_recoverable) or a dropped specifier's (check_input_specifiers_recover). A rejected unit's rounds
-// read past it (check_driver_rejected_common).
+// (check_input_attribute_recoverable, and an undeclared name's in its argument, CheckInputReport.attribute_name), a
+// dropped specifier's (check_input_specifiers_recover) or a misplaced attribute list's that the tag's declaration reads
+// past (#2468: `struct U [[gnu::aligned(8)]] { … }`), whose declaration a later constant may read. A rejected unit's
+// rounds read past it (check_driver_rejected_common).
 static bool check_driver_report_keeps_valid(const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
     const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
                            message == CHECK_INPUT_SPECIFIER_COMPLEX;
-    return report->recovered && (specifier || check_input_attribute_recoverable(report));
+    const bool list = message == CHECK_INPUT_ATTRIBUTE_LIST_PLACE;
+    const bool name = message == CHECK_INPUT_UNDECLARED && report->attribute_name;
+    return report->recovered && (specifier || list || name || check_input_attribute_recoverable(report));
 }
 
 // Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is one the
@@ -2994,22 +3065,29 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
 {
     const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
     const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
-    const bool call = types != NULL && graph != NULL && node < stream->count && graph->ops[node] == CHECK_OP_CALL &&
-                      graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL;
+    const CheckOp op = types != NULL && graph != NULL && node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    // A builtin's call (#2189): its arguments a list's, or its operands' (`__builtin_strcpy`), each converted to its
+    // prototype's parameter, which no declaration in the source names.
+    const bool builtin = op != CHECK_OP_CALL && op != CHECK_OP_COUNT && check_graph_has_arguments(op);
+    const bool lists = graph != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL;
+    const bool listed = lists && (op == CHECK_OP_CALL || (builtin && graph->argument_counts[node] != 0));
+    const bool operands = builtin && !listed && stream->conversions != NULL;
+    const bool call = listed || operands;
     if (call)
     {
         const uint32_t callee = graph->operand0[node];
         const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
         const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
-        const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE &&
+        const bool direct = op == CHECK_OP_CALL && callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE &&
                             check_action_kind(types, check_stream_type(stream, callee)) == BUSTER_TYPE_KIND_FUNCTION &&
                             declaration < input->token_count && input->declaration_kinds != NULL &&
                             input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-        const uint32_t offset = graph->argument_offsets[node];
-        for (uint32_t i = 0; !pp->fatal && i < graph->argument_counts[node]; i += 1)
+        const uint32_t offset = listed ? graph->argument_offsets[node] : 0;
+        const uint32_t arguments = listed ? graph->argument_counts[node] : 3;
+        for (uint32_t i = 0; !pp->fatal && i < arguments; i += 1)
         {
-            const uint32_t argument = graph->argument_nodes[offset + i];
-            const CheckConversion conversion = stream->argument_conversions[offset + i];
+            const uint32_t argument = listed ? graph->argument_nodes[offset + i] : i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node];
+            const CheckConversion conversion = listed ? stream->argument_conversions[offset + i] : stream->conversions[node].operands[i];
             if (argument < stream->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0)
             {
                 const CheckValue value = check_stream_value(stream, argument);
@@ -3052,10 +3130,13 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                         const uint32_t index = check_diagnostic_warning_index(warning);
                         if (source.length != 0 && target.length != 0 && (note_token == BUSTER_CHECK_NONE || note != NULL))
                         {
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_notes_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, notes, note != NULL,
                                 "passing %.*s to parameter of type %.*s %s [%s%s]", (int)source.length, source.pointer, (int)target.length, target.pointer,
                                 check_driver_pointer_wording(types, warning, nested, conversion.type, value.type),
                                 severity >= CHECK_WARNING_ERROR ? "-Werror," : "", check_warning_descriptions[index].option);
+                            // In argument order among the call's failed conversions' errors, which complete with it (#2481).
+                            pp_diagnostic_suborder(pp, previous, (uint64_t)parser->tokens.sources[located] + 1u);
                         }
                         else
                         {
@@ -3082,6 +3163,14 @@ typedef enum CheckDriverConversion
     CHECK_DRIVER_CONVERSION_INCOMPATIBLE,
 } CheckDriverConversion;
 
+// A converted node's type as check_driver_conversion_kind takes it: an lvalue's atomic type is converted to its value's,
+// and an rvalue's is kept (a cast's, #2230).
+static TypeId check_driver_conversion_source(const TypeTable* types, const CheckStream* stream, uint32_t node)
+{
+    const TypeId type = check_stream_type(stream, node);
+    return check_stream_category(stream, node) == CHECK_RVALUE ? type : type_conversion_operand(types, type);
+}
+
 static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types, TypeId target, TypeId source)
 {
     const TypeId to = type_conversion_operand(types, target);
@@ -3094,7 +3183,10 @@ static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types
     const bool to_function = to_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, to))) == BUSTER_TYPE_KIND_FUNCTION;
     const bool from_function = from_kind == BUSTER_TYPE_KIND_FUNCTION ||
                                (from_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, from))) == BUSTER_TYPE_KIND_FUNCTION);
-    return to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
+    // An atomic rvalue, a cast's (#2230), converts to nothing but an atomic type, which clang words as incompatible.
+    const bool atomic = type_kind(types, type_unqualified(type_strip_aligned(types, source))) == BUSTER_TYPE_KIND_ATOMIC;
+    return atomic ? CHECK_DRIVER_CONVERSION_INCOMPATIBLE :
+           to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
            to_integer && from_pointer ? CHECK_DRIVER_CONVERSION_POINTER_INT :
            to_kind == BUSTER_TYPE_KIND_POINTER && from_pointer ? (to_function && from_function ? CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS : CHECK_DRIVER_CONVERSION_POINTERS) :
            CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
@@ -3115,7 +3207,13 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
     const bool incompatible = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE;
     const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const bool void_return = returning && check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_VOID;
-    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    // The argument the report is at (#2413: a call's later failed arguments' reports, at each one's token), else the
+    // action's diagnostic operand.
+    uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    for (uint32_t i = 0; op == CHECK_OP_CALL && graph->argument_tokens != NULL && i < graph->argument_counts[node]; i += 1)
+    {
+        argument_index = graph->argument_tokens[graph->argument_offsets[node] + i] == token ? i + 1 : argument_index;
+    }
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     uint32_t source = BUSTER_CHECK_NONE;
     TypeId target = 0;
@@ -3140,7 +3238,7 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
     }
-    const TypeId value = source < stream->count ? check_stream_type(stream, source) : 0;
+    const TypeId value = source < stream->count ? check_driver_conversion_source(types, stream, source) : 0;
     const bool converted = incompatible && !void_return && value != 0 && target != 0 &&
                            check_driver_conversion_kind(types, target, value) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
     *converted_source = converted ? source : BUSTER_CHECK_NONE;
@@ -3453,7 +3551,7 @@ static String8 check_driver_library_designator(const Parser* parser, Preprocesso
 // (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
-                                                 uint32_t target_declaration, uint8_t action, Arena* scratch)
+                                                 uint32_t target_declaration, uint32_t target_node, uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if (source < stream->count && target != 0)
@@ -3472,7 +3570,11 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         CheckDriverSpaceScope scope;
         check_driver_space_scope(parser, pp, input, types, spell, target_declaration, &scope, scratch);
         const String8 placed_to = target_sugar == 0 ? check_driver_placed_type(parser, pp, input, types, spell, scratch, target, target_declaration) : (String8){ 0 };
-        const String8 to = placed_to.length != 0 ? placed_to : check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        // A member a counted_by family attribute counts, as clang's CountAttributedType prints it (#1842's 3c).
+        const String8 counted_to = target_node != BUSTER_CHECK_NONE ? check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, target_node, target) :
+                                   (String8){ 0 };
+        const String8 to = counted_to.length != 0 ? counted_to : placed_to.length != 0 ? placed_to :
+                           check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
         check_driver_space_restore(spell, &scope);
         const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
         const uint32_t source_declaration = check_driver_operand_declaration(input, stream, source);
@@ -3481,10 +3583,11 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const String8 designator = check_driver_library_designator(parser, pp, input, stream, types, source, value, scratch);
         const String8 placed_from = designator.length == 0 && source_sugar == 0 ?
                                     check_driver_placed_type(parser, pp, input, types, spell, scratch, value, source_declaration) : (String8){ 0 };
-        const String8 from = designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
+        const String8 counted_from = check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, source, value);
+        const String8 from = counted_from.length != 0 ? counted_from : designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
                              check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         check_driver_space_restore(spell, &scope);
-        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
+        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, check_driver_conversion_source(types, stream, source));
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
             "incompatible integer to pointer conversion ",
@@ -3558,7 +3661,7 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
                          !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
-                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, 0,
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0,
                                                                 scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
@@ -3574,7 +3677,7 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
 // fix-it its last words (check_driver_conversion_hint). NULL for any other report, which the generic message keeps.
 static const char* check_driver_conversion_error(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, uint32_t* note_token,
-                                                 const char** note, Arena* scratch)
+                                                 const char** note, uint32_t* argument, Arena* scratch)
 {
     const CheckGraph* graph = stream->graph;
     const uint32_t node = report->node;
@@ -3584,7 +3687,13 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     // message gives.)
     const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
                            check_action_kind(types, graph->types[node]) != BUSTER_TYPE_KIND_VOID;
-    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    // The argument the report is at (#2413: a call's later failed arguments' reports, at each one's token), else the
+    // action's diagnostic operand.
+    uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    for (uint32_t i = 0; op == CHECK_OP_CALL && graph->argument_tokens != NULL && i < graph->argument_counts[node]; i += 1)
+    {
+        argument_index = graph->argument_tokens[graph->argument_offsets[node] + i] == token ? i + 1 : argument_index;
+    }
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE &&
                          (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || returning || passing);
@@ -3593,9 +3702,11 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t target_spelling = 0;
     uint32_t target_sugar = 0;
     uint32_t target_declaration = BUSTER_CHECK_NONE;
+    uint32_t target_node = BUSTER_CHECK_NONE;
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
+    *argument = BUSTER_CHECK_NONE;
     if (applies && op == CHECK_OP_INITIALIZE)
     {
         source = graph->operand0[node];
@@ -3621,6 +3732,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         target = member ? lvalue : target;
         target_sugar = member ? 0 : check_driver_operand_sugar(input, stream, left);
         target_declaration = member ? BUSTER_CHECK_NONE : check_driver_operand_declaration(input, stream, left);
+        target_node = member ? left : BUSTER_CHECK_NONE;
     }
     else if (applies && returning)
     {
@@ -3636,14 +3748,25 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         // (check_driver_parameter_source).
         const uint32_t index = argument_index - 1;
         source = graph->argument_nodes[graph->argument_offsets[node] + index];
+        *argument = source;
         const uint32_t callee = graph->operand0[node];
-        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        // An overloadable call's selected candidate (#2480): C overloading takes an incompatible pointer argument as a
+        // conversion, whose error then names that candidate's parameter, not the latest declaration's.
+        const CheckOverloadEffect* chosen = NULL;
+        for (uint32_t k = 0; k < stream->overload_count && chosen == NULL; k += 1)
+        {
+            chosen = stream->overloads[k].node == node && stream->overloads[k].selected.status == CHECK_OVERLOAD_OK && stream->overloads[k].selected.type != 0 ?
+                     stream->overloads + k : NULL;
+        }
+        TypeId function = chosen != NULL ? type_strip_aligned(types, chosen->selected.type) :
+                          callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
         function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
         uint32_t parameter_count = 0;
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
         const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = chosen != NULL ? chosen->selected.declaration :
+                                     name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
         const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE && declaration < input->token_count &&
                             input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
         // A pointer parameter's note is where the declarator reader puts it (check_driver_parameter_source), any other's at
@@ -3665,9 +3788,305 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
     const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar,
-                                                                 target_declaration, action,
+                                                                 target_declaration, target_node, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
+    return result;
+}
+
+// __builtin_dump_struct's rest argument that doesn't convert to its printer's parameter (#2189, clang's BuiltinDumpStruct,
+// whose printer calls convert as a call's arguments): the conversion's words as a call's argument's
+// (check_driver_conversion_words), at the argument's first token, with clang's notes "in call to printing function with
+// arguments '(rest..., "%s", "struct S")' while dumping struct" at the builtin's name, the arguments of its first line's
+// call as clang's printer spells them, and "passing argument to parameter 'x' here" at the printer's parameter where it
+// is a function's name. NULL for another report.
+static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                            CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, PPOutputDiagnosticNote* notes, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && node < stream->count &&
+                           graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_DUMP_STRUCT && graph->argument_counts != NULL;
+    const uint32_t operand = candidate ? stream->diagnostic_operands[node] : 0;
+    const uint32_t count = candidate ? graph->argument_counts[node] : 0;
+    const char* result = NULL;
+    if (operand >= 2 && operand < count)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        const uint32_t index = operand - 2;
+        const uint32_t source = graph->argument_nodes[offset + operand];
+        const uint32_t printer = graph->argument_nodes[offset + 1];
+        TypeId function = printer < stream->count ? type_strip_aligned(types, check_stream_type(stream, printer)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        const TypeId target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+        // The function the printer names, as clang's getCalleeDecl finds it: `p`, `(p)` and `&p`.
+        const uint32_t called = printer < stream->count && graph->ops[printer] == CHECK_OP_ADDRESS ? graph->operand0[printer] : printer;
+        const uint32_t name = called < stream->count && graph->ops[called] == CHECK_OP_VALUE ? graph->tokens[called] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = declaration < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        uint32_t parameter = direct && target != 0 && check_action_kind(types, target) == BUSTER_TYPE_KIND_POINTER ?
+                             check_driver_parameter_source(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        const bool placed = parameter < input->token_count;
+        const char* words = target != 0 ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target,
+                                                                         placed ? check_driver_parameter_spelling(parser, input, parameter) : 0, 0,
+                                                                         placed ? parameter : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 3, scratch) : NULL;
+        // The first line's call: the rest as written, then the record's line's format and type name.
+        const uint32_t opening = graph->argument_tokens[offset] > 0 ? check_semantic_argument_begin(parser, graph, node, 0) - 1 : 0;
+        const uint32_t closing = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
+        const uint32_t record = graph->argument_nodes[offset];
+        const TypeId pointer = record < stream->count ? type_strip_aligned(types, check_stream_type(stream, record)) : 0;
+        const TypeId pointee = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_element(types, pointer)) : 0;
+        String8 type = pointee != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0) : (String8){ 0 };
+        // Its name as the call's string has it: the first quoted text, without the quotes.
+        uint64_t end = 1;
+        while (end < type.length && type.pointer[end] != '\'')
+        {
+            end += 1;
+        }
+        const String8 named = type.length > 2 && type.pointer[0] == '\'' ? (String8){ .pointer = type.pointer + 1, .length = end - 1 } : (String8){ 0 };
+        const char* arguments = "";
+        for (uint32_t k = 2; k < count && closing < parser->tokens.count && named.length != 0 && arguments != NULL; k += 1)
+        {
+            const uint32_t begin = check_semantic_argument_begin(parser, graph, node, k);
+            const uint32_t stop = k + 1 < count ? check_semantic_argument_begin(parser, graph, node, k + 1) - 1 : closing;
+            const char* text = begin < stop ? check_semantic_requirement(parser, pp, begin, stop, NULL, scratch) : NULL;
+            arguments = text != NULL ? check_warning_text(scratch, "%s%s, ", arguments, text) : NULL;
+        }
+        const uint32_t callee = opening > 0 ? opening - 1 : BUSTER_CHECK_NONE;
+        if (words != NULL && arguments != NULL && named.length != 0 && callee < parser->tokens.count)
+        {
+            result = words;
+            *located = check_semantic_argument_begin(parser, graph, node, operand);
+            uint32_t note_count = 0;
+            check_semantic_add_note(parser, notes, &note_count, callee,
+                                    check_warning_text(scratch, "in call to printing function with arguments '(%s\"%%s\", \"%.*s\")' while dumping struct", arguments,
+                                                       (int)named.length, named.pointer));
+            if (placed)
+            {
+                const bool identified = parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER && input->declarations[parameter] == parameter &&
+                                        input->declaration_kinds[parameter] == C_BINDING_OBJECT;
+                const uint32_t identifier = identified ? parser->tokens.names[parameter] : 0;
+                check_semantic_add_note(parser, notes, &note_count, parameter,
+                                        identified ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
+                                                                        intern_bytes(pp->table, identifier)) : "passing argument to parameter here");
+            }
+        }
+    }
+    return result;
+}
+
+// An overload set's address that matches no candidate (#2384), as clang's assignment diagnostic gives it: the conversion
+// error with '<overloaded function type>' as its source, "incompatible function pointer types ..." where the enable_ifs
+// leave one candidate, whose address clang converts, else "... incompatible type ...", with a note at each candidate, the
+// latest first: one with an enable_if that isn't always true "made ineligible by enable_if" at its declaration's first
+// token; else, at its name, its
+// first difference from the target's function type, clang's HandleFunctionTypeMismatch's: "has different number of
+// parameters (expected N but has M)", "has type mismatch at Nth parameter (expected 'T' but has 'U')", "has different
+// return type ('T' expected but has 'U')", or none ("candidate function"). An initialization's or an assignment's; NULL
+// for any other report.
+static const char* check_driver_overload_address(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, PPOutputDiagnosticNote* notes,
+                                                 Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN);
+    uint32_t source = !applies ? BUSTER_CHECK_NONE : op == CHECK_OP_INITIALIZE ? graph->operand0[node] : graph->operand1[node];
+    source = source < stream->count && graph->ops[source] == CHECK_OP_ADDRESS ? graph->operand0[source] : source;
+    const uint32_t found = source < stream->count ? check_stream_overload_head(stream, source) : 0;
+    // (A plain function's name has a candidate too: only an overloadable one's set is clang's '<overloaded function type>'.)
+    const uint32_t head = found != 0 && found - 1 < graph->overload_candidate_count &&
+                          (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ? found : 0;
+    const TypeId target = head == 0 ? 0 : op == CHECK_OP_INITIALIZE ? graph->types[node] :
+                          graph->operand0[node] < stream->count ? check_stream_type(stream, graph->operand0[node]) : 0;
+    const TypeId pointer = target != 0 ? type_strip_aligned(types, target) : 0;
+    const TypeId expected = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, pointer)) : 0;
+    const bool function = expected != 0 && type_kind(types, expected) == BUSTER_TYPE_KIND_FUNCTION;
+    uint32_t note_token = BUSTER_CHECK_NONE;
+    const char* note = NULL;
+    uint32_t argument = BUSTER_CHECK_NONE;
+    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument, scratch) :
+                                   NULL;
+    const char* prefix = "incompatible function pointer types ";
+    const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
+    // The target as the words spell it: between the action's words and the source's.
+    const char* action = shaped ? words + strlen(prefix) : NULL;
+    const char* separator = action == NULL ? NULL : op == CHECK_OP_INITIALIZE ? strstr(action, " with an expression of type ") : strstr(action, " from ");
+    const uint64_t skip = op == CHECK_OP_INITIALIZE ? strlen("initializing ") : strlen("assigning to ");
+    const bool spelled = separator != NULL && (uint64_t)(separator - action) > skip;
+    const char* result = NULL;
+    uint32_t note_count = 0;
+    uint32_t eligible = 0;
+    uint32_t seen[BUSTER_CHECK_SEMANTIC_NOTES];
+    uint32_t seen_count = 0;
+    uint32_t steps = 0;
+    for (uint32_t current = spelled ? head - 1 : UINT32_MAX; current < graph->overload_candidate_count && steps < graph->overload_candidate_count && note_count < BUSTER_CHECK_SEMANTIC_NOTES;
+         current = graph->overload_candidates[current].previous, steps += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + current;
+        bool repeated = false;
+        for (uint32_t k = 0; k < seen_count; k += 1)
+        {
+            repeated |= seen[k] == candidate->canonical;
+        }
+        if (repeated)
+        {
+            continue;
+        }
+        seen[seen_count++] = candidate->canonical;
+        const TypeId type = type_strip_aligned(types, candidate->type);
+        uint32_t have = 0;
+        uint32_t want = 0;
+        const TypeId* parameters = type_parameters(types, type, &have);
+        const TypeId* wanted = type_parameters(types, expected, &want);
+        uint32_t mismatch = UINT32_MAX;
+        for (uint32_t k = 0; have == want && mismatch == UINT32_MAX && k < have; k += 1)
+        {
+            mismatch = type_unqualified(type_strip_aligned(types, parameters[k])) != type_unqualified(type_strip_aligned(types, wanted[k])) ? k : mismatch;
+        }
+        const TypeId returned = type_return(types, type);
+        const TypeId wanted_return = type_return(types, expected);
+        const char* text = "candidate function";
+        uint32_t at = candidate->declaration;
+        const CheckConditionDeclaration* conditions = check_condition_find(&graph->conditions, candidate->declaration);
+        eligible += conditions == NULL || !conditions->restricted ? 1u : 0u;
+        if (conditions != NULL && conditions->restricted)
+        {
+            text = "candidate function made ineligible by enable_if";
+            at = check_input_declaration_begin(parser, candidate->declaration);
+        }
+        else if (have != want)
+        {
+            text = check_warning_text(scratch, "candidate function has different number of parameters (expected %u but has %u)", want, have);
+        }
+        else if (mismatch != UINT32_MAX)
+        {
+            const String8 wanted_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, wanted[mismatch], 0);
+            const String8 have_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, parameters[mismatch], 0);
+            const uint32_t ordinal = mismatch + 1;
+            const char* suffix = ordinal % 100 >= 11 && ordinal % 100 <= 13 ? "th" : ordinal % 10 == 1 ? "st" : ordinal % 10 == 2 ? "nd" : ordinal % 10 == 3 ? "rd" : "th";
+            text = check_warning_text(scratch, "candidate function has type mismatch at %u%s parameter (expected %.*s but has %.*s)", ordinal, suffix,
+                                      (int)wanted_text.length, wanted_text.pointer, (int)have_text.length, have_text.pointer);
+        }
+        else if (type_unqualified(type_strip_aligned(types, returned)) != type_unqualified(type_strip_aligned(types, wanted_return)))
+        {
+            const String8 wanted_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, wanted_return, 0);
+            const String8 have_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, returned, 0);
+            text = check_warning_text(scratch, "candidate function has different return type (%.*s expected but has %.*s)", (int)wanted_text.length,
+                                      wanted_text.pointer, (int)have_text.length, have_text.pointer);
+        }
+        check_semantic_add_note(parser, notes, &note_count, at, text);
+    }
+    // With one candidate left by the enable_ifs, clang converts its address, a function pointer's conversion.
+    const bool ineligible = eligible == 1;
+    if (spelled && note_count != 0)
+    {
+        const int length = (int)(separator - action - (int64_t)skip);
+        const char* target_text = action + skip;
+        result = op == CHECK_OP_INITIALIZE ?
+                 (ineligible ? check_warning_text(scratch, "incompatible function pointer types initializing %.*s with an expression of type '<overloaded function type>' "
+                                                           "[-Wincompatible-function-pointer-types]", length, target_text) :
+                               check_warning_text(scratch, "initializing %.*s with an expression of incompatible type '<overloaded function type>'", length, target_text)) :
+                 (ineligible ? check_warning_text(scratch, "incompatible function pointer types assigning to %.*s from '<overloaded function type>' "
+                                                           "[-Wincompatible-function-pointer-types]", length, target_text) :
+                               check_warning_text(scratch, "assigning to %.*s from incompatible type '<overloaded function type>'", length, target_text));
+    }
+    else
+    {
+        memset(notes, 0, sizeof(*notes) * BUSTER_CHECK_SEMANTIC_NOTES);
+    }
+    return result;
+}
+
+// An overloadable set's address returned or passed that matches no candidate (#2480), as clang's assignment diagnostic
+// gives it with the set as its source: "returning '<overloaded function type>' from a function with incompatible result
+// type 'T'" at the operand, and "passing '<overloaded function type>' to parameter of incompatible type 'T'" at the
+// argument with "passing argument to parameter 'x' here" (or "... parameter here") at a named callee's parameter, neither
+// with candidate notes. A call's argument is the first that is such a set (`f` or `&f`). Where an enable_if restricts a
+// candidate (whose address clang may convert alone) it leaves the report to the other words. NULL for any other report.
+static const char* check_driver_overload_operand(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, uint32_t* note_token,
+                                                 const char** note, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const uint32_t token = report->token;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE;
+    const bool returning = applies && op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+    const bool calling = applies && op == CHECK_OP_CALL && graph->argument_counts != NULL && graph->argument_offsets != NULL;
+    // The operand: the return's, or the call's first argument that is an overloadable set.
+    uint32_t operand = returning ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    uint32_t index = BUSTER_CHECK_NONE;
+    uint32_t head = 0;
+    const uint32_t count = calling ? graph->argument_counts[node] : returning ? 1 : 0;
+    for (uint32_t i = 0; head == 0 && i < count; i += 1)
+    {
+        const uint32_t at = calling ? graph->argument_nodes[graph->argument_offsets[node] + i] : operand;
+        const uint32_t named = at < stream->count && graph->ops[at] == CHECK_OP_ADDRESS ? graph->operand0[at] : at;
+        const uint32_t found = named < stream->count ? check_stream_overload_head(stream, named) : 0;
+        head = found != 0 && found - 1 < graph->overload_candidate_count && (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ?
+               found : 0;
+        operand = head != 0 ? at : operand;
+        index = head != 0 ? i : index;
+    }
+    // (Candidates that an enable_if restricts are the other words'.)
+    bool restricted = false;
+    uint32_t steps = 0;
+    for (uint32_t current = head != 0 ? head - 1 : UINT32_MAX; current < graph->overload_candidate_count && steps < graph->overload_candidate_count;
+         current = graph->overload_candidates[current].previous, steps += 1)
+    {
+        const CheckConditionDeclaration* conditions = check_condition_find(&graph->conditions, graph->overload_candidates[current].declaration);
+        restricted |= conditions != NULL && conditions->restricted;
+    }
+    TypeId target = 0;
+    uint32_t target_spelling = 0;
+    uint32_t parameter = BUSTER_CHECK_NONE;
+    if (head != 0 && !restricted && returning)
+    {
+        const uint32_t function = check_semantic_function(parser, input, token);
+        target = graph->types[node];
+        target_spelling = function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
+    }
+    else if (head != 0 && !restricted && calling)
+    {
+        const uint32_t callee = graph->operand0[node];
+        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+        const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE && declaration < input->token_count &&
+                            input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        parameter = direct && target != 0 ? check_driver_parameter_source(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        target_spelling = parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
+    }
+    const String8 spelled = target != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling) : (String8){ 0 };
+    const char* result = NULL;
+    if (spelled.length != 0 && operand < stream->count)
+    {
+        result = returning ? check_warning_text(scratch, "returning '<overloaded function type>' from a function with incompatible result type %.*s",
+                                                (int)spelled.length, spelled.pointer) :
+                             check_warning_text(scratch, "passing '<overloaded function type>' to parameter of incompatible type %.*s", (int)spelled.length,
+                                                spelled.pointer);
+        *located = check_warning_graph_first(graph, parser, operand);
+        if (parameter < input->token_count)
+        {
+            const bool named = parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER && input->declarations[parameter] == parameter &&
+                               input->declaration_kinds[parameter] == C_BINDING_OBJECT;
+            const uint32_t identifier = named ? parser->tokens.names[parameter] : 0;
+            *note_token = parameter;
+            *note = named ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
+                                               intern_bytes(pp->table, identifier)) : "passing argument to parameter here";
+        }
+    }
     return result;
 }
 
@@ -4158,6 +4577,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                               check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
                                               (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                               check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
+                                              warning_flag == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                              check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                               check_diagnostic_message(warning_flag);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                         const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
@@ -4252,12 +4673,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
                                                    severity == CHECK_WARNING_ERROR ? (default_error && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
+                    // A warning the policy made an error is clang's "-Werror," one; a default error has no prefix.
+                    const char* promoted = !default_error && severity >= CHECK_WARNING_ERROR ? "-Werror," : "";
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
+                        // Clang declares the builtin as its name is resolved, before the expression around it is built: where
+                        // the name completes with that expression (a value's `int *q = malloc;`, #2348), its error comes first.
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
-                                                      intern_length(pp->table, name), input->implicit_function_c99, scratch);
+                                                      intern_length(pp->table, name), input->implicit_function_c99, promoted, scratch);
+                        pp_diagnostic_suborder(pp, previous, 1);
                     }
                     else if (default_error)
                     {
@@ -4284,8 +4711,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     else
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
-                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [%s-Wimplicit-function-declaration]",
+                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name), promoted);
                     }
                 }
                 else
@@ -4319,14 +4746,33 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
                     }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_dump_struct(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
+                    }
                     // A failed assignment conversion's clang words, with an argument's parameter note (#147).
                     uint32_t conversion_note_token = BUSTER_CHECK_NONE;
                     const char* conversion_note = NULL;
+                    // A call's failed argument's (#2481): clang converts a call's arguments in order, once they are all
+                    // built, each one's warnings and errors alike, so its error is published with the call's conversion
+                    // warnings, at the call's token (check_driver_pointer_arguments), in its argument's place among them.
+                    uint32_t conversion_argument = BUSTER_CHECK_NONE;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_overload_address(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_overload_operand(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
+                                                                    &conversion_note_token, &conversion_note, scratch);
+                    }
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
-                                                                    &conversion_note_token, &conversion_note, scratch);
+                                                                    &conversion_note_token, &conversion_note, &conversion_argument, scratch);
                     }
+                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ?
+                                                    check_warning_graph_first(stream->graph, parser, conversion_argument) : BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
@@ -4344,7 +4790,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     else if (source != BUSTER_CHECK_NONE)
                     {
                         const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                        uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
+                        uint32_t publication = argument_first < count ? check_driver_publication_position(parser, pp, stream->graph->tokens[node], publication_end) :
+                                               completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
                         // An alias or ifunc definition's error is clang's after the multiversioning error at the
                         // function's name, though its location is its earlier attribute (#839).
                         if (phase == 0 && input->reports[index].sort != 0)
@@ -4488,7 +4935,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             else
                             {
-                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", (int)message.length, message.pointer);
+                                // An empty message is clang's "<no message provided>" (#2383).
+                                snprintf(noted, sizeof(noted), "candidate disabled: %.*s", message.length != 0 ? (int)message.length : 21,
+                                         message.length != 0 ? message.pointer : "<no message provided>");
                             }
                             const PPOutputDiagnosticNote note = {
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
@@ -5138,7 +5587,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && token < count &&
                                  (((kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) &&
-                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_AUTO_TYPE_EXTERN) ||
+                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_NON_EXTERN) ||
                                   (kind == CHECK_INPUT_ENUMERATOR_REDEFINITION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)))
                         {
                             const CheckInputReport* conflict = input->reports + index;
@@ -5380,7 +5829,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 const String8 name = check_driver_attribute_spelling(parser, pp, report->note_token, false);
                                 snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)name.length, name.pointer);
                             }
-                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION;
+                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ||
+                                                  report->note_kind == CHECK_INPUT_NOTE_CONSTANT_VOID || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION;
                             const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ||
                                                   report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE || forward || function || constant) &&
                                                  report->note_token < count;
@@ -5389,6 +5839,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .message = forward || function ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE ? "conflicting attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ? "division by zero" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_VOID ? "non-literal type 'void' cannot be used in a constant expression" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION ? "this conversion is not allowed in a constant expression" :
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
                             // (A `,` or `=` clang's ExpectAndConsume expects just past the token before: past the identifier's end.)
@@ -5588,7 +6040,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
                         }
-                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder : 0);
+                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
+                                                             argument_first < count ? (uint64_t)parser->tokens.sources[argument_first] + 1u : 0);
                     }
                     else
                     {
@@ -6748,6 +7201,98 @@ static uint32_t check_driver_prototype_scope(const Parser* parser, uint32_t toke
     return list;
 }
 
+// Whether a declaration the first reading bound at `declaration` is one an edited view changed (#2120): its tokens, or its
+// initializer's, hold a part left out, or its name's other declarations (a function's) are left out.
+static bool check_driver_rejected_changed(const Parser* parser, const CheckInput* input, const uint8_t* edits, uint32_t declaration)
+{
+    const uint32_t count = parser->tokens.count;
+    bool changed = declaration < count && edits[declaration] != CHECK_DRIVER_EDIT_KEEP;
+    // Its statement, where it is one of a body's: the nearest terminator, not past its body or block.
+    uint32_t statement = declaration;
+    for (uint32_t steps = 0; !changed && statement < count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[statement];
+        statement = role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK ? BUSTER_CHECK_NONE : parser->tree.parents[statement];
+    }
+    const uint32_t first = !changed && statement < count ? check_driver_subtree_start(parser, 0, statement) : BUSTER_CHECK_NONE;
+    for (uint32_t at = first; !changed && statement < count && at <= statement; at += 1)
+    {
+        changed = edits[at] != CHECK_DRIVER_EDIT_KEEP;
+    }
+    const uint32_t name = declaration < count ? parser->tokens.names[declaration] : 0;
+    for (uint32_t at = 0; !changed && declaration < count && at < count; at += 1)
+    {
+        changed = edits[at] != CHECK_DRIVER_EDIT_KEEP && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name &&
+                  input->declarations[at] == at;
+    }
+    return changed;
+}
+
+// Whether a reader's report is one clang makes of the whole function at its end (#2120): its labels' (each undeclared one
+// once, at its first use), its jumps', and its analysis' (a misplaced fallthrough, which runs only in a body without an
+// earlier error). A view that leaves out a part of the body changes them.
+static bool check_driver_rejected_function_wide(CheckInputMessage message)
+{
+    return message == CHECK_INPUT_FALLTHROUGH_PLACEMENT || message == CHECK_INPUT_LABEL_UNDECLARED || message == CHECK_INPUT_LABEL_REDEFINITION ||
+           message == CHECK_INPUT_LABEL_AMBIGUOUS || (message >= CHECK_INPUT_JUMP_GOTO && message <= CHECK_INPUT_JUMP_ASM);
+}
+
+// Whether an edited view's reading's error at the unit's `token` is the unit's own (#2120), which the next round leaves out
+// in turn, where a view's reading's errors may be the view's own otherwise. It is where the statement that holds it (the
+// nearest terminator, condition or for header) is kept whole, with no cast of the view's, and names no declaration the view
+// changed, and the view leaves out no tag's definition or label, whose later uses its reading would read differently.
+// Nor does it hold a known error (`errors`), which the reading may find at another of its tokens; nor, for an error clang
+// makes of the whole function (`analysed`, check_driver_rejected_function_wide), does its body. So a body's later errors
+// past a declaration's error (`typeof(k()) u;`, whose uses the view leaves out too) are given,
+// and a statement expression's left-out last statement, which makes its value void, gives no error of the view's.
+static bool check_driver_rejected_trusted(const Parser* parser, const CheckInput* input, const uint8_t* edits, const uint8_t* casts, const uint32_t* errors,
+                                          uint32_t error_count, uint32_t token, bool analysed)
+{
+    const uint32_t count = parser->tokens.count;
+    bool trusted = token < count && input->declarations != NULL;
+    // An error clang makes of the whole function (check_driver_rejected_function_wide): not in a body that holds a known
+    // one, a part of which the view left out.
+    uint32_t body = analysed ? token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; body < count && parser->tree.roles[body] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        body = parser->tree.parents[body];
+    }
+    const uint32_t opened = body < count ? check_driver_subtree_start(parser, 0, body) : body;
+    for (uint32_t e = 0; trusted && analysed && e < error_count; e += 1)
+    {
+        trusted = body < count && (errors[e] < opened || errors[e] > body);
+    }
+    for (uint32_t at = 0; trusted && at < count; at += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        trusted = edits[at] == CHECK_DRIVER_EDIT_KEEP ||
+                  (role != PARSE_ROLE_OPEN_STRUCT && role != PARSE_ROLE_OPEN_ENUM && role != PARSE_ROLE_LABEL);
+    }
+    uint32_t statement = token;
+    for (uint32_t steps = 0; trusted && statement < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[statement];
+        const bool found = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR;
+        trusted = role != PARSE_ROLE_CLOSE_BODY && role != PARSE_ROLE_CLOSE_BLOCK;
+        steps = found ? count : steps;
+        statement = found ? statement : parser->tree.parents[statement];
+    }
+    trusted = trusted && statement < count;
+    const uint32_t first = trusted ? check_driver_subtree_start(parser, 0, statement) : statement;
+    for (uint32_t at = first; trusted && at <= statement; at += 1)
+    {
+        const uint32_t declaration = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER ? input->declarations[at] : BUSTER_CHECK_NONE;
+        trusted = edits[at] == CHECK_DRIVER_EDIT_KEEP && (casts == NULL || casts[at] == 0) &&
+                  (declaration >= count || !check_driver_rejected_changed(parser, input, edits, declaration));
+    }
+    // Nor does the statement hold a known error (an error the first reading found at another of its tokens).
+    for (uint32_t e = 0; trusted && e < error_count; e += 1)
+    {
+        trusted = errors[e] < first || errors[e] > statement;
+    }
+    return trusted;
+}
+
 // Whether an error's token is among the unit's known ones.
 static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
 {
@@ -6913,12 +7458,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     const bool checked = valid && !errored_reading && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
     errored_reading = valid && (errored_reading || (!checked && program.status == CHECK_PROGRAM_INVALID));
     valid = valid && (errored_reading || checked);
-    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own.)
-    if (errored_reading && edited && !whole)
-    {
-        valid = false;
-    }
-    else if (errored_reading)
+    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own, and
+    // only those check_driver_rejected_trusted finds the unit's are, #2120.)
+    const bool trusting = errored_reading && edited && !whole;
+    if (errored_reading)
     {
         // The reading's errors the unit's earlier ones don't hold, published as the first reading's are: its reader's and
         // its graph's reports, and its controls' constraints, each in clang's words, in source order.
@@ -6946,7 +7489,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const bool literal = phase == 0 && at < count && at >= unit_stop &&
                                  (input.reports[index].message == CHECK_INPUT_LITERAL || input.reports[index].message == CHECK_INPUT_WIDE_LITERAL);
             const bool fresh = at < count && !literal && !check_driver_rejected_known(errors, error_count, at) &&
-                               !check_driver_rejected_known(found, *found_count, at) && (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
+                               !check_driver_rejected_known(found, *found_count, at) &&
+                               (trusting ? check_driver_rejected_trusted(unit, first_input, edits, casts, errors, error_count, at,
+                                                                         phase == 0 && check_driver_rejected_function_wide(input.reports[index].message)) :
+                                           !edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
             valid = !fresh || *found_count < found_capacity;
             if (fresh && valid)
             {
@@ -9330,6 +9876,9 @@ struct CheckDriverTypoEdits
     // The names whose tails (check_driver_typo_tail) a reading didn't confirm, at the original's tokens, which no later
     // view leaves out again.
     uint32_t rejected[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    // Beside each replacement, whether it is a parameter's unknown type name's (CHECK_TYPO_PARAMETER), whose error is
+    // "unknown type name" with a keyword too.
+    bool parameters[BUSTER_CHECK_DRIVER_TYPO_EDITS];
     const InternTable* table;
     uint32_t count;
     uint32_t rejected_count;
@@ -9371,7 +9920,7 @@ static uint32_t check_driver_view_token(const Parser* view, const Parser* origin
 }
 
 // Inserts an edit in token order, unless one is at its token or overlaps it. Whether it was added.
-static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit edit, uint32_t keyword, uint32_t type, uint32_t name)
+static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit edit, uint32_t keyword, uint32_t type, uint32_t name, bool parameter)
 {
     uint32_t at = 0;
     while (at < edits->count && edits->edits[at].token < edit.token)
@@ -9388,6 +9937,7 @@ static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit e
         edits->keywords[k] = edits->keywords[k - 1];
         edits->types[k] = edits->types[k - 1];
         edits->names[k] = edits->names[k - 1];
+        edits->parameters[k] = edits->parameters[k - 1];
     }
     if (added)
     {
@@ -9395,6 +9945,7 @@ static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit e
         edits->keywords[at] = keyword;
         edits->types[at] = type;
         edits->names[at] = name;
+        edits->parameters[at] = parameter;
         edits->count += 1;
     }
     return added;
@@ -9452,12 +10003,17 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
         fresh = edits->rejected[r] != (origin != NULL ? origin[at] : at);
     }
     *begin = fresh ? first : at;
-    *name_of = fresh ? at : at - 1;
     uint32_t result = fresh ? at : 0;
     const uint8_t kind = at < count ? view->tokens.kinds[at] : PARSE_KIND_END;
     const bool operand = kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING;
+    // (Or a parenthesized name's, `(myin)x`: clang's MaybeTypeCast reads the name as an expression's, its correction may
+    // be a typedef's, and the expression is invalid either way.)
+    const bool cast = at >= 4 && view->tokens.kinds[at - 1] == PARSE_KIND_R_PAREN && view->tokens.kinds[at - 2] == PARSE_KIND_IDENTIFIER &&
+                      view->tokens.kinds[at - 3] == PARSE_KIND_L_PAREN;
     const uint32_t name = result == 0 && !diagnostic->probe && operand && at >= 2 && view->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER ? at - 1 :
-                          BUSTER_CHECK_NONE;
+                          result == 0 && !diagnostic->probe && operand && cast ? at - 2 :
+                                                                                  BUSTER_CHECK_NONE;
+    *name_of = fresh ? at : name < count ? name : at - 1;
     const uint8_t before = name < count ? view->tokens.kinds[name - 1] : PARSE_KIND_END;
     bool near = name < count && before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW;
     const uint32_t named = near && origin != NULL ? origin[name] : name;
@@ -9479,6 +10035,9 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
         const uint32_t distance = listed && 3 * difference <= length ? check_typo_distance_table((const uint8_t*)other, other_length, spelling, length, row) : 0;
         keyword |= distance != 0 && distance <= (length + 2) / 3 && length / distance >= 3;
     }
+    // (Any other name too: one that stays undeclared is clang's "use of undeclared identifier", its expression invalid
+    // and its rest skipped as a keyword's typo's is, `u8'a'` before C23 among them; the reading confirms it.)
+    keyword |= near;
     const uint32_t end = keyword ? check_driver_skip_end(view, at) : BUSTER_CHECK_NONE;
     // (The tail ends at a `,` outside its groups too, an initializer's or an argument's end.)
     uint32_t stop = end;
@@ -9554,9 +10113,9 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
             const CheckPrefixEdit attributes_out = { .token = diagnostic->token, .end = name, .name = 0, .kind = 0 };
             const CheckPrefixEdit empty = { .token = name, .end = 0, .name = 0, .kind = PARSE_KIND_SEMI };
             const CheckPrefixEdit rest_out = { .token = name + 1, .end = end + 1, .name = 0, .kind = 0 };
-            added |= check_driver_typo_add(edits, attributes_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-            added |= check_driver_typo_add(edits, empty, 0, taken, name);
-            added |= check_driver_typo_add(edits, rest_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            added |= check_driver_typo_add(edits, attributes_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
+            added |= check_driver_typo_add(edits, empty, 0, taken, name, false);
+            added |= check_driver_typo_add(edits, rest_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
         }
         confirmed &= !attributes || (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && taken < count);
         if (name < count && !confirmed && edits->rejected_count < BUSTER_CHECK_DRIVER_TYPO_EDITS)
@@ -9566,13 +10125,19 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
             added = true;
         }
     }
-    for (uint32_t r = 0; r < input->report_count; r += 1)
+    // (Each report's, then each parameter's unknown type name's, CheckInput.parameter_typo_tokens.)
+    for (uint32_t r = 0; r < input->report_count + input->parameter_typo_count; r += 1)
     {
-        const CheckInputReport* report = input->reports + r;
-        const bool statement = report->message == CHECK_INPUT_UNDECLARED && (report->detail & CHECK_TYPO_STATEMENT) != 0;
-        const uint32_t token = statement ? check_driver_original_token(original, checking, report->token) : BUSTER_CHECK_NONE;
-        const uint32_t keyword = report->detail & (CHECK_TYPO_STATEMENT - 1);
-        const uint32_t type = statement && report->subject != 0 ? check_driver_original_token(original, checking, report->subject - 1) : BUSTER_CHECK_NONE;
+        const bool parameter = r >= input->report_count;
+        const uint32_t p = parameter ? r - input->report_count : 0;
+        const CheckInputReport* report = parameter ? NULL : input->reports + r;
+        const uint32_t detail = parameter ? input->parameter_typo_details[p] : report->detail;
+        const uint32_t subject = parameter ? input->parameter_typo_types[p] : report->subject;
+        const bool statement = parameter || (report->message == CHECK_INPUT_UNDECLARED && (detail & CHECK_TYPO_STATEMENT) != 0);
+        const uint32_t token = statement ? check_driver_original_token(original, checking, parameter ? input->parameter_typo_tokens[p] : report->token) :
+                                           BUSTER_CHECK_NONE;
+        const uint32_t keyword = detail & (CHECK_TYPO_STATEMENT - 1);
+        const uint32_t type = statement && subject != 0 ? check_driver_original_token(original, checking, subject - 1) : BUSTER_CHECK_NONE;
         uint32_t name = 0;
         uint8_t kind = PARSE_KIND_IDENTIFIER;
         if (keyword != 0 && keyword <= BUSTER_ARRAY_LENGTH(check_typo_keywords))
@@ -9592,7 +10157,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         if (token < count && name != 0 && kind != PARSE_KIND_UNKNOWN && original->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
         {
             const CheckPrefixEdit edit = { .token = token, .end = 0, .name = name, .kind = kind };
-            added |= check_driver_typo_add(edits, edit, keyword, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE);
+            added |= check_driver_typo_add(edits, edit, keyword, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE, parameter);
         }
     }
     // A probe's statement whose expression has an undeclared name that no correction took: its rest is left out.
@@ -9628,7 +10193,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && end > at)
         {
             const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };
-            added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
         }
     }
     return added;
@@ -9664,7 +10229,7 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
             const uint32_t name = original->tokens.names[edit->token];
             const char* other = noted ? (const char*)intern_bytes(pp->table, original->tokens.names[type]) : check_typo_keywords[keyword - 1];
             const int other_length = noted ? (int)intern_length(pp->table, original->tokens.names[type]) : (int)strlen(other);
-            snprintf(message, 512, "%s '%.*s'; did you mean '%.*s'?", typedef_name ? "unknown type name" : "use of undeclared identifier",
+            snprintf(message, 512, "%s '%.*s'; did you mean '%.*s'?", typedef_name || edits->parameters[e] ? "unknown type name" : "use of undeclared identifier",
                      (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
             if (note != NULL)
             {
@@ -9795,6 +10360,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             pp->fatal = false;
             ready = true;
         }
+        if (ready && pp->output.count == 0)
+        {
+            pp_diagnose_empty_unit(pp);
+        }
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         check_clock_tokens(stage_clock, pp->output.count);
@@ -9827,6 +10396,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 {
                     // Every missing `;` read past as clang's recovery reads it: the whole view, checked as a prefix is.
                     checking = recovered;
+                    resumed.parser.whole_view = true;
+                    prefix_only = true;
+                    ready = true;
+                }
+                else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                {
+                    // A parameter's unknown type first: every declaration before the first other error.
+                    checking = &prefix.parser;
                     prefix_only = true;
                     ready = true;
                 }
@@ -9953,7 +10530,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     checking_pp = pp;
                     if (recovered->errors == 0)
                     {
+                        resumed.parser.whole_view = true;
                         checking = recovered;
+                    }
+                    else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                    {
+                        checking = &prefix.parser;
                     }
                     else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
                     {
@@ -10227,7 +10809,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     check_driver_initializer_message(failure.status);
                                 place = conversion != NULL ? place : outermost ? failure.failed_declaration : failure.token;
                                 const TypeId converted = conversion != NULL && failure.failed_source != 0 && failure.failed_source - 1 < stream.count ?
-                                    check_stream_type(&stream, failure.failed_source - 1) : 0;
+                                    check_driver_conversion_source(&types, &stream, failure.failed_source - 1) : 0;
                                 const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&
                                     check_driver_conversion_kind(&types, failure.failed_type, converted) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)
@@ -10498,6 +11080,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const uint8_t* flushed = check_driver_flushed_bodies(checking, recovered, pp, &program, scratch);
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, flushed, &shift_warnings, scratch);
                             arena_pop_to(scratch, flushed_mark);
+                        }
+                        else
+                        {
+                            // -w spares the common checks that are errors by default (#2264): a chained comparison's.
+                            check_common_chained_comparisons(checking, pp, &input, scratch);
                         }
                     }
                     else if (!driver_fatal && ready && (!prefix_only || checking == recovered) && !repairing && !pp->fatal &&

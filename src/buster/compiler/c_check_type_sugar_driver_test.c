@@ -1335,6 +1335,125 @@ static const CheckDriverDefaultWarningFixture check_driver_parameter_typedef_fix
     },
 };
 
+// A counted_by family member's type as clang's CountAttributedType prints it (#1842's 3c, check_driver_counted_type): each
+// keyword's, a pointer's attribute before the placeholder and a flexible array's after it, through `&` and an array's
+// decay, as a failed conversion's source or an assigned member target, with the a.k.a.; a sibling declarator without
+// one keeps none.
+static const CheckDriverDefaultWarningFixture check_driver_counted_sugar_fixtures[] =
+{
+    {
+        .name = "counted_by family sugar",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct B { int n; int *__counted_by(n) p; char *__attribute__((sized_by(n))) q; void *__attribute__((sized_by_or_null(n))) r; int *__attribute__((counted_by_or_null(n))) s; };\n"
+                  "struct F { int n; int fam[] __counted_by(n); };\n"
+                  "void f(struct B *b, struct F *g)\n"
+                  "{\n"
+                  "    long *l;\n"
+                  "    l = b->p;\n"
+                  "    l = b->q;\n"
+                  "    l = b->r;\n"
+                  "    l = b->s;\n"
+                  "    l = g->fam;\n"
+                  "    l = &b->p;\n"
+                  "    double d = b->p;\n"
+                  "    int *ok = b->p;\n"
+                  "}\n",
+        .errors = 6,
+    },
+    {
+        .name = "counted_by sugar of targets and siblings",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct B { int n; int *__counted_by(n) p; int *__counted_by(n) p2, *plain; };\n"
+                  "struct F { int n; int fam[] __counted_by(n); };\n"
+                  "void take(long *x);\n"
+                  "void f(struct B *b, struct F *g, struct B v, long *l)\n"
+                  "{\n"
+                  "    b->p = l;\n"
+                  "    v.p = l;\n"
+                  "    take(b->p);\n"
+                  "    take(g->fam);\n"
+                  "    l = b->p2;\n"
+                  "    l = b->plain;\n"
+                  "    l = v.p;\n"
+                  "    l = &g->fam;\n"
+                  "    int *q = b->p;\n"
+                  "}\n",
+        .errors = 8,
+        .notes = 2,
+    },
+    {
+        // A member's specifiers' typedef past a GNU attribute list, whose arguments' names are no specifier (#2417: an
+        // invalid counted_by's count printed as the member's typedef), and kept in the counted sugar (`'const T *
+        // __counted_by(n)'`).
+        .name = "counted_by sugar with typedefs",
+        .source = "typedef int T;\n"
+                  "struct B { int n; const int *__attribute__((counted_by(n + 1))) e; T __attribute__((aligned(8))) *t; __attribute__((aligned(8))) T *u; const T *__attribute__((counted_by(n))) v; };\n"
+                  "void f(struct B *b, long *l)\n"
+                  "{\n"
+                  "    l = b->e;\n"
+                  "    l = b->t;\n"
+                  "    l = b->u;\n"
+                  "    l = b->v;\n"
+                  "}\n",
+        .errors = 5,
+    },
+    {
+        .name = "counted_by sugar of qualified typedefs",
+        .source = "typedef const int CI;\n"
+                  "typedef int *IP;\n"
+                  "struct B { int n; CI *__attribute__((counted_by(n))) p; volatile CI *__attribute__((counted_by(n))) q; };\n"
+                  "void f(struct B *b, long *l) { l = b->p; l = b->q; l = &b->p; }\n",
+        .errors = 3,
+    },
+};
+
+// A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete there (#1842's 3d,
+// check_graph_counted_uses): clang's "cannot use" at a read (a condition's, a `.`'s, a return's) and "cannot assign to" at
+// an assignment, each with its two notes; none for `&`'s operand, a sized_by member, or a pointee completed before the use.
+static const CheckDriverDefaultWarningFixture check_driver_counted_incomplete_fixtures[] =
+{
+    {
+        .name = "counted_by pointee incomplete",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct Inc;\n"
+                  "struct B { int n; struct Inc *__counted_by(n) p; };\n"
+                  "struct Inc *g(struct B *b, struct Inc *x)\n"
+                  "{\n"
+                  "    b->p = x;\n"
+                  "    struct Inc *y = b->p;\n"
+                  "    return b->p;\n"
+                  "}\n"
+                  "void h(struct B *b) { (void)b->p; void *v = b->p; struct Inc **pp = &b->p; }\n",
+        .errors = 5,
+        .notes = 10,
+    },
+    {
+        .name = "counted_by pointee completed later",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct Inc;\n"
+                  "struct Late;\n"
+                  "struct B { int n; struct Inc *__counted_by(n) p; struct Late *__counted_by(n) l; struct Inc *__attribute__((counted_by_or_null(n))) o; struct Inc *__attribute__((sized_by(n))) z; };\n"
+                  "void early(struct B *b, struct B v)\n"
+                  "{\n"
+                  "    struct Late *a = b->l;\n"
+                  "    struct Inc *c = v.p;\n"
+                  "    struct Inc *d = b->o;\n"
+                  "    struct Inc *e = b->z;\n"
+                  "    if (b->p) { }\n"
+                  "    b->o = 0;\n"
+                  "    struct Inc **f = &v.p;\n"
+                  "}\n"
+                  "struct Late { int x; };\n"
+                  "void late(struct B *b)\n"
+                  "{\n"
+                  "    struct Late *a = b->l;\n"
+                  "    int k = b->l[0].x;\n"
+                  "}\n",
+        .errors = 5,
+        .notes = 10,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
@@ -1346,6 +1465,10 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_size_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_size_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_counted_incomplete_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_counted_incomplete_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_counted_sugar_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_counted_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_parameter_typedef_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_parameter_typedef_fixtures));
 }

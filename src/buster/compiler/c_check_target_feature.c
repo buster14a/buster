@@ -43,8 +43,10 @@
 // where clang evaluates out of source order, an assignment's right side first). Clang emits the eager functions in
 // source order, and the deferred ones in the order its emission first referred to them or a declaration queued them,
 // depth first; this takes those in source order. Where the feature an error names is the first of the rest of a
-// function's map (an attribute's arch= CPU's, or a caller's attribute that turns several off), clang's order is its
-// StringMap's and this one predefines_features', so the two may name another feature for the same call.
+// function's map (an attribute's arch= CPU's, or a caller's attribute that turns several off), it is the first in the
+// order clang's StringMap iterates the map's keys (#2093, check_target_feature_order, c_check_feature_map.c), and a
+// caller's attribute's errors come in that order; but under -march=native and for a cpu_specific version's map, where
+// the order is predefines_features' (docs/x86-target.md).
 //
 // The walk is code generation's emission: #487's walk, Sema's reachability, with code generation's rules where they
 // differ (CheckTargetFeatureEmission): nothing after an expression statement that ends in a call that doesn't return —
@@ -70,6 +72,8 @@
 // builtin's call, and walks only a body that refers to a callee that may fail or calls a builtin that fails, whose call
 // sites it then finds (clang's headers give every intrinsic one, but a unit compiled for the features its intrinsics
 // need, the usual one, refers to none that fails).
+
+#include "c_check_feature_map.c"
 
 typedef struct CheckTargetFeatureError CheckTargetFeatureError;
 struct CheckTargetFeatureError
@@ -341,27 +345,134 @@ static int32_t check_target_feature_lacked(PredefinesFeatures callee, Predefines
     return result;
 }
 
+// The order of the true features of a function's map, as clang's checkTargetFeatures iterates it (#2093,
+// c_check_feature_map.c): `order`'s predefines_features indices, and their count, or 0 where it isn't known (a
+// cpu_specific version's map, and -march=native's, whose features the driver lists in the host's own map's order). The
+// map is initFeatureMap's of the CPU and a list (ASTContext::getFunctionFeatureMap): a target attribute's of its arch=
+// CPU, or the unit's, and of the command line's -m features (the driver's, its last of each, in order) followed by the
+// attribute's items; a target_clones function's first version's, of its arch= CPU or the unit's and "+" its string
+// alone; and a function without either's, the command line's own map.
+static uint32_t check_target_feature_order(const CheckTargetFeatureMaps* maps, const CheckTargetFeatureAttributes* attributes, int32_t* order)
+{
+    uint32_t count = 0;
+    const PredefinesOptions* options = maps->options;
+    if (attributes->specific == 0 && !maps->host.native)
+    {
+        uint16_t list[256];
+        uint32_t listed = 0;
+        const char* cpu = maps->host.name;
+        String8 text = { 0 };
+        const String8 first = attributes->clones != 0 ? check_target_feature_clone(attributes->clones, 0) : (String8){ 0 };
+        const bool clone = attributes->version == 0 && attributes->clones != 0 && first.length != 0 && !check_input_attribute_equal(first, "default");
+        if (attributes->version != 0)
+        {
+            text = attributes->version->text;
+        }
+        // The command line's -m features, each one's last, in the order of those (the driver's unifyTargetFeatures).
+        for (uint32_t i = 0; !clone && i < options->feature_count; i += 1)
+        {
+            bool later = false;
+            for (uint32_t j = i + 1; j < options->feature_count; j += 1)
+            {
+                later |= (options->features[j] >> 1) == (options->features[i] >> 1);
+            }
+            const char* name = predefines_features[options->features[i] >> 1].name;
+            if (!later)
+            {
+                check_feature_map_item(list, &listed, BUSTER_ARRAY_LENGTH(list), name, (uint32_t)strlen(name), (options->features[i] & 1) != 0);
+            }
+        }
+        if (clone && predefines_item_starts(first.pointer, (uint32_t)first.length, "arch="))
+        {
+            cpu = 0;
+            text = first;
+        }
+        else if (clone)
+        {
+            check_feature_map_item(list, &listed, BUSTER_ARRAY_LENGTH(list), first.pointer, (uint32_t)first.length, true);
+        }
+        // The attribute's items: arch='s CPU, a no- item's feature off and any other on, but tune=, fpmath= and
+        // branch-protection=, and the names clang doesn't know (filterFunctionTargetAttrs).
+        uint32_t cursor = 0;
+        const char* item = 0;
+        uint32_t item_length = 0;
+        const char* arch = 0;
+        uint32_t arch_length = 0;
+        while (text.length != 0 && predefines_attribute_item(text.pointer, (uint32_t)text.length, &cursor, &item, &item_length))
+        {
+            if (predefines_item_starts(item, item_length, "arch="))
+            {
+                uint32_t start = 5;
+                while (start < item_length && predefines_space(item[start]))
+                {
+                    start += 1;
+                }
+                arch = arch == 0 ? item + start : arch;
+                arch_length = arch_length == 0 ? item_length - start : arch_length;
+            }
+            else if (!clone && !predefines_item_starts(item, item_length, "tune=") && !predefines_item_starts(item, item_length, "fpmath=") &&
+                     !predefines_item_starts(item, item_length, "branch-protection="))
+            {
+                const bool off = predefines_item_starts(item, item_length, "no-");
+                check_feature_map_item(list, &listed, BUSTER_ARRAY_LENGTH(list), item + (off ? 3 : 0), item_length - (off ? 3u : 0u), !off);
+            }
+        }
+        uint64_t known[2] = { 0, 0 };
+        const bool valid_arch = arch != 0 && check_feature_map_cpu(arch, arch_length, known);
+        const char* name = valid_arch ? arch : cpu != 0 ? cpu : maps->host.name;
+        const uint32_t length = valid_arch ? arch_length : (uint32_t)strlen(name);
+        CheckFeatureMap map;
+        check_feature_map_initialize(&map, name, length, list, listed);
+        uint8_t keys[BUSTER_CHECK_FEATURE_MAP_BUCKETS];
+        const uint32_t total = check_feature_map_order(&map, keys);
+        for (uint32_t k = 0; k < total; k += 1)
+        {
+            const char* key = check_feature_map_features[keys[k]].name;
+            const int32_t feature = predefines_feature_index(key, strlen(key));
+            if (feature >= 0)
+            {
+                order[count++] = feature;
+            }
+        }
+    }
+    return count;
+}
+
+// The first of `order`'s `count` features (a map's, check_target_feature_order) in `callee` that `caller` lacks, or
+// where the order isn't known, the first by index (predefines_features'); -1 for none.
+static int32_t check_target_feature_first_lacked(const int32_t* order, uint32_t count, PredefinesFeatures callee, PredefinesFeatures caller)
+{
+    int32_t result = count == 0 ? check_target_feature_lacked(callee, caller, 0) : -1;
+    for (uint32_t i = 0; i < count && result < 0; i += 1)
+    {
+        result = predefines_has(callee, (uint32_t)order[i]) && !predefines_has(caller, (uint32_t)order[i]) ? order[i] : -1;
+    }
+    return result;
+}
+
 // The feature a callee's error names where its target attribute applies, or -1 for none (checkTargetFeatures'
-// required features): the attribute's own features, in its order, of those its map has, then the rest of its map.
-static int32_t check_target_feature_required(const CheckInputAttribute* version, PredefinesFeatures callee, PredefinesFeatures caller)
+// required features): the attribute's own features, in its order, of those its map has, then the rest of its map, in
+// the map's order where that is known (`order`, check_target_feature_order).
+static int32_t check_target_feature_required(const CheckInputAttribute* version, PredefinesFeatures callee, PredefinesFeatures caller, const int32_t* order,
+                                             uint32_t order_count)
 {
     // The first the caller lacks of the whole map, where the attribute's own lacks none; the usual call lacks none at all,
     // which needs no reading of the attribute.
-    const int32_t first = check_target_feature_lacked(callee, caller, 0);
+    const int32_t any = check_target_feature_lacked(callee, caller, 0);
     int32_t result = -1;
     const char* text = version->text.pointer;
     const uint32_t length = (uint32_t)version->text.length;
     uint32_t cursor = 0;
     const char* item = 0;
     uint32_t item_length = 0;
-    while (first >= 0 && result < 0 && predefines_attribute_item(text, length, &cursor, &item, &item_length))
+    while (any >= 0 && result < 0 && predefines_attribute_item(text, length, &cursor, &item, &item_length))
     {
         const bool named = !predefines_item_starts(item, item_length, "arch=") && !predefines_item_starts(item, item_length, "tune=") &&
                            !predefines_item_starts(item, item_length, "no-");
         const int32_t feature = named ? predefines_feature_index(item, item_length) : -1;
         result = feature >= 0 && predefines_has(callee, (uint32_t)feature) && !predefines_has(caller, (uint32_t)feature) ? feature : -1;
     }
-    return result >= 0 ? result : first;
+    return result >= 0 || any < 0 ? result : check_target_feature_first_lacked(order, order_count, callee, caller);
 }
 
 // Whether clang checks a call of a function of `callee`'s attributes in a function of `caller`'s (CodeGenFunction::EmitCall).
@@ -379,7 +490,7 @@ static bool check_target_feature_fails(CheckTargetFeatureMaps* maps, const Check
     bool result = false;
     if (check_target_feature_checked(caller, callee) && callee->targeted && !callee->versions)
     {
-        result = check_target_feature_required(callee->version, check_target_feature_map(maps, callee), caller_map) >= 0;
+        result = check_target_feature_required(callee->version, check_target_feature_map(maps, callee), caller_map, NULL, 0) >= 0;
     }
     else if (check_target_feature_checked(caller, callee) && caller->targeted && !caller->versions)
     {
@@ -1479,7 +1590,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
     unsigned __int128 value = 0;
     // A label inside the selector's expression keeps clang's ConstantFoldsToSimpleInteger from folding it: the
     // switch's cases all emit, as an unknown one's do.
-    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value) &&
+    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value, NULL) &&
                        !(node < program->input->graph.count && emission->node_labeled[node] != 0);
     while (next < walk->body->count && controls[next].kind == CHECK_CONTROL_CASE)
     {
@@ -1981,15 +2092,28 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
         }
         else if (object != 0 && check_target_feature_checked(caller, &callee) && callee.targeted && !callee.versions)
         {
-            const int32_t feature = check_target_feature_required(callee.version, check_target_feature_map(maps, &callee), caller_map);
+            const PredefinesFeatures callee_map = check_target_feature_map(maps, &callee);
+            int32_t order[BUSTER_CHECK_FEATURE_MAP_BUCKETS];
+            const uint32_t order_count = check_target_feature_lacked(callee_map, caller_map, 0) >= 0 ? check_target_feature_order(maps, &callee, order) : 0;
+            const int32_t feature = check_target_feature_required(callee.version, callee_map, caller_map, order, order_count);
             CheckTargetFeatureError error = base;
             error.feature = (uint32_t)feature;
             valid = feature < 0 || check_target_feature_report(output, errors, error_count, error);
         }
         else if (object != 0 && check_target_feature_checked(caller, &callee) && caller->targeted && !caller->versions)
         {
+            // An error for each feature of the callee's map the caller lacks, in the map's order where that is known.
             const PredefinesFeatures callee_map = check_target_feature_map(maps, &callee);
-            for (int32_t feature = check_target_feature_lacked(callee_map, caller_map, 0); valid && feature >= 0;
+            int32_t order[BUSTER_CHECK_FEATURE_MAP_BUCKETS];
+            const uint32_t order_count = check_target_feature_lacked(callee_map, caller_map, 0) >= 0 ? check_target_feature_order(maps, &callee, order) : 0;
+            for (uint32_t i = 0; valid && i < order_count; i += 1)
+            {
+                CheckTargetFeatureError error = base;
+                error.feature = (uint32_t)order[i];
+                const bool lacked = predefines_has(callee_map, (uint32_t)order[i]) && !predefines_has(caller_map, (uint32_t)order[i]);
+                valid = !lacked || check_target_feature_report(output, errors, error_count, error);
+            }
+            for (int32_t feature = order_count == 0 ? check_target_feature_lacked(callee_map, caller_map, 0) : -1; valid && feature >= 0;
                  feature = check_target_feature_lacked(callee_map, caller_map, (uint32_t)feature + 1))
             {
                 CheckTargetFeatureError error = base;

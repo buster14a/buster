@@ -100,6 +100,9 @@ struct CheckBuiltinAtomicResult
     int8_t answers[2];
     uint64_t query_size;
     TypeId query_pointer;
+    // A value pointer whose pointee's address space the object's doesn't include (#2233, CHECK_DIAG_ADDRESS_SPACE): the
+    // pointer type it converts to, which the error names.
+    TypeId space_target;
 };
 
 static bool check_builtin_atomic_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinAtomicAction* input)

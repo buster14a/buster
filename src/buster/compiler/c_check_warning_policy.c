@@ -6,11 +6,11 @@
 // The group relations and extension classes are checked against Clang 23.1.4, with original differential probes.
 
 // The warnings off by default that -pedantic (or -pedantic-errors) gives: GNU constant folding's, an unevaluated
-// string literal's escapes' (#1447), GCC's cast to a union's (#2301) and a GNU array range designator's (#2202).
+// string literal's escapes' (#1447), GCC's cast to a union's (#2301), a GNU array range designator's (#2202) and a C23 attribute list's before C23 (#2409).
 static bool check_warning_pedantic(uint32_t id)
 {
     return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE ||
-           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE;
+           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_NONSCALAR_SAME_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE || id == CHECK_WARNING_ID_C23_ATTRIBUTES;
 }
 
 static bool check_warning_extension(uint32_t id)
@@ -60,7 +60,8 @@ static bool check_warning_option(uint32_t id, String8 option)
     const bool wall = id == CHECK_WARNING_ID_UNUSED_VARIABLE || id == CHECK_WARNING_ID_UNUSED_CONST_VARIABLE ||
                       id == CHECK_WARNING_ID_UNUSED_FUNCTION ||
                       id == CHECK_WARNING_ID_UNINITIALIZED || id == CHECK_WARNING_ID_SWITCH || id == CHECK_WARNING_ID_DANGLING_ELSE ||
-                      id == CHECK_WARNING_ID_SELF_ASSIGN || id == CHECK_WARNING_ID_EMPTY_BODY || id == CHECK_WARNING_ID_FORMAT_SECURITY;
+                      id == CHECK_WARNING_ID_SELF_ASSIGN || id == CHECK_WARNING_ID_EMPTY_BODY || id == CHECK_WARNING_ID_FORMAT_SECURITY ||
+                      id == CHECK_WARNING_ID_SHIFT_OP_PARENTHESES;
     const bool wextra = id == CHECK_WARNING_ID_UNUSED_PARAMETER || id == CHECK_WARNING_ID_SIGN_COMPARE ||
                         id == CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER;
     matches |= wall && check_diagnostic_option(option, "-Wall");

@@ -451,6 +451,19 @@ static void check_test_program_asm_goto(CheckTest* test, const char* clang)
         "s+=v[i];skip:;}return s;}"
         "int tested(int n){unsigned s=0;for(int i=-2;i<9;i++)s=s*5+(unsigned)out(i+n)+(unsigned)both(i)*3+(unsigned)flags(i-n)*7+(unsigned)live(i&3)+(unsigned)vla(i&7);return (int)s;}",
         "asm-goto-outputs", clang);
+    // Bodies that branch straight to their labels (#2351): a label right after the statement, a template's own branch to
+    // its end, an always_inline function's statement spliced twice, one under a value of its expression (whose dispatch
+    // stays), and one in a loop of live values in callee-saved registers.
+    check_test_program_source(test,
+        "static int next(int x){int s=1;__asm__ goto(\"cmpl $2, %0\\n\\tje %l[n]\" : : \"r\"(x) : \"cc\" : n);s=2;n:return s+x;}"
+        "static int ends(int x){__asm__ goto(\"cmpl $3, %0\\n\\tje 1f\\n\\tcmpl $4, %0\\n\\tje %l[four]\\n1:\" : : \"r\"(x) : \"cc\" : four);return x;four:return 40;}"
+        "static inline __attribute__((always_inline)) int is_zero(int x){__asm__ goto(\"testl %0, %0\\n\\tjz %l[z]\" : : \"r\"(x) : \"cc\" : z);return 0;z:return 1;}"
+        "static int twice(int x){return is_zero(x)*3+is_zero(x-1);}"
+        "static int under(int x){int r=x*3+({__asm__ goto(\"testl %0, %0\\n\\tjs %l[m]\" : : \"r\"(x) : \"cc\" : m);1;});return r;m:return -7;}"
+        "static int kept(int x){long a=x*3,b=x*5,c=x*7,d=x*11,e=x*13,f=x*17;long t=0;for(int i=0;i<x+6;i++){__asm__ goto(\"testl $2, %0\\n\\tjnz %l[two]\" : : \"r\"(i) : \"cc\", \"rbx\", \"r12\" : two);"
+        "t+=a+b;continue;two:t+=c*d-e+f;}return (int)(t+a+b+c+d+e+f);}"
+        "int tested(int n){unsigned s=0;for(int i=-3;i<8;i++)s=s*7+(unsigned)next(i+n)+(unsigned)ends(i)*5+(unsigned)twice(i)*11+(unsigned)under(i-n)*13+(unsigned)kept(i&3);return (int)s;}",
+        "asm-goto-direct", clang);
 }
 
 static void check_test_program_asm(CheckTest* test, const char* clang)
@@ -1213,8 +1226,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static int over(long n){int r=0;__asm__(\"jrcxz 2f\\n1:\\n\\tincl %0\\n\\tcmpl $5, %0\\n\\tje 2f\\n\\tloop 1b\\n2:\" : \"+r\"(r), \"+c\"(n));return r;}"
         "int tested(int n){long m=(long)((unsigned)n%9u);return (int)sum(m+1)+zero(m)*3+zero(0)*5+(int)both(m)*7+(int)both(0)*11+over(m)*13+over(0)*17;}",
         "asm-loop-bodies", clang);
-    check_test_program_boundary_reason(test, "int tested(int n){asm goto(\".p2align 4\\n\\tleaq %l0(%%rip), %%rax\" : : : \"rax\" : out);return n;out:return -n;}",
-                                       "asm-directives-goto-data", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".cfi_startproc\\n\\t.cfi_endproc\");return n;}",
                                        "asm-cfi", true, false, 0, 0, "inline assembly's CFI directives");
     check_test_program_boundary_reason(test, "int tested(int n){int e;__asm__ volatile(\".set crossset, 7\");__asm__(\"movl $crossset, %0\" : \"=r\"(e));return e+n;}",
@@ -1239,11 +1250,18 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-flag-output-size", true, false, 0, 0, "inline assembly flag outputs of this size");
     check_test_program_boundary_reason(test, "int tested(int n){int z;__asm__(\"testl %1, %1\" : \"=r@ccz\"(z) : \"r\"(n));return z;}",
                                        "asm-flag-output-alternatives", true, false, 0, 0, "inline assembly flag outputs with other alternatives");
-    // asm goto (#147): a label as anything but a jmp's or a jcc's target.
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__ goto(\"leaq %l[out](%%rip), %%rax\" : : : \"rax\" : out);return n;out:return n+1;}",
-                                       "asm-goto-label-data", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__ goto(\"call %l0\" : : : : out);return n;out:return n+1;}",
-                                       "asm-goto-label-call", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
+    // asm goto's labels as data and as addresses (#1845's item 1): the template assembled whole in its helper, whose exits
+    // the uses take, as clang's take its indirect targets' blocks: the Linux kernel's __jump_table entries (`.quad 1b,
+    // %l[yes]`, and the relative `.long %l[yes] - .`), a rip-relative address the template jumps through, by a directive
+    // template and a record one, with an output stored on each way out; run against clang's build.
+    check_test_program_source(test,
+        "static int key(int n){__asm__ goto(\"cmpl $3, %0\\n\\tje %l[yes]\\n\\t.pushsection __jump_table, \\\"aw\\\"\\n\\t.balign 8\\n\\t.quad 1f, %l[yes]\\n\\t"
+        ".long 1f - ., %l[yes] - .\\n\\t.popsection\\n1:\" : : \"r\"(n) : : yes);return 0;yes:return 1;}"
+        "static int via(int n){int y;__asm__ goto(\"leaq %l[two](%%rip), %%rax\\n\\tcmpl $1, %1\\n\\tje 1f\\n\\tleaq %l[one](%%rip), %%rax\\n1:\\tleal 7(%1), %0\\n\\tjmp *%%rax\""
+        " : \"=&r\"(y) : \"r\"(n) : \"rax\" : one, two);return 100;one:return y+10;two:return y+20;}"
+        "static int aligned(int n){__asm__ goto(\".p2align 4\\n\\tleaq %l1(%%rip), %%rax\\n\\ttestl %0, %0\\n\\tjz 1f\\n\\tjmp *%%rax\\n1:\" : : \"r\"(n) : \"rax\" : out);return n;out:return -n;}"
+        "int tested(int n){int m=(int)((unsigned)n%5u);return key(m)+via(m)*3+aligned(m)*7;}",
+        "asm-goto-label-data", clang);
     // The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; shapes off the
     // stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
     // top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,

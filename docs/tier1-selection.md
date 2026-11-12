@@ -1085,9 +1085,22 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
 | `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
 | `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| `vselect m, op(a, b), w` of an `add`, `sub`, `mul`, shift, floating operation or `lane_op` only the select reads, at its lanes (#1840) | `MASKED_BINARY` | the operation's EVEX form under `k`: `vpaddd x{k}, a, b` merging into `w`, which `x` takes first by a `vmovdqa64` unless it holds it (xmm15 keeping an operand that move would overwrite), or `vpaddd x{k}{z}, a, b` where `w` is a zero vector |
 | the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+A masked operation (`tier1_select_masked_binary`) has four values: the
+operation's two operands, the mask and the passthrough `w` (`values[3]`, the
+`fourth` hole; `BUSTER_TIER1_SELECT_VALUES`), which the selection's costs and
+needs, the effective uses, liveness, both emitters, the code certificate and
+the straight-line check walk with the other three. The bitwise operations don't
+fold: their forms (`vpandq`, `vporq`, `vpxord`) mask a dword or a qword, not the
+select's lanes. Each form the fold can make has a complete Zen 5 row,
+`test-tier1-select`'s "every masked operation's form" check; zeroing on
+registers takes the unmasked row, as the model has it. On `main_unit_frontend.c`
+and `main_unit_backend.c`, compiled by `--tier1 -march=znver5`, the fold takes
+31 of 261 `vpblendm` and 82 of 411 into their operations.
 
 Unmasked, a quadword `and` or `or` is the doublewords' bits, and `x86_semantics.c`
 models those forms. A function with a vector constant keeps its frame out of the
@@ -1382,24 +1395,32 @@ is k0.
 ## Asm bodies (#1839)
 
 A body call ([the IR guide](ir.md)'s "Asm bodies") is `TIER1_RULE_ASM`, its
-`immediate` the body's index, of no operand and no result: its block argument is
-the `stack_addr` of a frame object, which no register holds (the node has no
-effective use, so the address is computed only where something else reads it).
-The selector takes a body whose block is a `stack_addr` and which touches none of
-rsp, rbp and r15 (`tier1_select_asm_supported`), as the producer has them. Like a
-row call it is no call of a function's: no argument moves, no outgoing area. Only
-the CFG consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's
-definition phase:
+`immediate` the body's index, of no result: its block argument is the
+`stack_addr` of a frame object, which no register holds (no effective use, so the
+address is computed only where something else reads it), and its register
+operands (#2144, `IrAsmBody.passed`) are its effective uses, each in a register of
+its class, as a row call's operands are (`tier1_select_asm_skipped` leaves the
+block out). The selector takes a body whose block is a `stack_addr`, which touches
+none of rsp, rbp and r15, and whose register operands are an `i32`'s, an `i64`'s
+or a `ptr`'s in a general register but the scratch r11, or a `float`'s or a
+`double`'s in xmm0 to xmm14, each register once (`tier1_select_asm_supported`).
+Like a row call it is no call of a function's: no outgoing area. Only the CFG
+consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's definition
+phase:
 
 1. the stores of the values that live past the node in the general registers the
    body touches into their call-save rows, a callee-saved register's among them
    (rbx for `cpuid`, where a value crosses a call there), and of the floating
    values in the xmm registers it touches into theirs, as a call saves them;
-2. the body's records, each that addresses the operand block
+2. its register operands' moves into their own registers
+   (`tier1_emit_cfg_asm_operands`), from where they are at its use phase: one
+   parallel move per class through that class's scratch register, as a call's
+   arguments' (`tier1_emit_call`);
+3. the body's records, each that addresses the operand block
    (`BUSTER_TIER0_ASM_BLOCK`) addressing the block's frame object from the frame's
    base register, its own branches the function's branches to their records (one
    to the body's end the first restore's), sized with the function's;
-3. the loads back.
+4. the loads back.
 
 The general registers it touches are its fixed registers
 (`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
@@ -1410,9 +1431,16 @@ are a call's. Its frame is a calling function's (rsp aligned at the template, no
 leaf frame), and the prologue saves the callee-saved registers it touches
 (`Tier1EmitPrepared.asm_callee`), as clang's saves `cpuid`'s rbx. The template's
 own records aren't bounded by the target's forms (as the assembler takes any
-instruction whatever `-march` says). The code's certificate (`--verify`) places
-and compares the body's records, its own branches among them, and kills the
-registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
+instruction whatever `-march` says). The values that cross a body are kept out
+of the general registers it touches where the allocation can
+(`tier1_emit_cfg_callee`'s second allocation, which takes them for values that
+cross calls too): such a value may take a callee-saved register, which the
+prologue saves once, rather than a register the body would save and restore
+around itself each time it runs; a phi's web keeps out of every body's registers
+any member crosses. If that allocation fails, the first stands and the saves
+stay. The code's certificate (`--verify`) places and compares the body's records,
+its own branches among them, reads its register operands in their registers, and
+kills the registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
 bodies").
 
 Registers outside `touched` hold no value across the node: the allocator gives

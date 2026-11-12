@@ -250,13 +250,16 @@ item 2), and the C driver's `--tier1` places every statement it places in its
 caller as one, none as a row (`CheckProgramOptions.asm_bodies`), so that Tier 1's
 code runs the statements in their places, as Tier 0's does. The lowering to the IR
 makes the body's `CALL` a body call ([the IR guide](ir.md)'s "Asm bodies"): an
-opaque call of the operand block's address, which every pass takes as an unknown
+opaque call of the operand block's address and its register operands, which every pass takes as an unknown
 callee's of an escaped object, so that the block's stores stay before it and no
 access moves across it. Tier 1's selection makes it `TIER1_RULE_ASM` and its CFG
 consumer writes its records in place ([the selection guide](tier1-selection.md)'s
-"Asm bodies"): the values live past it in the registers it touches saved into
-their rows around it, its block's base the frame's base register, its branches
-the function's, and the callee-saved registers it touches pushed by the prologue.
+"Asm bodies"): its register operands moved into their registers, as Tier 0's
+call row passes them (#2144: the body call's arguments past its block), the
+values live past it kept out of the registers it touches where the allocation
+can, and the rest saved into their rows around it, its block's base the frame's
+base register, its branches the function's, and the callee-saved registers it
+touches pushed by the prologue.
 A function whose body returns (`Tier0AsmBody.leaves`) is still Tier 0's
 (`ir_lower`'s `IR_ERROR_UNSUPPORTED`, which `--tier1` falls back from), as one
 that calls `__builtin_setjmp` is. A template that writes opmask registers is a
@@ -525,20 +528,44 @@ size, as SSE2 is every target's here. The check follows an operand's own
 (`check_asm_operand_checks` without `whole`) and precedes its tie's, and the
 statement's first error alone is given, as clang returns there.
 
+A constraint's or a clobber's error drops its statement, and checking goes on
+past it as clang's `ActOnGCCAsmStmt` returns there (#2369): the error is
+recovered (`check_input_recover_reports` in `check_input_asm_statement`), and
+the statement is no asm statement of the unit's. A later syntax error's
+repaired view keeps it, the statement's `)` being the original's
+(`check_repair_input_report`).
+
 Differences left: a `target` attribute on an earlier declaration alone, not
 the definition, doesn't widen an operand's limit, where clang's
-`getFunctionFeatureMap` reads the inherited attribute; an asm statement's
-constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369); and
-clang's "ignored asm label 'X' on automatic variable" warning is missing
-(#2370).
+`getFunctionFeatureMap` reads the inherited attribute.
+
+An asm label on a block-scope object of automatic storage (none or `auto`,
+C23's inferred `auto` and `constexpr` too), not `register`, is clang's
+"ignored asm label 'X' on automatic variable" (#2370,
+`warn_asm_label_on_auto_decl`, in no group: `-Werror` makes it an error, `-w`
+silences it), at the label's first string, X its decoded text
+(`check_input_asm_labels`, `CHECK_WARNING_ID_ASM_LABEL_ON_AUTO`). A static,
+extern, function or typedef label is not warned, as clang's. A `for`
+statement's declarations take asm labels as a block's do (#2419: the scalar
+parser's declarator reads one in the for header's frame too). Left: a
+block-scope `_Thread_local` object's error is "invalid or unsupported
+declaration", not clang's (#2420).
 
 Such a variable has no object and no symbol (an initializer is ignored, as
 clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
 `FRAME_ADDRESS`, which gives its function a frame pointer (clang's code reads rbp
 in one; under `--tier1`, such a function is Tier 0's, as `__builtin_frame_address`'s
 is), the low half for esp and ebp; an assignment of rsp or esp sets rsp
-(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does). An
-assignment of rbp or ebp, and an update (`sp += 8`, `sp++`), are refused by name.
+(`STACK_RESTORE`, esp's value zero-extended, as clang's `movl` does), the value
+kept in a temporary, the expression's after the write. An update of an integer
+one (`sp += 8`, `sp &= ~15L`, `sp++`, `--esp`, #2432) is clang -O0's read, the
+operation in the calculation's type and the write, its value the new one (the
+old one for a postfix increment or decrement): `check_lower_global_register_update`.
+An assignment or an update of rbp or ebp is refused by name: clang's code
+writes the frame pointer of a function that has one, which its epilogue's
+`popq %rbp` happens to undo, where Tier 0's `mov %rbp, %rsp` would take the
+written value as the frame. An update of a pointer one (whose arithmetic
+scales) is refused by name too.
 As an asm operand it is the register itself (`CheckAsmPlace.global`): the
 template names `%rsp` or `%rbp`, and nothing is loaded or stored, since clang's
 code moves the register's own value into it and back (but for esp and ebp
@@ -756,9 +783,11 @@ outputs' `setcc` stores, every output's store, the x87 pops and the epilogue.
 An asm goto's labels are its exits' labels there (`.Lbuster_goto_S_L`, the
 names the substitution printed for them), so that the template's jumps reach
 them. The template is first assembled alone with those names made global
-(`__buster_goto_S_L`), and each fixup to one must be a jmp's or a jcc's rel32
-field without an addend in the template's code (`check_asm_unit_gotos`); any
-other use is refused by name, as on the record path. A template of directives
+(`__buster_goto_S_L`). Any use of a label is its exit's address there: a
+jump's, and data's (#1845's item 1: the Linux kernel's `__jump_table` entries,
+`.quad 1b, %l[yes]` and `.long %l[yes] - .`), a rip-relative address's or a
+call's, as clang's use is the address of its `callbr`'s indirect target, the
+block that stores the outputs and goes to the label. A template of directives
 alone with x87 operands or flag outputs has this helper too, as a template of
 no instructions does. A held vector (a vector type in a vector register) is
 refused in a helper, as on the record path. A template with a 32-bit address
@@ -996,8 +1025,12 @@ each label, as clang's code gives it (GCC's since 11). The helper returns the
 number in eax, and the statement's code (`check_lower_asm`) keeps it in a
 temporary and branches to each label whose number it is, falling through on 0.
 A label as anything but a jmp's or a jcc's target (data, a call's target, an
-addend) is refused by name. A template of no instructions never jumps, and has
-no helper.
+addend, a rip-relative address: #1845's item 1) makes the template one
+assembled whole in its helper (`check_asm_unit_helper`), whose exits the uses
+take, as a template that takes directives is; a template's jump through such an
+address (`leaq %l[x](%rip), %rax; jmp *%rax`) runs the label's exit, which
+stores the outputs, as clang's indirect target's block does. A template of no
+instructions never jumps, and has no helper.
 
 Outside `--tier1`, an asm goto is an asm body (#1839's item 2): the same exits
 are the body's records after the template (`check_asm_inline_code`), the
@@ -1005,10 +1038,23 @@ template's jumps and the exits' jumps the body's branches, and the exit's move
 into eax its last record. Its call row returns that int (`check_lower_asm_call`'s
 result, a body call of class I32 to Tier 0's validator), and the statement's
 code dispatches on it as on the helper's. The statement costs no call, return,
-frame or block address, but still the exit's move, compare and branch: clang's
-`callbr` jumps from the template straight to the labels. Jumping straight would
-make the body's call row a block's terminator with several successors, which
-Tier 0's validator and `ir_lower` don't take yet. Under `--tier1` the statement
+frame or block address.
+
+Where nothing runs after the body, Tier 0 drops the exits and the dispatch, and
+the template's jumps go straight to the labels, as clang's `callbr` does
+(#2351). That takes a body without outputs (`Tier0AsmBody.exits`: its exits
+fall straight into the move into eax), whose call row has no value under its
+arguments on any stack and isn't a deep entry's, and the dispatch the lowering
+writes after it (a SET_LOCAL of the exit's temporary, then per label a LOCAL,
+CONST, EQ and BRANCH_TRUE), none of whose entries is a label
+(`tier0_asm_direct`). The typed stream keeps the dispatch, so the validator,
+the inliner and the IR see the statement's edges as before; Tier 0 absorbs its
+entries, branches from the template's jump to label l (to the exit's record
+before) to the target of the l-th BRANCH_TRUE, and takes the dispatch's
+references from the temporary, which then has no home. A statement with outputs,
+or one under a value of its expression (a statement expression's), keeps the
+exit's move, compare and branch: its label's exit would need its own copy of the
+outputs' stores, and of the restores after the call row. Under `--tier1` the statement
 keeps its helper, as the IR's body call returns nothing. Tier 0 sorts its branch
 columns where a body has branches: a body's are a deferred entry's, written after
 the branches of the entries that follow it.
@@ -1075,7 +1121,6 @@ defines, a reference to another template's `.set` symbol).
 
 Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 
-- an asm goto's label as anything but a jmp's or a jcc's target;
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
@@ -1359,7 +1404,7 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
+templates of references to names, asm goto under `--tier1` (and the dispatch of one with outputs or under an expression's value, #2351), `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
@@ -1370,8 +1415,6 @@ code's certificate (`--verify`) certifies a function with asm bodies
 
 What the lowering still refuses of what GCC and clang take:
 
-- an asm goto's label as data or a call's target (the Linux kernel's jump
-  tables), whose exits a helper has no address for;
 - a template that returns and has a named label, or keeps its helper for
   another of the reasons above (a reference, a directive), which the helper
   design refuses by name;

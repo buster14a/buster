@@ -1812,6 +1812,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_file_columns(P
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_output(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_output_ensure(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
 
 #include "c_preprocessor_history.c"
@@ -1843,6 +1844,7 @@ static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location)
 // Whether a source location is written in the main file, where Clang gives a file-scope variable's unused warning: it
 // leaves a header's file-scope variables alone, as every unit that includes the header shares them.
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Preprocessor* pp);
 
 // The bytes of [location, end) in the location space (in one range).
 static const uint8_t* pp_location_bytes(const Preprocessor* pp, uint32_t location)

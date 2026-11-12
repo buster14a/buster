@@ -248,4 +248,23 @@ static const uint16_t ir_simd_movemask_forms[4][2] = {
 static const uint16_t ir_simd_part_extract_forms[2] = { X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 };
 static const uint16_t ir_simd_part_insert_forms[2] = { X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8 };
 
+// A reduction's halvings (#1840, BUSTER_IR_INTRINSIC_REDUCE), by the operation past the minima and maxima (whose forms
+// are ir_simd_lane_op_forms'), the lanes (doublewords, quadwords) and the width, the halves in vvvv and rm, as
+// check_vector_elementwise_forms gives clang's __builtin_reduce_add, _mul, _and, _or and _xor (the bitwise ones the
+// quadwords' forms whatever the lanes).
+static const uint16_t ir_simd_reduce_forms[5][2][3] = {
+    { { X86_FORM_VPADDD_X_X_XM128_EVEX, X86_FORM_VPADDD_Y_Y_YM256_EVEX, X86_FORM_VPADDD_Z_Z_ZM512 }, { X86_FORM_VPADDQ_X_X_XM128_EVEX, X86_FORM_VPADDQ_Y_Y_YM256_EVEX, X86_FORM_VPADDQ_Z_Z_ZM512 } },
+    { { X86_FORM_VPMULLD_X_X_XM128_EVEX, X86_FORM_VPMULLD_Y_Y_YM256_EVEX, X86_FORM_VPMULLD_Z_Z_ZM512 }, { X86_FORM_VPMULLQ_X_X_XM128, X86_FORM_VPMULLQ_Y_Y_YM256, X86_FORM_VPMULLQ_Z_Z_ZM512 } },
+    { { X86_FORM_VPANDQ_X_X_XM128, X86_FORM_VPANDQ_Y_Y_YM256, X86_FORM_VPANDQ_Z_Z_ZM512 }, { X86_FORM_VPANDQ_X_X_XM128, X86_FORM_VPANDQ_Y_Y_YM256, X86_FORM_VPANDQ_Z_Z_ZM512 } },
+    { { X86_FORM_VPORQ_X_X_XM128, X86_FORM_VPORQ_Y_Y_YM256, X86_FORM_VPORQ_Z_Z_ZM512 }, { X86_FORM_VPORQ_X_X_XM128, X86_FORM_VPORQ_Y_Y_YM256, X86_FORM_VPORQ_Z_Z_ZM512 } },
+    { { X86_FORM_VPXORQ_X_X_XM128, X86_FORM_VPXORQ_Y_Y_YM256, X86_FORM_VPXORQ_Z_Z_ZM512 }, { X86_FORM_VPXORQ_X_X_XM128, X86_FORM_VPXORQ_Y_Y_YM256, X86_FORM_VPXORQ_Z_Z_ZM512 } },
+};
+
+// A reduction's form for the operation (BUSTER_IR_REDUCE_*), the lanes' bytes' log2 (2 or 3) and the width (16, 32 or
+// 64 bytes: 0, 1 or 2).
+static uint16_t ir_simd_reduce_form(uint32_t operation, uint32_t size, uint32_t width)
+{
+    return operation < 4 ? ir_simd_lane_op_forms[operation][size][width] : ir_simd_reduce_forms[operation - 4][size - 2][width];
+}
+
 #endif

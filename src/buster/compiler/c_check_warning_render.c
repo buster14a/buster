@@ -44,7 +44,8 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     bool errors = false;
     const CheckWarningCommandLine command = group != UINT32_MAX ?
         check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
-        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0,
+                                   (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0);
     CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
     if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
     {
@@ -58,8 +59,10 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     }
     else if (group == UINT32_MAX)
     {
-        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+        // -w leaves an error by default that no option demoted (BUSTER_CHECK_WARNING_DEFAULT_ERROR, #2213).
+        const bool kept = (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0 && command.mapped >= CHECK_WARNING_ERROR;
+        severity = (command.quiet && !kept) || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, kept ? command.mapped : command.severity);
     }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
@@ -1434,6 +1437,74 @@ static uint32_t check_driver_operand_declaration(const CheckInput* input, const 
     return result;
 }
 
+// A counted_by family attribute's keyword as clang's CountAttributedType prints it (#1842's 3c), by its
+// TypeMember.count_kind less one: `__counted_by`, `__sized_by`, `__counted_by_or_null`, `__sized_by_or_null`.
+static const char* const check_driver_counted_names[] = { "counted_by", "sized_by", "counted_by_or_null", "sized_by_or_null" };
+
+// A warning operand's type with clang's CountAttributedType sugar where it is a member a counted_by family attribute
+// counts (#1842's 3c), through an array's decay and one `&`, quoted with its a.k.a.: `'int * __counted_by(n)' (aka
+// 'int *')`, `'int[] __counted_by(n)' (aka 'int[]')`, `&b->p`'s `'int * __counted_by(n)*' (aka 'int **')`. As clang's
+// printer places it, the attribute follows a pointer's before the placeholder and an array's after it. Empty for any
+// other operand, which prints as before.
+static String8 check_driver_counted_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch, uint32_t node, TypeId type)
+{
+    const CheckGraph* graph = stream->graph;
+    String8 result = { 0 };
+    uint32_t addresses = 0;
+    for (uint32_t steps = 0; node < graph->count && steps < 8 && (graph->ops[node] == CHECK_OP_CONVERT || graph->ops[node] == CHECK_OP_ADDRESS); steps += 1)
+    {
+        addresses += graph->ops[node] == CHECK_OP_ADDRESS ? 1 : 0;
+        node = graph->operand0[node];
+    }
+    const bool member = node < graph->count && addresses <= 1 && (graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW) && type != 0;
+    const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, node) : 0;
+    // The member's count, which the reader kept (TypeMember.count_kind, count_name).
+    const uint32_t kind = selected != 0 && selected < types->members.count ?
+                          (uint32_t)((types->members.flags[selected] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT) : BUSTER_TYPE_COUNT_NONE;
+    const bool counted = kind != BUSTER_TYPE_COUNT_NONE && kind <= BUSTER_ARRAY_LENGTH(check_driver_counted_names) && types->members.count_name[selected] != 0 &&
+                         check_driver_spelling_ready(parser, pp, input, types, spell, scratch);
+    if (counted)
+    {
+        TypeNames names = { .bytes = spell->bytes, .lengths = spell->lengths, .count = spell->count, .anonymous = spell->anonymous, .anonymous_count = spell->anonymous_count };
+        // The typedef the member's declaration spells its pointee or element with (`const T * __counted_by(n)`), as its
+        // sugar keeps it, with the qualifiers written beside it.
+        const uint32_t declarator = check_semantic_member_token(parser, input, types, selected);
+        const uint32_t use = declarator < input->token_count ? check_input_typedef_sugar(input, parser, declarator) : 0;
+        uint32_t alias_written = 0;
+        const uint32_t spelling = use != 0 ? check_input_sugar_declaration(input, parser, use, &alias_written) : 0;
+        TypeId alias_type = spelling != 0 && spelling < input->token_count ? input->declared_types[spelling] : 0;
+        String8 alias_name = alias_type != 0 ? check_driver_warning_name(pp, parser->tokens.names[spelling]) : (String8){ 0 };
+        if (alias_type != 0 && alias_name.length != 0)
+        {
+            names.alias_types = &alias_type;
+            names.alias_names = &alias_name;
+            names.alias_written = &alias_written;
+            names.alias_count = 1;
+        }
+        const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+        const TypeId inner = types->members.type[selected];
+        const bool array = type_kind_is_array(type_kind(types, type_strip_aligned(types, inner)));
+        const String8 count = check_driver_warning_name(pp, types->members.count_name[selected]);
+        const char* attribute = check_warning_text(scratch, " __%s(%.*s)", check_driver_counted_names[kind - 1], (int)count.length, count.pointer);
+        const char mark[1] = { BUSTER_TYPE_SUGAR_MARK };
+        const String8 text = type_print(types, scratch, inner, addresses != 0 ? (String8){ .pointer = (char*)mark, .length = 1 } : (String8){ 0 }, &names, options);
+        uint64_t split = text.length;
+        for (uint64_t b = 0; addresses != 0 && b < text.length && split == text.length; b += 1)
+        {
+            split = text.pointer[b] == BUSTER_TYPE_SUGAR_MARK ? b : split;
+        }
+        const String8 before = { .pointer = text.pointer, .length = split };
+        const String8 after = split < text.length ? (String8){ .pointer = text.pointer + split + 1, .length = text.length - split - 1 } : (String8){ 0 };
+        const String8 canonical = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, 0);
+        const char* quoted = text.length != 0 && canonical.length != 0 ?
+                             check_warning_text(scratch, "'%.*s%s%s%.*s%s' (aka %.*s)", (int)before.length, before.pointer, array ? "" : attribute, addresses != 0 ? "*" : "",
+                                                (int)after.length, after.pointer, array ? attribute : "", (int)canonical.length, canonical.pointer) : NULL;
+        result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = strlen(quoted) } : (String8){ 0 };
+    }
+    return result;
+}
+
 // The spelling's address space macros while one declaration's type prints (#1447 item 2, check_driver_space_scope).
 typedef struct CheckDriverSpaceScope CheckDriverSpaceScope;
 struct CheckDriverSpaceScope
@@ -2153,6 +2224,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
             result = "'_BitInt' suffix for literals is a C23 extension";
             break;
+        case CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO:
+        {
+            // The label's decoded string, as clang's warn_asm_label_on_auto_decl prints it (#2370).
+            const String8 label = check_warning_strings_value(parser, pp, payload->token, scratch);
+            result = check_warning_text(scratch, "ignored asm label '%.*s' on automatic variable", (int)label.length, label.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_C23_ATTRIBUTES:
+            result = "[[]] attributes are a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :
@@ -2466,6 +2547,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = messages[payload->data < BUSTER_ARRAY_LENGTH(messages) ? payload->data : 0];
             break;
         }
+        case CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = type.length != 0 ? check_warning_text(scratch, "C99 forbids casting nonscalar type %.*s to the same type", (int)type.length, type.pointer) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION:
         {
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
@@ -2490,6 +2577,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_UNUSED_PARAMETER:
             result = check_warning_text(scratch, "unused parameter '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_DIVISION_BY_ZERO:
+            result = payload->data != 0 ? "remainder by zero is undefined" : "division by zero is undefined";
             break;
         default: break;
     }
@@ -2669,7 +2759,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                 // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
                 const uint32_t group = check_driver_warning_group(event);
                 const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
-                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const bool default_error = (group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0) ||
+                                           (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0;
                 const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
