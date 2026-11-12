@@ -8097,7 +8097,15 @@ change, it refused such a declaration by name.
   because there exists no call expression inside the statement"; a `nomerge`
   of arguments, clang's "'nomerge' attribute takes no arguments"; and
   `suppress`'s arguments, string literals through parentheses
-  (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`). The calls
+  (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
+  inside them (`suppress((1))`, #2332) is the string error, then the parser's
+  "expected ')'" at the same token, noted "to match this '('" at the innermost
+  `(` (`check_input_attribute_suppress_paren`). Not yet clang's: arguments
+  clang's parser itself rejects (`suppress("a",)`, `suppress("a" x)`), after
+  whose first error clang's parser goes on and buster's parser stops; and an
+  implicit int's declaration after a statement's attributes (`__attribute__((unused))
+  (x)++;`), whose redeclaration errors and `-Wignored-attributes` warning
+  clang's Sema gives after the parser's errors, which stop buster (#2332). The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
