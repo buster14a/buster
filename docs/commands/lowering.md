@@ -213,7 +213,9 @@ takes its entries.
   record only through the accessors (`node_machine_record_*`, below), so that
   a new record layout changes the machine's file and T alone.
 - **The record accessors,** each `(machine, r)`, and all but `_third` and
-  `_truth` one load or store today:
+  `_truth` one load or store of a column; `_integer`, `_offset`, `_floating`,
+  `_fault` and `_overloaded` test the record's standing first and read its
+  wide value where it has one (`_wide`), and `_truth` makes the value whole:
   - what T wrote: `_op`, `_left`, `_right`, `_third` (operand records,
     `UINT32_MAX` for none; `_third` is a conditional's second arm, from the
     graph), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
@@ -245,6 +247,19 @@ takes its entries.
   C reads the comma's and a store's type before it evaluates their operands:
   after `node_machine_evaluate`, a call, an accessor would load its column's
   pointer again.
+- **T's records** are the design's columns, not a whole `CheckValue` a record:
+  a value's type, flags and object, a standing byte (its category, its
+  constant kind and which field its 64-bit payload holds: its integer, its
+  offset or its floating value's significand, beside a 16-bit exponent) and
+  the payload. A value they can't hold whole (a fault, an overload set, a
+  bit-field's width, an integer past 64 bits, two payload fields) goes whole to
+  a side array, `wides`, which its payload indexes. T writes them with
+  `node_machine_record` and `node_machine_record_from` (an operand's value with
+  its type, category, flags and constant kind replaced) and makes a value whole
+  only for the action, `--verify` and the rare conversions. T's and C's
+  columns are the arrays of one struct, `NodeMachineColumns`, so that every
+  field is one load from one base, each array 128 bytes past the one before
+  modulo 4 KB: [the design](../node-machine.md#ts-records-as-columns) has why.
 
 - **Its records** are the expression's graph nodes: one range of them and the
   root, which the reader may make later (a condition's wrapper follows the
@@ -260,9 +275,16 @@ takes its entries.
   `check_lower_logical`'s for `&&`, `||` and `?:`, whose test, branch and jump
   X writes as a segment after an operand's row. Their labels are numbered from
   the expression's first, in the order the tasks number them, with each
-  label's place in the tape. The machine's set is the census's within those
-  rules: the increments and the compound assignments are refused by code, and
-  `a ?: b` by its template.
+  label's place in the tape. For the increments and the compound assignments
+  they are the lowering's own (`check_lower_update`): an update's first row
+  (the old value read, by name or through its destination's kept address, and
+  converted) follows its destination's entries, and its second (the operation,
+  the conversion back and the store) follows its value's. T types an update of
+  an arithmetic destination by its computation's row and of a pointer by
+  `check_action_pointer_arithmetic`'s steps, the action taking the rest. The
+  machine's set is the census's within those rules: `a ?: b` and an update of
+  a `long double`, a 128-bit integer or a vector are refused by template (the
+  census refuses a bit-field's and an atomic's).
 - **A call** is typed by its callee's prototype (`node_machine_call_rule`):
   each argument converted as an assignment converts it, a variadic one by the
   default promotions, the action taking the rest. A callee with semantics of
@@ -274,6 +296,27 @@ takes its entries.
   `template`. X writes the arguments, each converted, and a `CALL` whose value
   is the call's row numbered in the tasks' preorder, as the lowering allocates
   its rows, relative to the expression's first call.
+- **A call's per-unit answers** (`NodeMachine`, filled as T meets them and
+  forgotten by `node_machine_forget`):
+  - `function_pointers`, a function type's pointer type by type index
+    (`node_machine_function_pointer`), `type_pointer` its twin: a callee's and
+    a function argument's conversion is one load once the type's first
+    designator has filled it.
+  - `argument_memo`, 1,024 entries of 16 bytes, direct-mapped
+    (`node_machine_argument_memo`): `node_machine_argument`'s answer (taken or
+    refused, and the conversion) by the argument record's type, its standing
+    (an lvalue, an integer constant, or neither) and the parameter's type (0
+    for a variadic argument). Only an argument the rule reads nothing else of
+    is a key: no constant but an address or an integer, none of a null
+    pointer's, a bit-field's, a register array's or a volatile part's flags,
+    and no enumeration's lvalue. A hit answers where the conversion changes
+    nothing `check_action_inherit` reads (an integer, floating, pointer or
+    enumeration type's, from those or an array or a function), and inherits
+    the record's value; an integer constant's only where every integer of its
+    type converts alike (`node_machine_memo_integers`: not to a pointer, where
+    a null pointer constant is taken and another isn't). The rule fills a miss
+    and takes every other argument, and `--verify` checks the call against
+    the action either way.
 - **The comparison**, for every expression the machine takes: each record's
   value (every field), its operands' conversions, a call's arguments'
   conversions and a member's offset against the stream's, and its tape against
@@ -285,7 +328,10 @@ takes its entries.
   an entry after `check_lower_resolve_labels`, is compared by label: the log
   keeps each pop's next label and each body's labels' entries, so each of the
   expression's labels must be the lowering's of the same number counted from
-  the expression's first, at the same entry.
+  the expression's first, at the same entry. A temporary (a postfix update's
+  through an address keeps the address and the old value in two) is numbered
+  on the tape in the order the tape first names it, and must be a local the
+  body hasn't met, the same one every time the expression names it.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps
@@ -296,13 +342,17 @@ takes its entries.
   taken expressions N times a sweep set, T alone, T and C, and all three,
   interleaved, and keeps each set's least cycles and instructions (this
   thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X
-  only, under its lock, as `taskset -c 2`.
+  only, under its lock, as `taskset -c 2`. Each sweep set starts with the
+  unit's call answers forgotten, so that each pass pays their fills as one
+  compile of the unit does.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
 callee), the operators the code and template refusals stopped at, the
 differences (values, entries, twin), the labels compared, T's nodes by row or
-rule and by the action, by operator, and the times.
+rule and by the action, by operator, the argument memo's entries filled and the
+arguments the rule took instead (over every expression T typed, beside the taken
+calls' arguments), and the times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`

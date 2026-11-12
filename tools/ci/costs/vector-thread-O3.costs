@@ -16,6 +16,7 @@
 #: revision 9c5133fe67ef8828465b1520dc57987a31443f27 4
 #: cpu 4 0.64 AMD EPYC 9V45 96-Core Processor
 #: cpu 7 0.81 AMD EPYC 9V74 80-Core Processor
+#: unmeasured Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 0.0 Check unity fixture ownership without rebuilding
 253.5 Test the foreign inputs [8 CPUs]
 274.3 Check the no-recursion rule on the call graph [8 CPUs]
@@ -155,3 +156,4 @@
 1.0 Test scoped name-resolution kernels
 22.4 Test the partial Zen 5 model and instruction harness
 1.5 Test Tier 1 integer truth round trips against native and instruction-shape oracles
+23.2 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes

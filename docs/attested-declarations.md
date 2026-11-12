@@ -1,6 +1,7 @@
 # Attested declarations: a file-scope declaration is read once per command (#2531): design
 
-Status: design only. Nothing below is implemented. Its skip has been run in
+Status: step 0, the census, is built and measured
+([below](#step-0-the-census)); the rest is design. Its skip has been run in
 the compiler's own reader by a measurement patch, with the decisions made
 outside; the rest of its gains are estimates that its first two steps exist to
 confirm or refute. It is
@@ -509,6 +510,91 @@ Step 4 is where a command of one unit gains. It is last because it is a
 decision about files a compiler writes, not because it is hard: the memo is a
 set of hashes, and a wrong or stale entry can only skip the checking of a
 declaration nothing names.
+
+## Step 0: the census
+
+`measure-attested` (`c_check_attested.c`,
+[the guide](commands/translation-units.md#attested-declarations-census-2531))
+is step 0: a command's units compiled as they are, with the passes and a memo
+over the units computed beside each, and after each declaration's reading what
+it did, by the reader's own binding events and declaration bits. Nothing is
+skipped. On the 9700X at `ee5b39b9`, one lane, rounds of one page state
+([the record](https://github.com/buster14a/buster-performance/tree/1ff99765e33a2f287af30aca2862e71d4ce8d0a3/docs/measurements/attested-census-2531-2026-11-12)):
+
+| | musl, 1,336 units | 512 units over glibc's headers |
+| --- | ---: | ---: |
+| file-scope declaring events outside the declaration's list (gate: none) | 0 of 303,705 | 0 of 386,867 |
+| tokens outside definitions skipped: attested, not reached (gate: 75%) | 79.31% | 87.00% |
+| … reached by a spelled name; by the lowering's runtime names alone | 6.69%; 6.41% | 7.52%; 4.35% |
+| … learned (the memo's first readings); impure | 1.34%; 6.25% | 1.13%; none |
+| the passes in the compile, cycles a token (gate: 25) | 35.35 | 32.48 |
+| … the same passes again on the unit, the least of three | 21.54 | 21.49 |
+| memo hits whose reading was not silent and pure | 0 of 274,654 | 0 of 292,253 |
+| objects and diagnostics against the plain compile's | the same bytes | the same bytes |
+
+**The gate's first two parts hold and its third doesn't.** No reading on
+either corpus declares, completes or uses a name outside its list, and the
+reader's own test leaves 79% and 87% of the tokens outside definitions
+skippable. The passes cost 35 and 32 cycles a token where the compile runs
+them, before each unit's reader; run again at once on the same unit they cost
+21.5. The difference is the passes' first touch after the reader's previous
+unit: five times the branch misses (0.44 a token against 0.08, 4 to 5 of musl's
+13.8 extra cycles), the same count of L1D misses, and the rest uncounted
+(where those misses are served from, the instruction side).
+
+**What it means for step 2.** At the reader's skip's measured saving a token
+(372 cycles on musl, 359 on the glibc units, "The skip in the compiler's own
+reader"), the census's skipped tokens with its passes as measured project
+1.16 times on musl and 1.46 on the glibc units, against step 2's gates of 1.15
+and 1.4 and the 1.23 and 1.62 expected; on main since #2532's baked index,
+1.17 on musl. Step 2 starts with less margin than designed, for two reasons
+the census names:
+
+- **The lowering's runtime names.** It looks up `memcpy`, `memset`, the libgcc
+  helpers and the elementwise builtins' libm by name in every unit with a body
+  (`check_lower_runtime_names`), and a runtime call's symbol comes from the
+  name's first declaration, so the census reaches those declarations in every
+  such unit. That rule is 216,403 of the 274,674 tokens the emulation skipped
+  on musl and the census doesn't, and 224,854 of the glibc units' 239,753. Two
+  narrower rules are step 1's to test: reach them only where the unit's
+  lowering makes a runtime call, or only where a declaration changes the
+  call's symbol (an asm label, a visibility).
+- **The passes in the compile.** The design expected 12 cycles a token from
+  the roles. The lists are the costliest (11.0 on musl in the compile, 13.1 on
+  the glibc units): they follow the parser's groups to classify each
+  identifier, which the parser knows as it builds them (the open question in
+  "Risks" below). The literals' identities are next: musl's units spell
+  309,003 literals a run, 6.1% of the tokens, about 90 cycles each read back
+  through the preprocessor's ranges, where the lexer has each one's bytes in
+  hand. The chain and the reach cost twice as much in the compile as when
+  repeated (7.0 and 5.5 cycles a token on musl against 3.0 and 2.5), with
+  ten and five times the branch misses.
+
+**What the census found about a reading.**
+
+- **A body declares only its callees.** A function definition's file-scope
+  `DECLARE` events are its implicit declarations and its block-scope
+  `extern`s'. The lists give every name in a body the class "looks up", and
+  "declares" to a callee's name (an identifier the parser marks as called)
+  and, in a body that spells `extern`, to every name; no event fell outside.
+- **The events need the reader's environment published**, which `-c` doesn't
+  ask for; the census asks, and every object and diagnostic stays the same
+  bytes.
+- **Silence and purity, as the reader sees them.** Each of musl's 321 warnings
+  falls in a function definition, placed by its output position; no
+  declaration's reading reported anything. The impure in musl are 374
+  definitions by an initializer (205,089 tokens, most of them the units' own
+  tables), 287 aliases, 90 tentative definitions and 20 internal
+  declarations; in the glibc units, none.
+- **Three lookups by a name no token spells**, each counted as spelled by a
+  root: the runtime names above, a `__builtin_` name's library function, and
+  the symbols in asm labels' and alias attributes' strings.
+
+**What it doesn't do.** "Risks" below gives step 0 a test listing every field of
+the reader's state by class; the census doesn't have it. Its evidence on that
+risk is the zero contradictions over 566,907 hits, and step 1's shadow checks
+each would-be skipped reading. The census runs one lane, without `-g` and
+without deferred bodies (it refuses those options); step 1 runs with them.
 
 ## Expected gains
 

@@ -44,6 +44,15 @@ on:
   # the merge.
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  # A merge-queue candidate (#1430): GitHub's temporary merge of main, the queue's entries ahead of it and its pull
+  # request, on a gh-readonly-queue/main/... branch. It runs the full hosted contract once (every row and sanitizer, the
+  # vector pool and the fuzz campaigns; docs/ci.md, "The merge queue") and reports both required contexts, so that a
+  # ruleset requiring the queue merges only what passed. Nothing triggers it until a ruleset turns the queue on. No
+  # path filter: every candidate runs, documentation alone included. `checks_requested` is the event's only type,
+  # named so that a type GitHub adds later doesn't start runs.
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
 
 permissions:
   contents: read
@@ -51,10 +60,12 @@ permissions:
 # Keep each PR's replaceable queue separate: a newer push cancels only that PR's superseded qualification.
 # Every push to main gets its own run-id group. cancel-in-progress: false alone would still allow a later merge to
 # replace an earlier pending main run in GitHub's default single pending slot; all main revisions need the full
-# hosted matrix and fuzzing (#1271). The daily run and manual refs retain their own groups. The runner's job hooks
-# still serialize hardware jobs with the shared host lock (AGENTS.md), not the hosted correctness runs.
+# hosted matrix and fuzzing (#1271). So does every merge-queue candidate (#1430): the queue builds several at once,
+# and one candidate's run must neither cancel nor replace another's. The daily run and manual refs retain their own
+# groups. The runner's job hooks still serialize hardware jobs with the shared host lock (AGENTS.md), not the hosted
+# correctness runs.
 concurrency:
-  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -86,8 +97,11 @@ jobs:
   # it decides.
   # A nightly backlog run decides as a pull request does, on its commit's change against its first parent; with the
   # nightly mode (vars.BUSTER_NIGHTLY: on), so does a push, whose `code` stays true (the selector's targeted push).
+  # A merge-queue candidate (#1430) takes the selector's merge-group profile whatever it changes: code, every plain
+  # benchmark and the performance readers' qualification; it runs the self-tests above all the same, so that a
+  # candidate that breaks the selector, the costs, the aggregate, the nightly or the re-run policy fails here.
   changes:
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -154,7 +168,9 @@ jobs:
         run: |
           set -euo pipefail
           workflow=.github/workflows/9700x.yml
-          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$NIGHTLY" != on ]; then
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+              "$RUNNER_TEMP/changes" --event merge_group --workflow "$workflow" --output "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$NIGHTLY" != on ]; then
               "$RUNNER_TEMP/changes" --event push --workflow "$workflow" --output "$GITHUB_OUTPUT"
           else
               # The merge's changes against its base (a push's or a nightly run's commit's against its first parent),
@@ -177,8 +193,10 @@ jobs:
   # push: its own hosted rows, plain alone in the nightly mode (#2057), which defers its 9700X work to the window; before
   # the nightly mode, every row and its own native correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
-  # plain hosted rows of the commit's own earlier run, and the 02:00-08:00 Europe/Madrid window. Missing, ambiguous or
-  # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
+  # plain hosted rows of the commit's own earlier run (a push's, a dispatch's or a merge-queue candidate's), and the
+  # 02:00-08:00 Europe/Madrid window. A merge-queue candidate (#1430): the full hosted scope, its own, and never the
+  # 9700X, whose native correctness and measurements its merged first-parent state gets in the window. Missing,
+  # ambiguous or mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
   evidence:
     name: Reuse evidence and hardware admission
     runs-on: ubuntu-26.04
@@ -211,11 +229,11 @@ jobs:
           persist-credentials: false
 
       - name: Test the nightly glue and the 9700X's caches against fixtures
-        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, the
-        # hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on recorded runs
-        # (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's own self-test
-        # runs in `changes`).
-        if: github.event_name == 'pull_request'
+        # On pull requests and merge-queue candidates, before any hardware: the scripts this job, the record job and the
+        # 9700X job run, the hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on
+        # recorded runs (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's
+        # own self-test runs in `changes`). A candidate runs them on main and its pull request merged (#1430).
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         shell: bash
         run: |
           bash tests/ci/nightly.sh
@@ -239,15 +257,16 @@ jobs:
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
     needs: [changes, evidence, policy]
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}
     uses: ./.github/workflows/prepare-hosted-tools.yml
 
   test:
     name: Tests on Ubuntu 26.04 (${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
-    # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
-    # policy job (`policy`, #2334), which finishes about when `changes` does, and don't start when it fails: they wouldn't
-    # change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test regardless, so that every
-    # row reports.
+    # A pull request's run stops at its first failure, and so does a merge-queue candidate's (#1430, the owner's choice
+    # on 2026-11-12: a failing candidate leaves the queue sooner and holds fewer runners). GitHub has no fail-fast across
+    # jobs, so their tests wait for the policy job (`policy`, #2334), which finishes about when `changes` does, and don't
+    # start when it fails: they wouldn't change a qualification that can't pass. Pushes to main, the daily run and
+    # dispatched runs test regardless, so that every row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     # Each row is hosted-correctness.yml: its shards, and for a portable row the job that builds its compiler once for
     # them (#2032; docs/ci.md, "Shared row products"). Their names are this one's, ` / ` and their own, which
@@ -258,18 +277,19 @@ jobs:
     # (docs/ci.md, "The vector row"). It is one call of the row workflow, which `include` adds: its `sanitizer` lists
     # the configurations.
     needs: [changes, evidence, policy, prepare-hosted-tools]
-    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}
     strategy:
-      # On a pull request, the first failing row cancels the others (and each row's own shards fail fast). Elsewhere
-      # every row runs to its end: these rows are main's sanitizer coverage, and one detector's failure must not hide
-      # what the others find.
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      # On a pull request or a merge-queue candidate, the first failing row cancels the others (and each row's own shards
+      # and vector draws fail fast). Elsewhere every row runs to its end: these rows are main's sanitizer coverage, and
+      # one detector's failure must not hide what the others find.
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64"]' || '["x86-64", "native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
-        # in the nightly mode (#2057, until the merge queue carries the full suite). The daily run, full dispatches,
-        # pushes before the nightly mode and the snapshot's deferred daily run run the whole matrix.
+        # in the nightly mode (#2057, until the merge queue carries the full suite). Merge-queue candidates (#1430),
+        # the daily run, full dispatches, pushes before the nightly mode and the snapshot's deferred daily run run the
+        # whole matrix.
         # `address` already combines ASan, UBSan, bounds and LSan; standalone UBSan remains
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
@@ -306,7 +326,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
-      fail-fast: false
+      # A merge-queue candidate's first failing campaign cancels the others, as its test rows fail fast (#1430). The
+      # daily and dispatched runs, and pushes before the nightly mode, run every campaign to its end.
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         include:
           - entry: frontend
@@ -1967,7 +1989,12 @@ jobs:
     # 9700X job must pass on the same revision. A pull request, draft or ready,
     # never runs that job (#2055): the context passes on its hosted rows alone,
     # and says that native correctness and measurements run on its merged
-    # first-parent state in the nightly window. On the daily and dispatched runs,
+    # first-parent state in the nightly window. A merge-queue candidate
+    # (#1430) never runs it either: the context passes on the full hosted
+    # contract, which its coverage step checks job by job from the run's own
+    # jobs (every shard of every row and sanitizer, the vector verdict, each
+    # fuzz campaign), and its merged state gets native correctness and
+    # measurements in the window. On the daily and dispatched runs,
     # and on a push to main before the nightly mode, the 9700X job runs native
     # correctness before the measurements. A
     # nightly dispatch reports through its coverage record instead; a retired
@@ -1979,13 +2006,31 @@ jobs:
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    # The coverage step reads this run's jobs; nothing here writes.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Check out the qualification policy
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # A merge-queue candidate's expected coverage, from this run's own jobs (tools/ci/nightly.c's `coverage`): every
+      # shard 1..N of every row (x86-64 and native, each sanitizer, one N per row), the vector pool's verdict and each
+      # fuzz campaign, all completed and successful. A job missing, skipped, cancelled, failed or timed out, or a row
+      # whose shards disagree, fails it; so does an API failure. The predicate below reads its outcome, so that a test
+      # job's result alone, which a skipped shard leaves green, can't pass a candidate.
+      - name: Check a merge-queue candidate's coverage job by job
+        id: coverage
+        if: github.event_name == 'merge_group'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/nightly.sh coverage "$RUNNER_TEMP/coverage"
       - name: Require hosted and native correctness before successful qualification
+        if: ${{ !cancelled() }}
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
@@ -1997,6 +2042,7 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
           BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
+          COVERAGE_RESULT: ${{ steps.coverage.outcome }}
           EVENT_NAME: ${{ github.event_name }}
           PURPOSE: ${{ inputs.purpose }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
