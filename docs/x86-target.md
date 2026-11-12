@@ -395,9 +395,42 @@ quarters. A builtin whose 128-bit form the copy can't lower either stays
 refused by name: at the x86-64 baseline, those of SSE3 to SSE4.1 and AVX that
 have no SSE2 form here (`palignr`, the blends, `round`, `dpps`, `mpsadbw`,
 `pextrb`, `pinsrb`, `pinsrd`, `pinsrq`, `vpermilpd`, and compares by predicates
-past 7), which LLVM expands into SSE2 sequences (#1834). Not given: clang's AVX ABI errors
-for such calls' wide vector arguments and returns, which buster gives for no
-function (#2367).
+past 7), which LLVM expands into SSE2 sequences (#1834).
+Such a call's wide vector arguments and results take the AVX calling-convention
+check below, against the same first version's features.
+
+The same pass gives clang's AVX calling-convention diagnostics (#2367,
+`X86_64TargetCodeGenInfo::checkFunctionCallABI` and `checkFunctionABI`), in a
+unit whose types hold a vector wider than 128 bits where the unit or a target
+attribute may lack AVX-512F (`check_target_feature_abi_unit`; such a unit's
+bodies have their emission order, `CheckProgram.body_eager`). A vector argument
+or result past 256 bits needs `avx512f`, one past 128 bits `avx`; where neither
+function has it, the result is `-Wpsabi`'s warning ("AVX vector argument of type
+T without 'avx' enabled changes the ABI", `CHECK_WARNING_ID_PSABI`, on by
+default, its pragmas and `-Werror=` as any warning's), and where one of them
+lacks it, the same words as an error. Clang is permissive where neither has the
+feature and the callee is internal or `always_inline`. The checks are:
+
+- **A direct call's.** After the call's own feature errors, each argument in
+  order, by its converted type (a variadic one's promoted type), named by its
+  parameter's declared type where it has one and by its own sugar otherwise, then
+  the callee's declared result type. The first diagnosed one ends the call's
+  checks. It is reported at the call's beginning (`check_target_feature_abi`).
+- **An emitted definition's own.** These come before its body's calls, against
+  its own features as both caller and callee, so they are warnings alone. The
+  result is checked first and reported at its type's typedef, whatever follows.
+  Then the parameters, up to the first diagnosed one, each reported at its name
+  (an unnamed one's at its end) (`check_target_feature_abi_definition`).
+
+Unlike a target feature's error, which ends the emission, these errors don't:
+clang goes on to the next function and the deferred ones, and so does the pass
+(`check_target_feature_stops`). Each target_clones copy reports them once.
+`test-checker-driver` compares every line about its fixtures and the exit
+status with clang `-c`'s, on both paths, for `-march=x86-64` and
+`-march=x86-64-v3`, with `-Wpsabi`, `-Werror=psabi` and `-Wno-psabi`
+(`c_check_avx_abi_driver_test.c`). Difference left: a K&R definition's parameter
+is placed at its identifier list's name and printed by its canonical type, where
+clang places it at the declaration list's name and prints its typedef.
 
 That walk is Sema's reachability, its CFG's, which #487's range warnings
 follow, as clang's do. Code generation emits other code in a few shapes, and the
