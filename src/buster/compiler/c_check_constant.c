@@ -861,7 +861,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         {
             // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
             const uint32_t count = reader->output->report_count;
-            check_input_report_specifiers(reader, *cursor, end, *cursor);
+            check_input_report_specifiers(reader, *cursor, end, *cursor, true);
             valid = reader->output->report_count != count && check_input_recover_reports(reader, count);
         }
     }

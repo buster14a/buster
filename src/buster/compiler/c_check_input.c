@@ -4300,13 +4300,15 @@ static void check_input_cfstring_class(CheckInputReader* reader)
 #include "c_check_declspec.c"
 
 // The reports of specifiers from `first` to `end` that don't combine: clang's errors, their places and their messages, in
-// clang's order (#1820 (c)), if it gives one; else CHECK_INPUT_DECLARATION at `fallback` (#1127).
-static void check_input_report_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t fallback)
+// clang's order (#1820 (c)), if it gives one; else CHECK_INPUT_DECLARATION at `fallback` (#1127). Only the first where the
+// list doesn't recover (`all` false): the reader stops at it, as clang's later errors don't come.
+static void check_input_report_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t fallback, bool all)
 {
     CheckDeclspecErrors errors;
     if (check_declspec_scan(reader->parser, first, end, NULL, &errors, NULL))
     {
-        for (uint32_t e = 0; e < errors.count; e += 1)
+        const uint32_t count_reported = all ? errors.count : 1u;
+        for (uint32_t e = 0; e < count_reported; e += 1)
         {
             const CheckDeclspecResult declspec = errors.items[e];
             const CheckInputMessage message = declspec.error == CHECK_DECLSPEC_ERROR_SIGN ? CHECK_INPUT_SPECIFIER_SIGN :
@@ -4478,7 +4480,7 @@ static __attribute__((noinline, cold)) bool check_input_specifiers_recover(Check
     const uint32_t count = reader->output->report_count;
     if (recovered && report)
     {
-        check_input_report_specifiers(reader, first, end, at);
+        check_input_report_specifiers(reader, first, end, at, true);
         recovered = reader->output->report_count != count && check_input_recover_reports(reader, count);
     }
     if (recovered)
@@ -4657,7 +4659,7 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     {
         // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
         const uint32_t count = reader->output->report_count;
-        check_input_report_specifiers(reader, colon + 1, end, colon + 1);
+        check_input_report_specifiers(reader, colon + 1, end, colon + 1, true);
         valid = valid && reader->output->report_count != count && check_input_recover_reports(reader, count);
     }
     const TypeId integer = valid ? type_unqualified(type_strip_aligned(reader->types, base)) : 0;
@@ -5838,7 +5840,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 }
                 else if (!reported)
                 {
-                    check_input_report_specifiers(reader, first, end, i);
+                    check_input_report_specifiers(reader, first, end, i, false);
                 }
                 reported |= !valid;
                 if (!valid)
@@ -6076,7 +6078,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         // The list refused as a whole once it ended (a sign or a width the type doesn't take, typedef with a storage
         // class), which no report says yet: clang's.
-        check_input_report_specifiers(reader, first, end, first);
+        check_input_report_specifiers(reader, first, end, first, false);
     }
     *cursor = i;
     *storage_class = storage;
