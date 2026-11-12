@@ -691,6 +691,9 @@ struct CheckInputReport
     bool recovered;
     // A recovered error that waits for its declarator's completion (CheckInputReader.recovered_pending).
     bool pending;
+    // An undeclared name in an attribute's argument, whose attribute clang's parser drops and whose declaration stays
+    // valid (#2251, #2468): a rejected unit's readings keep that declaration (check_driver_report_keeps_valid).
+    bool attribute_name;
     // CHECK_INPUT_TAG_INCOMPATIBLE's bit-fields' widths, each plus one (0 for no bit-field), the second definition's in
     // the high half; else 0.
     uint32_t bit_widths;
@@ -6926,6 +6929,10 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
             {
                 undeclared = reader->output->reports[r].message == CHECK_INPUT_UNDECLARED;
+            }
+            for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
+            {
+                reader->output->reports[r].attribute_name = true;
             }
             if (undeclared && check_input_recover_reports(reader, reported))
             {

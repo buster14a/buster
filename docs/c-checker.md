@@ -9021,11 +9021,12 @@ arguments against the function. The checker now gives these as clang does.
   argument expressions (`aligned(zzz)`, `alloc_size(nosuch)`,
   `check_input_read_attributes`). A name that clang's search corrects
   (`aligned(alignedy)` near a variable `alignedx`) still gets no suggestion
-  and no "'aligned' attribute requires integer constant" after it; and a
-  later warning of the unit's file scope can be dropped where a dropped
-  attribute's declarator group is read again by a constant (`int v
-  __attribute__((aligned(zzz))), w;` then `_Static_assert(_Alignof(w) == 8,
-  "")`). Then, after their subjects and counts (with the handlers' "at
+  and no "'aligned' attribute requires integer constant" after it. A
+  dropped attribute's report leaves its declaration valid for a rejected
+  unit's readings (`CheckInputReport.attribute_name`, #2468), so a constant
+  that reads its declarator group again (`int v __attribute__((aligned(zzz))),
+  w;` then `_Static_assert(_Alignof(w) == 4, "")`) keeps the unit's later
+  warnings. Then, after their subjects and counts (with the handlers' "at
   least 1 argument"): `capability`'s name a string literal; a trylock's
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of
@@ -10148,9 +10149,11 @@ arguments against the function. The checker now gives these as clang does.
     attributes (a later use of `struct V [[deprecated]];`'s tag isn't
     deprecated); an enum's list's, or a list's after a GNU list, declaration
     attributes (`deprecated`) are clang's "cannot be applied to types" error,
-    not the warning; and a later warning of the unit's file scope
-    (`-Wdivision-by-zero`) is dropped after a constant that reads such a tag
-    (`_Alignof(struct V)`).
+    not the warning. A rejected unit's readings keep such a declaration, its
+    misplaced list's report one that leaves it valid
+    (`check_driver_report_keeps_valid`, #2468), so that a later constant that
+    reads the tag (`_Alignof(struct V)`) keeps the unit's later warnings
+    (`-Wdivision-by-zero`).
   - A struct's or a union's definition's C23 lists between its name and its
     body (#2268, `check_input_tag`): the parser reads on past them
     (`parse_scalar_tag`, whose tree the vector path's rules build too), and
@@ -10161,7 +10164,8 @@ arguments against the function. The checker now gives these as clang does.
     (`[[gnu::packed]]`, `[[gnu::aligned(16)]]`). An enum's list there, which
     clang applies to the type with "cannot be applied to types" before the
     parser's "expected identifier or '('" at its `{`, is still the parser's
-    error alone.
+    error alone. As a bare declaration's, its list's report leaves the
+    declaration valid for a rejected unit's readings (#2468).
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
