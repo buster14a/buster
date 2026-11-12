@@ -796,15 +796,19 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
         for (uint32_t i = 0; i < views[v].count; i += 1)
         {
             const CheckWarningEvent* event = views[v].events + i;
-            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+            const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0,
+                                   (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0);
             // A grouped diagnose_if's policy is its group's (#1447).
             const bool grouped = check_driver_warning_group(event) != UINT32_MAX;
-            if (!grouped && (command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0))
+            // (-w leaves an error by default that no option demoted, #2213.)
+            const bool kept = (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0 && command.mapped >= CHECK_WARNING_ERROR;
+            if (!grouped && ((command.quiet && !kept) || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0))
             {
                 continue;
             }
             const CheckWarningSeverity severity = grouped ? check_driver_warning_severity(pp, &path->input, event) :
-                                                  check_diagnostic_severity_id_from(&path->input, event->token, event->source, event->id, command.severity);
+                                                  check_diagnostic_severity_id_from(&path->input, event->token, event->source, event->id,
+                                                                                    kept ? command.mapped : command.severity);
             if (severity == CHECK_WARNING_IGNORE || event->token >= parser->tokens.count)
             {
                 continue;

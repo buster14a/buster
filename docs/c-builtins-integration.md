@@ -2733,6 +2733,18 @@ converts between pointers to integer types where one is of the unique plain
 or their operands); beside `__builtin_verbose_trap`'s own error at the same
 argument, clang gives the warning first and this gives it after.
 
+A misc builtin's argument that doesn't convert to its parameter
+(`check_builtin_misc_convert`, which records the parameter in the failed
+argument's conversion) is clang's conversion error in an ordinary call's
+words, "incompatible integer to pointer conversion passing 'int' to parameter
+of type 'const char *'", at the argument's first token, with no parameter's
+note (#2460, `check_driver_builtin_conversion`); CFString's then adds clang's
+"CFString literal is not a string constant" at the same place. Still the
+generic "incompatible operand or conversion types", one past the argument:
+the builtins whose arguments convert elsewhere (`__builtin_strcmp`'s list,
+`__builtin_abs`, the atomic builtins), and clang's `-Wabsolute-value` beside
+`__builtin_abs`'s error.
+
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
   clang's code makes the constant size's stores itself. Lowering them through

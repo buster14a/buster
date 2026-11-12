@@ -322,6 +322,9 @@ typedef enum CheckDiagnostic
 // GCC's cast to a union (#2301, clang's CK_ToUnion): the conversion's type is the member the operand initializes, the
 // first of the operand's unqualified type, and the cast's value is a union whose first bytes are that member's.
 #define BUSTER_CHECK_CONVERT_TO_UNION 0x400u
+// No conversion: a builtin's argument that didn't convert to its parameter, the conversion's type (#2460,
+// check_builtin_misc_convert), for the error's words (check_driver_builtin_conversion). Only a unit in error has one.
+#define BUSTER_CHECK_CONVERT_FAILED 0x800u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
 #define CHECK_WARNING_GNU_CONSTANT 0x02u
