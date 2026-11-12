@@ -420,7 +420,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` — `c_builtin.c` — [guide](docs/commands/builtins.md).
 - `check-call-graph, test-call-graph` — `call_graph.c` — [guide](docs/commands/call-graph.md).
 - `test-calling-convention, benchmark-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
-- `check, test-checker, test-checker-driver` — `c_checker.c` — [guide](docs/commands/checker.md).
+- `check, test-checker[-driver]` — `c_checker.c` — [guide](docs/commands/checker.md).
 - `test-checker-asm` — `c_check_program_asm.c` — [guide](docs/commands/checker-asm.md).
 - `test-checker-corpus` — `c_check_corpus.c` — [guide](docs/commands/checker-corpus.md).
 - `test-check-debug, benchmark-check-debug` — `c_check_debug.c` — [guide](docs/commands/check-debug.md).
@@ -431,7 +431,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-dataflow, benchmark-dataflow` — `dataflow.c` — [guide](docs/commands/dataflow.md).
 - `test-debug, benchmark-debug` — `debug.c` — [guide](docs/commands/debug.md).
 - `test-checker-deferred, benchmark-checker-deferred` — `c_check_deferred_test.c` — [guide](docs/commands/deferred.md).
-- `test-diagnostics, benchmark-diagnostics` — `diagnostic.c` — [guide](docs/commands/determinism.md).
+- `{test,benchmark}-diagnostics` — `diagnostic.c` — [guide](docs/commands/determinism.md).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
 - `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
@@ -477,7 +477,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-tier1-cfg[-source]` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
 - `test-tier1-frame[-execution]` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
 - `test-tier1-schedule, benchmark-tier1-schedule` — `tier1_schedule.c` — [guide](docs/commands/tier1-schedule.md).
-- `test-check-units, benchmark-check-units` — `c_checker_units.c` — [guide](docs/commands/translation-units.md).
+- `{test,benchmark}-check-units, measure-attested` — `c_check{er_units,_attested}.c` — [guide](docs/commands/translation-units.md).
 - `test-types, benchmark-types` — `c_types.c` — [guide](docs/commands/types.md).
 - `test-unwind, benchmark-unwind` — `unwind_tier0.c` — [guide](docs/commands/unwind.md).
 - `disassemble, test-x86-disassembler` — `x86_64_disassembler.c` — [guide](docs/commands/x86-disassembler.md).
