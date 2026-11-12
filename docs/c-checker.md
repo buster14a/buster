@@ -3291,7 +3291,13 @@ What the lowering covers past scalars (#145's programs):
     operands' bits zero-extended to 32 or 64 bits, the result truncated to
     the scalar. A `_BitInt` scalar of up to 64 bits, of any width, takes the
     integer sequences of `check_lower_integer_elements` as a 1-, 2-, 4- or
-    8-byte scalar does, a funnel shift's count modulo a width no power of two. These expansions, ordered floating sums
+    8-byte scalar does, a funnel shift's count modulo a width no power of two.
+    `__int128` and `_BitInt`s of 65 to 128 bits take the same sequences in
+    Tier 0's 128-bit classes: their shift counts are U32 values, a constant
+    past 64 bits is built of its halves (`check_lower_sequence_halves`), a
+    `_BitInt`'s operands are masked by shifting up and back, and a funnel
+    count of a width no power of two is reduced modulo it through its 64-bit
+    halves, `(hi % w) * (2^64 % w) + lo % w`. These expansions, ordered floating sums
     and floating reduction trees are bounded to 1,024 elements and preserve
     the ordinary rows' element-type and target-feature refusals.
   - boolean elementwise builtins use packed bit operations at scalar and
@@ -3340,8 +3346,8 @@ What the lowering covers past scalars (#145's programs):
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 64 bits (`__int128` and `_BitInt` past 64 bits, #2410), and of scalars, pdep and pext
-  without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
+  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410), and of scalars, pdep, pext and clmul of more than 64
+  bits, pdep and pext without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
@@ -4507,6 +4513,17 @@ take clang's words and places:
   binary expression". Other failures keep the generic error. A bound's
   failure before its first undeclared name is reported with it, in source
   order.
+- **A member access** whose base is no structure or union, anywhere else
+  (#2288, `check_semantic_constraint`'s member branch): clang's "member
+  reference base type 'int' is not a structure or union" at the operator,
+  with the operand's type as written for `.` (`'myint' (aka 'int')`) and the
+  pointee for `->`; `.` of a pointer to a record is "member reference type
+  'struct S *' is a pointer; did you mean to use '->'?" there, and `->` of no
+  pointer is "member reference type 'int' is not a pointer" at the member's
+  name. Clang goes on reading `.` of a pointer as `->`, so a member that
+  pointer's record lacks adds its "no member named" there; buster's
+  expression stays invalid and gives only the first. `->`'s pointee type
+  prints as its canonical type, not its typedef's.
 
 Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
@@ -10515,7 +10532,10 @@ enables, which this checker doesn't all give.
   is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared
   where its typedef holds them itself, as clang's `getUnqualifiedType` does
   (`CI`'s `'int'`). An array decays to a pointer to its qualified element
-  (`'const int *'`).
+  (`'const int *'`). An `_Atomic` argument is checked and printed as its value
+  type, which the lvalue conversion leaves (#2234,
+  `check_common_format_argument_type`): `%d` of an `_Atomic int` is quiet, and
+  `%s` of one is "the argument has type 'int'".
   A declaration's calling convention keeps clang's `AttributedType` where it
   is written, in a type sugar node of its own (`c_types_sugar.c`, made by
   `c_check_type_sugar_input.c`; `docs/c-types.md`'s "Type sugar"). A failed

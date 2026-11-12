@@ -790,6 +790,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // A member access whose base is no structure or union (#2288): clang's "member reference base type ... is not a
+        // structure or union" at the operator, the type as written for `.`; `.` of a pointer to one is "is a pointer; did you
+        // mean to use '->'?" there, and `->` of no pointer "member reference type ... is not a pointer" at the member's name.
+        "typedef int myint;\nstruct S { int a; } s, *sp;\nunion U { int u; } uu;\nint z = sizeof(((int *)0)->a);\n"
+        "int f(int x, int *p, double d, myint m)\n{\n    int unused;\n    x = p->a + (1, 2);\n    d.re = 1;\n    uu.v = 2;\n"
+        "    return x.a + sp.a + x->b + sizeof(d.k) + m.c + s.zz + sp->yy;\n}\nint g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
         // Any name that stays undeclared before an operand (#2255): clang's "use of undeclared identifier", its expression
         // invalid and its rest skipped as a keyword's typo's is, and the unit goes on. Before C23, `u8'a'` is the name `u8`
         // and a character constant.

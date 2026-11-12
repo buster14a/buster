@@ -1632,6 +1632,19 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         format = "passing %.*s to parameter of type %.*s changes address space of %spointer";
         check_semantic_parameter_note(parser, pp, input, callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE, argument, note, scratch);
     }
+    else if (op == CHECK_OP_BUILTIN_ATOMIC && graph->argument_tokens != NULL)
+    {
+        // A generic atomic builtin's value pointer in another address space than its object's (#2233): the pointer type its
+        // check converted it to (CheckBuiltinAtomicEffect.space_target), at the argument.
+        const uint32_t argument = stream->diagnostic_operands[node];
+        for (uint32_t i = 0; i < stream->atomic_count; i += 1)
+        {
+            to = stream->atomics[i].node == node ? stream->atomics[i].space_target : to;
+        }
+        from_node = argument < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + argument] : BUSTER_CHECK_NONE;
+        format = to != 0 ? "passing %.*s to parameter of type %.*s changes address space of %spointer" : NULL;
+        *location = to != 0 ? graph->argument_tokens[graph->argument_offsets[node] + argument] : token;
+    }
     if (format != NULL)
     {
         from = from_node < stream->count ? check_semantic_value_type(types, check_stream_type(stream, from_node), false) : 0;
@@ -1979,8 +1992,51 @@ static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckG
     return first;
 }
 
+// __builtin_clear_padding's argument refused (#2414, clang's BuiltinClearPadding), at its first token, its parentheses
+// included: no pointer, "passing 'T' to parameter of incompatible type pointer: type mismatch at 1st parameter ('T' vs
+// pointer)", the argument's type as written (an array isn't decayed); a function pointer, "argument to
+// __builtin_clear_padding must be a pointer to a trivially-copyable type ('T' invalid)"; an incomplete pointee, "variable
+// has incomplete type 'T'" with a tag's "forward declaration" note; a const one, "read-only variable is not assignable".
+// NULL for another report.
+static const char* check_semantic_clear_padding(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
+                                                Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = report->node;
+    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node]];
+    const uint32_t first = check_semantic_argument_begin(parser, graph, node, 0);
+    const TypeId written = argument < stream->count ? check_stream_type(stream, argument) : 0;
+    const TypeId bare = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId pointee = pointer ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : 0;
+    const char* result = NULL;
+    if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && written != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, written, check_semantic_operand_spelling(parser, input, stream, types, argument));
+        result = type.length == 0 ? NULL :
+                 pointer ? check_warning_text(scratch, "argument to __builtin_clear_padding must be a pointer to a trivially-copyable type (%.*s invalid)",
+                                              (int)type.length, type.pointer) :
+                           check_warning_text(scratch, "passing %.*s to parameter of incompatible type pointer: type mismatch at 1st parameter (%.*s vs pointer)",
+                                              (int)type.length, type.pointer, (int)type.length, type.pointer);
+    }
+    else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && pointee != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0);
+        result = type.length != 0 ? check_warning_text(scratch, "variable has incomplete type %.*s", (int)type.length, type.pointer) : NULL;
+        *note = result != NULL ? check_semantic_forward_note(parser, pp, input, types, spell, pointee, scratch) : *note;
+    }
+    else if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && pointer)
+    {
+        result = "read-only variable is not assignable";
+    }
+    *location = result != NULL ? first : report->token;
+    return result;
+}
+
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
+
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
@@ -2019,6 +2075,13 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             *location = check_semantic_argument_begin(parser, graph, node, 0);
         }
     }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CLEAR_PADDING &&
+             graph->argument_counts[node] == 1 &&
+             (report->diagnostic == CHECK_DIAG_INCOMPATIBLE || report->diagnostic == CHECK_DIAG_INCOMPLETE || report->diagnostic == CHECK_DIAG_INVALID_TYPE))
+    {
+        const char* refused = check_semantic_clear_padding(parser, pp, input, stream, types, report, spell, location, note, scratch);
+        result = refused != NULL ? refused : result;
+    }
     else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->argument_counts[node] == 2 &&
              (graph->members[node] == CBUILTIN_ALIGN_UP || graph->members[node] == CBUILTIN_ALIGN_DOWN || graph->members[node] == CBUILTIN_IS_ALIGNED) &&
              (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED || report->diagnostic == CHECK_DIAG_INCOMPATIBLE))
@@ -2044,10 +2107,28 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         if (report->diagnostic == CHECK_DIAG_MEMBER && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && token + 1 < parser->tokens.count)
         {
             const TypeId record = op == CHECK_OP_ARROW ? type_element(types, operand_type) : operand_type;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(record), 0);
             const String8 name = check_semantic_name(parser, pp, token + 1);
+            // A base of no structure or union is clang's err_typecheck_member_reference_struct_union at the operator
+            // (LookupMemberExpr, #2288), the operand's type as written for `.`; `.` of a pointer to one is its
+            // err_typecheck_member_reference_suggestion there, naming the pointer. A record's missing member is at its name.
+            const uint8_t kind = record != 0 ? type_kind(types, type_strip_aligned(types, record)) : 0;
+            const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+            const uint8_t pointee = op == CHECK_OP_MEMBER && kind == BUSTER_TYPE_KIND_POINTER ? type_kind(types, type_strip_aligned(types, type_element(types, record))) : 0;
+            const bool suggestion = pointee == BUSTER_TYPE_KIND_STRUCT || pointee == BUSTER_TYPE_KIND_UNION;
+            const uint32_t spelling = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling);
+            *location = aggregate ? token + 1 : token;
+            result = type.length == 0 ? NULL :
+                     aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
+                     suggestion ? check_warning_text(scratch, "member reference type %.*s is a pointer; did you mean to use '->'?", (int)type.length, type.pointer) :
+                     check_warning_text(scratch, "member reference base type %.*s is not a structure or union", (int)type.length, type.pointer);
+        }
+        else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_ARROW && operand_type != 0 && token + 1 < parser->tokens.count)
+        {
+            // `->` of no pointer: clang's err_typecheck_member_reference_arrow, at the member's name (#2288).
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type, check_input_operand_type_spelling(input, parser, operand));
             *location = token + 1;
-            result = type.length != 0 ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
+            result = type.length != 0 ? check_warning_text(scratch, "member reference type %.*s is not a pointer", (int)type.length, type.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op == CHECK_OP_POSITIVE && operand_type != 0 && graph->tokens[node] < parser->tokens.count &&
                  parser->tree.roles[graph->tokens[node]] == PARSE_ROLE_CLOSE_CONDITION && graph->tokens[node] != 0 &&
