@@ -1475,6 +1475,23 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "unsigned long long e[]={(unsigned long long)deposit((unsigned _BitInt(37))(n*0x12345),(unsigned _BitInt(37))0x1f0f0f0f0full),"
           "(unsigned long long)extract(n*0x9e3779b97f4a7c15,0x0ff00ff00ff00ff0)};FOLD(e);return (int)h;}\n"
         },
+        // The integer elementwise builtins of 128-bit scalars (#2410): __int128, unsigned __int128 and _BitInts of 65 to 128
+        // bits, the sequences in Tier 0's 128-bit classes, their constants built of halves, a _BitInt's operands masked by
+        // shifts and a funnel count of a width no power of two reduced modulo it by its halves'; zero, all ones and the
+        // most negative value among the operands.
+        { "scalar-wide-elements",
+          "#define S(T) {T q_[]={__builtin_elementwise_add_sat((T)a,(T)b),__builtin_elementwise_add_sat((T)c,(T)a),__builtin_elementwise_sub_sat((T)a,(T)b),"
+          "__builtin_elementwise_sub_sat((T)b,(T)c),__builtin_elementwise_max((T)a,(T)b),__builtin_elementwise_min((T)a,(T)c),__builtin_elementwise_popcount((T)a),"
+          "__builtin_elementwise_bitreverse((T)a),__builtin_elementwise_clzg((T)a,(T)b),__builtin_elementwise_ctzg((T)z,(T)c),__builtin_elementwise_ctzg((T)b,(T)c),"
+          "__builtin_elementwise_clzg((T)(c|1)),__builtin_elementwise_fshl((T)a,(T)b,(T)c),__builtin_elementwise_fshr((T)a,(T)b,(T)(c>>3))};FOLD(q_);}\n"
+          "#define A(T) S(T) {T m=(T)((unsigned __int128)1<<(sizeof(T)*8-1));T q_[]={__builtin_elementwise_abs((T)a),__builtin_elementwise_abs((T)(0-(unsigned __int128)a)),"
+          "__builtin_elementwise_abs((T)(m<<1))};FOLD(q_);}\n"
+          "int tested(int n){unsigned h=2166136261u;unsigned long long x=(unsigned long long)n*0x9e3779b97f4a7c15ull,y=x*0x2545f4914f6cdd1dull;\n"
+          "for(int i=0;i<4;i++){unsigned __int128 a=((unsigned __int128)x<<64)|(y*3),b=((unsigned __int128)(y^x)<<64)|x,"
+          "c=(unsigned __int128)(x*0x9e3779b97f4a7c15ull)*y,z=0;if(i==1)a=0;if(i==2)b=~(unsigned __int128)0>>(x&7);if(i==3)a=(unsigned __int128)1<<127;\n"
+          "S(unsigned __int128)A(__int128)S(unsigned _BitInt(100))A(_BitInt(100))A(_BitInt(65))S(unsigned _BitInt(128))A(_BitInt(127))S(unsigned _BitInt(65))"
+          "x=x*31+y;y^=x>>7;}return (int)h;}\n"
+        },
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
