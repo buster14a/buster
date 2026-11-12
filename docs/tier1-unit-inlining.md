@@ -1047,7 +1047,7 @@ part of the decision.
 
 ## The other levers without an owner
 
-Measured here, not designed; each is a candidate for its own issue.
+Measured here, not designed. The first is #2553 and the next three are #2554.
 
 - **Allocation across blocks.** Moves, spills and reloads on edges are 7.4% of
   speedtest1's instructions under `--tier1` and 10.0% of Lua's, after #1216.
@@ -1083,5 +1083,7 @@ Measured here, not designed; each is a candidate for its own issue.
   (open) and #1216, #1218 and #1219 (all three closed): the back end's
   causes.
 - #1344, #1373, #1375: the compiler's own largest causes.
+- #2553 and #2554: the next causes without an owner, filed from this
+  measurement.
 - #1353, #1384, #1395, #1377: the inventory's open items; #1132 (closed): the
   default's decision.
