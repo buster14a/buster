@@ -220,6 +220,9 @@ struct CheckAttested
     uint32_t list;
     // --passes N: the passes run N times a unit (1 by default), the least cycles of each kept; the first run's results.
     uint32_t passes;
+    // --twins: each unit's lists, own hashes and literals made again by the other path and compared (check_attested_twins).
+    bool twins;
+    uint64_t twin_differences;
     // The memo: a set of 128-bit hashes, open addressing in `memo_mask + 1` slots, a zero slot empty (a hash's low word is
     // never zero).
     Arena memo_arena;
@@ -257,6 +260,9 @@ struct CheckAttested
     uint32_t* name_entries;
     uint32_t name_count;
     CheckAttestedHash* owns;
+    // The own hashes' running sums at each declaration's root (the vector path's), with room for a register past the last.
+    uint64_t* sums_low;
+    uint64_t* sums_high;
     CheckAttestedHash* semantics;
     uint8_t* hits;
     uint8_t* reached;
@@ -786,7 +792,7 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
 // The lists of `parser`'s unit into the census's unit arrays; whether there was room. One pass in source order, with a
 // stack of the open groups: on the vector path 64 tokens at a time, their parts from the tables by vpermb and the
 // parser's roots by compares, stepping through the tokens that have either; on the scalar path, its twin, every token.
-static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census, const Parser* parser)
+static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census, const Parser* parser, bool scalar)
 {
     const uint32_t count = parser->tokens.count;
     const uint8_t* const kinds = parser->tokens.kinds;
@@ -825,7 +831,6 @@ static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census
     const __m512i role_low = _mm512_loadu_si512(role_actions);
     const __m512i role_high = _mm512_loadu_si512(role_actions + 64);
     const __m512i none = _mm512_set1_epi32(-1);
-    const bool scalar = parser->options.scalar;
     uint32_t t = 0;
     while (valid && !BUSTER_SCALAR_PATH(scalar) && t < count)
     {
@@ -1034,48 +1039,143 @@ static void check_attested_literal_word(CheckAttested* census, Preprocessor* pp,
     hash->high += (uint64_t)(product >> 64) + placed;
 }
 
-// The declarations' own hashes: a sum over each one's tokens of a product of the token's word at its place, then its
-// literals' spellings' (the sum's order is none, so they come after), then its length mixed in. One pass over every
-// token, its declaration's sum kept where it ends (no branch a token, none a declaration); the literals stepped
-// through by their kinds' mask 64 tokens at a time, or every token on the scalar path, its twin.
-static __attribute__((noinline)) void check_attested_hashes(CheckAttested* census, const Parser* parser)
+// A token's word's contribution to its declaration's own hash, in one of its two halves (`k0`, `k1`, `k2`): a 64-bit
+// mix, two multiplies, the same in a vector lane and in scalar code.
+#define BUSTER_ATTESTED_M0 0x9e3779b97f4a7c15ull
+#define BUSTER_ATTESTED_M1 0xbf58476d1ce4e5b9ull
+#define BUSTER_ATTESTED_M2 0x94d049bb133111ebull
+#define BUSTER_ATTESTED_M3 0xd6e8feb86659fd93ull
+
+static inline uint64_t check_attested_mix(uint64_t value, uint64_t first, uint64_t second)
+{
+    uint64_t x = value * first;
+    x ^= x >> 29;
+    x *= second;
+    x ^= x >> 32;
+    return x;
+}
+
+// The same in eight lanes.
+static inline __m512i check_attested_mix_lanes(__m512i value, uint64_t first, uint64_t second)
+{
+    __m512i x = _mm512_mullo_epi64(value, _mm512_set1_epi64((int64_t)first));
+    x = _mm512_xor_si512(x, _mm512_srli_epi64(x, 29));
+    x = _mm512_mullo_epi64(x, _mm512_set1_epi64((int64_t)second));
+    return _mm512_xor_si512(x, _mm512_srli_epi64(x, 32));
+}
+
+// The declarations' own hashes: a sum over each one's tokens of its token's word (name, system level, role and kind) at
+// its place in the declaration (the place times BUSTER_ATTESTED_K3, in the word), mixed into two halves; then its
+// literals' spellings' (the sum has no order, so they come after), then its length mixed in. The vector path takes
+// eight tokens a register, each one's place from the declaration's first token found by a prefix maximum of the lanes
+// that start one, and each declaration's sum as the difference of a running prefix sum at its root and at the last
+// one (compressed into `sums` at the roots); the scalar path, its twin, a token at a time. No branch a token.
+static __attribute__((noinline)) void check_attested_hashes(CheckAttested* census, const Parser* parser, bool scalar)
 {
     const uint8_t* const kinds = parser->tokens.kinds;
     const uint8_t* const roles = parser->tree.roles;
     const uint32_t* const names = parser->tokens.names;
     const uint8_t* const levels = census->token_levels;
     const uint32_t* const parents = parser->tree.parents;
-    const uint32_t* const firsts = census->firsts;
     const uint32_t* const lasts = census->lasts;
     CheckAttestedHash* const owns = census->owns;
     const uint32_t declarations = census->declaration_count;
-    uint32_t d = 0;
-    // The token's place in its declaration times BUSTER_ATTESTED_K3, kept as a running sum.
-    uint64_t place = 0;
-    uint64_t low = BUSTER_ATTESTED_K0;
-    uint64_t high = BUSTER_ATTESTED_K1;
     const uint32_t end = declarations != 0 ? lasts[declarations - 1] + 1 : 0;
-    for (uint32_t t = declarations != 0 ? firsts[0] : 0; t < end; t += 1)
+    uint32_t d = 0;
+    uint32_t t = 0;
+    if (!BUSTER_SCALAR_PATH(scalar))
     {
-        const uint64_t word = (uint64_t)names[t] << 32 | (uint64_t)levels[t] << 16 | (uint64_t)roles[t] << 8 | kinds[t];
-        const uint64_t placed = word ^ place;
-        const unsigned __int128 product = (unsigned __int128)(placed ^ BUSTER_ATTESTED_K0) * BUSTER_ATTESTED_K1;
-        low += (uint64_t)product ^ (uint64_t)(product >> 64);
-        high += (uint64_t)(product >> 64) + placed;
-        // The sum so far, kept as the declaration's own until its last token's is: then the next declaration's. A
-        // declaration's last token is a root of the parser's tree (the lists' ranges), which no step here waits for.
-        owns[d] = (CheckAttestedHash){ .low = low, .high = high };
-        const bool ends = parents[t] == BUSTER_PARSE_ROOT;
-        d += ends ? 1u : 0u;
-        place = ends ? 0 : place + BUSTER_ATTESTED_K3;
-        low = ends ? BUSTER_ATTESTED_K0 : low;
-        high = ends ? BUSTER_ATTESTED_K1 : high;
+        uint64_t* const sums_low = census->sums_low;
+        uint64_t* const sums_high = census->sums_high;
+        const __m512i lane = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+        const __m512i zero = _mm512_setzero_si512();
+        const __m512i last = _mm512_set1_epi64(7);
+        __m512i carry_low = zero;
+        __m512i carry_high = zero;
+        __m512i carry_first = zero;
+        uint32_t previous_root = 1;
+        for (; t < end; t += 8)
+        {
+            const uint32_t length = end - t < 8 ? end - t : 8;
+            const __mmask8 lanes = (__mmask8)_bzhi_u32(0xffu, length);
+            const __m512i name = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, names + t));
+            const __m512i kind = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, kinds + t));
+            const __m512i role = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, roles + t));
+            const __m512i level = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, levels + t));
+            __m512i word = _mm512_or_si512(_mm512_slli_epi64(name, 32), _mm512_slli_epi64(level, 16));
+            word = _mm512_or_si512(word, _mm512_or_si512(_mm512_slli_epi64(role, 8), kind));
+            const __mmask8 roots = (__mmask8)(_mm256_cmpeq_epi32_mask(_mm256_maskz_loadu_epi32(lanes, parents + t), _mm256_set1_epi32(-1)) & lanes);
+            const __mmask8 starts = (__mmask8)(((uint32_t)roots << 1 | previous_root) & lanes);
+            const __m512i token = _mm512_add_epi64(_mm512_set1_epi64(t), lane);
+            // Each lane's declaration's first token: the greatest start at or below it, or the last block's.
+            __m512i first = _mm512_maskz_mov_epi64(starts, token);
+            first = _mm512_max_epu64(first, _mm512_alignr_epi64(first, zero, 7));
+            first = _mm512_max_epu64(first, _mm512_alignr_epi64(first, zero, 6));
+            first = _mm512_max_epu64(first, _mm512_alignr_epi64(first, zero, 4));
+            first = _mm512_max_epu64(first, carry_first);
+            const __m512i placed = _mm512_xor_si512(word, _mm512_mullo_epi64(_mm512_sub_epi64(token, first), _mm512_set1_epi64((int64_t)BUSTER_ATTESTED_K3)));
+            __m512i low = _mm512_maskz_mov_epi64(lanes, check_attested_mix_lanes(_mm512_xor_si512(placed, _mm512_set1_epi64((int64_t)BUSTER_ATTESTED_K0)),
+                                                                                 BUSTER_ATTESTED_M0, BUSTER_ATTESTED_M1));
+            __m512i high = _mm512_maskz_mov_epi64(lanes, check_attested_mix_lanes(_mm512_xor_si512(placed, _mm512_set1_epi64((int64_t)BUSTER_ATTESTED_K2)),
+                                                                                  BUSTER_ATTESTED_M2, BUSTER_ATTESTED_M3));
+            // The running sums at each lane.
+            low = _mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 7));
+            high = _mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 7));
+            low = _mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 6));
+            high = _mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 6));
+            low = _mm512_add_epi64(_mm512_add_epi64(low, _mm512_alignr_epi64(low, zero, 4)), carry_low);
+            high = _mm512_add_epi64(_mm512_add_epi64(high, _mm512_alignr_epi64(high, zero, 4)), carry_high);
+            // At the roots, the running sums, packed (`sums` has room for a register past the last declaration).
+            _mm512_storeu_si512(sums_low + d, _mm512_maskz_compress_epi64(roots, low));
+            _mm512_storeu_si512(sums_high + d, _mm512_maskz_compress_epi64(roots, high));
+            d += (uint32_t)__builtin_popcount(roots);
+            carry_low = _mm512_permutexvar_epi64(last, low);
+            carry_high = _mm512_permutexvar_epi64(last, high);
+            carry_first = _mm512_permutexvar_epi64(last, first);
+            previous_root = (uint32_t)roots >> (length - 1) & 1;
+        }
+        // A last declaration that no root ends (a failed parse's view): the sums at the end.
+        if (d < declarations)
+        {
+            _mm512_storeu_si512(sums_low + d, carry_low);
+            _mm512_storeu_si512(sums_high + d, carry_high);
+            d += 1;
+        }
+        uint64_t before_low = 0;
+        uint64_t before_high = 0;
+        for (uint32_t k = 0; k < declarations; k += 1)
+        {
+            owns[k] = (CheckAttestedHash){ .low = sums_low[k] - before_low, .high = sums_high[k] - before_high };
+            before_low = sums_low[k];
+            before_high = sums_high[k];
+        }
+    }
+    else
+    {
+        // The token's place in its declaration times BUSTER_ATTESTED_K3, kept as a running sum.
+        uint64_t place = 0;
+        uint64_t low = 0;
+        uint64_t high = 0;
+        for (; t < end; t += 1)
+        {
+            const uint64_t word = (uint64_t)names[t] << 32 | (uint64_t)levels[t] << 16 | (uint64_t)roles[t] << 8 | kinds[t];
+            const uint64_t placed = word ^ place;
+            low += check_attested_mix(placed ^ BUSTER_ATTESTED_K0, BUSTER_ATTESTED_M0, BUSTER_ATTESTED_M1);
+            high += check_attested_mix(placed ^ BUSTER_ATTESTED_K2, BUSTER_ATTESTED_M2, BUSTER_ATTESTED_M3);
+            // The sum so far, kept as the declaration's own until its last token's is: then the next declaration's.
+            owns[d] = (CheckAttestedHash){ .low = low, .high = high };
+            const bool ends = parents[t] == BUSTER_PARSE_ROOT;
+            d += ends ? 1u : 0u;
+            place = ends ? 0 : place + BUSTER_ATTESTED_K3;
+            low = ends ? 0 : low;
+            high = ends ? 0 : high;
+        }
     }
 }
 
 // The own hashes' literals: each one's word added to its declaration's sum (a cursor that only rises, as the literals
 // do), then every declaration's sum finished with its length.
-static __attribute__((noinline)) void check_attested_literals(CheckAttested* census, const Parser* parser, Preprocessor* pp)
+static __attribute__((noinline)) void check_attested_literals(CheckAttested* census, const Parser* parser, Preprocessor* pp, bool scalar)
 {
     const uint8_t* const kinds = parser->tokens.kinds;
     const uint32_t* const sources = parser->tokens.sources;
@@ -1095,7 +1195,7 @@ static __attribute__((noinline)) void check_attested_literals(CheckAttested* cen
         const uint32_t length = end - t < 64 ? end - t : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         uint64_t literals = 0;
-        if (!BUSTER_SCALAR_PATH(parser->options.scalar))
+        if (!BUSTER_SCALAR_PATH(scalar))
         {
             const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + t);
             literals = (_mm512_cmpeq_epi8_mask(kind, number) | _mm512_cmpeq_epi8_mask(kind, character) | _mm512_cmpeq_epi8_mask(kind, string)) & lanes;
@@ -1539,6 +1639,8 @@ static bool check_attested_unit_arrays(CheckAttested* census, uint32_t count, ui
     census->name_entries = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->owns = arena_push_array(arena, slots, sizeof(CheckAttestedHash), 64);
     census->semantics = arena_push_array(arena, slots, sizeof(CheckAttestedHash), 64);
+    census->sums_low = arena_push_array(arena, slots + 8, sizeof(uint64_t), 64);
+    census->sums_high = arena_push_array(arena, slots + 8, sizeof(uint64_t), 64);
     census->hits = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->reached = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->reached_without_runtime = arena_push_array(arena, slots, sizeof(uint8_t), 64);
@@ -1613,18 +1715,19 @@ static bool check_attested_passes(CheckAttested* census, const Parser* parser, P
     uint64_t times[CHECK_ATTESTED_PASSES + 1];
     check_attested_counts(census, laps[0]);
     times[0] = __rdtsc();
-    const bool listed = check_attested_lists(census, parser) && check_attested_pragmas(census, parser, pp);
+    const bool scalar = parser->options.scalar;
+    const bool listed = check_attested_lists(census, parser, scalar) && check_attested_pragmas(census, parser, pp);
     times[1] = __rdtsc();
     check_attested_counts(census, laps[1]);
     if (listed)
     {
-        check_attested_hashes(census, parser);
+        check_attested_hashes(census, parser, scalar);
     }
     times[2] = __rdtsc();
     check_attested_counts(census, laps[2]);
     if (listed)
     {
-        check_attested_literals(census, parser, pp);
+        check_attested_literals(census, parser, pp, scalar);
     }
     times[3] = __rdtsc();
     check_attested_counts(census, laps[3]);
@@ -1657,6 +1760,61 @@ static bool check_attested_passes(CheckAttested* census, const Parser* parser, P
         }
     }
     return listed;
+}
+
+// --twins: the lists, the own hashes and their literals made again by the other path, the vector one's or its scalar
+// twin's, compared with the passes' (CheckAttested.twin_differences counts the declarations whose range, flags, names
+// or own hash differ, and a unit whose counts differ). Their arrays are then the other path's, the same where nothing
+// differs. Untimed.
+static void check_attested_twins(CheckAttested* census, const Parser* parser, Preprocessor* pp)
+{
+    const uint32_t declarations = census->declaration_count;
+    const uint32_t names = census->name_count;
+    const uint32_t strings = census->string_count;
+    const uint64_t mark = census->unit_arena.length;
+    uint32_t* firsts = arena_push_array(&census->unit_arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    uint32_t* lasts = arena_push_array(&census->unit_arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    uint8_t* flags = arena_push_array(&census->unit_arena, (uint64_t)declarations + 1, sizeof(uint8_t), 64);
+    uint32_t* starts = arena_push_array(&census->unit_arena, (uint64_t)declarations + 2, sizeof(uint32_t), 64);
+    uint32_t* entries = arena_push_array(&census->unit_arena, (uint64_t)names + 1, sizeof(uint32_t), 64);
+    uint32_t* texts = arena_push_array(&census->unit_arena, (uint64_t)strings + 1, sizeof(uint32_t), 64);
+    CheckAttestedHash* owns = arena_push_array(&census->unit_arena, (uint64_t)declarations + 1, sizeof(CheckAttestedHash), 64);
+    const bool room = firsts != NULL && lasts != NULL && flags != NULL && starts != NULL && entries != NULL && texts != NULL && owns != NULL;
+    if (room)
+    {
+        memcpy(firsts, census->firsts, (uint64_t)declarations * sizeof(uint32_t));
+        memcpy(lasts, census->lasts, (uint64_t)declarations * sizeof(uint32_t));
+        memcpy(flags, census->flags, declarations);
+        memcpy(starts, census->name_starts, ((uint64_t)declarations + 1) * sizeof(uint32_t));
+        memcpy(entries, census->name_entries, (uint64_t)names * sizeof(uint32_t));
+        memcpy(texts, census->string_tokens, (uint64_t)strings * sizeof(uint32_t));
+        memcpy(owns, census->owns, (uint64_t)declarations * sizeof(CheckAttestedHash));
+        const bool other = !parser->options.scalar;
+        const bool listed = check_attested_lists(census, parser, other) && check_attested_pragmas(census, parser, pp);
+        if (listed)
+        {
+            check_attested_hashes(census, parser, other);
+            check_attested_literals(census, parser, pp, other);
+        }
+        const bool same = listed && census->declaration_count == declarations && census->name_count == names && census->string_count == strings;
+        census->twin_differences += same ? 0 : 1;
+        for (uint32_t d = 0; same && d < declarations; d += 1)
+        {
+            bool equal = census->firsts[d] == firsts[d] && census->lasts[d] == lasts[d] && census->flags[d] == flags[d] && census->name_starts[d] == starts[d] &&
+                         check_attested_equal(census->owns[d], owns[d]);
+            for (uint32_t n = starts[d]; equal && n < starts[d + 1]; n += 1)
+            {
+                equal = census->name_entries[n] == entries[n];
+            }
+            census->twin_differences += equal ? 0 : 1;
+        }
+        for (uint32_t k = 0; same && k < strings; k += 1)
+        {
+            census->twin_differences += census->string_tokens[k] == texts[k] ? 0 : 1;
+        }
+    }
+    census->twin_differences += room ? 0 : 1;
+    arena_pop_to(&census->unit_arena, mark);
 }
 
 // check_driver_unit's reader for a census's unit: the passes, then check_input_run as check_input_compile calls it, with
@@ -1715,6 +1873,10 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
             }
         }
         census->pass_tokens += count;
+        if (census->twins && listed)
+        {
+            check_attested_twins(census, parser, pp);
+        }
         // Untimed: the reach without the runtime functions' names, for what that rule alone reaches.
         check_attested_reach(census, parser, pp, census->reached_without_runtime, false);
         // Each declaration's place, for --list and the tests' records alone.
@@ -1998,6 +2160,10 @@ static void check_attested_report(const CheckAttested* census)
     printf("attested: events declares=%" PRIu64 " unlisted=%" PRIu64 " completions-unlisted=%" PRIu64 " uses=%" PRIu64 " unlisted-uses=%" PRIu64 "\n", census->declare_events,
            census->unlisted_declares, census->unlisted_completions, census->use_events, census->unlisted_uses);
     printf("attested: diagnostics=%" PRIu64 " unplaced=%" PRIu64 "\n", census->diagnostics, census->unplaced_diagnostics);
+    if (census->twins)
+    {
+        printf("attested: twins differences=%" PRIu64 "\n", census->twin_differences);
+    }
     printf("attested: literals=%" PRIu64 " spelled=%" PRIu64 " range-searches=%" PRIu64 " (of every run of the passes)\n", census->literal_count, census->spelled_literals,
            census->range_searches);
     uint64_t all = 0;
@@ -2102,7 +2268,7 @@ static int check_attested_run(CheckAttested* census, int count, char** arguments
             check_attested_report(census);
         }
         fflush(stdout);
-        result = result == 0 && !census->failed && census->units_observed != 0 ? 0 : 1;
+        result = result == 0 && !census->failed && census->units_observed != 0 && census->twin_differences == 0 ? 0 : 1;
     }
     if (valid)
     {
@@ -2122,7 +2288,8 @@ static __attribute__((unused)) int run_attested_census(int count, char** argumen
     while (valid && options && first < count)
     {
         const char* argument = arguments[first];
-        options = strcmp(argument, "--list") == 0 || strcmp(argument, "--passes") == 0;
+        options = strcmp(argument, "--list") == 0 || strcmp(argument, "--passes") == 0 || strcmp(argument, "--twins") == 0;
+        census.twins |= strcmp(argument, "--twins") == 0;
         if (strcmp(argument, "--list") == 0)
         {
             valid = first + 1 < count && check_attested_number(arguments[first + 1], &census.list);
@@ -2131,12 +2298,12 @@ static __attribute__((unused)) int run_attested_census(int count, char** argumen
         {
             valid = first + 1 < count && check_attested_number(arguments[first + 1], &census.passes) && census.passes != 0 && census.passes <= 100;
         }
-        first += options ? 2 : 0;
+        first += !options ? 0 : strcmp(argument, "--twins") == 0 ? 1 : 2;
     }
     const int status = valid ? check_attested_run(&census, count - first, arguments + first, false) : 2;
     if (status == 2)
     {
-        fprintf(stderr, "usage: compiler measure-attested [--list N] [--passes N] [compile options] file...\n");
+        fprintf(stderr, "usage: compiler measure-attested [--list N] [--passes N] [--twins] [compile options] file...\n");
     }
     return status == 0 ? 0 : 1;
 }

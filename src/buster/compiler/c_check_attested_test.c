@@ -211,12 +211,13 @@ static bool check_attested_test_command(CheckAttested* census, const char* direc
         snprintf(path, sizeof(path), "%s/unit%u.o", directory, u + 1);
         unlink(path);
     }
-    const bool clean = census->unlisted_declares == 0 && census->unlisted_completions == 0 && census->unlisted_uses == 0 && census->contradictions == 0;
+    const bool clean = census->unlisted_declares == 0 && census->unlisted_completions == 0 && census->unlisted_uses == 0 && census->contradictions == 0 &&
+                       census->twin_differences == 0;
     if (valid && (result != status || !clean))
     {
         fprintf(stderr, "test-checker: attested: the command's status %d (expected %d), unlisted declares %" PRIu64 " completions %" PRIu64 " uses %" PRIu64
-                        ", contradictions %" PRIu64 "\n",
-                result, status, census->unlisted_declares, census->unlisted_completions, census->unlisted_uses, census->contradictions);
+                        ", contradictions %" PRIu64 ", twins' differences %" PRIu64 "\n",
+                result, status, census->unlisted_declares, census->unlisted_completions, census->unlisted_uses, census->contradictions, census->twin_differences);
     }
     return valid && result == status && clean;
 }
@@ -235,7 +236,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     CheckAttestedRecord* records = calloc(1024, sizeof(CheckAttestedRecord));
     // The main fixture, by -c: unit 3's error fails the command.
     {
-        CheckAttested census = { .passes = 2, .records = records, .record_capacity = 1024 };
+        CheckAttested census = { .passes = 2, .twins = true, .records = records, .record_capacity = 1024 };
         const char* options[] = { "-nostdinc", "-std=gnu17", "-c" };
         const bool ran = written && records != NULL && check_attested_test_command(&census, directory, "#include \"h.h\"\n", check_attested_test_units,
                                                                                   "#include \"late.h\"\n", 4, options, BUSTER_ARRAY_LENGTH(options), 1);
@@ -249,7 +250,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     }
     // The same units by -fsyntax-only, with unit 3's error out of the command: the same outcomes.
     {
-        CheckAttested census = { .passes = 1, .records = records, .record_capacity = 1024 };
+        CheckAttested census = { .passes = 1, .twins = true, .records = records, .record_capacity = 1024 };
         const char* options[] = { "-nostdinc", "-std=gnu17", "-fsyntax-only" };
         const char* const units[] = { check_attested_test_units[0], check_attested_test_units[1], check_attested_test_units[3] };
         const bool ran = written && records != NULL && check_attested_test_command(&census, directory, "#include \"h.h\"\n", units, "#include \"late.h\"\n", 3, options,
@@ -265,7 +266,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     }
     // The main fixture by the scalar path (--scalar's parser and reader, the twins): the same outcomes.
     {
-        CheckAttested census = { .passes = 1, .records = records, .record_capacity = 1024 };
+        CheckAttested census = { .passes = 1, .twins = true, .records = records, .record_capacity = 1024 };
         const char* options[] = { "-nostdinc", "-std=gnu17", "--scalar", "-c" };
         const bool ran = written && records != NULL && check_attested_test_command(&census, directory, "#include \"h.h\"\n", check_attested_test_units,
                                                                                   "#include \"late.h\"\n", 4, options, BUSTER_ARRAY_LENGTH(options), 1);
@@ -279,7 +280,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     snprintf(header, sizeof(header), "%s/q.h", directory);
     written = ready && parse_test_write(header, check_attested_test_otherwise_header, strlen(check_attested_test_otherwise_header));
     {
-        CheckAttested census = { .passes = 1, .records = records, .record_capacity = 1024 };
+        CheckAttested census = { .passes = 1, .twins = true, .records = records, .record_capacity = 1024 };
         const char* options[] = { "-nostdinc", "-c" };
         const bool ran = written && records != NULL &&
                          check_attested_test_command(&census, directory, "", check_attested_test_otherwise_units, "", 4, options, BUSTER_ARRAY_LENGTH(options), 0);
@@ -296,7 +297,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     written = ready && mkdir(system, 0700) == 0 && parse_test_write(header, check_attested_test_system_header, strlen(check_attested_test_system_header)) &&
               parse_test_write(user, check_attested_test_user_header, strlen(check_attested_test_user_header));
     {
-        CheckAttested census = { .passes = 1, .records = records, .record_capacity = 1024 };
+        CheckAttested census = { .passes = 1, .twins = true, .records = records, .record_capacity = 1024 };
         const char* options[] = { "-nostdinc", "-isystem", system, "-c" };
         const bool ran = written && records != NULL &&
                          check_attested_test_command(&census, directory, "", check_attested_test_system_units, "", 3, options, BUSTER_ARRAY_LENGTH(options), 0);
