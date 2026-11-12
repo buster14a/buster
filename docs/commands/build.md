@@ -680,7 +680,11 @@ beside the configured Clang or on `PATH`, at its version: `llvm-config` with
 LLVM's C API headers and library (the splitter is built in the tree, at
 `codegen-tools/split`, with the flags it gives), `clang++`, `llvm-nm`,
 `llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
-where `llvm-config` finds them, else static, as in CI's hosted release. The Debug configuration compiles
+where `llvm-config` finds them, else static, as the official release's
+archives do in CI, hosted and on the 9700X. A system library `llvm-config`
+names by a path the host lacks links by its name instead: the release names
+Ubuntu's `/usr/lib/x86_64-linux-gnu/libzstd.a`, and the 9700X, an Arch host,
+links `-lzstd`. The Debug configuration compiles
 the units as before; the final link still uses any supported `BUSTER_LINKER`.
 
 An unrelated edit reuses both units' native objects. A change to a split unit
@@ -698,7 +702,9 @@ translation units with identically named private functions, data and TLS, distin
 hidden public entries, and shared strong and weak external references. It checks
 runtime isolation across threads, the source compilation database, unchanged and
 source-only edits, one-part private data edits, missing pieces, deterministic
-regeneration, late assembly warnings and failed-stage recovery. The full build
+regeneration, late assembly warnings and failed-stage recovery. It also checks
+the mapping of `llvm-config`'s system libraries (`cmake -P`): hosted runners
+have the release's paths, so only the 9700X's build maps one. The full build
 regression also builds the real opt-in compiler once and runs its baking checks.
 
 The parts are made after the optimizer, so a unit's `-O3` pipeline is still one

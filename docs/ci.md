@@ -163,6 +163,22 @@ self-contained `libclang-cpp`, avoiding the release's Ubuntu-specific static
 system-library paths on the Arch host. Frozen inputs use the same verified
 archive as hosted tests. No system packages are modified.
 
+The staged tree also keeps LLVM's static archives (`lib/libLLVM*.a`, 222
+files, 338 MB), as the hosted install does, so that the Release build
+generates the checker's and the backend's native code in parallel parts
+([build guide](commands/build.md#parallel-native-generation)): the splitter
+links them through `llvm-config --link-static`, the release having no shared
+`libLLVM`. Its system libraries name the release's build machine's
+`/usr/lib/x86_64-linux-gnu/libzstd.a`, which the Arch host doesn't have;
+the build links that one by name, `-lzstd`, from the host's `libzstd.so`.
+Without the archives the job's configure step said `parallel native
+generation is off` and compiled the two units whole (#2563): a clean build
+of 97.1 s against 68.9 s with the parts, measured with the same clang. A
+tree staged before them is staged afresh once. Turning the parts on moved
+the measured executable's code (#2058 measured the two executables within
+±0.33% of each other), so measurements across that change compare
+different layouts.
+
 The job keeps its verified setup inputs in the runner's private cache
 (`BUSTER_CI_CACHE`). Each one is kept under a key that identifies it, checked
 on every use, published atomically, and replaced when stale or corrupt:
@@ -185,9 +201,10 @@ its inputs, and environment variables such as `CPLUS_INCLUDE_PATH`.
 The staged Clang release itself has a content manifest
 (`tools/ci/tree-manifest.sh`): the SHA-256 of every file and the target of
 every link, written when `setup-benchpress.sh` publishes the tree. Every use
-checks the tree against it (about 0.15 s for 600 MB, in 8 processes) and
-stages it afresh from the verified archive when anything differs. A tree
-staged before the manifest is staged afresh once.
+checks the tree against it (about 0.15 s for 600 MB, in 8 processes, when it
+was measured; the tree is 1.6 GB with LLVM's archives) and stages it afresh
+from the verified archive when anything differs. A tree staged before the
+manifest is staged afresh once.
 
 On 2026-11-03 PR jobs, the setup before native tests took about 45 s, nearly
 all of it the 40 s build. The corpus and c-testsuite fetches took 0 to 1 s, and
