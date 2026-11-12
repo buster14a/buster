@@ -307,7 +307,15 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_LANE_EXTRACT 31u
 #define BUSTER_IR_INTRINSIC_LANE_INSERT 32u
 #define BUSTER_IR_INTRINSIC_MOVEMASK 33u
-#define BUSTER_IR_INTRINSIC_COUNT 34u
+// A unary operation of each of a vector's integer lanes (#1840), a of the result's type: its flags the lanes' bytes'
+// log2 in bits 0 and 1 and the operation in bits 2 and 3 (BUSTER_IR_LANE_UNARY_*): each lane's set bits (0: vpopcntb to
+// vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), or its conflicts, bit j set
+// for each lane j below it that equals it (2: vpconflictd, vpconflictq); the last two of doublewords and quadwords.
+#define BUSTER_IR_INTRINSIC_LANE_UNARY 34u
+#define BUSTER_IR_INTRINSIC_COUNT 35u
+#define BUSTER_IR_LANE_UNARY_POPCOUNT 0u
+#define BUSTER_IR_LANE_UNARY_LZCNT 1u
+#define BUSTER_IR_LANE_UNARY_CONFLICT 2u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -864,6 +872,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_extract",
     "lane_insert",
     "movemask",
+    "lane_unary",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2108,6 +2117,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     valid = b == BUSTER_IR_NONE && lanes != 0 &&
                             (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
                                                                     type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_LANE_UNARY)
+                {
+                    // A population count of any lanes; a leading zero count or conflicts of doublewords or quadwords.
+                    valid = b == BUSTER_IR_NONE && ir_vector_type(type) && ta == type && (part >> 2) <= BUSTER_IR_LANE_UNARY_CONFLICT &&
+                            ((part >> 2) == BUSTER_IR_LANE_UNARY_POPCOUNT || (part & 3) >= 2);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_INSERT)
                 {
@@ -3575,7 +3590,8 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
-                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK)
+                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
+                                c == BUSTER_IR_INTRINSIC_LANE_UNARY)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

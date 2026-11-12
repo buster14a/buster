@@ -1176,6 +1176,106 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's lane moves and movemasks are C's");
 }
 
+// The lanes' unary operations (#1840): both verifiers admit lane_unary exactly where its operand is of its type and its
+// flags a population count of any lanes, or a leading zero count or conflicts of doublewords or quadwords, for every
+// flags byte at each width; and the model gives C's counts and conflicts of each lane on random vectors whose lanes
+// repeat.
+static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x6a09e667bb67ae85);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType vector = (IrType)(IR_V4I32 + width);
+                const IrType source = other == 0 ? vector : (IrType)(IR_V4I32 + (width + 1) % 3);
+                const bool admitted = other == 0 && (flags >> 2) <= 2 && ((flags >> 2) == 0 || (flags & 3) >= 2);
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "lane unary verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_UNDEF, source, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, vector, 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_UNARY);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[1] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a lane's unary operation is admitted exactly at its lanes and operation, of its type");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * (4 + 2 + 2), "lane unary operations are admitted at every width, lanes and operation");
+    // The model against C's counts and conflicts, lane by lane.
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 8 * 4; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t pick = (trial / 3) % 8;
+        const uint32_t operation = pick < 4 ? 0 : pick < 6 ? 1 : 2;
+        const uint32_t size = pick < 4 ? pick : 2 + pick % 2;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const uint32_t lanes = bytes / element;
+        IrSimdValue a = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+        }
+        // Repeated lanes for the conflicts, zeros and narrow values for the counts.
+        uint8_t* raw = (uint8_t*)a.words;
+        for (uint32_t lane = 1; lane < lanes; lane += 1)
+        {
+            const uint64_t random = ir_test_random(&state);
+            if ((random & 3) == 0)
+            {
+                memcpy(raw + lane * element, raw + (random >> 8) % lane * element, element);
+            }
+            else if ((random & 3) == 1)
+            {
+                memset(raw + lane * element, 0, element);
+                raw[lane * element] = (uint8_t)(random >> 8);
+            }
+        }
+        IrSimdValue expected = {0};
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            uint64_t x = 0;
+            memcpy(&x, raw + lane * element, element);
+            uint64_t value = 0;
+            for (uint32_t bit = 0; bit < element * 8; bit += 1)
+            {
+                value += operation == 0 ? (x >> bit) & 1 : 0;
+            }
+            for (uint32_t bit = element * 8; operation == 1 && bit > 0 && ((x >> (bit - 1)) & 1) == 0; bit -= 1)
+            {
+                value += 1;
+            }
+            for (uint32_t below = 0; operation == 2 && below < lane; below += 1)
+            {
+                uint64_t y = 0;
+                memcpy(&y, raw + below * element, element);
+                value |= (uint64_t)(x == y) << below;
+            }
+            memcpy((uint8_t*)expected.words + lane * element, &value, element);
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &a, 0, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_LANE_UNARY, .result = shape, .operands = { shape, IR_SIMD_NONE, IR_SIMD_NONE }, .index = (uint8_t)(size | operation << 2) };
+        IrSimdValue got = {0};
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && memcmp(&got, &expected, sizeof(got)) == 0;
+    }
+    ir_test_expect(test, exact, "the model's lane counts and conflicts are C's");
+}
+
 // The masked loads and stores (#1840): both verifiers admit them exactly where their flags are integer lanes (0 to 3),
 // whose mask is the load's b or the store's c, the address a ptr, the passthrough or the stored vector a vector (a load's
 // of its type) and the alignment's log2 at most 31; the float lanes, an invalid lane, another mask, a vector address and
@@ -1489,6 +1589,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_compresses(test, output, scratch);
     ir_test_masked_memory(test, output, scratch);
     ir_test_lane_moves(test, output, scratch);
+    ir_test_lane_unaries(test, output, scratch);
     ir_test_aes(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);

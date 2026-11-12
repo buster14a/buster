@@ -1,0 +1,14 @@
+function (ptr) -> v16i32 {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v8i32 %0 align=32
+  %3 = load.v16i32 %0 align=64
+  %4 = intrinsic.v4i32 %1 lane_unary 0
+  %5 = intrinsic.v8i32 %2 lane_unary 1
+  %6 = intrinsic.v16i32 %3 lane_unary 7
+  %7 = intrinsic.v8i32 %2 lane_unary 6
+  %8 = intrinsic.v16i32 %3 lane_unary 10
+  %9 = intrinsic.v4i32 %1 lane_unary 11
+  %10 = ret.void %8
+}

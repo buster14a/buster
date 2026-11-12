@@ -153,6 +153,10 @@ struct Tier1MasksTest
     // stage as the IR's.
     uint32_t lane_attempts;
     uint32_t lane_rows;
+    // The lanes' unary operations (#1840, tier1_masks_test_lane_unaries): those tried, and those through every stage as
+    // the IR's.
+    uint32_t unary_attempts;
+    uint32_t unary_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -6015,6 +6019,199 @@ static void tier1_masks_test_lane_moves(Tier1MasksTest* test)
     free(program);
 }
 
+// A lane's unary operation's row (#1840), `kind` 0 to 3 popcount of bytes to quadwords (clang's
+// __builtin_elementwise_popcount: check_vector_elementwise_forms' form), 4 and 5 the leading zero count of doublewords
+// and quadwords of one operand, 6 and 7 of two (__builtin_elementwise_clzg: the count, vptestnm into k1 and vpblendm
+// under it, as the front end writes them), 8 and 9 the conflicts (_mm*_conflict_epi32 and _epi64), at `width` (0 to 2);
+// its flags into `flags`. ir_simd_typed_test.c's decoder test reads the same rows.
+static Tier0Operation tier1_masks_test_lane_unary_row(uint32_t kind, uint32_t width, uint32_t* flags)
+{
+    static const uint16_t tests[2][3] = {
+        { X86_FORM_VPTESTNMD_K_X_XM128, X86_FORM_VPTESTNMD_K_Y_YM256, X86_FORM_VPTESTNMD_K_Z_ZM512 },
+        { X86_FORM_VPTESTNMQ_K_X_XM128, X86_FORM_VPTESTNMQ_K_Y_YM256, X86_FORM_VPTESTNMQ_K_Z_ZM512 },
+    };
+    static const uint16_t blends[2][3] = {
+        { X86_FORM_VPBLENDMD_X_X_XM128, X86_FORM_VPBLENDMD_Y_Y_YM256, X86_FORM_VPBLENDMD_Z_Z_ZM512 },
+        { X86_FORM_VPBLENDMQ_X_X_XM128, X86_FORM_VPBLENDMQ_Y_Y_YM256, X86_FORM_VPBLENDMQ_Z_Z_ZM512 },
+    };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint32_t bytes = 16u << width;
+    const uint32_t size = kind < 4 ? kind : 2 + kind % 2;
+    const uint32_t operation = kind < 4 ? 0 : kind < 8 ? 1 : 2;
+    const bool fallback = kind == 6 || kind == 7;
+    const CheckVectorShape shape = { .lanes = bytes >> size, .bytes = bytes, .element = (uint8_t)(1u << size), .integer = true };
+    uint64_t needed = 0;
+    const uint16_t form = operation == 2 ? ir_simd_lane_unary_forms[2][size][width] :
+                                           (uint16_t)check_vector_elementwise_forms(operation == 0 ? CBUILTIN_ELEMENTWISE_POPCOUNT : CBUILTIN_ELEMENTWISE_CLZG, shape, &needed).forms[width];
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    if (fallback)
+    {
+        row.records[0] = check_vector_lower_record(form, BUSTER_TIER0_ROLE_VECTOR(2), 0, v0);
+        row.records[1] = check_vector_lower_record(tests[size - 2][width], 1, v0, v0);
+        row.records[2] = check_vector_lower_record(blends[size - 2][width], v0, BUSTER_TIER0_ROLE_VECTOR(2), BUSTER_TIER0_ROLE_VECTOR(1));
+        row.records[2].decorations = 1;
+        row.record_count = 3;
+    }
+    else
+    {
+        row.records[0] = check_vector_lower_record(form, v0, 0, v0);
+        row.record_count = 1;
+    }
+    row.operand_count = fallback ? 2 : 1;
+    for (uint32_t j = 0; j < row.operand_count; j += 1)
+    {
+        row.operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_bytes[j] = (uint8_t)bytes;
+    }
+    row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+    row.result_bytes = (uint8_t)bytes;
+    *flags = size | operation << 2;
+    return row;
+}
+
+// The lanes' unary operations through the IR to Tier 1 (#1840): each row of tier1_masks_test_lane_unary_row at each
+// width as the program's only row in 4 statements of the input buffer's vector k (and k + 1 for the two-operand leading
+// zero count) into the output's vector k, inputs whose lanes repeat and are often zero or narrow.
+// tier1_masks_test_typed_pipeline takes each through the IR as its lane_unary, which the interpreter runs at every
+// stage, and Tier 1 natively, against C's counts and conflicts. The population counts are BITALG's and VPOPCNTDQ's,
+// past x86-64-v4: their output target has them too, and a host that runs Tier 1's code natively must have them, or
+// they are left to test-ir-simd's decoding.
+static void tier1_masks_test_lane_unaries(Tier1MasksTest* test)
+{
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    // x86-64-v4's target and forms, and with the population counts' features.
+    const uint64_t v4 = test->v4_features;
+    uint8_t* const v4_forms = test->v4;
+    const uint64_t counts = BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
+    uint8_t* counted_forms = malloc(X86_FORM_COUNT);
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0 && counted_forms != 0,
+                                         "the lane unary operations' memory");
+    if (ready)
+    {
+        const X86Target counted = { .features = v4 | counts };
+        x86_target_forms(&counted, counted_forms);
+    }
+    uint64_t state = test->random ^ UINT64_C(0x5be0cd19137e2179);
+    const bool counted = !test->native || (x86_target_native().features & counts) == counts;
+    for (uint32_t form = counted ? 0 : 4 * 3; ready && form < 10 * 3; form += 1)
+    {
+        const uint32_t kind = form / 3;
+        test->v4_features = kind < 4 ? v4 | counts : v4;
+        test->v4 = kind < 4 ? counted_forms : v4_forms;
+        const uint32_t width = form % 3;
+        const uint32_t bytes = 16u << width;
+        uint32_t flags = 0;
+        Tier0Operation row = tier1_masks_test_lane_unary_row(kind, width, &flags);
+        const uint32_t size = flags & 3;
+        const uint32_t operation = flags >> 2;
+        const uint32_t element = 1u << size;
+        const uint32_t lanes = bytes / element;
+        const bool fallback = row.operand_count == 2;
+        const uint64_t output_mark = test->output.length;
+        test->unary_attempts += 1;
+        char name[96];
+        snprintf(name, sizeof(name), "lane_unary 0x%x at %u bytes%s", flags, bytes, fallback ? " with a fallback" : "");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t st = 0; st < 4; st += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, st * bytes / 8);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, st * bytes / 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            if (fallback)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (st + 1) * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        bool ok = tier1_masks_test_expect(test, !program->overflow, "the lane unary operation's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            // Repeated, zero and narrow lanes, the same through the input buffer at this lane size.
+            uint8_t* raw = (uint8_t*)in;
+            for (uint32_t lane = 1; lane < BUSTER_TIER1_MASKS_TEST_IN / element; lane += 1)
+            {
+                const uint64_t random = tier0_test_mask_random(&state);
+                if ((random & 3) == 0)
+                {
+                    memcpy(raw + lane * element, raw + (lane - 1 - (random >> 8) % (lane < 4 ? lane : 4)) * element, element);
+                }
+                else if ((random & 7) == 1)
+                {
+                    memset(raw + lane * element, 0, element);
+                    raw[lane * element] = (uint8_t)(random >> 8 & (random >> 16));
+                }
+            }
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t st = 0; st < 4; st += 1)
+            {
+                const uint8_t* vector = raw + st * bytes % 256;
+                const uint8_t* other = raw + (st + 1) * bytes % 256;
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
+                {
+                    uint64_t x = 0;
+                    memcpy(&x, vector + lane * element, element);
+                    uint64_t value = 0;
+                    for (uint32_t bit = 0; operation == 0 && bit < element * 8; bit += 1)
+                    {
+                        value += (x >> bit) & 1;
+                    }
+                    for (uint32_t bit = element * 8; operation == 1 && bit > 0 && ((x >> (bit - 1)) & 1) == 0; bit -= 1)
+                    {
+                        value += 1;
+                    }
+                    for (uint32_t below = 0; operation == 2 && below < lane; below += 1)
+                    {
+                        uint64_t y = 0;
+                        memcpy(&y, vector + below * element, element);
+                        value |= (uint64_t)(x == y) << below;
+                    }
+                    if (fallback && x == 0)
+                    {
+                        memcpy(&value, other + lane * element, element);
+                    }
+                    memcpy(wanted + st * bytes + lane * element, &value, element);
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a lane's unary operation is the IR's, not a machine row");
+        test->unary_rows += ok;
+        test->v4_features = v4;
+        test->v4 = v4_forms;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the lane unary operations return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            arena_pop_to(&arenas[r], 0);
+        }
+    }
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        arena_release(&arenas[r]);
+    }
+    free(expected);
+    free(inputs);
+    free(counted_forms);
+    free(program);
+}
+
 // The masked loads and stores through the IR to Tier 1 (#1840): vmovdqu8 to vmovdqu64 at each width, a load's merged
 // under a mask from the input into a passthrough and moved into the result, a store's of an input vector under one, each
 // as the program's only row in 4 statements: a load's from the input buffer's vector k into the output's vector k, its
@@ -6628,6 +6825,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_compresses(&test);
             tier1_masks_test_masked_memory(&test);
             tier1_masks_test_lane_moves(&test);
+            tier1_masks_test_lane_unaries(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -6642,7 +6840,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
-                                                                               test.masked_rows + test.lane_rows),
+                                                                               test.masked_rows + test.lane_rows + test.unary_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -6708,6 +6906,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the one-lane moves and movemasks: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its lane_extract, "
                "lane_insert and movemask\n",
                test.lane_rows);
+        tier1_masks_test_expect(&test, test.unary_attempts >= 18 && test.unary_rows == test.unary_attempts, "every lane unary operation goes through the IR and Tier 1 as the IR's");
+        printf("test-tier1-masks: the lanes' population counts, leading zero counts and conflicts: %u through the IR's interpreter, SSA, the optimizer and Tier 1 "
+               "natively as its lane_unary\n",
+               test.unary_rows);
         printf("test-tier1-masks: the front end's masks to vectors and back: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as vpmovm2 and vpmov2m\n",
                test.mask_vector_rows);
         printf("test-tier1-masks: the front end's shifts by an int: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its shift\n", test.shift_rows);
