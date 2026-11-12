@@ -5,8 +5,9 @@
 // the postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
 // check_lower_template_own's, and the logical operators' and the conditional's) and then its conversion's to its target
 // in its context (node_machine_conversion, check_lower_template_conversion's), then its consumer's segment after it where
-// it has one (node_machine_hook). It reads the records T typed and C classified through the record accessors alone; the
-// tape (NodeMachine's kinds, classes and tape) and its labels' entries (label_entries) are its own.
+// it has one (node_machine_hook); a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It
+// reads the records T typed and C classified through the record accessors alone; the tape (NodeMachine's kinds, classes
+// and tape), its labels' entries (label_entries) and the call rows (calls_at, call_records, call_count) are its own.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 
@@ -260,21 +261,43 @@ static void node_machine_hook(NodeMachine* machine, uint32_t r, uint8_t state)
     }
 }
 
-// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, and after it
-// its consumer's segment where it has one (node_machine_hook). `object` as in C.
+// Call record `r`'s own entry, after its callee's and its arguments': a CALL of its result's class, whose value is its row
+// relative to the expression's. The lowering numbers a call's row when its task pops, before its operands' tasks (the
+// tasks' preorder), where X writes in postorder: its row is the evaluated calls before its subtree, every one written
+// before its least record, and those that contain it, its call depth (C's).
+static void node_machine_call_own(NodeMachine* machine, uint32_t r)
+{
+    const uint32_t row = machine->calls_at[node_machine_record_lowest(machine, r)] + node_machine_record_call_depth(machine, r);
+    machine->call_records[row] = r;
+    machine->call_count += 1;
+    node_machine_put(machine, BUSTER_TYPED_CALL, node_machine_record_class(machine, r), row);
+}
+
+// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, after it its
+// consumer's segment where it has one (node_machine_hook), and each call's row (NodeMachine.call_records). `object` as in
+// C.
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
     const uint32_t count = machine->count;
     machine->entry_count = 0;
+    machine->call_count = 0;
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < count)
     {
+        machine->calls_at[r] = machine->call_count;
         const uint8_t state = node_machine_record_state(machine, r);
         if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
         {
             const uint32_t before = machine->entry_count;
-            node_machine_own(machine, r, r == count - 1 ? object : 0);
+            if (node_machine_record_template(machine, r) == BUSTER_NODE_MACHINE_TEMPLATE_CALL)
+            {
+                node_machine_call_own(machine, r);
+            }
+            else
+            {
+                node_machine_own(machine, r, r == count - 1 ? object : 0);
+            }
             const bool takes = node_machine_conversion(machine, r);
             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
             if (refusal == NODE_MACHINE_TAKEN && (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)

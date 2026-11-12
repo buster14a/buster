@@ -220,14 +220,22 @@ takes its entries.
     low 64 bits), `_floating`, `_object`, `_offset`, `_truth(machine, r,
     &truth)` (whether `check_action_truth` knows the value's truth),
     `_fault`, `_overloaded`, `_facts`, `_class`, `_converted(machine, r, k)`,
-    `_conversion_flags(machine, r, k)` and `_member_offset`;
+    `_conversion_flags(machine, r, k)`, `_member_offset`, `_lowest` (its
+    subtree's least record, a call's arguments included), and a call's
+    `_argument_count`, `_argument(machine, r, i)` (a record),
+    `_argument_converted(machine, r, i)` and
+    `_argument_conversion_flags(machine, r, i)`;
   - C's own: `_evaluated`, `_state` (with `BUSTER_NODE_MACHINE_AFTER_CONDITION`
     and `_AFTER_ARM`, a consumer's segment after the record's row), `_context`,
-    `_target`, `_template`, `_hook` (that consumer) and `_label_base`, written
-    by `node_machine_records_set_unevaluated(machine, count)` and
+    `_target`, `_template`, `_hook` (that consumer), `_label_base` and
+    `_call_depth` (the evaluated calls among its ancestors), written by
+    `node_machine_records_set_unevaluated(machine, count)` and
     `node_machine_record_set_evaluated`, `_set_context`, `_set_target`,
-    `_set_template`, `_set_hook(machine, r, consumer, hook)` and
-    `_set_label_base`;
+    `_set_template`, `_set_hook(machine, r, consumer, hook)`,
+    `_set_label_base` and `_set_call_depth`;
+  - a call's, beside them: `node_machine_callee_function` and
+    `node_machine_direct_callee` of its callee record, and
+    `node_machine_call_target` and `node_machine_call_variadic`, its row's;
   - the shadow's: `node_machine_record_value(machine, r, &value)`, the whole
     value, which its comparison with the stream reads with `_converted`,
     `_conversion_flags` and `_member_offset`.
@@ -253,17 +261,31 @@ takes its entries.
   X writes as a segment after an operand's row. Their labels are numbered from
   the expression's first, in the order the tasks number them, with each
   label's place in the tape. The machine's set is the census's within those
-  rules: calls, the increments and the compound assignments are refused by
-  code, and `a ?: b` by its template.
+  rules: the increments and the compound assignments are refused by code, and
+  `a ?: b` by its template.
+- **A call** is typed by its callee's prototype (`node_machine_call_rule`):
+  each argument converted as an assignment converts it, a variadic one by the
+  default promotions, the action taking the rest. A callee with semantics of
+  its own (a library builtin's call the catalogue folds, a unit with overload
+  sets, no prototype, another convention than System V's, a callee that
+  returns twice) is refused as `callee`; a call the lowering doesn't make
+  plainly (`check_lower_call_body`'s plain call: a struct's, a union's, a long
+  double's, a 128-bit or a half-precision argument, parameter or result) as
+  `template`. X writes the arguments, each converted, and a `CALL` whose value
+  is the call's row numbered in the tasks' preorder, as the lowering allocates
+  its rows, relative to the expression's first call.
 - **The comparison**, for every expression the machine takes: each record's
-  value (every field), its operands' conversions and a member's offset against
-  the stream's, and its tape against the lowering's entries that the
-  expression's tasks own (the inventory's log), a local's numbered by a map of
-  the body's that must stay one to one. A branch's target, an entry after
-  `check_lower_resolve_labels`, is compared by label: the log keeps each pop's
-  next label and each body's labels' entries, so each of the expression's
-  labels must be the lowering's of the same number counted from the
-  expression's first, at the same entry.
+  value (every field), its operands' conversions, a call's arguments'
+  conversions and a member's offset against the stream's, and its tape against
+  the lowering's entries that the expression's tasks own (the inventory's
+  log), a local's numbered by a map of the body's that must stay one to one
+  and a call's row by one base, the stream's row for the tape's 0, each row's
+  contents (its callee's symbol, its arguments' count, classes and sizes,
+  whether it is variadic, no result object) the machine's. A branch's target,
+  an entry after `check_lower_resolve_labels`, is compared by label: the log
+  keeps each pop's next label and each body's labels' entries, so each of the
+  expression's labels must be the lowering's of the same number counted from
+  the expression's first, at the same entry.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps
@@ -276,11 +298,11 @@ takes its entries.
   thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X
   only, under its lock, as `taskset -c 2`.
 
-The report gives the expressions and evaluated nodes taken, each refusal's
-(shape, code, leaf, context, diagnostic, template, row, root), the operators
-the code and template refusals stopped at, the differences (values, entries,
-twin), the labels compared, T's nodes by row or rule and by the action, by
-operator, and the times.
+The report gives the expressions, evaluated nodes and calls taken, each
+refusal's (shape, code, leaf, context, diagnostic, template, row, root,
+callee), the operators the code and template refusals stopped at, the
+differences (values, entries, twin), the labels compared, T's nodes by row or
+rule and by the action, by operator, and the times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`

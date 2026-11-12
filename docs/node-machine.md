@@ -4,11 +4,13 @@ Status: step 0, the census, is built and its gate holds
 ([below](#step-0-the-census)). Step 1, the shadow, is built
 ([below](#step-1-the-shadow)): the machine's entries are the pipeline's on every
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
-gate asks for 120 (188 with `&&`, `||` and `?:`, whose expressions cost more a
-node), and it codes only part of the set (no calls yet). No compile
-takes it. Its gains are estimates that its first two steps exist to confirm or
-refute; a prototype of its three sweeps has been run over the compile's real
-nodes ([below](#what-a-prototype-of-the-sweeps-measured)). It is
+gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
+on its own, their expressions costing more a node), and it codes only part of the
+set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
+and the compound assignments). No compile takes it. Its gains are estimates that
+its first two steps exist to confirm or refute; a prototype of its three sweeps
+has been run over the compile's real nodes
+([below](#what-a-prototype-of-the-sweeps-measured)). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design: the change that the measurements below rank first for one core. The
 issue is [#2524](https://github.com/buster14a/buster/issues/2524). The names of
@@ -709,8 +711,9 @@ takes it.
   lookup.
 
 The machine's set is the census's within those rules. It refuses by code what
-they don't take: calls, the increments, the compound assignments. They are the
-next constructs, one a pull request.
+they don't take: the increments, the compound assignments. They are the next
+constructs, one a pull request; calls and `&&`, `||` and `?:` came first
+([below](#calls)).
 
 ### What it measured
 
@@ -803,7 +806,7 @@ sweeps' IPC. The levers, in order:
    class and standing read once from its declaration, as step 2 reads them.
 2. **The context and template tables baked** in place of C's and X's branches.
 
-Coverage comes after: calls first.
+Coverage comes after: calls first ([below](#calls)).
 
 ### The logical operators and the conditional: rows before and between operands
 
@@ -903,6 +906,86 @@ behavior. On the 9700X at `34748d68`, on main `0af27a30`
 - **All three:** 659.9 against 669.9. Main's X formed and spilled each record's
   value address before its template's branch; the accessors form it only where
   a value field is read.
+
+### Calls
+
+The machine's first new code, built on the split's files and accessors
+(#2575, [its record](https://github.com/buster14a/buster-performance/tree/d4eb313476e3f3229f6c9b44f434c7976d0809a2/docs/measurements/node-machine-calls-2524-2026-11-12)).
+A call was the first operator without a code in 12,836 of `sqlite3.c`'s
+18,651 refused expressions.
+
+- **T** types a call by its callee's prototype (`node_machine_call_rule`), as
+  "T: bind and type" says. Each argument converts as an assignment would: an
+  arithmetic type to another (an enumeration's too), a null pointer constant
+  or a pointer to the same pointee, or to a `void` one, with at least its
+  qualifiers. A variadic argument takes the default promotions. The action
+  takes the rest and is the rule's twin under `--verify`, which compares the
+  arguments' conversions too.
+- **T refuses as `callee`** a callee with semantics of its own:
+  - a library builtin's call that the catalogue folds;
+  - a unit with overload sets;
+  - a callee without a prototype, or of a convention other than System V's;
+  - a callee that returns twice.
+
+  The census refuses before it the callees whose attributes or names a warning
+  reads, and in step 2 that test becomes the machine's.
+- **C** takes the lowering's plain call (`check_lower_call_body`'s): a result,
+  parameters and arguments of plain scalars. It evaluates the callee only where
+  the call goes through a pointer, then each argument to its conversion's type.
+  Any other call is a `template` refusal: a struct, union, long double, 128-bit
+  or half-precision argument, parameter or result.
+- **X** writes a `CALL` whose value is the call's row of the function's calls
+  table. Rows are numbered as the lowering numbers them, when a call's task
+  pops (the tasks' preorder), but relative to the expression's first call.
+  X writes in postorder, so a call's row is the evaluated calls written
+  before its subtree's least record, plus the evaluated calls that contain it
+  (C's call depth). Step 2's splice adds the rows before the expression.
+- **The shadow** compares three things:
+  - each call's arguments' conversions, with the stream's;
+  - its `CALL`'s row, with the stream's by one base for the whole expression;
+  - the row's contents, with Tier 0's calls table: the callee's symbol, the
+    argument count, classes and sizes, the variadic flag, and no result
+    object.
+
+  Numbering the rows in postorder instead made 282 of `sqlite3.c`'s
+  expressions differ, the ones with nested calls.
+
+On the 9700X at `4b0e3cb5`, on the split's `27ee009a`, the machine-taken
+evaluated nodes as shares of the census-taken ones, with no difference in
+values, entries or the twin. The three corpora also ran with `-g`:
+
+| | main `0af27a30` | with calls | calls compared |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 50.19% | 80.23% | 12,548 |
+| Lua 5.4.8, 34 files | 40.96% | 73.27% | 3,708 |
+| musl, 1,336 units | 46.66% | 68.59% | 4,596 |
+| c-testsuite's 220 programs | 63.67% | 81.15% | 276 |
+| `main.c` | 24.55% | 43.52% | 4,034 |
+
+- **What `sqlite3.c` still refuses** is the other codes: 19.2% of its nodes,
+  by the first such operator in each expression. The increments come first
+  (2,173 expressions), then `&&` (1,600), the compound assignments (1,422),
+  `||` (625) and `?:` (588).
+- **musl** refuses 59 calls by template, most with a long double.
+- **Lua** refuses one call as `callee`, `ldo.c`'s `setjmp`.
+- **T types 3, 0 and 11 calls by the action** on the three corpora (volatile
+  arguments).
+
+**The cost:** the sweeps take 201.5 cycles and 749.9 instructions a taken node
+on `sqlite3.c`, against the split's 171.0 and 659.9. The nodes calls add cost
+252 cycles each at the margin, 159 of them in T:
+
+- **More records than nodes.** A direct call's callee is a record T types but
+  no node the lowering evaluates: 1.23 records an evaluated node at the
+  margin, against 1.09.
+- **Two costs of T's own.** The profiles show interning the callee's
+  function-to-pointer type (`type_index_find` and `type_find_or_add`, 2.4% of
+  the run) and the arguments' conversions (`check_action_convert_plain`, 3.6%
+  against 1.9%). Each is a per-unit table's work: a function type's pointer,
+  and a pair of types' conversion, as the design's memo has it.
+
+`-c sqlite3.c` is unchanged: 124.1 ms against 124.0 ms, with the same
+instructions.
 
 ## Expected gains
 
