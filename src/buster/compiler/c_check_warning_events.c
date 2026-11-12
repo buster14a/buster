@@ -232,15 +232,18 @@ enum
     // A folded signed `<<` whose result sets its type's sign bit (#2264, clang's DiagnoseBadShiftValues):
     // -Wshift-sign-overflow, off by default.
     CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW = 153,
+    // An integer constant converted to an enumeration that none of its enumerators equals (#2264, clang's
+    // DiagnoseAssignmentEnum): -Wassign-enum, off by default.
+    CHECK_WARNING_ID_ASSIGN_ENUM = 154,
     // clang's warnings that default to errors, of a conversion it still makes (#1963): an integer and a pointer either way
     // (-Wint-conversion, -Wconversion's and so -Wnon-gcc's), pointers to incompatible types (-Wincompatible-pointer-types)
     // and to incompatible function types (-Wincompatible-function-pointer-types, under it), and a void function's value or a
     // non-void function's missing one (-Wreturn-mismatch, -Wreturn-type's and so -Wmost's and -Wall's). Each is an error
     // unless an option or a pragma demotes or ignores it (BUSTER_CHECK_RELAXED_TOKEN).
-    CHECK_WARNING_ID_INT_CONVERSION = 154,
-    CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES = 155,
-    CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES = 156,
-    CHECK_WARNING_ID_RETURN_MISMATCH = 157,
+    CHECK_WARNING_ID_INT_CONVERSION = 155,
+    CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES = 156,
+    CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES = 157,
+    CHECK_WARNING_ID_RETURN_MISMATCH = 158,
     CHECK_WARNING_ID_COUNT,
 };
 
