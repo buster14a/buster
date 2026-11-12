@@ -127,6 +127,11 @@ static void check_input_report_jump(CheckInputReader* reader, uint32_t token, Ch
         input->reports[before].note_token = entered;
     }
     check_input_jump_completion(reader, before);
+    // (Clang reports it from the function's whole body, which stays valid: the report stops nothing, #1942.)
+    if (input->report_count > before)
+    {
+        check_input_recover_reports(reader, before);
+    }
 }
 
 // A musttail return statement's record (CheckInput.musttails), in source order.
@@ -3796,12 +3801,13 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }
-                else if (complete && !check_input_region_transfer(reader, owner, end))
-                {
-                    check_input_report_jump(reader, token, CHECK_INPUT_JUMP_SWITCH, owner, end);
-                }
                 else if (complete)
                 {
+                    // (A label the switch may not jump to is still its case, whose value clang checks, #1942.)
+                    if (!check_input_region_transfer(reader, owner, end))
+                    {
+                        check_input_report_jump(reader, token, CHECK_INPUT_JUMP_SWITCH, owner, end);
+                    }
                     check_sparse_set(reader->output->sparse_pool, reader->output->control_owners, token, owner);
                     check_sparse_set(reader->output->sparse_pool, reader->output->control_owners, end, owner);
                 }
