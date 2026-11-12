@@ -60,6 +60,7 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_LANE_INSERT: operation = IR_SIMD_LANE_INSERT; break;
         case BUSTER_IR_INTRINSIC_MOVEMASK: operation = IR_SIMD_MOVEMASK; break;
         case BUSTER_IR_INTRINSIC_REDUCE: operation = IR_SIMD_REDUCE; break;
+        case BUSTER_IR_INTRINSIC_LANE_UNARY: operation = IR_SIMD_LANE_UNARY; break;
         default: break;
     }
     return operation;

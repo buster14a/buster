@@ -641,6 +641,20 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }
+    else if (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_LANE_UNARY)
+    {
+        // A lane's population count, leading zero count or conflicts (#1840), folded by the model once its vector is
+        // constant.
+        result = work->states[a];
+        if (result == IROPT_CONSTANT)
+        {
+            const IrSimdValue operand = ir_optimize_simd_value(work, a);
+            const IrSimdValue* pointers[3] = { &operand, 0, 0 };
+            const IrSimdShape shape = ir_simd_shape(f->type[i]);
+            const IrSimdAction action = { .operation = IR_SIMD_LANE_UNARY, .result = shape, .operands = { shape, IR_SIMD_NONE, IR_SIMD_NONE }, .index = f->flags[i] };
+            result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+        }
+    }
     else if (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_AES)
     {
         // An AES round (#1840), folded by the model once both operands are constant.

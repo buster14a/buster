@@ -1421,6 +1421,72 @@ The tests:
   is refused without each feature it needs and under 6 changes.
 - **`test-tier1-masks`:** the 54 run through both lowering paths, the
   interpreter at every stage and Tier 1 natively, against C's reductions.
+## The lanes' unary operations (#1840)
+
+One more unary `intrinsic` kind, `lane_unary` (`BUSTER_IR_INTRINSIC_LANE_UNARY`),
+computes one of three things of each of a vector's integer lanes:
+
+```text
+%6 = intrinsic.v16i32 %3 lane_unary 7
+```
+
+- **Operands:** a is of the result's type, a vector of any width.
+- **Flags:** the lanes' bytes' log2 in bits 0 and 1, and the operation in bits
+  2 and 3 (`BUSTER_IR_LANE_UNARY_*`):
+  - **0, population count:** each lane's set bits, of any lanes (`vpopcntb` to
+    `vpopcntq`: BITALG for bytes and words, VPOPCNTDQ for the others);
+  - **1, leading zeros:** the lane's bits for a zero lane, of doublewords and
+    quadwords (AVX-512CD's `vplzcntd`, `vplzcntq`);
+  - **2, conflicts:** bit j set for each lane j below it that equals it, of
+    doublewords and quadwords (`vpconflictd`, `vpconflictq`).
+- **Model and passes:** `IR_SIMD_LANE_UNARY`. SCCP folds a constant vector's,
+  and GVN and LICM take it as pure and total.
+
+**Decoder** (`ir_simd_typed_lane_unary`):
+
+- One record of `ir_simd_lane_unary_forms`' from VECTOR(0) into it is the kind
+  itself. These rows are clang's `__builtin_elementwise_popcount`, its one-operand
+  `__builtin_elementwise_clzg`, and the x86 builtins' `_mm*_popcnt_*`,
+  `_mm*_lzcnt_*` and `_mm*_conflict_*`.
+- `__builtin_elementwise_clzg` of two operands is three records: the count into
+  VECTOR(2), `vptestnm` of VECTOR(0) into k1, then `vpblendm` of VECTOR(2) and
+  VECTOR(1) under k1. It decodes to the kind, then a `vselect` of the second
+  operand where a `vcmp` finds the first's lanes equal to zero.
+
+**Tier 1** selects the one instruction back (`BUSTER_TIER1_VECTOR_LANE_UNARY`).
+
+**Zen 5:** the 24 forms had no row. They were measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-lane-unary-1840-2026-11-12)):
+
+| Forms | Latency | Throughput |
+| --- | ---: | ---: |
+| population counts and leading zero counts, every width | 2 cycles | 2 per cycle |
+| conflicts of an xmm register | 3 cycles | 2 per cycle |
+| conflicts of a ymm or zmm register | 7 cycles, two macro-ops | 1 per cycle |
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against main (`d96b2e73`, with the reductions):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 6 | 1 |
+| `main_unit_backend.c` | 162 | 141 |
+
+`test-checker-driver`'s machine-rows unit goes from 9 rows to 7.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `lane_unary` exactly of its own type at
+  every flags byte and width. The model gives C's counts and conflicts on random
+  vectors whose lanes repeat or are zero.
+- **`test-ir-parse`:** `tests/ir/lane-unary.ir` round-trips.
+- **`test-ir-simd`:** the 30 rows (popcounts of 4 lane sizes, both leading zero
+  counts, the conflicts, at 3 widths) decode at exactly their features. Each is
+  refused without each feature it needs and under 6 changes.
+- **`test-tier1-masks`:** the 30 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C. The population
+  counts' target adds BITALG and VPOPCNTDQ to x86-64-v4's; a host that runs
+  Tier 1's code natively without them leaves those 12 to `test-ir-simd`.
 
 ## Masks to vectors and back (#1840)
 

@@ -91,17 +91,49 @@ struct CheckDeclspecResult
     uint8_t second;
 };
 
-// The slots a list read without an error holds once it ends (check_declspec_scan, #1447): its type, width and sign
-// (CHECK_DECLSPEC_*), whether it has _Complex, its type's token, and whether every specifier was one the scan knows.
+// The slots a list holds once it ends (check_declspec_scan, #1447): its type, width and sign (CHECK_DECLSPEC_*), whether
+// it has _Complex, its type's token, whether every specifier was one the scan knows, and how many of its specifiers the
+// scan's drops left out.
 typedef struct CheckDeclspecSlots CheckDeclspecSlots;
 struct CheckDeclspecSlots
 {
     uint32_t type_token;
+    uint32_t dropped;
     uint8_t type;
     uint8_t width;
     uint8_t sign;
     bool complex;
     bool known;
+};
+
+// The specifiers clang's DeclSpec drops from a list (#1447, #1820 (c)): each one whose kind's slot is taken, at its error,
+// as a bit of the list's tokens from `first` (`overflow` past CHECK_DECLSPEC_DROP_SPAN of them), and every sign or
+// _Complex where the list's end unsets that slot.
+enum
+{
+    CHECK_DECLSPEC_DROP_SPAN = 256,
+    CHECK_DECLSPEC_ERROR_CAPACITY = 8,
+};
+
+typedef struct CheckDeclspecDrops CheckDeclspecDrops;
+struct CheckDeclspecDrops
+{
+    uint64_t bits[CHECK_DECLSPEC_DROP_SPAN / 64];
+    uint32_t first;
+    bool sign;
+    bool complex;
+    bool overflow;
+};
+
+// A list's errors, in clang's order: its specifiers' as the list goes, then its end's (DeclSpec::Finish's chain), and the
+// specifiers they drop. `overflow` where more than CHECK_DECLSPEC_ERROR_CAPACITY.
+typedef struct CheckDeclspecErrors CheckDeclspecErrors;
+struct CheckDeclspecErrors
+{
+    CheckDeclspecResult items[CHECK_DECLSPEC_ERROR_CAPACITY];
+    CheckDeclspecDrops drops;
+    uint32_t count;
+    bool overflow;
 };
 
 // The token after a group that opens at `open` (a `(`, `[` or `{`), balanced over all three, or `end`.
@@ -187,12 +219,58 @@ static bool check_declspec_complex_name(uint32_t name)
     return name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2;
 }
 
-// clang's first error for the specifiers from `first` to `end` (a declaration's, a parameter's or a type name's), into
-// `result`. False if clang gives none, or if a specifier is one this doesn't model, which the caller's own report keeps.
-// check_declspec_error's scan, with the token `skip` left out (BUSTER_CHECK_NONE for none), which a specifier clang drops
-// is (#1447, check_input_specifiers_recover), every _Complex for a _Complex's, and the slots it ends with in `slots`.
-static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* parser, uint32_t first, uint32_t end, uint32_t skip, CheckDeclspecResult* result,
-                                                                CheckDeclspecSlots* slots)
+// Whether `name` is a spelling of signed or unsigned.
+static bool check_declspec_sign_name(uint32_t name)
+{
+    return name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED;
+}
+
+// Whether `drops` leave out the specifier at `token` by itself: at its own error.
+static bool check_declspec_dropped_at(const CheckDeclspecDrops* drops, uint32_t token)
+{
+    const uint32_t offset = token - drops->first;
+    return token >= drops->first && offset < CHECK_DECLSPEC_DROP_SPAN && ((drops->bits[offset / 64] >> (offset % 64)) & 1) != 0;
+}
+
+// Whether `drops` leave out the specifier at `token`.
+static bool check_declspec_dropped(const Parser* parser, const CheckDeclspecDrops* drops, uint32_t token)
+{
+    const uint32_t name = parser->tokens.names[token];
+    return check_declspec_dropped_at(drops, token) || (drops->sign && check_declspec_sign_name(name)) || (drops->complex && check_declspec_complex_name(name));
+}
+
+// Adds the specifier at `token` to `drops`.
+static void check_declspec_drop(CheckDeclspecDrops* drops, uint32_t token)
+{
+    const uint32_t offset = token - drops->first;
+    const bool fits = token >= drops->first && offset < CHECK_DECLSPEC_DROP_SPAN;
+    drops->overflow |= !fits;
+    if (fits)
+    {
+        drops->bits[offset / 64] |= (uint64_t)1 << (offset % 64);
+    }
+}
+
+// Appends an error to `errors`.
+static void check_declspec_add(CheckDeclspecErrors* errors, CheckDeclspecResult error)
+{
+    errors->overflow |= errors->count == CHECK_DECLSPEC_ERROR_CAPACITY;
+    if (errors->count < CHECK_DECLSPEC_ERROR_CAPACITY)
+    {
+        errors->items[errors->count] = error;
+        errors->count += 1;
+    }
+}
+
+// clang's errors for the specifiers from `first` to `end` (a declaration's, a parameter's or a type name's), into
+// `errors`, with the specifiers they drop, in clang's order: a specifier whose kind's slot is taken is an error at it,
+// and dropped (the list goes on, #1820 (c)); then the list's end's, each of which unsets what it is about before the next
+// is checked, as DeclSpec::Finish does: a sign the type doesn't take, then a width (the type becoming int), then
+// _Complex. False if clang gives none, or if a specifier is one this doesn't model, which the caller's own report keeps.
+// The specifiers `skip` drops are left out (NULL for none; #1447, check_input_specifiers_recover), and the slots the
+// list ends with go to `slots`.
+static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* parser, uint32_t first, uint32_t end, const CheckDeclspecDrops* skip,
+                                                                CheckDeclspecErrors* errors, CheckDeclspecSlots* slots)
 {
     const bool c23 = parser->language.standard >= 2023;
     // The type, the width, the sign, _Complex, the storage class, the thread storage class and constexpr: each one's
@@ -209,18 +287,18 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
     uint32_t storage_token = BUSTER_CHECK_NONE;
     uint32_t thread_token = BUSTER_CHECK_NONE;
     uint32_t constexpr_token = BUSTER_CHECK_NONE;
-    *result = (CheckDeclspecResult){ .token = BUSTER_CHECK_NONE, .finish = BUSTER_CHECK_NONE };
-    // A _Complex that clang drops is its whole slot: every _Complex of the list, a repeated one too (DeclSpec::Finish
-    // unsets TypeSpecComplex; review on #1820, `_Complex _Complex _Bool`).
-    const bool skip_complex = skip != BUSTER_CHECK_NONE && check_declspec_complex_name(parser->tokens.names[skip]);
+    uint32_t dropped_count = 0;
+    *errors = (CheckDeclspecErrors){ .drops = { .first = first } };
     uint32_t i = first;
     bool reading = true;
     bool known = true;
-    while (reading && known && result->error == CHECK_DECLSPEC_ERROR_NONE && i < end)
+    while (reading && known && i < end)
     {
         const uint32_t name = parser->tokens.names[i];
         const uint8_t kind = parser->tokens.kinds[i];
         const bool group = i + 1 < end && parser->tokens.kinds[i + 1] == PARSE_KIND_L_PAREN;
+        // A specifier `skip` drops is read for its extent alone: none of the slots.
+        const bool dropped = skip != NULL && check_declspec_dropped(parser, skip, i);
         // The specifier's kind's slot: a type (one), a width, a sign, a storage class or a thread storage class.
         uint8_t new_type = CHECK_DECLSPEC_NONE;
         uint8_t new_width = CHECK_DECLSPEC_NONE;
@@ -228,11 +306,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
         uint8_t new_storage = CHECK_DECLSPEC_NONE;
         uint8_t new_thread = CHECK_DECLSPEC_NONE;
         uint32_t next = i + 1;
-        if (i == skip || (skip_complex && check_declspec_complex_name(name)))
-        {
-            // (A keyword clang drops: none of the slots.)
-        }
-        else if ((kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS) && group)
+        if ((kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS) && group)
         {
             next = check_declspec_skip_group(parser, i + 1, end);
         }
@@ -282,7 +356,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
                 case C_NAME_GNU_THREAD: new_thread = CHECK_DECLSPEC_GNU_THREAD; break;
                 case C_NAME_THREAD_LOCAL: new_thread = CHECK_DECLSPEC_THREAD_LOCAL; break;
                 case C_NAME_THREAD_LOCAL_C11: new_thread = CHECK_DECLSPEC_THREAD_LOCAL_C11; break;
-                case C_NAME_CONSTEXPR: constexpr_token = constexpr_token == BUSTER_CHECK_NONE ? i : constexpr_token; break;
+                case C_NAME_CONSTEXPR: constexpr_token = constexpr_token == BUSTER_CHECK_NONE && !dropped ? i : constexpr_token; break;
                 // inline and _Noreturn, function specifiers, which repeat with a warning.
                 case C_NAME_INLINE: case C_NAME_GNU_INLINE: case C_NAME_GNU_INLINE2: case C_NAME_NORETURN: break;
                 default: known = false; break;
@@ -293,13 +367,13 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
             // A `long` after `long` makes `long long`, which another `long` doesn't take.
             new_width = name == C_NAME_SHORT ? CHECK_DECLSPEC_SHORT : width == CHECK_DECLSPEC_LONG ? CHECK_DECLSPEC_LONG_LONG : CHECK_DECLSPEC_LONG;
         }
-        else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
+        else if (check_declspec_sign_name(name))
         {
             new_sign = name == C_NAME_UNSIGNED ? CHECK_DECLSPEC_UNSIGNED : CHECK_DECLSPEC_SIGNED;
         }
         else if (check_declspec_complex_name(name))
         {
-            complex_token = complex_token == BUSTER_CHECK_NONE ? i : complex_token;
+            complex_token = complex_token == BUSTER_CHECK_NONE && !dropped ? i : complex_token;
         }
         else if (kind == PARSE_KIND_TYPE)
         {
@@ -316,6 +390,12 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
         {
             reading = false;
         }
+        dropped_count += reading && dropped;
+        new_type = dropped ? CHECK_DECLSPEC_NONE : new_type;
+        new_width = dropped ? CHECK_DECLSPEC_NONE : new_width;
+        new_sign = dropped ? CHECK_DECLSPEC_NONE : new_sign;
+        new_storage = dropped ? CHECK_DECLSPEC_NONE : new_storage;
+        new_thread = dropped ? CHECK_DECLSPEC_NONE : new_thread;
         // A second specifier of a slot: the same one repeats (a warning), another conflicts, but `long` after `long`.
         const uint8_t conflict = new_type != CHECK_DECLSPEC_NONE && type != CHECK_DECLSPEC_NONE ? type :
                                  new_width != CHECK_DECLSPEC_NONE && width != CHECK_DECLSPEC_NONE && new_width != width && new_width != CHECK_DECLSPEC_LONG_LONG ? width :
@@ -324,7 +404,10 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
                                  new_thread != CHECK_DECLSPEC_NONE && thread != CHECK_DECLSPEC_NONE && new_thread != thread ? thread : CHECK_DECLSPEC_NONE;
         if (reading && conflict != CHECK_DECLSPEC_NONE)
         {
-            *result = (CheckDeclspecResult){ .token = i, .finish = BUSTER_CHECK_NONE, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = conflict };
+            // Dropped, and the list goes on (DeclSpec's Set* fail, the parser reporting and going on).
+            check_declspec_add(errors, (CheckDeclspecResult){ .token = i, .finish = BUSTER_CHECK_NONE, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = conflict });
+            check_declspec_drop(&errors->drops, i);
+            i = next;
         }
         else if (reading)
         {
@@ -341,37 +424,43 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
             i = next;
         }
     }
-    // The list's end: what the type takes (DeclSpec::Finish), in clang's order.
-    const bool finish = known && result->error == CHECK_DECLSPEC_ERROR_NONE;
+    // The list's end: what the type takes (DeclSpec::Finish), in clang's order, each error unsetting what it is about
+    // before the next check: a sign error the sign, a width error the type (int then), a _Complex error _Complex.
     const bool integer = type == CHECK_DECLSPEC_NONE || type == CHECK_DECLSPEC_INT;
+    if (known && sign != CHECK_DECLSPEC_NONE && !integer && type != CHECK_DECLSPEC_INT128 && type != CHECK_DECLSPEC_CHAR && type != CHECK_DECLSPEC_BIT_INT)
+    {
+        check_declspec_add(errors, (CheckDeclspecResult){ .token = sign_token, .finish = i, .error = CHECK_DECLSPEC_ERROR_SIGN, .first = type });
+        errors->drops.sign = true;
+    }
+    if (known && width != CHECK_DECLSPEC_NONE && !integer && !(width == CHECK_DECLSPEC_LONG && type == CHECK_DECLSPEC_DOUBLE))
+    {
+        check_declspec_add(errors, (CheckDeclspecResult){ .token = width_token, .finish = i, .error = CHECK_DECLSPEC_ERROR_WIDTH, .first = width, .second = type });
+        check_declspec_drop(&errors->drops, type_token);
+        type = CHECK_DECLSPEC_INT;
+    }
     const bool floating = type == CHECK_DECLSPEC_FLOAT || type == CHECK_DECLSPEC_DOUBLE || type == CHECK_DECLSPEC_FLOAT16 || type == CHECK_DECLSPEC_FLOAT128;
+    if (known && complex_token != BUSTER_CHECK_NONE && type != CHECK_DECLSPEC_NONE && type != CHECK_DECLSPEC_INT && type != CHECK_DECLSPEC_CHAR && !floating)
+    {
+        check_declspec_add(errors, (CheckDeclspecResult){ .token = complex_token, .finish = i, .error = CHECK_DECLSPEC_ERROR_COMPLEX, .first = type });
+        errors->drops.complex = true;
+    }
     const bool thread_first = thread_token < storage_token;
-    if (finish && sign != CHECK_DECLSPEC_NONE && !integer && type != CHECK_DECLSPEC_INT128 && type != CHECK_DECLSPEC_CHAR && type != CHECK_DECLSPEC_BIT_INT)
-    {
-        *result = (CheckDeclspecResult){ .token = sign_token, .error = CHECK_DECLSPEC_ERROR_SIGN, .first = type };
-    }
-    else if (finish && width != CHECK_DECLSPEC_NONE && !integer && !(width == CHECK_DECLSPEC_LONG && type == CHECK_DECLSPEC_DOUBLE))
-    {
-        *result = (CheckDeclspecResult){ .token = width_token, .error = CHECK_DECLSPEC_ERROR_WIDTH, .first = width, .second = type };
-    }
-    else if (finish && complex_token != BUSTER_CHECK_NONE && type != CHECK_DECLSPEC_NONE && type != CHECK_DECLSPEC_INT && type != CHECK_DECLSPEC_CHAR && !floating)
-    {
-        *result = (CheckDeclspecResult){ .token = complex_token, .error = CHECK_DECLSPEC_ERROR_COMPLEX, .first = type };
-    }
-    else if (finish && thread != CHECK_DECLSPEC_NONE && storage != CHECK_DECLSPEC_NONE && storage != CHECK_DECLSPEC_EXTERN && storage != CHECK_DECLSPEC_STATIC)
+    if (known && thread != CHECK_DECLSPEC_NONE && storage != CHECK_DECLSPEC_NONE && storage != CHECK_DECLSPEC_EXTERN && storage != CHECK_DECLSPEC_STATIC)
     {
         // At the later of the two, naming the earlier.
-        *result = (CheckDeclspecResult){ .token = thread_first ? storage_token : thread_token, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = thread_first ? thread : storage };
+        check_declspec_add(errors, (CheckDeclspecResult){ .token = thread_first ? storage_token : thread_token, .finish = i, .error = CHECK_DECLSPEC_ERROR_COMBINE,
+                                                          .first = thread_first ? thread : storage });
     }
-    else if (finish && c23 && constexpr_token != BUSTER_CHECK_NONE && (thread != CHECK_DECLSPEC_NONE || storage == CHECK_DECLSPEC_EXTERN))
+    else if (known && c23 && constexpr_token != BUSTER_CHECK_NONE && (thread != CHECK_DECLSPEC_NONE || storage == CHECK_DECLSPEC_EXTERN))
     {
-        *result = (CheckDeclspecResult){ .token = constexpr_token, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = thread != CHECK_DECLSPEC_NONE ? thread : storage };
+        check_declspec_add(errors, (CheckDeclspecResult){ .token = constexpr_token, .finish = i, .error = CHECK_DECLSPEC_ERROR_COMBINE,
+                                                          .first = thread != CHECK_DECLSPEC_NONE ? thread : storage });
     }
-    result->finish = finish && result->error != CHECK_DECLSPEC_ERROR_NONE ? i : BUSTER_CHECK_NONE;
     if (slots != NULL)
     {
         *slots = (CheckDeclspecSlots){
             .type_token = type_token,
+            .dropped = dropped_count,
             .type = type,
             .width = width,
             .sign = sign,
@@ -379,10 +468,14 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
             .known = known,
         };
     }
-    return known && result->error != CHECK_DECLSPEC_ERROR_NONE;
+    return known && errors->count != 0;
 }
 
+// clang's first error for the specifiers from `first` to `end`, into `result` (check_declspec_scan's).
 static bool check_declspec_error(const Parser* parser, uint32_t first, uint32_t end, CheckDeclspecResult* result)
 {
-    return check_declspec_scan(parser, first, end, BUSTER_CHECK_NONE, result, NULL);
+    CheckDeclspecErrors errors;
+    const bool erroneous = check_declspec_scan(parser, first, end, NULL, &errors, NULL);
+    *result = erroneous ? errors.items[0] : (CheckDeclspecResult){ .token = BUSTER_CHECK_NONE, .finish = BUSTER_CHECK_NONE };
+    return erroneous;
 }

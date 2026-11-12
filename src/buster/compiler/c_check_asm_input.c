@@ -1156,6 +1156,22 @@ static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_
     return refused;
 }
 
+// The first label of the asm goto at `token` whose scope it enters (check_input_asm_goto_refused), or BUSTER_CHECK_NONE.
+static uint32_t check_input_asm_goto_entered(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t id = check_input_asm_id(reader->output, token);
+    const CheckInputAsm* assembly = id != 0 ? reader->output->asm_statements + id - 1 : NULL;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t l = 0; assembly != NULL && assembly->token == token && result == BUSTER_CHECK_NONE && l < assembly->label_count; l += 1)
+    {
+        const uint32_t label = assembly->labels[l].target;
+        const uint32_t declaration = label < parser->tokens.count && reader->scope_marks[label] != 0 ? reader->scope_marks[label] - 1 : BUSTER_CHECK_NONE;
+        result = declaration != BUSTER_CHECK_NONE && (token < declaration || token >= reader->vla_scope_ends[declaration]) ? label : result;
+    }
+    return result;
+}
+
 static void check_input_asm_finish(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;

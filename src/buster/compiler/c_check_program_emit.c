@@ -3684,11 +3684,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const EmittedCode* code = run.codes + failed;
             const Tier0Error error = (Tier0Error)code->error;
-            const bool twice = error == TIER0_ERROR_RETURNS_TWICE;
             result->status = error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
-                             error == TIER0_ERROR_UNSUPPORTED || error == TIER0_ERROR_DEPTH || twice ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+                             error == TIER0_ERROR_UNSUPPORTED || error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
             result->reason = error == TIER0_ERROR_DEPTH ? "Tier 0 mask depth or operand register window exceeded" :
-                             twice ? "a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp" :
                              error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = error;
             result->backend_node = code->node;
@@ -4055,6 +4053,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     base[context_length] = '.';
                     memcpy(base + context_length + 1, intern_bytes(identifiers, identifier), own_length);
                     name = check_program_emit_made_name(&result->link, &names, base, (uint32_t)base_length, scratch);
+                }
+                // An asm label naming the static's own name, `f.n` (#2439), which a given name takes first, so that the
+                // static is renamed: clang's module joins the label to the static where it emits the static's function
+                // before the label's first use, and doesn't otherwise. The emission doesn't model that order: refused by
+                // name (its name 0, which ends the symbols' loop). Only a renamed static looks.
+                for (uint32_t t = 0; base != 0 && name != 0 && result->link.names.length[name] != base_length && t < program->symbol_count; t += 1)
+                {
+                    const String8 label = symbol_names[t + 1];
+                    if (label.length == base_length && memcmp(label.pointer, base, base_length) == 0)
+                    {
+                        result->status = CHECK_PROGRAM_UNSUPPORTED;
+                        result->reason = "an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order";
+                        result->token = declaration;
+                        name = 0;
+                    }
                 }
             }
             else if (given != 0)

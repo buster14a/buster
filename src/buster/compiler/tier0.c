@@ -459,6 +459,13 @@ struct Tier0AsmBody
     const uint32_t* label_records;
     const uint32_t* label_names;
     uint32_t label_count;
+    // An asm goto's body whose exits fall straight into the exit's move into eax, with no store between (#2351): the
+    // record its exits start at, past the template's; 0 for any other body. Its call row's class is I32, and the
+    // statement's dispatch on the exit follows it: SET_LOCAL of a temporary, then for each label l a LOCAL of it, a CONST
+    // of l + 1, an EQ and a BRANCH_TRUE to the label. Where nothing runs after the row (tier0_asm_direct), Tier 0 drops
+    // the exits and the dispatch, and the template's jump to label l (a branch to the exit's record, exits + 2 + 2l)
+    // branches to the label's entry, as clang's callbr does.
+    uint32_t exits;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -800,9 +807,6 @@ typedef enum Tier0Error
     TIER0_ERROR_MEMORY,
     // tier0_validate's alone: the stream breaks a rule (`node` and Tier0Check.rule say which).
     TIER0_ERROR_INVALID,
-    // A function that calls __builtin_setjmp holds a value across one of its calls where another expression's code may
-    // write before a longjmp resumes after it (tier0_returns_twice_saves): `node` is that call.
-    TIER0_ERROR_RETURNS_TWICE,
 } Tier0Error;
 
 // A local's final home, in the hole block's layout: a register, or a slot relative to its frame base.
@@ -3807,9 +3811,11 @@ struct Tier0Entries
     uint32_t tail_finish;
     uint32_t eh_finish;
     // A function that calls __builtin_setjmp: the words of each depth's snapshot below a call (tier0_returns_twice_snapshot),
-    // and its depths, once the frame is known, 0 for none: tier0_count_call's.
+    // and its depths, once the frame is known, 0 for none, and whether it takes snapshots at all (of the masks and deep
+    // values too): tier0_count_call's.
     uint32_t snapshot_words;
     uint32_t snapshot_depths;
+    bool snapshot;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and
     // full-width depths before every entry and at count, where the byte columns hold the depths its records are made at.
     uint8_t* deep;
@@ -3823,6 +3829,9 @@ struct Tier0Entries
     // The labels, a bit per entry (tier0_labels's, or tier0_vector_labels's), for emission's looks at an entry's operands'
     // producers (tier0_int128_product); 0 where a caller of the passes has none.
     const uint64_t* labels;
+    // The asm goto body call rows that branch straight to their labels (tier0_asm_direct, #2351), a bit per entry; 0 for
+    // a function without them.
+    uint64_t* direct;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -4354,11 +4363,15 @@ struct Tier0Frame
     uint32_t memory_depths;
     uint32_t mask_area;
     uint32_t mask_slots;
-    // A function that calls __builtin_setjmp (#1843): each call's snapshot of the memory classes' and the vectors' slots
-    // below its arguments, `snapshot_bytes` from `snapshot_area` a call (tier0_returns_twice_snapshot), 0 for none.
+    // A function that calls __builtin_setjmp (#1843): each call's snapshot of the slots a longjmp's resumption after it
+    // must find, `snapshot_bytes` from `snapshot_area` a call (tier0_returns_twice_snapshot), 0 for none: the memory
+    // classes' and the vectors' slots of `snapshot_depths` depths, then from `snapshot_masks` the mask slots (#2465),
+    // then from `snapshot_deep` the deep slots, the integer stack's and the floating one's.
     uint32_t snapshot_area;
     uint32_t snapshot_bytes;
     uint32_t snapshot_depths;
+    uint32_t snapshot_masks;
+    uint32_t snapshot_deep;
     uint32_t variadic_area;
     uint32_t overflow_area;
     uint32_t outgoing;
@@ -5095,15 +5108,21 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         frame->mask_area = valid ? (uint32_t)offset : 0;
         offset += BUSTER_TIER0_MASK_SLOT_BYTES * (uint64_t)frame->mask_slots;
     }
-    if (function->returns_twice && (frame->memory_slots || frame->vectors))
+    const uint64_t deep_slots = (uint64_t)frame->deep_slots + frame->deep_floating_slots;
+    if (function->returns_twice && (frame->memory_slots || frame->vectors || frame->masks || deep_slots != 0))
     {
-        // Each call's snapshot of the slots a longjmp's resumption after it must find (tier0_returns_twice_snapshot).
-        const uint64_t bytes = (frame->memory_slots ? BUSTER_TIER0_MEMORY_SLOT_BYTES * memory_depths : 0) +
-                               (frame->vectors ? BUSTER_TIER0_VECTOR_SLOT_BYTES * memory_depths : 0);
+        // Each call's snapshot of the slots a longjmp's resumption after it must find (tier0_returns_twice_snapshot): the
+        // memory classes' and the vectors', the masks' (#2465) and the deep values' (#2465).
+        const uint64_t depths = frame->memory_slots || frame->vectors ? memory_depths : 0;
+        const uint64_t slots = (frame->memory_slots ? BUSTER_TIER0_MEMORY_SLOT_BYTES * depths : 0) + (frame->vectors ? BUSTER_TIER0_VECTOR_SLOT_BYTES * depths : 0);
+        const uint64_t masks = frame->masks ? BUSTER_TIER0_MASK_SLOT_BYTES * (uint64_t)frame->mask_slots : 0;
+        const uint64_t bytes = slots + masks + 8 * deep_slots;
         valid = valid && offset <= INT32_MAX && bytes <= INT32_MAX;
         frame->snapshot_area = valid ? (uint32_t)offset : 0;
         frame->snapshot_bytes = valid ? (uint32_t)bytes : 0;
-        frame->snapshot_depths = valid ? (uint32_t)memory_depths : 0;
+        frame->snapshot_depths = valid ? (uint32_t)depths : 0;
+        frame->snapshot_masks = valid ? (uint32_t)slots : 0;
+        frame->snapshot_deep = valid ? (uint32_t)(slots + masks) : 0;
         offset += bytes * function->call_count;
     }
     if (function->incoming_variadic != 0)
@@ -6550,7 +6569,8 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         {
             valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
         }
-        valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0));
+        valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0)) &&
+                (body->exits == 0 || (body->exits < body->count && (body->count - body->exits) % 2 == 0 && body->count - body->exits >= 4));
         for (uint32_t k = 0; valid && k < body->label_count; k += 1)
         {
             valid = body->label_records[k] <= body->count;
@@ -6597,16 +6617,36 @@ static uint32_t tier0_call_saved(const Tier0Function* function, uint32_t call, u
     return below < limit ? below : limit;
 }
 
+// One 8-byte word of a setjmp caller's snapshot (tier0_returns_twice_snapshot): from its slot into its copy, or back.
+// It goes through the x87 stack, which is empty at a call: FILD and FISTP of a 64-bit integer keep every bit pattern, and
+// need no register the call's moves may hold.
+static void tier0_snapshot_word(const Tier0Frame* frame, int64_t slot, int64_t copy, bool restore, Tier0Writer* writer)
+{
+    tier0_put(writer, tier0_instruction(X86_FORM_FILD_M64, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)(restore ? copy : slot), 0));
+    tier0_put(writer, tier0_instruction(X86_FORM_FISTP_M64, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)(restore ? slot : copy), 0));
+}
+
+// The values a setjmp caller's call holds in slots across it (tier0_returns_twice_snapshot): its depths below its
+// arguments (`below`), the mask stack's depth (`masks`), and a deep call's integer and floating values in their deep
+// slots (`deep`, 0 for other calls).
+typedef struct Tier0Held Tier0Held;
+struct Tier0Held
+{
+    uint32_t below;
+    uint32_t masks;
+    uint32_t deep[2];
+};
+
 // A function that calls __builtin_setjmp keeps its long doubles', 128-bit integers' and vectors' values in their depths'
-// slots, which the expressions after a call share (#1843): call `call` copies the slots of the depths below its arguments,
-// `below`, into a snapshot of its own (Tier0Frame.snapshot_area) before it, and back after it (`restore`), so that a
-// longjmp's resumption after the call finds them whatever ran since, as its saved registers' (tier0_emit_call). Each 8
-// bytes go through the x87 stack, which is empty at a call: FILD and FISTP of a 64-bit integer keep every bit pattern, and
-// need no register the call's moves may hold. Out of line: such functions are rare.
-static __attribute__((noinline)) void tier0_returns_twice_snapshot(const Tier0Frame* frame, uint32_t call, uint32_t below, bool restore, Tier0Writer* writer)
+// slots, which the expressions after a call share (#1843), its masks past their registers and those a call saves in the
+// mask slots, and a deep call's values in the deep slots (#2465): call `call` copies the slots of what it holds,
+// `held`, into a snapshot of its own (Tier0Frame.snapshot_area) before it, and back after it (`restore`), so that a
+// longjmp's resumption after the call finds them whatever ran since, as its saved registers' (tier0_emit_call). Out of
+// line: such functions are rare.
+static __attribute__((noinline)) void tier0_returns_twice_snapshot(const Tier0Frame* frame, uint32_t call, Tier0Held held, bool restore, Tier0Writer* writer)
 {
     const int64_t region = (int64_t)frame->snapshot_area + (int64_t)frame->snapshot_bytes * call + frame->bias;
-    const uint32_t depths = below < frame->snapshot_depths ? below : frame->snapshot_depths;
+    const uint32_t depths = held.below < frame->snapshot_depths ? held.below : frame->snapshot_depths;
     const int64_t vectors = frame->memory_slots ? (int64_t)BUSTER_TIER0_MEMORY_SLOT_BYTES * frame->snapshot_depths : 0;
     for (uint32_t d = 0; d < depths; d += 1)
     {
@@ -6621,21 +6661,58 @@ static __attribute__((noinline)) void tier0_returns_twice_snapshot(const Tier0Fr
             const int64_t copy = memory ? region + BUSTER_TIER0_MEMORY_SLOT_BYTES * (int64_t)d + word : region + vectors + BUSTER_TIER0_VECTOR_SLOT_BYTES * (int64_t)d + word;
             if (taken)
             {
-                tier0_put(writer, tier0_instruction(X86_FORM_FILD_M64, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)(restore ? copy : slot), 0));
-                tier0_put(writer, tier0_instruction(X86_FORM_FISTP_M64, 0, frame->base, BUSTER_X86_MEMORY_BASE, (int32_t)(restore ? slot : copy), 0));
+                tier0_snapshot_word(frame, slot, copy, restore, writer);
             }
+        }
+    }
+    for (uint32_t d = 0; frame->masks && d < held.masks; d += 1)
+    {
+        const int64_t slot = (int64_t)frame->mask_area + BUSTER_TIER0_MASK_SLOT_BYTES * (int64_t)d + frame->bias;
+        tier0_snapshot_word(frame, slot, region + frame->snapshot_masks + BUSTER_TIER0_MASK_SLOT_BYTES * (int64_t)d, restore, writer);
+    }
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        for (uint32_t d = 0; d < held.deep[s]; d += 1)
+        {
+            const int64_t index = (s == 0 ? 0 : (int64_t)frame->deep_slots) + d;
+            tier0_snapshot_word(frame, (int64_t)frame->deep_area + 8 * index + frame->bias, region + frame->snapshot_deep + 8 * index, restore, writer);
         }
     }
 }
 
-// The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
-// each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home.
-static void tier0_emit_call_record(const Tier0Function* function, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
+// How many records call entry i's snapshot takes and puts back (tier0_returns_twice_snapshot), 0 where its function
+// takes none: a deep call's (`deep_call`) with its deep values below its arguments, `below` and `floating_below`.
+static uint32_t tier0_snapshot_records(const Tier0Entries* entries, uint32_t i, uint32_t below, uint32_t floating_below, bool deep_call)
 {
+    const uint32_t depths = below < entries->snapshot_depths ? below : entries->snapshot_depths;
+    const uint32_t masks = entries->mask_depths != 0 ? entries->mask_depths[i] : 0;
+    const uint32_t words = entries->snapshot_words * depths + masks + (deep_call ? below + floating_below : 0);
+    return entries->snapshot ? 4 * words : 0;
+}
+
+// Whether call entry i is an asm goto's body that branches straight to its labels (Tier0Entries.direct, #2351).
+static bool tier0_direct(const Tier0Entries* entries, uint32_t i)
+{
+    return entries->direct != 0 && (entries->direct[i >> 6] >> (i & 63) & 1) != 0;
+}
+
+// The records an asm body's call row `i` writes: its own, or a direct one's up to its exits (#2351).
+static uint32_t tier0_body_records(const Tier0Entries* entries, const Tier0AsmBody* body, uint32_t i)
+{
+    return tier0_direct(entries, i) ? body->exits : body->count;
+}
+
+// The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
+// each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home. A direct asm goto's body
+// (#2351) stops at its exits, and its jumps to its labels go to the labels' entries, the dispatch's BRANCH_TRUEs' targets.
+static void tier0_emit_call_record(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t call = (uint32_t)function->values[i];
     const Tier0AsmBody* body = tier0_call_body(function, call);
     if (body != 0)
     {
         const uint32_t first = writer->count;
+        const uint32_t end = tier0_body_records(entries, body, i);
         // Its labels' records (#1839), past the labels of the bodies before it.
         uint32_t label_base = 0;
         for (uint32_t b = 0; writer->asm_labels != 0 && body->label_count != 0 && function->asm_bodies + b != body; b += 1)
@@ -6647,7 +6724,7 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
             writer->asm_labels[label_base + k] = first + body->label_records[k];
         }
         uint32_t branch = 0;
-        for (uint32_t r = 0; r < body->count; r += 1)
+        for (uint32_t r = 0; r < end; r += 1)
         {
             X86Instruction record = body->records[r];
             if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
@@ -6661,8 +6738,11 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
                 // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
                 if (writer->records != 0)
                 {
+                    const uint32_t target = body->targets[branch];
+                    // A direct body's jump to label l: the l-th BRANCH_TRUE of the dispatch, 4 entries each past the SET_LOCAL.
+                    const bool label = end != body->count && target > end;
                     writer->branches[writer->branch_count] = writer->count;
-                    writer->targets[writer->branch_count] = first + body->targets[branch];
+                    writer->targets[writer->branch_count] = label ? entries->positions[function->values[i + 5 + 4 * ((target - end - 2) / 2)]] : first + target;
                 }
                 writer->branch_count += 1;
                 branch += 1;
@@ -6691,19 +6771,25 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
     }
 }
 
-// How many branches tier0_emit_call_record writes for call row `call`: an asm body's own.
-static uint32_t tier0_count_call_branches(const Tier0Function* function, uint32_t call)
+// How many branches tier0_emit_call_record writes for call entry i: an asm body's own, a direct one's before its exits.
+static uint32_t tier0_count_call_branches(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
-    const Tier0AsmBody* body = tier0_call_body(function, call);
-    return body != 0 ? body->branch_count : 0;
+    const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
+    uint32_t count = 0;
+    for (uint32_t b = 0; body != 0 && b < body->branch_count; b += 1)
+    {
+        count += body->branches[b] < tier0_body_records(entries, body, i) ? 1 : 0;
+    }
+    return count;
 }
 
-// How many records tier0_emit_call_record writes for call row `call`, and its references into `references`.
-static uint32_t tier0_count_call_record(const Tier0Function* function, uint32_t call, uint32_t* references)
+// How many records tier0_emit_call_record writes for call entry i, and its references into `references`.
+static uint32_t tier0_count_call_record(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t* references)
 {
+    const uint32_t call = (uint32_t)function->values[i];
     const Tier0AsmBody* body = tier0_call_body(function, call);
     *references += body == 0 && function->call_targets[call] != 0 ? 1 : 0;
-    return body != 0 ? body->count : 1;
+    return body != 0 ? tier0_body_records(entries, body, i) : 1;
 }
 
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
@@ -6760,15 +6846,17 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     {
         tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), region + 8 * (saved + d), false);
     }
-    if (__builtin_expect(frame->snapshot_bytes != 0, 0) && !tail)
-    {
-        tier0_returns_twice_snapshot(frame, call, below, false, writer);
-    }
     // The masks in their registers (#179), which the call may overwrite, saved into their slots and loaded back.
     const uint32_t masks = memory ? tier0_saved_masks(entries, i) : 0;
     for (uint32_t d = 0; d < masks; d += 1)
     {
         tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, d, tier0_mask_register(d)));
+    }
+    // A setjmp caller's snapshot, of the mask slots too once the masks are in them.
+    const Tier0Held held = { below, entries->mask_depths != 0 ? entries->mask_depths[i] : 0, { 0, 0 } };
+    if (__builtin_expect(frame->snapshot_bytes != 0, 0) && !tail)
+    {
+        tier0_returns_twice_snapshot(frame, call, held, false, writer);
     }
     uint8_t to[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
     uint8_t from[2 * BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
@@ -6849,7 +6937,7 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        tier0_emit_call_record(function, homes, call, writer);
+        tier0_emit_call_record(function, entries, homes, i, writer);
         const uint32_t result = tier0_stack(function->classes[i]);
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
@@ -6878,7 +6966,7 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         }
         if (__builtin_expect(frame->snapshot_bytes != 0, 0))
         {
-            tier0_returns_twice_snapshot(frame, call, below, true, writer);
+            tier0_returns_twice_snapshot(frame, call, held, true, writer);
         }
         for (uint32_t d = 0; d < masks; d += 1)
         {
@@ -8973,6 +9061,9 @@ static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
 // argument goes from its slot of the memory classes, at its true depth, into its place by fld and fstp, and a long double
 // result from st0 into its depth's, as tier0_emit_call moves them. A deep tail call ends with tier0_emit_tail's records
 // in the call's place, and fills nothing (tier0_select_deep gives it no fill).
+static void tier0_deep_snapshot(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t call, uint32_t i, uint32_t below, uint32_t floating_below,
+                                bool restore, Tier0Writer* writer);
+
 static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                  Tier0Writer* writer)
 {
@@ -8998,6 +9089,11 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
     for (uint32_t d = 0; d < masks; d += 1)
     {
         tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_M64_K, frame, d, tier0_mask_register(d)));
+    }
+    const bool snapshot = __builtin_expect(frame->snapshot_bytes != 0, 0) && function->kinds[i] != BUSTER_TYPED_TAIL_CALL;
+    if (snapshot)
+    {
+        tier0_deep_snapshot(entries, frame, call, i, below, floating_below, false, writer);
     }
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
@@ -9089,7 +9185,11 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        tier0_emit_call_record(function, homes, call, writer);
+        tier0_emit_call_record(function, entries, homes, i, writer);
+        if (snapshot)
+        {
+            tier0_deep_snapshot(entries, frame, call, i, below, floating_below, true, writer);
+        }
         const uint32_t result = tier0_stack(function->classes[i]);
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
@@ -9110,6 +9210,15 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
         tier0_put(writer, tier0_mask_slot(X86_FORM_KMOVQ_K_M64, frame, d, tier0_mask_register(d)));
     }
     tier0_deep_leave(writer, frame, &deep, flags & (BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING));
+}
+
+// A deep call's snapshot in a setjmp caller (#2465): its values below its arguments are in their deep slots, the masks'
+// in theirs (tier0_returns_twice_snapshot). Out of line: such functions are rare.
+static __attribute__((noinline)) void tier0_deep_snapshot(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t call, uint32_t i, uint32_t below,
+                                                          uint32_t floating_below, bool restore, Tier0Writer* writer)
+{
+    const Tier0Held held = { below, entries->mask_depths != 0 ? entries->mask_depths[i] : 0, { below, floating_below } };
+    tier0_returns_twice_snapshot(frame, call, held, restore, writer);
 }
 
 // A deep entry's own records where its slot has no template at its window's depth: its deferred emitter's at that depth.
@@ -9414,9 +9523,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     const uint32_t floating_below = floating_depth - floating_after;
     const uint32_t saved = tier0_call_saved(function, call, below);
     count += 2 * (saved + floating_below + (memory ? tier0_saved_masks(entries, i) : 0));
-    // A setjmp caller's snapshot of the slots below the call, an FILD and an FISTP a word, taken and put back.
-    const uint32_t snapshot = below < entries->snapshot_depths ? below : entries->snapshot_depths;
-    count += !tail ? 4 * entries->snapshot_words * snapshot : 0;
+    // A setjmp caller's snapshot of the slots below the call and the masks', an FILD and an FISTP a word, taken and put back.
+    count += !tail ? tier0_snapshot_records(entries, i, below, 0, false) : 0;
     // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
     uint8_t source_of[32];
     uint32_t pending = 0;
@@ -9449,7 +9557,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? tier0_count_call_record(function, call, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+    count += !tail ? tier0_count_call_record(function, entries, i, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -9553,7 +9661,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
         count = value == X86_REGISTER_RCX ? 3 : 4;
     }
     // An asm body's own branches (#1839).
-    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, (uint32_t)function->values[i]) : 0;
+    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, entries, i) : 0;
     return count;
 }
 
@@ -10641,11 +10749,21 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
         uint32_t references = tail && !indirect ? 1 : 0;
-        count += !tail ? tier0_count_call_record(function, call, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+        count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
+        uint32_t integer_arguments = 0;
+        uint32_t floating_arguments = 0;
+        for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+        {
+            const bool floating = tier0_class_floating(function->argument_classes[first + a]);
+            integer_arguments += floating ? 0 : 1;
+            floating_arguments += floating ? 1 : 0;
+        }
+        const uint32_t below = deep.before[0] - integer_arguments - (indirect ? 1 : 0);
+        count += !tail ? tier0_snapshot_records(entries, i, below, deep.before[1] - floating_arguments, true) : 0;
         counts->references += references;
-        counts->branches += !tail ? tier0_count_call_branches(function, call) : 0;
+        counts->branches += !tail ? tier0_count_call_branches(function, entries, i) : 0;
     }
     else
     {
@@ -10913,7 +11031,9 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->mask_top = 0;
     entries->snapshot_words = 0;
     entries->snapshot_depths = 0;
+    entries->snapshot = false;
     entries->labels = 0;
+    entries->direct = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
@@ -10968,42 +11088,6 @@ static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choic
         memcpy(record, &low, sizeof(low));
         memcpy(record + 8, &high, sizeof(high));
     }
-}
-
-// Whether every value a function that calls __builtin_setjmp holds across one of its calls is saved where nothing else
-// writes, so that a longjmp's resumption after the call finds it (#1242's review): the integer depths below the call's
-// arguments in registers the call saves into its own region (tier0_emit_call), and the floating ones; a long double's, a
-// 128-bit integer's or a vector's in its depth's slot, which the call copies into a snapshot of its own and back
-// (tier0_returns_twice_snapshot, #1843). Not a mask on the mask stack (whose slots are its depths'), nor any value of a
-// function with deep entries (whose depths live in their slots). Returns the first call that holds one, or the count.
-static uint32_t tier0_returns_twice_saves(const Tier0Function* function, const Tier0Entries* entries)
-{
-    uint32_t failed = function->count;
-    const bool deep = entries->deep != 0;
-    for (uint32_t i = 0; failed == function->count && i < function->count; i += 1)
-    {
-        if (!entries->absorbed[i] && function->kinds[i] == BUSTER_TYPED_CALL)
-        {
-            const uint32_t call = (uint32_t)function->values[i];
-            const uint32_t first = function->call_first[call];
-            uint32_t integer_arguments = 0;
-            uint32_t floating_arguments = 0;
-            for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
-            {
-                const bool floating = tier0_class_floating(function->argument_classes[first + a]);
-                integer_arguments += floating ? 0 : 1;
-                floating_arguments += floating ? 1 : 0;
-            }
-            const uint32_t pending = integer_arguments + (function->call_targets[call] == 0 ? 1u : 0u);
-            bool kept = tier0_saved_masks(entries, i) == 0;
-            // A deep function's values are in their depths' slots across a call (tier0_emit_deep_call): it may hold none.
-            const uint32_t integer_depth = deep ? entries->deep_depths[i] : entries->depths[i];
-            const uint32_t floating_depth = deep ? entries->deep_floating_depths[i] : entries->floating_depths[i];
-            kept &= !deep || (integer_depth <= pending && floating_depth <= floating_arguments);
-            failed = kept ? failed : i;
-        }
-    }
-    return failed;
 }
 
 // The segment overrides (#1447) of a function that has them (Tier0Function.segments), one per entry (`segments`: 0, or
@@ -11070,6 +11154,100 @@ static __attribute__((noinline, cold)) bool tier0_push_asm_labels(const Tier0Fun
 // What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
+// Whether asm goto body call entry i (Tier0AsmBody.exits, #2351) may branch straight to its labels: nothing runs after
+// its row (no value under its arguments on any stack, none of them a deep entry's), and the statement's dispatch follows
+// it as the lowering writes it, none of its entries a label.
+static bool tier0_asm_dispatch(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const Tier0AsmBody* body)
+{
+    const uint32_t call = (uint32_t)function->values[i];
+    const uint32_t first = function->call_first[call];
+    uint32_t integer = 0;
+    uint32_t floating = 0;
+    for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+    {
+        const bool is_floating = tier0_class_floating(function->argument_classes[first + a]);
+        integer += is_floating ? 0 : 1;
+        floating += is_floating ? 1 : 0;
+    }
+    const uint32_t labels = (body->count - body->exits - 2) / 2;
+    const uint64_t last = (uint64_t)i + 1 + 4 * (uint64_t)labels;
+    bool valid = function->classes[i] == BUSTER_TYPED_CLASS_I32 && entries->depths[i] == integer && entries->floating_depths[i] == floating &&
+                 (entries->mask_depths == 0 || entries->mask_depths[i] == 0) && (entries->deep == 0 || entries->deep[i] == 0) && last < function->count &&
+                 function->kinds[i + 1] == BUSTER_TYPED_SET_LOCAL && function->classes[i + 1] == BUSTER_TYPED_CLASS_I32;
+    const uint64_t temporary = valid ? function->values[i + 1] : 0;
+    for (uint32_t l = 0; valid && l < labels; l += 1)
+    {
+        const uint32_t e = i + 2 + 4 * l;
+        valid = function->kinds[e] == BUSTER_TYPED_LOCAL && function->values[e] == temporary && function->kinds[e + 1] == BUSTER_TYPED_CONST &&
+                function->values[e + 1] == (uint64_t)l + 1 && function->kinds[e + 2] == BUSTER_TYPED_EQ && function->kinds[e + 3] == BUSTER_TYPED_BRANCH_TRUE &&
+                function->values[e + 3] <= function->count;
+        for (uint32_t k = 0; valid && k < 4; k += 1)
+        {
+            valid = function->classes[e + k] == BUSTER_TYPED_CLASS_I32;
+        }
+    }
+    for (uint32_t e = i + 1; valid && e <= last; e += 1)
+    {
+        valid = !tier0_label(entries->labels, e);
+    }
+    return valid;
+}
+
+// The asm goto bodies that branch straight to their labels (#2351, Tier0AsmBody.exits): each such call row marked in
+// Tier0Entries.direct, and its dispatch absorbed, so that it writes no record on either path. Out of line and cold: few
+// functions have them.
+static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Function* function, Tier0Entries* entries, Arena* scratch)
+{
+    Tier0Error error = TIER0_OK;
+    for (uint32_t i = 0; error == TIER0_OK && i < function->count; i += 1)
+    {
+        const bool row = function->kinds[i] == BUSTER_TYPED_CALL && entries->absorbed[i] == 0 && function->values[i] < function->call_count;
+        const Tier0AsmBody* body = row ? tier0_call_body(function, (uint32_t)function->values[i]) : 0;
+        if (body != 0 && body->exits != 0 && entries->labels != 0 && tier0_asm_dispatch(function, entries, i, body))
+        {
+            const uint64_t words = (uint64_t)function->count / 64 + 1;
+            if (entries->direct == 0)
+            {
+                entries->direct = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words);
+                error = entries->direct != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+                if (error == TIER0_OK)
+                {
+                    memset(entries->direct, 0, words * sizeof(uint64_t));
+                }
+            }
+            if (error == TIER0_OK)
+            {
+                entries->direct[i >> 6] |= 1ull << (i & 63);
+                const uint32_t last = i + 1 + 4 * ((body->count - body->exits - 2) / 2);
+                for (uint32_t e = i + 1; e <= last; e += 1)
+                {
+                    entries->absorbed[e] = 1;
+                    entries->templates[e] = BUSTER_TIER0_ENTRY_ABSORBED;
+                    entries->words[e] = BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES;
+                }
+            }
+        }
+    }
+    return error;
+}
+
+// The references of the direct asm goto bodies' absorbed dispatches (tier0_asm_direct) taken from their exits'
+// temporaries, each the SET_LOCAL's and a LOCAL per label: one no other entry reads then takes no home, nor a
+// callee-saved register's save.
+static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0Function* function, const Tier0Entries* entries, uint32_t* references)
+{
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        if (tier0_direct(entries, i))
+        {
+            const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
+            const uint64_t temporary = function->values[i + 1];
+            const uint32_t taken = 1 + (body->count - body->exits - 2) / 2;
+            references[temporary] -= references[temporary] >= taken ? taken : references[temporary];
+        }
+    }
+}
+
 static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* segments, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code,
                                  bool vector)
 {
@@ -11087,13 +11265,9 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
     {
         error = tier0_select_deep(function, entries, &frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
     }
-    // A function that calls __builtin_setjmp, whose calls' saves are their own: each value it holds across a call must be in
-    // one of them (tier0_returns_twice_saves), and none in a deep entry's slot.
-    const uint32_t held = error == TIER0_OK && unsupported == function->count && function->returns_twice ? tier0_returns_twice_saves(function, entries) : function->count;
-    if (held != function->count)
+    if (error == TIER0_OK && unsupported == function->count && function->asm_body_count != 0)
     {
-        error = TIER0_ERROR_RETURNS_TWICE;
-        code->node = held;
+        error = tier0_asm_direct(function, entries, scratch);
     }
     // The memory classes' slots, a function with their values' (whose long double result, if one, leaves st0 from slot 0),
     // and the vectors'.
@@ -11130,13 +11304,18 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         {
             tier0_count_references(function, references);
         }
+        if (entries->direct != 0)
+        {
+            tier0_direct_references(function, entries, references);
+        }
         frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
         error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
         entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes, false) : 0;
         entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame.eh_return ? tier0_count_tail_finish(function, &frame, homes, true) : 0;
-        entries->snapshot_words = error == TIER0_OK && frame.snapshot_depths != 0 ? frame.snapshot_bytes / (8 * frame.snapshot_depths) : 0;
+        entries->snapshot_words = error == TIER0_OK && frame.snapshot_depths != 0 ? frame.snapshot_masks / (8 * frame.snapshot_depths) : 0;
         entries->snapshot_depths = error == TIER0_OK ? frame.snapshot_depths : 0;
+        entries->snapshot = error == TIER0_OK && frame.snapshot_bytes != 0;
     }
     if (error == TIER0_OK)
     {

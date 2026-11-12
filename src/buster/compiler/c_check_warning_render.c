@@ -44,7 +44,8 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     bool errors = false;
     const CheckWarningCommandLine command = group != UINT32_MAX ?
         check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
-        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0,
+                                   (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0);
     CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
     if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
     {
@@ -58,8 +59,10 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     }
     else if (group == UINT32_MAX)
     {
-        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+        // -w leaves an error by default that no option demoted (BUSTER_CHECK_WARNING_DEFAULT_ERROR, #2213).
+        const bool kept = (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0 && command.mapped >= CHECK_WARNING_ERROR;
+        severity = (command.quiet && !kept) || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, kept ? command.mapped : command.severity);
     }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
@@ -1463,7 +1466,22 @@ static String8 check_driver_counted_type(const Parser* parser, Preprocessor* pp,
                          check_driver_spelling_ready(parser, pp, input, types, spell, scratch);
     if (counted)
     {
-        const TypeNames names = { .bytes = spell->bytes, .lengths = spell->lengths, .count = spell->count, .anonymous = spell->anonymous, .anonymous_count = spell->anonymous_count };
+        TypeNames names = { .bytes = spell->bytes, .lengths = spell->lengths, .count = spell->count, .anonymous = spell->anonymous, .anonymous_count = spell->anonymous_count };
+        // The typedef the member's declaration spells its pointee or element with (`const T * __counted_by(n)`), as its
+        // sugar keeps it, with the qualifiers written beside it.
+        const uint32_t declarator = check_semantic_member_token(parser, input, types, selected);
+        const uint32_t use = declarator < input->token_count ? check_input_typedef_sugar(input, parser, declarator) : 0;
+        uint32_t alias_written = 0;
+        const uint32_t spelling = use != 0 ? check_input_sugar_declaration(input, parser, use, &alias_written) : 0;
+        TypeId alias_type = spelling != 0 && spelling < input->token_count ? input->declared_types[spelling] : 0;
+        String8 alias_name = alias_type != 0 ? check_driver_warning_name(pp, parser->tokens.names[spelling]) : (String8){ 0 };
+        if (alias_type != 0 && alias_name.length != 0)
+        {
+            names.alias_types = &alias_type;
+            names.alias_names = &alias_name;
+            names.alias_written = &alias_written;
+            names.alias_count = 1;
+        }
         const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
         const TypeId inner = types->members.type[selected];
         const bool array = type_kind_is_array(type_kind(types, type_strip_aligned(types, inner)));
@@ -2213,6 +2231,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, "ignored asm label '%.*s' on automatic variable", (int)label.length, label.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_C23_ATTRIBUTES:
+            result = "[[]] attributes are a C23 extension";
+            break;
+        case CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT:
+            result = check_warning_text(scratch, (payload->data & 2u) != 0 ? "%s without named members is a GNU extension" : "empty %s is a GNU extension",
+                                        (payload->data & 1u) != 0 ? "union" : "struct");
+            break;
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :
@@ -2549,7 +2574,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;
         case CHECK_WARNING_EVENT_UNUSED_VARIABLE:
-            result = check_warning_text(scratch, "unused variable '%.*s'", (int)name.length, name.pointer);
+            result = check_warning_text(scratch, payload->data != 0 ? "variable '%.*s' set but not used" : "unused variable '%.*s'", (int)name.length,
+                                        name.pointer);
             break;
         case CHECK_WARNING_EVENT_UNUSED_FUNCTION:
             result = check_warning_text(scratch, "unused function '%.*s'", (int)name.length, name.pointer);
@@ -2559,6 +2585,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_UNUSED_LABEL:
             result = check_warning_text(scratch, "unused label '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_DIVISION_BY_ZERO:
+            result = payload->data != 0 ? "remainder by zero is undefined" : "division by zero is undefined";
             break;
         default: break;
     }
@@ -2738,7 +2767,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                 // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
                 const uint32_t group = check_driver_warning_group(event);
                 const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
-                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const bool default_error = (group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0) ||
+                                           (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0;
                 const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;

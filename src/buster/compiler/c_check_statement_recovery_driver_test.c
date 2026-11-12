@@ -235,10 +235,46 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void g(void) { goto in; int b __attribute__((cleanup(c))) = 0; (void)b; in: ; }\n"
         "void h(int n) { switch (n) { int a[n]; case 1: ; } }\n"
         "void k(int n) { goto in; typedef int T[n]; in: ; }\n",
+        // A case label a switch may not jump to is still its case, and its report cuts nothing: the assignment of the
+        // statement expression's void value keeps its error (#1942).
+        "int f(int x) { int y = 0; switch (x) { case 0: y = ({ int z; }); y = ({ case 1: 2; }); } return y; }\n"
+        "int h(int x) { switch (x) { case 0: x = ({ case 5: 1; }) + \"s\"; } return x; }\n",
+        // A computed goto and an asm goto into a variable length array's, a VLA typedef's or a cleanup variable's scope:
+        // clang's notes at a possible target's label and the declaration it bypasses (#1942).
+        "void use(int);\nvoid cl(int *);\n"
+        "void f(int n) { void *p = &&l1; goto *p; { int a[n]; l1: use(a[0]); } }\n"
+        "void g(int n) { asm goto(\"\" :::: l2); { int b[n]; l2: use(b[0]); } }\n"
+        "void h(int n) { void *p = &&l3; goto *p; { typedef int T[n]; l3: use(sizeof(T)); } }\n"
+        "void k(void) { void *p = &&l4; goto *p; { int c __attribute__((cleanup(cl))) = 0; l4: use(c); } }\n"
+        "void m(int n) { void *q = &&l5; { int a[n]; goto *q; } l5: ; }\n",
         // An undeclared name in a type name's bound ends the reader's walk; the rounds find the later body's error, under -w
         // too (#2162).
         "int f(void) { return _Alignof(int[undecl3]); }\n"
         "int k(void) { return d; }\n",
+        // A declaration constant's error inside a body (#2120): the view leaves out the declaration and its uses, and its
+        // reading's later errors, in statements it keeps whole, are the unit's, in each round.
+        "int k(int b, ...);\n"
+        "int h(int a);\n"
+        "void f(void)\n"
+        "{\n"
+        "    typeof(k()) u;\n"
+        "    typeof(k()) w;\n"
+        "    (void)u; (void)w;\n"
+        "    (void)sizeof(h(1, 2));\n"
+        "    int unused;\n"
+        "}\n",
+        // A statement expression's left-out last statement makes its value void in the view, whose error isn't the unit's;
+        // a later statement's is.
+        "int k(int b, ...);\n"
+        "int h(int a);\n"
+        "int a[sizeof(k())];\n"
+        "void f(void)\n"
+        "{\n"
+        "    int x = ({ typeof(k()) v; 1; });\n"
+        "    int y = ({ int z = k(); });\n"
+        "    h(1, 2);\n"
+        "    (void)(x + y);\n"
+        "}\n",
         // A file-scope array initialized by a compound literal whose body holds a value that is no constant (#1812): the
         // literal's error once at its place, and no mismatch of the array's type with the literal's, which clang's invalid
         // literal leaves out; a valid body's mismatch is still given.

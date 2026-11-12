@@ -194,6 +194,13 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_ALIGNMENT_NO_OP] = { "-Wtautological-compare", NULL, "aligning a value to 1 byte is a no-op" },
     [CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE] = { "-Wtautological-compare", NULL, "the result of checking whether a value is aligned to 1 byte is always true" },
     [CHECK_WARNING_ID_NONSCALAR_SAME_CAST] = { "-Wpedantic", NULL, "C99 forbids casting nonscalar type to the same type" },
+    [CHECK_WARNING_ID_C23_ATTRIBUTES] = { "-Wc23-extensions", "-Wc2x-extensions", "[[]] attributes are a C23 extension" },
+    [CHECK_WARNING_ID_ELABORATED_ENUM_BASE] = { "-Welaborated-enum-base", NULL,
+                                                "non-defining declaration of enumeration with a fixed underlying type is only permitted as a standalone "
+                                                "declaration; missing list of enumerators?" },
+    [CHECK_WARNING_ID_PSABI] = { "-Wpsabi", NULL, "AVX vector argument of type T without 'avx' enabled changes the ABI" },
+    [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = { "-Wgnu-empty-struct", "-Wgnu", "empty struct is a GNU extension" },
+    [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = { "-Wunused-but-set-variable", "-Wunused", "variable set but not used" },
     [CHECK_WARNING_ID_UNUSED_LABEL] = { "-Wunused-label", "-Wunused", "unused label" },
 };
 

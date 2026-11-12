@@ -859,9 +859,9 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // bytes, whose naked function has a label another template takes the address of, and whose template calls libc's puts
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
-// A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
-// review): a deep expression's, in its depth's slot, which later expressions share. Both paths refuse it by name, and
-// compile a long double held across setjmp, whose slot the call snapshots (#1843), and a function with no value held.
+// A value held across a call in a function that calls __builtin_setjmp, which a longjmp's resumption must find: a deep
+// expression's, in its depth's slot, which later expressions share, and which the call snapshots (#2465); a long double's,
+// whose slot the call snapshots (#1843); and a function with no value held. Both paths compile all three.
 static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
 {
     static const char* const sources[3] = {
@@ -886,16 +886,62 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
             char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
             char* text = NULL;
             const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-            const bool refused = status == 1 && text != NULL &&
-                                 strstr(text, "unsupported: a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp") != NULL;
             const bool compiled = status == 0;
-            check_test_expect(test, s == 0 ? refused : compiled,
-                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp is refused by name" : "the same, scalar")
+            check_test_expect(test, compiled,
+                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp compiles" : "the same, scalar")
                               : s == 1 ? (path == 0 ? "a long double held across __builtin_setjmp compiles" : "the same, scalar")
                                        : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
             free(text);
         }
         check_test_expect(test, written, "setjmp's held-value sources written");
+    }
+    unlink(source);
+    unlink(object);
+}
+
+// An asm label naming a block-scope static's symbol, `f.n` (#2439), which clang joins to the static where it emits the
+// static's function before the label's first use (the first source prints 6) and not otherwise (the second, whose link
+// fails), and makes one GLOBAL of the static's storage for a definition so labelled (the third). Both paths refuse the
+// three by name; a label of another dotted name, which no static has, compiles.
+static void check_test_driver_static_label(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char* const sources[4] = {
+        "int printf(const char*, ...);\nint f(void) { static int n = 5; return n++; }\nextern int fn __asm__(\"f.n\");\n"
+        "int main(void) { f(); printf(\"%d\\n\", fn); return 0; }\n",
+        "int printf(const char*, ...);\nextern int fn __asm__(\"f.n\");\nint g(void) { return fn; }\nint f(void) { static int n = 5; return n++; }\n"
+        "int main(void) { f(); printf(\"%d\\n\", g()); return 0; }\n",
+        "int f(void) { static int n = 5; return n++; }\nint fn __asm__(\"f.n\") = 9;\nint main(void) { return f() + fn; }\n",
+        "int f(void) { static int n = 5; return n++; }\nint fm __asm__(\"f.m\") = 9;\nint main(void) { return f() + fm; }\n",
+    };
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/static_label.c", directory);
+    snprintf(object, sizeof(object), "%s/static_label.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            const bool refused = status == 1 && text != NULL &&
+                                 strstr(text, "unsupported: an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order") != NULL;
+            char description[160];
+            if (s < 3)
+            {
+                snprintf(description, sizeof(description), "an asm label naming a block-scope static's symbol, shape %u, is refused by name%s", s,
+                         path == 0 ? "" : ", scalar");
+            }
+            else
+            {
+                snprintf(description, sizeof(description), "an asm label of a dotted name no static has compiles%s", path == 0 ? "" : ", scalar");
+            }
+            check_test_expect(test, s < 3 ? refused : status == 0, description);
+            free(text);
+        }
+        check_test_expect(test, written, "the static labels' sources written");
     }
     unlink(source);
     unlink(object);
@@ -5837,6 +5883,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                                           check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           (warning & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                           check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning, scratch) :
+                                          warning == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                          check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
@@ -6446,9 +6494,27 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\nint e1(int x) { return h(g(x)) + h(x); }\n",
           true, true },
+        // The feature an error names is the first its map's StringMap iterates to (#2093, c_check_feature_map.c).
         { "an arch= attribute", "-march=x86-64",
           "static inline __attribute__((always_inline, target(\"arch=haswell\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true,
-          false },
+          true },
+        { "an arch= attribute of a later CPU", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"arch=znver4\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true,
+          true },
+        { "an attribute that turns its feature off again", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx512f,no-avx512f\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n",
+          true, true },
+        { "an apxf attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"apxf\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true, true },
+        { "an arch= attribute over -mavx", "-mavx",
+          "static inline __attribute__((always_inline, target(\"arch=skylake-avx512\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n",
+          true, true },
+        { "a caller's attribute below the unit's CPU", "-march=x86-64-v2",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"arch=x86-64\"))) int caller(int x) { return h(x); }\n",
+          true, true },
+        { "a caller's attribute that turns a feature off", "-march=haswell",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"no-avx2\"))) int caller(int x) { return h(x); }\n",
+          true, true },
         { "an intrinsic of a feature the unit lacks", "-march=x86-64",
           "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", true, true },
         { "an intrinsic of a feature the unit has", "-march=x86-64-v3",
@@ -7057,6 +7123,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
+#include "c_check_avx_abi_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -8179,11 +8246,18 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_builtin_pointer_sign_driver_test.c"
 #include "c_check_shift_op_parentheses_driver_test.c"
 #include "c_check_alignment_builtin_driver_test.c"
+#include "c_check_lvalue_cast_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
 #include "c_check_asm_label_auto_driver_test.c"
 #include "c_check_assert_const_driver_test.c"
 #include "c_check_assert_bool_driver_test.c"
 #include "c_check_ident_driver_test.c"
+#include "c_check_c23_attributes_driver_test.c"
+#include "c_check_empty_unit_driver_test.c"
+#include "c_check_reserved_macro_driver_test.c"
+#include "c_check_integer_overflow_driver_test.c"
+#include "c_check_gnu_empty_struct_driver_test.c"
+#include "c_check_unused_but_set_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
@@ -9129,11 +9203,18 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);
             check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
             check_test_driver_alignment_builtins(&test, clang, executable, directory);
+            check_test_driver_lvalue_casts(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_asm_label_auto(&test, clang, executable, directory);
             check_test_driver_assert_const(&test, clang, executable, directory);
             check_test_driver_assert_bool(&test, clang, executable, directory);
             check_test_driver_ident(&test, clang, executable, directory);
+            check_test_driver_c23_attributes(&test, clang, executable, directory);
+            check_test_driver_empty_unit(&test, clang, executable, directory);
+            check_test_driver_reserved_macro(&test, clang, executable, directory);
+            check_test_driver_integer_overflow(&test, clang, executable, directory);
+            check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
+            check_test_driver_unused_but_set(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);
@@ -9201,6 +9282,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_target_feature_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_avx_abi(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
         {
@@ -9675,6 +9760,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_asm_symbols(&test, executable, directory);
                 check_test_driver_setjmp_held(&test, executable, directory);
+                check_test_driver_static_label(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
