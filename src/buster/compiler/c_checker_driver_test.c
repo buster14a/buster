@@ -8179,6 +8179,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_shift_op_parentheses_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
 #include "c_check_asm_label_auto_driver_test.c"
+#include "c_check_assert_const_driver_test.c"
 #include "c_check_empty_unit_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
@@ -9125,6 +9126,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_asm_label_auto(&test, clang, executable, directory);
+            check_test_driver_assert_const(&test, clang, executable, directory);
             check_test_driver_empty_unit(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
