@@ -154,7 +154,7 @@ static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1
         const uint64_t mark = kept->length;
         Tier1SelectPlan plan = { 0 };
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], kept, scratch, true, &plan, &node);
+        const Tier1SelectError selected = tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], 0, 0, kept, scratch, true, &plan, &node);
         bool ok = selected == TIER1_SELECT_OK;
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, bench->allowed, kept, scratch, &emitted, &node) : TIER1_EMIT_INVALID;

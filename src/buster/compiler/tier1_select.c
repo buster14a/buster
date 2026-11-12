@@ -33,6 +33,16 @@
 // host's emulation's arguments) and printf's calls of the compiler's own tests, 16 of main_unit_backend.c's 25 refusals.
 #define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 64
 
+// The access column's values selection and the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*,
+// which c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot; and a thread-local's
+// (#141), the thread pointer plus its offset, a TPOFF32 immediate for one of the image's (local-exec) or the offset from
+// its GOT slot (initial-exec), as Tier 0's. A memory operand folds only a direct symbol, rip-relative (#2573,
+// tier1_select_address); a symbol past the column is a direct one, as the consumers read it.
+#define BUSTER_TIER1_ACCESS_DIRECT 0
+#define BUSTER_TIER1_ACCESS_GOT 1
+#define BUSTER_TIER1_ACCESS_LOCAL_EXEC 2
+#define BUSTER_TIER1_ACCESS_INITIAL_EXEC 3
+
 typedef enum Tier1SelectError
 {
     TIER1_SELECT_OK,
@@ -2957,6 +2967,10 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // mask's TIER1_RULE_MASK_LOAD_ADDRESS and TIER1_RULE_MASK_STORE_ADDRESS (#179), `stack_object` is BUSTER_IR_NONE, or the
 // frame object the address walk reached, whose offset the consumer adds to the
 // displacement at emission (tier1_emit_cfg.c): the base value is then BUSTER_IR_NONE, and no register is read for it.
+// With `rip` (#2573), `stack_object` is instead the direct symbol the walk reached (its IR_SYMBOL_ADDR's SymbolId): the
+// memory operand is rip-relative, without a base or an index, and the consumer gives its displacement field a PC32
+// reference to the symbol plus `displacement` (tier1_emit_cfg_kernel). Either leaf reads no value, so every check that
+// a pattern's base is a value's register reads `stack_object` first.
 // The original function stays immutable.
 #define BUSTER_TIER1_SELECT_VALUES 4
 
@@ -2986,6 +3000,8 @@ struct Tier1SelectPattern
     uint8_t storage_width;
     // An ordinary I32 ALU operation writes its wrapping result first, then establishes signed 64-bit storage once.
     bool sign_result;
+    // Whether `stack_object` is a symbol, reached rip-relative (#2573), rather than a frame object.
+    bool rip;
 };
 
 // The fixed registers of a node's pattern (#1839): an asm body's general registers it touches (TIER1_RULE_ASM), or its
@@ -3022,6 +3038,11 @@ struct Tier1SelectPlan
     // every plan the selector publishes has, so the liveness build doesn't verify its function again (#1379). A plan
     // made otherwise (a test's) leaves it false.
     bool function_verified;
+    // The access column the plan was selected by (Tier1SelectForest.symbol_access; null for every symbol direct), whose
+    // direct symbols alone its memory operands fold (#2573). The CFG consumer refuses a folded symbol its own column
+    // doesn't reach directly.
+    const uint8_t* symbol_access;
+    uint32_t symbol_count;
 };
 
 typedef struct Tier1SelectCode Tier1SelectCode;
@@ -3067,10 +3088,23 @@ struct Tier1SelectForest
     // Optional: each pure address node whose every user takes it as an address, a load's or a store's or another such
     // node's (tier1_select_sinkable, #1217), which a memory operand may fold from an earlier block. Null for none.
     const uint8_t* sinkable;
+    // How each symbol below `symbol_count` is reached (BUSTER_TIER1_ACCESS_*), which the plan's caller gives: a memory
+    // operand folds a direct symbol's address alone (#2573, tier1_select_direct_symbol). Null reaches every symbol
+    // directly, as Tier1EmitOptions.symbol_access's null does.
+    const uint8_t* symbol_access;
+    uint32_t symbol_count;
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
     bool vectors;
 };
+
+// Whether a memory operand may take `symbol`'s address as its rip-relative leaf (#2573): a symbol the access column
+// reaches directly. A GOT slot's address and a thread-local's keep their own sequences (TIER1_RULE_SYMBOL_ADDRESS), and
+// their accesses go through the register those leave the address in.
+static bool tier1_select_direct_symbol(const Tier1SelectForest* forest, uint32_t symbol)
+{
+    return forest->symbol_access == 0 || symbol >= forest->symbol_count || forest->symbol_access[symbol] == BUSTER_TIER1_ACCESS_DIRECT;
+}
 
 static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 {
@@ -4638,7 +4672,7 @@ static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
 }
 
 // A memory operand's address: base + index * 2^scale + displacement, the frame object the walk reached instead of a
-// base value, and the nodes its walk passed.
+// base value, or with `rip` the direct symbol (#2573), and the nodes its walk passed.
 typedef struct Tier1SelectAddress Tier1SelectAddress;
 struct Tier1SelectAddress
 {
@@ -4648,6 +4682,7 @@ struct Tier1SelectAddress
     uint32_t object;
     uint8_t scale;
     uint8_t folds;
+    bool rip;
 };
 
 // An address's index through single-use I64 arithmetic in its block, at most BUSTER_TIER1_SELECT_WALK nodes: additions
@@ -4705,7 +4740,9 @@ static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t roo
 // layout, with the frame's base register, so no value is read for it. A memory operand may take shared address nodes
 // too: other users that need their values keep them live through the effective uses. An address-valued root keeps
 // the single-use rule, so it doesn't duplicate a shared lea. The object may live in the entry block past the walk's
-// block: the producer materializes every slot address there, which dominates every use. No narrowed address or
+// block: the producer materializes every slot address there, which dominates every use. A direct symbol's address
+// ends it too (#2573), from any block, since it reads no value either: the operand is the symbol plus the displacement,
+// rip-relative, which has no index, so an address with one keeps the symbol's lea as its base. No narrowed address or
 // speculative load is introduced: the walk stops at the base, the first node it can't take.
 static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address, bool shared)
 {
@@ -4777,6 +4814,16 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
             next.base = BUSTER_IR_NONE;
             taken = true;
         }
+        else if (op == IR_SYMBOL_ADDR && address.index == BUSTER_IR_NONE && (shared || forest->uses[node] == 1) && tier1_select_direct_symbol(forest, a))
+        {
+            // A direct symbol's address is rip-relative wherever it is defined (#2573): speedtest1's MEMSYS5 state
+            // (mem5), sqlite3Config and sqlite3Stat are read and written at constant offsets this way, as clang's
+            // `mov mem5+off(%rip), %eax` does, rather than through a lea of each symbol's.
+            next.object = a;
+            next.rip = true;
+            next.base = BUSTER_IR_NONE;
+            taken = true;
+        }
         else
         {
             taken = taken && ((op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && function->type[node] == IR_I64));
@@ -4812,6 +4859,7 @@ static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier
     pattern->values[first] = address.base;
     pattern->values[first + 1] = address.index;
     pattern->stack_object = address.object;
+    pattern->rip = address.rip;
     pattern->scale = address.scale;
     pattern->displacement = (int32_t)address.displacement;
     pattern->fold_count += address.folds;
@@ -5558,11 +5606,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         if (address.folds != 0)
         {
             Tier1SelectPattern walked = base;
-            // Through a frame object the address is a lea from the frame's base, never a copy of no value.
+            // Through a frame object the address is a lea from the frame's base, never a copy of no value, and through a
+            // symbol a lea from rip (#2573).
             walked.rule = address.object != BUSTER_IR_NONE || address.index != BUSTER_IR_NONE || address.displacement != 0 ? TIER1_RULE_ADDRESS : TIER1_RULE_COPY;
             walked.values[0] = address.base;
             walked.values[1] = address.index;
             walked.stack_object = address.object;
+            walked.rip = address.rip;
             walked.scale = address.scale;
             walked.displacement = (int32_t)address.displacement;
             walked.fold_count = address.folds;
@@ -6073,6 +6123,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = address.base;
             base.values[1] = address.index;
             base.stack_object = address.object;
+            base.rip = address.rip;
             base.displacement = (int32_t)address.displacement;
             base.scale = address.scale;
             base.fold_count = address.folds;
@@ -6567,7 +6618,9 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
 
 // `costed` is true for both public entry points. Tests may set it false for the independent maximal-munch reference;
 // `vector` changes only kernel implementations, never the cover's cost model or tie-breaking.
-static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
+// `symbol_access` is how each symbol below `symbol_count` is reached (Tier1SelectForest.symbol_access; null for every
+// symbol directly).
+static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
 {
     (void)vector;
 
@@ -6577,7 +6630,12 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     const uint64_t output_mark = arguments ? output->length : 0;
     const uint64_t scratch_mark = arguments ? scratch->length : 0;
     const uint32_t count = function != 0 ? function->instruction_count : 0;
-    Tier1SelectPlan plan = { .function = function, .vector = BUSTER_VECTOR_PATH(vector) };
+    Tier1SelectPlan plan = {
+        .function = function,
+        .vector = BUSTER_VECTOR_PATH(vector),
+        .symbol_access = symbol_access,
+        .symbol_count = symbol_access != 0 ? symbol_count : 0,
+    };
     if (!arguments)
     {
         error = TIER1_SELECT_ERROR_INVALID;
@@ -6779,6 +6837,8 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .canonical = canonical,
         .known_bits = known_bits,
         .sinkable = sinkable,
+        .symbol_access = plan.symbol_access,
+        .symbol_count = plan.symbol_count,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
     // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,
@@ -6958,30 +7018,40 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
 
 // The plan of a function that hasn't been verified: ir_verify (or ir_verify_scalar on the scalar path) with `dominance`
 // first, which refuses what the plan can't read.
+// Every symbol is reached directly (a rip-relative memory operand may fold any, #2573).
 static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, vector, true, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, vector, true, true, result, error_node);
+}
+
+// tier1_select_plan's, with each symbol below `symbol_count` reached as `symbol_access` says (BUSTER_TIER1_ACCESS_*, the
+// emitter's Tier1EmitOptions.symbol_access): only a direct one folds into a memory operand (#2573).
+static __attribute__((unused)) Tier1SelectError tier1_select_plan_access(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+{
+    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, vector, true, true, result, error_node);
 }
 
 // The plan of a function its caller has verified with `dominance`, as ir_optimize verifies its result: the same plan as
-// tier1_select_plan's, without verifying it again. On the frozen sqlite3.c, the verification was a quarter of selection's
-// cycles (#141). Unverified IR here may be read outside its columns.
-static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+// tier1_select_plan_access's, without verifying it again. On the frozen sqlite3.c, the verification was a quarter of
+// selection's cycles (#141). Unverified IR here may be read outside its columns.
+static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, output, scratch, vector, false, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, vector, false, true, result, error_node);
 }
 
 static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* pattern, const uint8_t* registers, uint32_t first)
 {
     const uint32_t index = pattern->values[first + 1];
+    const bool rip = pattern->rip && pattern->stack_object != BUSTER_IR_NONE;
     const X86Instruction result =
     {
         .displacement = pattern->displacement,
         // A frame object's base is the frame's base register, which the consumer sets at emission with the object's
-        // offset (tier1_emit_cfg.c): until then the stack pointer's, as the object's lea's is.
-        .rm = pattern->stack_object != BUSTER_IR_NONE ? X86_REGISTER_RSP : registers[pattern->values[first]],
-        .index = index == BUSTER_IR_NONE ? 0 : registers[index],
-        .mode = index == BUSTER_IR_NONE ? BUSTER_X86_MEMORY_BASE : (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(pattern->scale),
+        // offset (tier1_emit_cfg.c): until then the stack pointer's, as the object's lea's is. A symbol's operand is
+        // rip-relative (#2573), whose displacement the consumer moves into its reference's addend.
+        .rm = pattern->stack_object != BUSTER_IR_NONE ? (rip ? 0 : X86_REGISTER_RSP) : registers[pattern->values[first]],
+        .index = index == BUSTER_IR_NONE || rip ? 0 : registers[index],
+        .mode = rip ? BUSTER_X86_MEMORY_RIP : index == BUSTER_IR_NONE ? BUSTER_X86_MEMORY_BASE : (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(pattern->scale),
     };
     return result;
 }

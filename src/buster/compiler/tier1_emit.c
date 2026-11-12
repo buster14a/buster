@@ -94,15 +94,6 @@ struct Tier1EmitDiagnostic
     uint32_t error;
 };
 
-// The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*, which
-// c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot; and a thread-local's (#141), the
-// thread pointer plus its offset, a TPOFF32 immediate for one of the image's (local-exec) or the offset from its GOT slot
-// (initial-exec), as Tier 0's.
-#define BUSTER_TIER1_ACCESS_DIRECT 0
-#define BUSTER_TIER1_ACCESS_GOT 1
-#define BUSTER_TIER1_ACCESS_LOCAL_EXEC 2
-#define BUSTER_TIER1_ACCESS_INITIAL_EXEC 3
-
 typedef struct Tier1EmitOptions Tier1EmitOptions;
 struct Tier1EmitOptions
 {
@@ -1645,7 +1636,14 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
                     allocated &= tier1_select_register_allowed(transitions.registers[value]);
                 }
             }
-            if (!allocated)
+            // A folded frame object or symbol (#2573) needs the frame's layout or a reference, which only the CFG consumer
+            // gives: tier1_emit_cfg_chain sends every function with a frame object's or a symbol's address to it, so a
+            // plan whose pattern has one here isn't one the selector made for this consumer.
+            if (pattern->stack_object != BUSTER_IR_NONE)
+            {
+                error = TIER1_EMIT_UNSUPPORTED;
+            }
+            else if (!allocated)
             {
                 error = TIER1_EMIT_ALLOCATION;
             }
