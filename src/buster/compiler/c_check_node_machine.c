@@ -24,14 +24,29 @@
 //   evaluated operand's context and the type its consumer converts it to. A node the templates don't take refuses the
 //   expression.
 // - X, up again (c_check_node_machine_expand.c, node_machine_expand): each evaluated node's row, its own entries and
-//   then its conversion's, in the evaluation order the tasks write them in (postorder: no template writes before or
-//   between its operands). A local's entries hold its object, which the function's local numbers in step 2's splice; a
-//   global's its symbol.
+//   then its conversion's, in the evaluation order the tasks write them in: postorder, and a logical operator's and a
+//   conditional's entries that come before or between their operands' as a segment after the operand's row
+//   (NodeMachine.hooks), the rows' shape the design's risks name. A local's entries hold its object, which the
+//   function's local numbers in step 2's splice; a global's its symbol; a branch's its label, numbered from the
+//   expression's first (NodeMachine.label_bases), whose place in the tape is NodeMachine.label_entries: the splice numbers
+//   them from the function's count and check_lower_resolve_labels gives them their targets.
 //
-// The set is the census's (c_check_node_census.c) and, within it, the templates': a value read, an address, a folded
-// constant, `&x`, `*p`, a member, a cast, a conversion, the unary and binary scalar operators, a pointer plus an
-// integer, a subscript, the comma and an assignment to a local, a global or an address, each of a scalar class I8 to
-// F64. Calls, `&&`, `||`, `?:`, the increments and the compound assignments are not yet the machine's: it refuses them.
+// The set is the census's (c_check_node_census.c) and, within it, the templates' and check_lower_logical's: a value read,
+// an address, a folded constant, `&x`, `*p`, a member, a cast, a conversion, the unary and binary scalar operators, a
+// pointer plus an integer, a subscript, the comma, `&&`, `||`, `?:` and an assignment to a local, a global or an address,
+// each of a scalar class I8 to F64 (a conditional's of void too); and a plain call (below). The increments and the
+// compound assignments are not yet the machine's: it refuses them.
+//
+// A call (docs/node-machine.md, "T: bind and type"): T types it by its callee's prototype, each argument converted as an
+// assignment converts it and a variadic one by the default promotions (node_machine_call_rule, the action its twin), and
+// refuses a callee with semantics of its own (node_machine_callee_refused). C takes the lowering's plain call
+// (check_lower_call_body's: a result, parameters and arguments of plain scalars) and evaluates its callee where the call
+// is indirect, then its arguments, each to its conversion's type (node_machine_classify_call). X writes a CALL whose
+// value is the call's row of the function's calls table, numbered in the tasks' preorder, as the lowering allocates its
+// rows, but relative to the expression's first: row 0 is the expression's outermost first call (step 2's splice adds the
+// calls before it; node_machine_call_own). Its row's contents, the callee's symbol, the arguments' count and classes and
+// whether it is variadic, are the call record's (node_machine_call_target, node_machine_call_variadic and the argument
+// accessors).
 //
 // This file is the machine's state and its records' interface; main.c includes the three sweeps' files after it, in
 // the checker unit, before baked.c:
@@ -42,7 +57,9 @@
 // - The record accessors (node_machine_record_*): every read of a record by C, X and the shadow's comparison, and C's
 //   writes of its own columns, go through them, so that a record's layout (T's columns, the design's: a value's type,
 //   flags, object, standing and payload, and the rare value whole on the side) changes here and in T alone.
-// - node_machine_local and node_machine_address_takes: what C and X ask of an object.
+// - node_machine_local and node_machine_address_takes: what C and X ask of an object; node_machine_callee_function,
+//   node_machine_direct_callee, node_machine_call_target and node_machine_call_variadic: what T, C, X and the shadow ask
+//   of a call.
 // - node_machine_run: the three sweeps, one after another.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
@@ -51,8 +68,15 @@
 #define BUSTER_NODE_MACHINE_MOST 4096u
 // The most entries one record's row writes: its own and its conversion's (BUSTER_CHECK_LOWER_TEMPLATE_MOST).
 #define BUSTER_NODE_MACHINE_ROW_MOST 8u
+// The most entries a segment after a record's row writes (node_machine_hook): a test of its value and a branch.
+#define BUSTER_NODE_MACHINE_HOOK_MOST 4u
 // A record's state in C: reached and evaluated by its consumer's template.
 #define BUSTER_NODE_MACHINE_EVALUATED 0x01u
+// Its consumer's entries follow its row (NodeMachine.hooks): a logical operator's or a conditional's test of its
+// condition, and the branch past its second operand or first arm.
+#define BUSTER_NODE_MACHINE_AFTER_CONDITION 0x02u
+// A conditional's jump from the end of its first arm to its end, and its second arm's label.
+#define BUSTER_NODE_MACHINE_AFTER_ARM 0x04u
 
 // A type's word's flags (NodeMachine.type_words): no aligned typedef's wrapper (type_strip_aligned is the type itself), and
 // type_is_valid.
@@ -68,14 +92,34 @@
 #define BUSTER_NODE_MACHINE_FLOATING 0x40u
 #define BUSTER_NODE_MACHINE_WIDE 0x80u
 
+// The machine's templates past the node templates' (CheckLowerTemplate): check_lower_logical's, a logical operator's and a
+// conditional's, and a call's. A conditional whose condition is known takes CHECK_LOWER_TEMPLATE_PASS: its arm's entries alone,
+// after its condition's where that has effects.
+typedef enum NodeMachineTemplate
+{
+    // Its condition isn't known: two labels, its alternate and its end; its condition's test and branch to the alternate
+    // after the condition's row (BUSTER_NODE_MACHINE_AFTER_CONDITION); a conditional's jump to its end after its first
+    // arm's, with the alternate there (_AFTER_ARM); and its own row: a logical operator's second operand's test, its jump
+    // to its end, the alternate and its value there, a conditional's nothing; then its end.
+    NODE_MACHINE_TEMPLATE_BRANCH = CHECK_LOWER_TEMPLATE_STORE + 1,
+    // A logical operator whose known condition decides it: its value, 0 for `&&` and 1 for `||`.
+    NODE_MACHINE_TEMPLATE_DECIDED,
+    // A logical operator whose known condition leaves its value to its second operand: that operand's test.
+    NODE_MACHINE_TEMPLATE_SECOND,
+    // A plain call: its CALL (node_machine_call_own).
+    NODE_MACHINE_TEMPLATE_CALL,
+} NodeMachineTemplate;
+
+// A call's template (node_machine_record_template), the machine's own, past #1048's CheckLowerTemplate values.
+#define BUSTER_NODE_MACHINE_TEMPLATE_CALL ((CheckLowerTemplate)NODE_MACHINE_TEMPLATE_CALL)
+
 // Why the machine refuses an expression: the first sweep's reason that stopped it.
 typedef enum NodeMachineRefusal
 {
     NODE_MACHINE_TAKEN,
     // Its nodes aren't one range of the graph with every operand inside it, or past BUSTER_NODE_MACHINE_MOST.
     NODE_MACHINE_REFUSED_SHAPE,
-    // An operator without a code of the machine's (a call, a logical operator, a conditional, an increment, a compound
-    // assignment, a builtin...).
+    // An operator without a code of the machine's (an increment, a compound assignment, a builtin...).
     NODE_MACHINE_REFUSED_CODE,
     // A leaf it doesn't take: an overload set's, an invalid type's, a variable-length array's.
     NODE_MACHINE_REFUSED_LEAF,
@@ -89,6 +133,8 @@ typedef enum NodeMachineRefusal
     NODE_MACHINE_REFUSED_ROW,
     // A root whose consumer evaluates it in a context the machine doesn't give (initialized, a volatile copy, a _BitInt).
     NODE_MACHINE_REFUSED_ROOT,
+    // A call whose callee has semantics of its own (node_machine_callee_refused).
+    NODE_MACHINE_REFUSED_CALLEE,
     NODE_MACHINE_REFUSALS,
 } NodeMachineRefusal;
 
@@ -102,6 +148,7 @@ static const char* const node_machine_refusal_names[NODE_MACHINE_REFUSALS] = {
     [NODE_MACHINE_REFUSED_TEMPLATE] = "template",
     [NODE_MACHINE_REFUSED_ROW] = "row",
     [NODE_MACHINE_REFUSED_ROOT] = "root",
+    [NODE_MACHINE_REFUSED_CALLEE] = "callee",
 };
 
 // T's and C's columns of an expression's records, one array a field, in one block: each record field is then one load
@@ -153,6 +200,18 @@ struct NodeMachineColumns
     uint8_t targets_stagger[BUSTER_NODE_MACHINE_STAGGER];
     uint8_t templates[BUSTER_NODE_MACHINE_MOST];
     uint8_t templates_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t lowest[BUSTER_NODE_MACHINE_MOST];
+    uint8_t lowest_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t argument_first[BUSTER_NODE_MACHINE_MOST];
+    uint8_t argument_first_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t argument_counts[BUSTER_NODE_MACHINE_MOST];
+    uint8_t argument_counts_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t hooks[BUSTER_NODE_MACHINE_MOST];
+    uint8_t hooks_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t label_bases[BUSTER_NODE_MACHINE_MOST];
+    uint8_t label_bases_stagger[BUSTER_NODE_MACHINE_STAGGER];
+    uint32_t call_depths[BUSTER_NODE_MACHINE_MOST];
+    uint8_t call_depths_stagger[BUSTER_NODE_MACHINE_STAGGER];
 };
 
 // The machine's state: the unit's, set once a file (node_machine_begin), and the current expression's records and tape.
@@ -192,25 +251,54 @@ struct NodeMachine
     // floating value's significand, with its sign and exponent in `exponents`. A value the columns can't hold whole (a
     // fault, an overload set, a bit-field's width, an integer past 64 bits, two of the payload's fields) is in `wides`,
     // and its payload is its index there. Then its type's word and facts and its class on the stack (an aggregate's is its
-    // address's), its operands' conversions (their types and flags) and a member's offset in bits. C's: each record's
-    // state, its context (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to, and its
-    // template (CheckLowerTemplate).
+    // address's), its operands' conversions (their types and flags), a member's offset in bits, its subtree's least
+    // record (itself for a leaf), for a call's row (node_machine_call_own), and a call's first argument in the
+    // expression's list (`arguments`) and its count. C's: each record's state, its context
+    // (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to, its template
+    // (CheckLowerTemplate, or past it NodeMachineTemplate), its hook and label base (below) and the evaluated calls among
+    // its ancestors.
     NodeMachineColumns* columns;
     CheckValue* wides;
     uint32_t wide_count;
-    // X's tape: the expression's entries, a local's holding its object.
+    // A call's arguments: their records, by place in the expression's list, and each argument's conversion.
+    // `argument_values` and `verified` are an action's arguments and --verify's conversions, for one call at a time.
+    uint32_t* arguments;
+    CheckConversion* argument_conversions;
+    uint32_t argument_total;
+    CheckValue* argument_values;
+    CheckConversion* verified;
+    // The unit's names of the functions that return twice and the jmp_buf's tag (check_lower_twice_names), for
+    // node_machine_callee_refused.
+    IdentId twice_names[BUSTER_CHECK_LOWER_TWICE_NAMES];
+    IdentId twice_tag;
+    // C's: the record C is classifying, its operands' consumer. Where a record's state has
+    // BUSTER_NODE_MACHINE_AFTER_CONDITION or _AFTER_ARM, its hook is its consumer's record, whose segment follows its row;
+    // where its template is NODE_MACHINE_TEMPLATE_BRANCH, its label base is the first of its two labels, counted from the
+    // expression's first in the order the tasks number them (node_machine_number_labels), of the expression's
+    // `label_count`. `stack` is the numbering's: the labeled records C met, then their subtrees' first records.
+    uint32_t* stack;
+    uint32_t label_count;
+    uint32_t classified;
+    // X's tape: the expression's entries, a local's holding its object, a branch's its label and a call's its row relative
+    // to the expression's first; each label's entry, its place in the tape; per record, the evaluated calls before it in
+    // postorder; and per row, its call's record, `call_count` rows.
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* tape;
+    uint32_t* label_entries;
     uint32_t entry_count;
+    uint32_t* calls_at;
+    uint32_t* call_records;
+    uint32_t call_count;
     // The record T, C or X stopped at, for a refusal's report.
     uint32_t stopped;
 };
 
-// The sweeps' files' functions that node_machine_begin and node_machine_run call: T's table and its types' completion
-// positions (c_check_node_machine_type.c), and the three sweeps.
+// The sweeps' files' functions that this file calls: T's table, its types' completion positions and its operands' records
+// (c_check_node_machine_type.c), and the three sweeps.
 static bool node_machine_tables_initialize(void);
 static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGraph* graph, TypeId type);
+static uint32_t node_machine_operand(const NodeMachine* machine, uint32_t r, uint32_t k);
 static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count);
 static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object);
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object);
@@ -227,7 +315,8 @@ static void* node_machine_column(Arena* arena, uint64_t count, uint64_t bytes, u
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
-    const uint32_t entries = BUSTER_NODE_MACHINE_MOST * BUSTER_NODE_MACHINE_ROW_MOST;
+    // Each record's row, and the segment one record's row may have after it.
+    const uint32_t entries = BUSTER_NODE_MACHINE_MOST * (BUSTER_NODE_MACHINE_ROW_MOST + BUSTER_NODE_MACHINE_HOOK_MOST);
     *machine = (NodeMachine){
         .program = program,
         .types = (TypeTable*)program->types,
@@ -240,18 +329,29 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
-    _Static_assert(sizeof(NodeMachineColumns) % 64 == 0 && sizeof(NodeMachineColumns) % 4096 == 19 * BUSTER_NODE_MACHINE_STAGGER % 4096,
+    _Static_assert(sizeof(NodeMachineColumns) % 64 == 0 && sizeof(NodeMachineColumns) % 4096 == 25 * BUSTER_NODE_MACHINE_STAGGER % 4096,
                    "the record columns stagger by BUSTER_NODE_MACHINE_STAGGER each");
     machine->columns = arena_push_array(arena, 1, sizeof(NodeMachineColumns), 4096);
-    // The others after the record columns' lines (19 arrays, two lines each).
-    machine->wides = node_machine_column(arena, most, sizeof(CheckValue), 38);
-    machine->kinds = node_machine_column(arena, entries, sizeof(uint8_t), 40);
-    machine->classes = node_machine_column(arena, entries, sizeof(uint8_t), 42);
-    machine->tape = node_machine_column(arena, entries, sizeof(uint64_t), 44);
+    // The others after the record columns' lines (25 arrays, two lines each).
+    machine->wides = node_machine_column(arena, most, sizeof(CheckValue), 50);
+    machine->kinds = node_machine_column(arena, entries, sizeof(uint8_t), 52);
+    machine->classes = node_machine_column(arena, entries, sizeof(uint8_t), 54);
+    machine->tape = node_machine_column(arena, entries, sizeof(uint64_t), 56);
+    machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
+    machine->calls_at = node_machine_column(arena, most, sizeof(uint32_t), 60);
+    machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
+    machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+    machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
+    machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
+    machine->verified = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
+    machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
     const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
-                      machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL;
+                      machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
+                      machine->calls_at != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
+                      machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL;
     if (room)
     {
+        (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
         check_lower_classify_types(program->types, machine->type_count, classes, facts);
         for (uint32_t index = 0; index < machine->type_count; index += 1)
         {
@@ -314,6 +414,12 @@ static inline uint32_t node_machine_record_left(const NodeMachine* machine, uint
 static inline uint32_t node_machine_record_right(const NodeMachine* machine, uint32_t r)
 {
     return machine->columns->right[r];
+}
+
+// Its operand 2's record (a conditional's second arm), from the graph: UINT32_MAX for none.
+static inline uint32_t node_machine_record_third(const NodeMachine* machine, uint32_t r)
+{
+    return node_machine_operand(machine, r, 2);
 }
 
 // Its value's type, its category (an lvalue, an rvalue or a function designator) and its BUSTER_CHECK_* flags.
@@ -399,6 +505,14 @@ static inline int64_t node_machine_record_offset(const NodeMachine* machine, uin
     return wide != NULL ? wide->offset : (machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_OFFSET ? (int64_t)machine->columns->payloads[r] : 0;
 }
 
+// Whether its value's truth is known, check_action_truth's answer for its value made whole, and into `truth` that truth.
+static inline bool node_machine_record_truth(const NodeMachine* machine, uint32_t r, bool* truth)
+{
+    CheckValue value;
+    node_machine_record_value(machine, r, &value);
+    return check_action_truth(machine->types, &value, truth);
+}
+
 // Its value's fault, and whether it is an overload set's: a wide value's alone.
 static inline CheckFault node_machine_record_fault(const NodeMachine* machine, uint32_t r)
 {
@@ -442,11 +556,46 @@ static inline uint64_t node_machine_record_member_offset(const NodeMachine* mach
     return machine->columns->member_offsets[r];
 }
 
-// C's columns. Whether its consumer evaluates it (none is, until C reaches it), its context
-// (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to and its template.
+// The least record of its subtree: itself for a leaf, else its operands' and a call's arguments' least.
+static inline uint32_t node_machine_record_lowest(const NodeMachine* machine, uint32_t r)
+{
+    return machine->columns->lowest[r];
+}
+
+// A call's arguments: their count, argument `i`'s record, and its conversion (the type the call converts it to and the
+// conversion's BUSTER_CHECK_CONVERT_* flags, as the stream's argument_conversions hold them).
+static inline uint32_t node_machine_record_argument_count(const NodeMachine* machine, uint32_t r)
+{
+    return machine->columns->argument_counts[r];
+}
+
+static inline uint32_t node_machine_record_argument(const NodeMachine* machine, uint32_t r, uint32_t i)
+{
+    return machine->arguments[machine->columns->argument_first[r] + i];
+}
+
+static inline TypeId node_machine_record_argument_converted(const NodeMachine* machine, uint32_t r, uint32_t i)
+{
+    return machine->argument_conversions[machine->columns->argument_first[r] + i].type;
+}
+
+static inline uint32_t node_machine_record_argument_conversion_flags(const NodeMachine* machine, uint32_t r, uint32_t i)
+{
+    return machine->argument_conversions[machine->columns->argument_first[r] + i].flags;
+}
+
+// C's columns. Whether its consumer evaluates it (none is, until C reaches it), and its whole state, which says too
+// whether its consumer's segment follows its row (BUSTER_NODE_MACHINE_AFTER_CONDITION, _AFTER_ARM); its context
+// (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to and its template; that
+// consumer, where its state says; and a labeled record's first label.
 static inline bool node_machine_record_evaluated(const NodeMachine* machine, uint32_t r)
 {
-    return machine->columns->states[r] == BUSTER_NODE_MACHINE_EVALUATED;
+    return (machine->columns->states[r] & BUSTER_NODE_MACHINE_EVALUATED) != 0;
+}
+
+static inline uint8_t node_machine_record_state(const NodeMachine* machine, uint32_t r)
+{
+    return machine->columns->states[r];
 }
 
 static inline uint8_t node_machine_record_context(const NodeMachine* machine, uint32_t r)
@@ -459,12 +608,29 @@ static inline TypeId node_machine_record_target(const NodeMachine* machine, uint
     return machine->columns->targets[r];
 }
 
+// The evaluated calls among its ancestors, whose rows the lowering numbers before its own.
+static inline uint32_t node_machine_record_call_depth(const NodeMachine* machine, uint32_t r)
+{
+    return machine->columns->call_depths[r];
+}
+
 static inline CheckLowerTemplate node_machine_record_template(const NodeMachine* machine, uint32_t r)
 {
     return (CheckLowerTemplate)machine->columns->templates[r];
 }
 
-// C's writes: the first `count` records not evaluated, then a record evaluated, its context, its target and its template.
+static inline uint32_t node_machine_record_hook(const NodeMachine* machine, uint32_t r)
+{
+    return machine->columns->hooks[r];
+}
+
+static inline uint32_t node_machine_record_label_base(const NodeMachine* machine, uint32_t r)
+{
+    return machine->columns->label_bases[r];
+}
+
+// C's writes: the first `count` records not evaluated, then a record evaluated, its context, its target and its template;
+// an evaluated record's consumer `consumer` whose segment `hook` follows its row; and a labeled record's first label.
 static inline void node_machine_records_set_unevaluated(NodeMachine* machine, uint32_t count)
 {
     memset(machine->columns->states, 0, count);
@@ -490,6 +656,22 @@ static inline void node_machine_record_set_template(NodeMachine* machine, uint32
     machine->columns->templates[r] = (uint8_t)kind;
 }
 
+static inline void node_machine_record_set_hook(NodeMachine* machine, uint32_t r, uint32_t consumer, uint8_t hook)
+{
+    machine->columns->states[r] = BUSTER_NODE_MACHINE_EVALUATED | hook;
+    machine->columns->hooks[r] = consumer;
+}
+
+static inline void node_machine_record_set_label_base(NodeMachine* machine, uint32_t r, uint32_t base)
+{
+    machine->columns->label_bases[r] = base;
+}
+
+static inline void node_machine_record_set_call_depth(NodeMachine* machine, uint32_t r, uint32_t depth)
+{
+    machine->columns->call_depths[r] = depth;
+}
+
 // Whether `object` is a local of the function: an object without a symbol (a parameter's, an automatic object's), which
 // the function's local numbers; one with a symbol is a global's.
 static bool node_machine_local(const NodeMachine* machine, uint32_t object)
@@ -503,6 +685,47 @@ static bool node_machine_address_takes(const NodeMachine* machine, uint32_t obje
 {
     const CheckProgram* program = machine->program;
     return object == 0 || object < program->object_count;
+}
+
+// What T, C and X ask of a call's callee, record `a`. Its function type, by check_action_call's steps from its value's
+// type (a function designator's, or a pointer's pointee), or 0 for none.
+static TypeId node_machine_callee_function(const NodeMachine* machine, uint32_t a)
+{
+    const TypeTable* types = machine->types;
+    TypeId function = type_strip_aligned(types, node_machine_record_type(machine, a));
+    if (type_kind(types, function) == BUSTER_TYPE_KIND_POINTER)
+    {
+        function = type_strip_aligned(types, type_element(types, function));
+    }
+    return type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? function : 0;
+}
+
+// The object it designates where the lowering calls it directly (check_lower_call_body's `direct`): a function with a
+// symbol of its own, its address a constant without an offset or an effect; 0 for a call through a pointer, whose callee
+// the lowering evaluates.
+static uint32_t node_machine_direct_callee(const NodeMachine* machine, uint32_t a)
+{
+    const CheckProgram* program = machine->program;
+    const uint32_t object = node_machine_record_object(machine, a);
+    const bool direct = node_machine_record_category(machine, a) != CHECK_LVALUE && node_machine_record_constant_kind(machine, a) == CHECK_CONSTANT_ADDRESS &&
+                        object != 0 && node_machine_record_offset(machine, a) == 0 && object < program->object_count && program->object_symbols[object] != 0 &&
+                        (node_machine_record_flags(machine, a) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+    return direct ? object : 0;
+}
+
+// What a call record `r`'s row of the function's calls table holds: the symbol it calls (Tier0Function.call_targets), its
+// callee's where it is called directly and 0 through a pointer; and whether it is variadic (call_variadic), its callee's
+// prototype's.
+static SymbolId node_machine_call_target(const NodeMachine* machine, uint32_t r)
+{
+    const uint32_t object = node_machine_direct_callee(machine, node_machine_record_left(machine, r));
+    return object != 0 ? machine->program->object_symbols[object] : 0;
+}
+
+static bool node_machine_call_variadic(const NodeMachine* machine, uint32_t r)
+{
+    const TypeId function = node_machine_callee_function(machine, node_machine_record_left(machine, r));
+    return function != 0 && (machine->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
 }
 
 // The three sweeps over the expression of `count` records (node_machine_type's), whose consumer evaluates it with

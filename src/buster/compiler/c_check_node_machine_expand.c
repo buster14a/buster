@@ -3,9 +3,11 @@
 //
 // #2524's node machine's X sweep (c_check_node_machine.c has the machine): node_machine_expand walks the records up
 // the postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
-// check_lower_template_own's) and then its conversion's to its target in its context (node_machine_conversion,
-// check_lower_template_conversion's). It reads the records T typed and C classified through the record accessors alone;
-// the tape (NodeMachine's kinds, classes and tape) is its own.
+// check_lower_template_own's, and the logical operators' and the conditional's) and then its conversion's to its target
+// in its context (node_machine_conversion, check_lower_template_conversion's), then its consumer's segment after it where
+// it has one (node_machine_hook); a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It
+// reads the records T typed and C classified through the record accessors alone; the tape (NodeMachine's kinds, classes
+// and tape), its labels' entries (label_entries) and the call rows (calls_at, call_records, call_count) are its own.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 
@@ -16,6 +18,19 @@ static inline __attribute__((always_inline)) void node_machine_put(NodeMachine* 
     machine->classes[at] = class;
     machine->tape[at] = value;
     machine->entry_count = at + 1;
+}
+
+// A test of a value of class `class` (check_lower_truth's entries): a narrow class's value converted to I32, then compared
+// with 0 by NE, or by EQ where `negate`.
+static void node_machine_put_truth(NodeMachine* machine, uint8_t class, bool negate)
+{
+    const bool narrow = check_lower_narrow(class);
+    if (narrow)
+    {
+        node_machine_put(machine, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+    }
+    node_machine_put(machine, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : class, 0);
+    node_machine_put(machine, negate ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
 }
 
 // An object's address's entries (check_lower_template_address): a local's (its object, which the splice numbers) or a
@@ -118,14 +133,29 @@ static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
     }
     else if (kind == CHECK_LOWER_TEMPLATE_TRUTH)
     {
-        const uint8_t operand_class = node_machine_class(machine, node_machine_record_converted(machine, r, 0));
-        const bool narrow = check_lower_narrow(operand_class);
-        if (narrow)
+        node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 0)), op == CHECK_OP_NOT);
+    }
+    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCH)
+    {
+        // After its second operand's or second arm's row: a logical operator's test of it, its jump to its end, its
+        // alternate and its value there, 0 for `&&` and 1 for `||`; then its end, which a conditional's first arm jumps to.
+        const uint32_t alternate = node_machine_record_label_base(machine, r);
+        if (op != CHECK_OP_CONDITIONAL)
         {
-            node_machine_put(machine, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+            node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
+            node_machine_put(machine, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
+            machine->label_entries[alternate] = machine->entry_count;
+            node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
         }
-        node_machine_put(machine, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : operand_class, 0);
-        node_machine_put(machine, op == CHECK_OP_NOT ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+        machine->label_entries[alternate + 1] = machine->entry_count;
+    }
+    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_DECIDED)
+    {
+        node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
+    }
+    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_SECOND)
+    {
+        node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
     }
     else if (kind == CHECK_LOWER_TEMPLATE_BINARY)
     {
@@ -209,22 +239,71 @@ static bool node_machine_conversion(NodeMachine* machine, uint32_t r)
     return takes;
 }
 
-// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape. `object` as
-// in C.
+// The segment of record `r`'s consumer after `r`'s row (`state`, its state, says which): a logical operator's or a
+// conditional's test of its condition and branch to its alternate, past its second operand or first arm (a `||`'s where
+// the condition holds, the others' where it doesn't); or a conditional's jump from its first arm to its end, then its
+// alternate, where its second arm starts.
+static void node_machine_hook(NodeMachine* machine, uint32_t r, uint8_t state)
+{
+    const uint32_t consumer = node_machine_record_hook(machine, r);
+    const uint32_t alternate = node_machine_record_label_base(machine, consumer);
+    if ((state & BUSTER_NODE_MACHINE_AFTER_CONDITION) != 0)
+    {
+        node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, consumer, 0)), false);
+        node_machine_put(machine, node_machine_record_op(machine, consumer) == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE,
+                         BUSTER_TYPED_CLASS_I32, alternate);
+    }
+    else
+    {
+        const uint8_t class = node_machine_record_class(machine, consumer);
+        node_machine_put(machine, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
+        machine->label_entries[alternate] = machine->entry_count;
+    }
+}
+
+// Call record `r`'s own entry, after its callee's and its arguments': a CALL of its result's class, whose value is its row
+// relative to the expression's. The lowering numbers a call's row when its task pops, before its operands' tasks (the
+// tasks' preorder), where X writes in postorder: its row is the evaluated calls before its subtree, every one written
+// before its least record, and those that contain it, its call depth (C's).
+static void node_machine_call_own(NodeMachine* machine, uint32_t r)
+{
+    const uint32_t row = machine->calls_at[node_machine_record_lowest(machine, r)] + node_machine_record_call_depth(machine, r);
+    machine->call_records[row] = r;
+    machine->call_count += 1;
+    node_machine_put(machine, BUSTER_TYPED_CALL, node_machine_record_class(machine, r), row);
+}
+
+// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, after it its
+// consumer's segment where it has one (node_machine_hook), and each call's row (NodeMachine.call_records). `object` as in
+// C.
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
     const uint32_t count = machine->count;
     machine->entry_count = 0;
+    machine->call_count = 0;
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < count)
     {
-        if (node_machine_record_evaluated(machine, r))
+        machine->calls_at[r] = machine->call_count;
+        const uint8_t state = node_machine_record_state(machine, r);
+        if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
         {
             const uint32_t before = machine->entry_count;
-            node_machine_own(machine, r, r == count - 1 ? object : 0);
+            if (node_machine_record_template(machine, r) == BUSTER_NODE_MACHINE_TEMPLATE_CALL)
+            {
+                node_machine_call_own(machine, r);
+            }
+            else
+            {
+                node_machine_own(machine, r, r == count - 1 ? object : 0);
+            }
             const bool takes = node_machine_conversion(machine, r);
             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+            if (refusal == NODE_MACHINE_TAKEN && (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)
+            {
+                node_machine_hook(machine, r, state);
+            }
             machine->stopped = r;
         }
         r += refusal == NODE_MACHINE_TAKEN;

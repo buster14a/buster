@@ -12,11 +12,27 @@
 # of the 9700X (8). Fourteen, one per hardware thread, ran in two waves there and took 74.0 s against 73.1 s.
 set(BUSTER_CODEGEN_PARTITIONS 8)
 
+# llvm-config's system libraries (ARGN) as this host links them, into `output`: one it names by a path the host lacks
+# links by its name, from the host's library path. The official release's llvm-config names its build machine's static
+# zstd, /usr/lib/x86_64-linux-gnu/libzstd.a (Ubuntu's), which the 9700X, an Arch host, has as /usr/lib/libzstd.so.
+# buster_codegen_tools' probe decides whether the result links; build-regression checks the mapping.
+function(buster_codegen_system_libraries output)
+    set(libraries "")
+    foreach(library IN LISTS ARGN)
+        if(IS_ABSOLUTE "${library}" AND NOT EXISTS "${library}" AND library MATCHES "/lib([^/]+)\\.(a|so)(\\.[0-9]+)*$")
+            set(library "-l${CMAKE_MATCH_1}")
+        endif()
+        list(APPEND libraries "${library}")
+    endforeach()
+    set(${output} "${libraries}" PARENT_SCOPE)
+endfunction()
+
 # Finds the tools: llvm-config, clang++, llvm-nm, llvm-objcopy, llvm-readobj and ld.lld matching the configured Clang,
 # beside it or on PATH, and LLVM's C API headers. Sets `available`, and `missing` to what is missing or mismatched.
 # llvm-readobj, not its llvm-readelf alias, which a trimmed toolchain (CI's hosted one) leaves out; the merge asks it
-# for readelf's output style. LLVM's libraries link shared where llvm-config finds them, else static (the hosted
-# release ships only the archives), only the components the splitter uses.
+# for readelf's output style. LLVM's libraries link shared where llvm-config finds them, else static (the official
+# release ships only the archives, which CI's hosted install and the 9700X's staged tree keep), only the components the
+# splitter uses.
 function(buster_codegen_tools available missing)
     get_filename_component(directory "${compiler_file}" DIRECTORY)
     set(absent "")
@@ -70,7 +86,8 @@ function(buster_codegen_tools available missing)
                     OUTPUT_VARIABLE system RESULT_VARIABLE system_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
                 if(libraries_status EQUAL 0 AND system_status EQUAL 0 AND NOT libraries STREQUAL "")
                     separate_arguments(llvm_libs UNIX_COMMAND "${libraries}")
-                    separate_arguments(llvm_system_libs UNIX_COMMAND "${system}")
+                    separate_arguments(system UNIX_COMMAND "${system}")
+                    buster_codegen_system_libraries(llvm_system_libs ${system})
                 endif()
             endif()
         endforeach()

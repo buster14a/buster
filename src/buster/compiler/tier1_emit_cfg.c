@@ -11,8 +11,9 @@
 // options ask, constants, symbols' addresses and frame objects' addresses are rematerializable (#178): a fragment the
 // allocator takes out of a register recomputes its value where it needs one again, with no slot, no store and no
 // reload; a symbol's copy is one more reference. tier1_cfg's entry has no predecessors, so where the IR's entry has some
-// (a loop's header), an empty block goes before it and base is 2. tier1_cfg_allocate, or its scalar twin, then
-// allocates the selected uses over the CFG.
+// (a loop's header), an empty block goes before it and base is 2. tier1_cfg's one-call order (#2538,
+// tier1_emit_cfg_one_call) then allocates the selected uses over the CFG: the intervals once, the plain problem's verdict,
+// and the problem that prefers callee-saved registers for values live across a call (tier1_emit_cfg_preference).
 //
 // The records, block by block in layout order: the entry's prologue, then at each block's start its single incoming
 // edge's moves where tier1_cfg placed them there; each node as the straight-line consumer emits it (its fragment
@@ -115,12 +116,12 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     return chain;
 }
 
-// The callee-saved registers that values live across a call may take (tier1_emit_cfg_callee): rbp among them where the
+// The callee-saved registers that values live across a call may take (tier1_emit_cfg_preference): rbp among them where the
 // frame keeps no frame pointer in it (#1116), which the frame's reservations say before allocation.
 #define BUSTER_TIER1_EMIT_CFG_CALLEE ((1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15))
 
 // A register the CFG consumer's values may be in: the selector's caller-saved ones, and the callee-saved ones that values
-// live across a call take (tier1_emit_cfg_callee); never rsp or the scratch register, and rbp only where the frame
+// live across a call take (tier1_emit_cfg_preference); never rsp or the scratch register, and rbp only where the frame
 // doesn't reserve it.
 static bool tier1_emit_cfg_register(uint8_t reg)
 {
@@ -589,7 +590,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     // The general registers' call-save columns: every caller-saved register where the function calls, and the fixed
     // registers' sequences'. Their rows, after allocation, are those of them a call or a sequence saves (tier1_emit_cfg_saves;
     // #177): until then, every column's.
-    // An asm body's callee-saved registers (#1839) hold values only in a function that calls (tier1_emit_cfg_callee).
+    // An asm body's callee-saved registers (#1839) hold values only in a function that calls (tier1_emit_cfg_preference).
     const uint32_t held = options->register_mask | (prepared->call_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE : 0);
     prepared->call_save_columns = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & held);
     prepared->call_save_mask = prepared->call_save_columns;
@@ -718,7 +719,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     const uint32_t registers = options->register_mask & ~prepared->reserved_registers;
     // The xmm registers the floating values take (#141): every one but the class's scratch, or the options' of them.
     const uint32_t vector_registers = options->vector_register_mask != 0 ? options->vector_register_mask & BUSTER_TIER1_EMIT_VECTOR_REGISTERS : BUSTER_TIER1_EMIT_VECTOR_REGISTERS;
-    // The callee-saved registers values live across a call may take, but those the frame reserves (tier1_emit_cfg_callee):
+    // The callee-saved registers values live across a call may take, but those the frame reserves (tier1_emit_cfg_preference):
     // rbp where it is the frame pointer, r15 where it is a realigned dynamic frame's base.
     // And values live across an asm body (#2144), which may take them to keep out of the registers it touches.
     emitted->callee_registers = prepared->call_count != 0 || prepared->asm_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE & ~prepared->reserved_registers : 0;
@@ -3990,30 +3991,76 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     return error;
 }
 
-// Whether the speculative callee-saved preference's allocation failure must fail the function. The first allocation
-// already stands, so only a corrupt input is the allocator's own failure; a constraint or exhausted arena only drops
-// the preference. A test in the Tier 1 outcome regression checks every Tier1CfgError value.
+// Whether the speculative callee-saved preference's allocation failure must fail the function. The plain allocation
+// still stands, so only a corrupt input is the allocator's own failure; a constraint or exhausted arena only drops the
+// preference. A test in the Tier 1 outcome regression checks every Tier1CfgError value.
 static bool tier1_emit_cfg_preference_fatal(Tier1CfgError error)
 {
     return error != TIER1_CFG_OK && error != TIER1_CFG_CONSTRAINT && error != TIER1_CFG_CAPACITY;
 }
 
+// The calls before each position (#2538): `before[q]`, for q from 0 to `positions`, counts the calls of `calls` (in
+// position order, each below `positions`) at positions below q. A 0/1 column of the calls' positions, one past each,
+// and its prefix sum, 16 positions a step: within a register by four shifted adds, then the carry, the last lane's
+// sum, broadcast into the next step. tier1_emit_cfg_calls_before_scalar is its twin.
+static void tier1_emit_cfg_calls_before_vector(const uint32_t* calls, uint32_t call_count, uint32_t positions, uint32_t* before)
+{
+    memset(before, 0, ((uint64_t)positions + 1) * sizeof(uint32_t));
+    for (uint32_t k = 0; k < call_count; k += 1)
+    {
+        before[calls[k] + 1] = 1;
+    }
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i last = _mm512_set1_epi32(15);
+    __m512i carry = zero;
+    for (uint32_t q = 0; q <= positions; q += 16)
+    {
+        const uint32_t left = positions + 1 - q;
+        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        __m512i sum = _mm512_maskz_loadu_epi32(lanes, before + q);
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 15));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 14));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 12));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 8));
+        sum = _mm512_add_epi32(sum, carry);
+        _mm512_mask_storeu_epi32(before + q, lanes, sum);
+        carry = _mm512_permutexvar_epi32(last, sum);
+    }
+}
+
+// The scalar twin of tier1_emit_cfg_calls_before_vector: the running count.
+static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t call_count, uint32_t positions, uint32_t* before)
+{
+    uint32_t k = 0;
+    for (uint32_t q = 0; q <= positions; q += 1)
+    {
+        before[q] = k;
+        k += k < call_count && calls[k] == q;
+    }
+}
+
 // Values live across a call into callee-saved registers, which the prologue saves once, rather than in caller-saved ones
-// that every call saves and restores around itself: from the first allocation's intervals, each value whose interval
-// covers a call's definition phase, but the call's own result, is allocated again with the callee-saved registers alone
-// (and a parameter's incoming one, its definition's), and every other value with the caller-saved ones. A value whose
-// interval covers an asm body's definition phase (#2144, TIER1_RULE_ASM) is kept out of the general registers the body
-// touches, which it would otherwise save and restore around itself (tier1_emit_cfg_asm), and may take the callee-saved
-// ones too where it crosses no call: a phi's web as one, as for calls. If that allocation fails, the first stands. Then
-// the callee-saved registers the allocation took, which the frame saves.
-static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
+// that every call saves and restores around itself: from the plain problem's intervals (`intervals`), each value whose
+// interval covers a call's definition phase, but the call's own result, is allowed the callee-saved registers alone (and a
+// parameter's incoming one, its definition's), and every other value the caller-saved ones. A value whose interval covers
+// an asm body's definition phase (#2144, TIER1_RULE_ASM) is kept out of the general registers the body touches, which it
+// would otherwise save and restore around itself (tier1_emit_cfg_asm), and may take the callee-saved ones too where it
+// crosses no call: a phi's web as one, as for calls. The preferred problem's sets, on the output arena, which
+// tier1_cfg_preferred joins to each definition's registers while it is bound, and how many general values it moves
+// (`crossing`, none: nothing to prefer). False where an arena is short.
+//
+// An interval crosses a call where the first call at or past its start is before its end and isn't its value's own
+// definition. With `counted` (#2538's step 4) that is two loads of the calls before each position
+// (tier1_emit_cfg_calls_before_vector, or its scalar twin without `vector`): a call in [start, end), unless the first is
+// the value's own, which only a call's result's interval can start at. Without it, the first call at or past the start
+// by halving the calls, the form tier1_emit_cfg_two_calls keeps, which --verify compares.
+static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, bool vector, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing)
 {
     const IrFunction* function = plan->function;
-    Tier1CfgInput* input = &emitted->cfg_input;
     const uint32_t callee = emitted->callee_registers;
     const uint32_t added = input->block_count - function->block_count;
     const uint32_t base = 2 * added;
-    bool ok = callee != 0;
+    bool ok = true;
     uint32_t* calls = ok ? ir_allocate(scratch, (uint64_t)emitted->prepared.call_count + 1, 4, &ok) : 0;
     uint32_t call_count = 0;
     for (uint32_t node = 0; ok && node < function->instruction_count; node += 1)
@@ -4021,6 +4068,18 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         if (tier1_select_function_call(function, node))
         {
             calls[call_count++] = base + 2 * node + 1;
+        }
+    }
+    uint32_t* before = ok && counted ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
+    if (before != 0)
+    {
+        if (BUSTER_VECTOR_PATH(vector))
+        {
+            tier1_emit_cfg_calls_before_vector(calls, call_count, input->position_count, before);
+        }
+        else
+        {
+            tier1_emit_cfg_calls_before_scalar(calls, call_count, input->position_count, before);
         }
     }
     // The asm bodies' definition phases, in position order, and the general registers each touches.
@@ -4070,30 +4129,42 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
             }
         }
     }
-    uint32_t crossing = 0;
+    uint32_t count = 0;
     const uint32_t caller = input->registers[0];
     for (uint32_t pass = 0; ok && pass < 2; pass += 1)
     for (uint32_t v = 0; ok && v < input->value_count; v += 1)
     {
         const uint32_t node = emitted->value_nodes[v];
+        const uint32_t own = base + 2 * node + 1;
+        // Where the value is a call's result: then its definition's interval starts at that call, which it doesn't cross.
+        const bool called = before != 0 && tier1_select_function_call(function, node);
         // A mask keeps its class's registers (#179): no opmask register survives a call.
         const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
         bool crosses = false;
         uint32_t avoid = 0;
-        for (uint32_t i = emitted->cfg.value_interval_offsets[v]; i < emitted->cfg.value_interval_offsets[v + 1]; i += 1)
+        for (uint32_t i = intervals->value_interval_offsets[v]; i < intervals->value_interval_offsets[v + 1]; i += 1)
         {
-            const uint32_t start = emitted->cfg.intervals.starts[i];
-            const uint32_t end = emitted->cfg.intervals.ends[i];
-            // The first call at or past the interval's start, by halving: the calls are in position order.
-            uint32_t low = 0;
-            uint32_t high = call_count;
-            while (low < high)
+            const uint32_t start = intervals->intervals.starts[i];
+            const uint32_t end = intervals->intervals.ends[i];
+            if (before != 0)
             {
-                const uint32_t middle = low + (high - low) / 2;
-                low = calls[middle] < start ? middle + 1 : low;
-                high = calls[middle] < start ? high : middle;
+                // A call in [start, end), and the first of them not the value's own: none before its own in the interval.
+                const bool inside = called && start <= own && own < end;
+                crosses |= before[end] != before[start] && !(inside && before[own] == before[start]);
             }
-            crosses |= low < call_count && calls[low] < end && calls[low] != base + 2 * node + 1;
+            else
+            {
+                // The first call at or past the interval's start, by halving: the calls are in position order.
+                uint32_t low = 0;
+                uint32_t high = call_count;
+                while (low < high)
+                {
+                    const uint32_t middle = low + (high - low) / 2;
+                    low = calls[middle] < start ? middle + 1 : low;
+                    high = calls[middle] < start ? high : middle;
+                }
+                crosses |= low < call_count && calls[low] < end && calls[low] != own;
+            }
             // The bodies the interval covers (a body defines no value), each's registers.
             uint32_t first = 0;
             uint32_t past = body_count;
@@ -4108,10 +4179,10 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
                 avoid |= touched[b];
             }
         }
-        // A parameter keeps its incoming register over its definition's interval, as in the first allocation: free there
-        // too, in a callee-saved register from the entry on, it would hold one for the whole entry block, which spilled
-        // more than its saves around the calls there cost (on speedtest1, a slower run). A parameter the first
-        // allocation already freed (tier1_emit_cfg_function) stays free, the entry's moves bringing it.
+        // A parameter keeps its incoming register over its definition's interval, as in the plain allocation
+        // (tier1_cfg_preferred adds it): free there too, in a callee-saved register from the entry on, it would hold one
+        // for the whole entry block, which spilled more than its saves around the calls there cost (on speedtest1, a slower
+        // run). A parameter the plain allocation already freed stays free, the entry's moves bringing it.
         uint32_t root = v;
         while (parents[root] != root)
         {
@@ -4121,49 +4192,186 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         crosses = crossed[root] != 0;
         avoided[root] |= pass == 0 ? avoid : 0;
         avoid = avoided[root];
-        const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
-        allowed[v] = general ? ((crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid) | defined : input->allowed_registers[v];
-        crossing += pass == 1 && general && (crosses || avoid != 0);
+        allowed[v] = general ? (crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
+        count += pass == 1 && general && (crosses || avoid != 0);
     }
-    Tier1EmitError error = ok || callee == 0 ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
-    if (error == TIER1_EMIT_OK && crossing != 0)
+    *preferred = allowed;
+    *crossing = count;
+    return ok;
+}
+
+// The callee-saved registers the general class's fragments took (a mask's k3 is no rbx), which the frame saves.
+static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32_t callee)
+{
+    uint32_t used = 0;
+    const Tier1Allocation* allocation = &cfg->allocation;
+    for (uint32_t i = 0; i < cfg->intervals.count; i += 1)
     {
-        const Tier1CfgInput first_input = *input;
-        input->allowed_registers = allowed;
-        input->registers[0] = caller | callee;
-        Tier1CfgAllocation second;
-        const Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(input, output, scratch, &second) : tier1_cfg_allocate_scalar(input, output, scratch, &second);
-        // This second pass only tries to prefer callee-saved registers. A constraint or exhausted arena discards the
-        // preference and keeps the first allocation, which the function already has; a corrupt input is the allocator's
-        // own failure to report, not a capability or capacity result.
-        if (tier1_emit_cfg_preference_fatal(allocated))
-        {
-            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
-            error = TIER1_EMIT_INVALID;
-        }
-        const bool taken = allocated == TIER1_CFG_OK && second.split_count == 0 && (second.temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0;
-        if (taken)
-        {
-            emitted->cfg = second;
-            emitted->crossing_values = crossing;
-        }
-        else
-        {
-            *input = first_input;
-        }
-    }
-    // The callee-saved registers the general class's fragments took (a mask's k3 is no rbx).
-    emitted->callee_used = 0;
-    const Tier1Allocation* allocation = &emitted->cfg.allocation;
-    for (uint32_t i = 0; error == TIER1_EMIT_OK && i < emitted->cfg.intervals.count; i += 1)
-    {
-        for (uint32_t f = allocation->fragment_offsets[i]; emitted->cfg.intervals.classes[i] == BUSTER_TIER1_ALLOCATE_GPR && f < allocation->fragment_offsets[i + 1]; f += 1)
+        for (uint32_t f = allocation->fragment_offsets[i]; cfg->intervals.classes[i] == BUSTER_TIER1_ALLOCATE_GPR && f < allocation->fragment_offsets[i + 1]; f += 1)
         {
             const uint8_t reg = allocation->registers[f];
-            emitted->callee_used |= allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && reg < 16 && ((callee >> reg) & 1) != 0 ? 1u << reg : 0;
+            used |= allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && reg < 16 && ((callee >> reg) & 1) != 0 ? 1u << reg : 0;
+        }
+    }
+    return used;
+}
+
+// An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
+// ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
+static Tier1EmitError tier1_emit_cfg_allocated(Tier1CfgError allocated, const Tier1CfgAllocation* cfg)
+{
+    const Tier1EmitError error = allocated == TIER1_CFG_OK ? TIER1_EMIT_OK : allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : allocated == TIER1_CFG_CONSTRAINT ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_INVALID;
+    return error != TIER1_EMIT_OK || (cfg->split_count == 0 && (cfg->temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0) ? error : TIER1_EMIT_ALLOCATION;
+}
+
+// The order the CFG consumer allocated in before #2538, kept as the one-call order's reference (--verify) and for a
+// problem with fixed ranges: the plain problem allocated whole, and again with every parameter free where a parameter
+// bound to its incoming register over its definition's interval leaves a use there no register; then the preference from
+// its intervals, and the preferred problem allocated whole again, whose allocation replaces the plain one where it is taken
+// (allocated, without a split). `input` and `cfg` are the problem and the allocation as the order leaves them, and
+// `crossing` the values it moved where the preference is taken.
+static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg, uint32_t* crossing)
+{
+    const bool vector = BUSTER_VECTOR_PATH(options->vector);
+    *crossing = 0;
+    Tier1CfgError allocated = vector ? tier1_cfg_allocate(input, output, scratch, cfg) : tier1_cfg_allocate_scalar(input, output, scratch, cfg);
+    if (allocated == TIER1_CFG_CONSTRAINT)
+    {
+        input->definition_registers = 0;
+        allocated = vector ? tier1_cfg_allocate(input, output, scratch, cfg) : tier1_cfg_allocate_scalar(input, output, scratch, cfg);
+    }
+    tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
+    Tier1EmitError error = tier1_emit_cfg_allocated(allocated, cfg);
+    uint32_t* allowed = 0;
+    uint32_t moved = 0;
+    if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
+    {
+        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, vector, output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    }
+    Tier1CfgInput problem = *input;
+    const Tier1CfgPreference preference = {
+        .sets = allowed,
+        .registers = {
+            input->registers[0] | emitted->callee_registers,
+            input->registers[1],
+            input->registers[2],
+        },
+    };
+    error = error == TIER1_EMIT_OK && moved != 0 && !tier1_cfg_preferred(input, &preference, output, &problem) ? TIER1_EMIT_MEMORY : error;
+    if (error == TIER1_EMIT_OK && moved != 0)
+    {
+        Tier1CfgAllocation second;
+        const Tier1CfgError preferred = vector ? tier1_cfg_allocate(&problem, output, scratch, &second) : tier1_cfg_allocate_scalar(&problem, output, scratch, &second);
+        // The preferred problem only tries to keep values in callee-saved registers. A constraint or exhausted arena
+        // discards the preference and keeps the plain allocation; a corrupt input is the allocator's own failure to report,
+        // not a capability or capacity result.
+        if (tier1_emit_cfg_preference_fatal(preferred))
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, preferred);
+            error = TIER1_EMIT_INVALID;
+        }
+        if (tier1_cfg_taken(preferred, &second))
+        {
+            *cfg = second;
+            *input = problem;
+            *crossing = moved;
         }
     }
     return error;
+}
+
+// The CFG consumer's allocation (#2538): the intervals prepared once for both problems, which have the same ones without
+// fixed ranges (tier1_cfg_order_prepare); the preference from those intervals; then the preferred problem assigned with
+// the plain one's verdict inside its call, the plain problem assigned whole only where the preferred allocation isn't
+// taken, and lookup columns, slot sharing and edge moves made once, for the allocation that stands
+// (tier1_cfg_order_run). The same problem and allocation as tier1_emit_cfg_two_calls's, which --verify checks
+// (tier1_emit_cfg_order_check).
+static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg, uint32_t* crossing)
+{
+    Tier1CfgOrder order;
+    *crossing = 0;
+    Tier1CfgError allocated = tier1_cfg_order_prepare(input, output, scratch, BUSTER_VECTOR_PATH(options->vector), &order);
+    tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
+    Tier1EmitError error = tier1_emit_cfg_allocated(allocated, &order.prepared.candidate);
+    uint32_t* sets = 0;
+    uint32_t moved = 0;
+    if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
+    {
+        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &sets, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+    }
+    if (error == TIER1_EMIT_OK)
+    {
+        const Tier1CfgPreference preference = {
+            .sets = sets,
+            .registers = {
+                input->registers[0] | emitted->callee_registers,
+                input->registers[1],
+                input->registers[2],
+            },
+            .verdict = true,
+        };
+        const uint32_t* preferred = 0;
+        Tier1CfgError second = TIER1_CFG_OK;
+        bool taken = false;
+        allocated = tier1_cfg_order_run(input, moved != 0 ? &preference : 0, output, scratch, &order, cfg, &preferred, &second, &taken);
+        // The preferred problem only tries to keep values in callee-saved registers. A constraint or exhausted arena
+        // discards the preference and keeps the plain allocation; a corrupt input is the allocator's own failure to report.
+        if (allocated == TIER1_CFG_OK && tier1_emit_cfg_preference_fatal(second))
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, second);
+            error = TIER1_EMIT_INVALID;
+        }
+        else
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
+            error = tier1_emit_cfg_allocated(allocated, cfg);
+        }
+        if (taken)
+        {
+            input->allowed_registers = preferred;
+            input->registers[0] = preference.registers[0];
+            *crossing = moved;
+        }
+    }
+    else if (allocated == TIER1_CFG_OK)
+    {
+        tier1_cfg_release(&order.prepared, scratch);
+    }
+    return error;
+}
+
+// --verify's check of the one-call order (#2538): today's order, tier1_emit_cfg_two_calls, run after it on the problem as
+// tier1_emit_cfg_problem built it (`problem`), and the two allocations (tier1_cfg_differs), the problems as each left
+// them and the values each moved compared. Both arenas go back to where they were. A difference is
+// TIER1_EMIT_CERTIFICATE, with the first group of fields that differs plus BUSTER_TIER1_EMIT_CFG_ORDER as a
+// TIER1_EMIT_CAUSE_CFG_ALLOCATION diagnostic's error. The reference running out of memory compares nothing: that order
+// keeps two allocations' columns.
+static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const Tier1EmitResult* emitted, const Tier1CfgInput* problem, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    Tier1EmitOptions quiet = *options;
+    quiet.diagnostic = NULL;
+    Tier1CfgInput input = *problem;
+    Tier1CfgAllocation cfg = { 0 };
+    uint32_t crossing = 0;
+    const Tier1EmitError reference = tier1_emit_cfg_two_calls(plan, &quiet, emitted, output, scratch, &input, &cfg, &crossing);
+    const Tier1CfgInput* kept = &emitted->cfg_input;
+    uint32_t differs = reference == TIER1_EMIT_MEMORY ? 0 : reference != TIER1_EMIT_OK ? 15 : tier1_cfg_differs(&input, &cfg, &emitted->cfg);
+    bool same = differs != 0 || reference != TIER1_EMIT_OK || (crossing == emitted->crossing_values && memcmp(input.registers, kept->registers, sizeof(input.registers)) == 0);
+    same = same && (differs != 0 || reference != TIER1_EMIT_OK || ((input.definition_registers == 0) == (kept->definition_registers == 0)));
+    for (uint32_t v = 0; same && differs == 0 && reference == TIER1_EMIT_OK && v < input.value_count; v += 1)
+    {
+        same = input.allowed_registers[v] == kept->allowed_registers[v] && (input.definition_registers == 0 || input.definition_registers[v] == kept->definition_registers[v]);
+    }
+    differs = same ? differs : 14;
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    if (differs != 0)
+    {
+        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, BUSTER_TIER1_EMIT_CFG_ORDER | differs);
+    }
+    return differs != 0 ? TIER1_EMIT_CERTIFICATE : TIER1_EMIT_OK;
 }
 
 // The CFG consumer's whole function: problem, allocation, frame and records, out of line, so that tier1_emit_function's
@@ -4179,25 +4387,19 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
     Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
+    const Tier1CfgInput problem = emitted->cfg_input;
     if (error == TIER1_EMIT_OK)
     {
-        Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
-        // A parameter bound to its incoming register over its definition's interval may leave a use there no register:
-        // then every parameter is free, the entry's moves bringing each where its allocation has it.
-        if (allocated == TIER1_CFG_CONSTRAINT)
-        {
-            emitted->cfg_input.definition_registers = 0;
-            allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
-        }
-        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
-        error = allocated == TIER1_CFG_OK ? TIER1_EMIT_OK : allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : allocated == TIER1_CFG_CONSTRAINT ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_INVALID;
-        // Without fixed ranges there are no splits; each class's temporary slot is a frame row of its own.
-        error = error != TIER1_EMIT_OK || (emitted->cfg.split_count == 0 && (emitted->cfg.temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0) ? error : TIER1_EMIT_ALLOCATION;
+        // Around a fixed range a value's intervals depend on its registers, so the two problems share none: today's order.
+        // The CFG consumer gives none.
+        error = problem.fixed.count != 0 ? tier1_emit_cfg_two_calls(plan, options, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg, &emitted->crossing_values) :
+                                           tier1_emit_cfg_one_call(plan, options, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg, &emitted->crossing_values);
     }
-    if (error == TIER1_EMIT_OK)
+    if (error == TIER1_EMIT_OK && options->certify && problem.fixed.count == 0)
     {
-        error = tier1_emit_cfg_callee(plan, options, output, scratch, emitted);
+        error = tier1_emit_cfg_order_check(plan, options, emitted, &problem, output, scratch);
     }
+    emitted->callee_used = error == TIER1_EMIT_OK ? tier1_emit_cfg_callee_used(&emitted->cfg, emitted->callee_registers) : 0;
     if (error == TIER1_EMIT_OK && options->certify)
     {
         // The final allocation's certificate (#939): the problem as the callee-saved step left it, and its result.

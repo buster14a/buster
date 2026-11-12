@@ -1364,7 +1364,10 @@ static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratc
 
 // C's operation of two lanes in the rounding mode the flags name (#1840's fround), by host_fesetround and volatile
 // operands, the oracle of the model's MXCSR rounding: the arithmetic happens between the volatile loads and the volatile
-// store, which no call reorders.
+// store, which no call reorders. Where both lanes are NaNs, C leaves the result's NaN to the compiler, which may commute
+// x + y or x * y (clang does in the TSan build, and the processor then returns y's), so the oracle gives x86's rule
+// there: the first operand's NaN, quieted (the Intel SDM's rules for handling NaNs, vol. 1, 4.8.3.5). With one NaN,
+// either order gives that NaN, quieted.
 static uint64_t ir_test_fround_oracle(uint32_t flags, uint64_t a, uint64_t b)
 {
     static const int modes[4] = { FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO };
@@ -1398,7 +1401,16 @@ static uint64_t ir_test_fround_oracle(uint32_t flags, uint64_t a, uint64_t b)
         memcpy(&result, (const void*)&z, sizeof(result));
     }
     host_fesetround(saved);
-    return result;
+    const bool wide = (flags & 4) != 0;
+    const uint64_t width = wide ? UINT64_MAX : UINT32_MAX;
+    const uint64_t exponent = wide ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    const uint64_t fraction = wide ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
+    const uint64_t quiet = wide ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+    const uint64_t first = a & width;
+    const uint64_t second = b & width;
+    const bool first_nan = (first & exponent) == exponent && (first & fraction) != 0;
+    const bool second_nan = (second & exponent) == exponent && (second & fraction) != 0;
+    return first_nan && second_nan ? first | quiet : result;
 }
 
 // The truncating conversions of lane 0 (#1840): both verifiers admit cvtt exactly of a V4I32 into the I32 or I64 its

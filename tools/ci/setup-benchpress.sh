@@ -22,10 +22,12 @@ if [ -L "$destination/bin/cc" ] && [ "$(readlink "$destination/bin/cc")" = clang
     unlink "$destination/bin/cc"
 fi
 # Every use checks the tree against the manifest written at its publication: a tree without one (published before it)
-# or whose files no longer match it is staged afresh from the verified archive.
+# or whose files no longer match it is staged afresh from the verified archive. So is one without LLVM's static
+# archives (published before them): llvm-config --link-static answers only when every component's archive is there,
+# and it runs only once the manifest has verified the tree.
 if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE.TXT" ] || [ ! -f "$destination/.manifest-complete" ] ||
     [ ! -x "$destination/bin/llvm-split" ] || [ ! -x "$destination/bin/llvm-nm" ] || [ ! -x "$destination/bin/llvm-objcopy" ] ||
-    ! bash "$manifest_tool" check "$destination"; then
+    ! bash "$manifest_tool" check "$destination" || ! "$destination/bin/llvm-config" --link-static --libs > /dev/null 2>&1; then
     temporary=$(mktemp -d "$cache/.clang-${version}.XXXXXXXX")
     trap 'rm -rf "$temporary"' EXIT
     # Curl's default retry policy omits transport resets (e.g. exit 35/56). These
@@ -36,15 +38,19 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
     printf '%s  %s\n' "$digest" "$temporary/archive.tar.zst" | sha256sum --check
     mkdir "$temporary/tree"
     # The release uses a 1 GiB zstd window. Keep the matching Clang API and
-    # object/DWARF consumers for native correctness too. libclang-cpp contains
-    # its LLVM dependencies, so no LLVM static archives or system changes are needed.
+    # object/DWARF consumers for native correctness too: libclang-cpp contains
+    # its LLVM dependencies, for the pragma oracle. LLVM's static archives
+    # (222 files, 338 MB) are what the build's optimized-IR splitter links
+    # (docs/commands/build.md, "Parallel native generation"), as in the hosted
+    # install: the release has no shared libLLVM. No system changes are needed.
     tar -I 'zstd -d --long=30' --extract --file "$temporary/archive.tar.zst" \
         --directory "$temporary/tree" --strip-components=1 --no-same-owner --wildcards \
         "$archive/bin/clang-23" "$archive/bin/clang" "$archive/bin/clang++" \
         "$archive/bin/lld" "$archive/bin/ld.lld" "$archive/bin/llvm-config" \
         "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" \
         "$archive/bin/llvm-split" "$archive/bin/llvm-nm" "$archive/bin/llvm-objcopy" \
-        "$archive/include/*" "$archive/lib/clang/23/*" "$archive/lib/libclang-cpp.so*"
+        "$archive/include/*" "$archive/lib/clang/23/*" "$archive/lib/libclang-cpp.so*" \
+        "$archive/lib/libLLVM*.a"
     # The binary release omits the project license. Retain the LLVM license
     # from the exact release commit alongside the staged executable.
     curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 \
@@ -56,6 +62,7 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
     test "$("$temporary/tree/bin/llvm-config" --version)" = "$version"
     test -f "$temporary/tree/lib/clang/23/include/immintrin.h"
     test -f "$temporary/tree/lib/libclang-cpp.so"
+    "$temporary/tree/bin/llvm-config" --link-static --libs > /dev/null
     for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj llvm-split llvm-nm llvm-objcopy; do
         test -x "$temporary/tree/bin/$tool"
     done
@@ -81,6 +88,7 @@ test "$("$destination/bin/clang" -dumpversion)" = "$version"
 test "$("$destination/bin/llvm-config" --version)" = "$version"
 test -f "$destination/lib/clang/23/include/immintrin.h"
 test -f "$destination/lib/libclang-cpp.so"
+"$destination/bin/llvm-config" --link-static --libs > /dev/null
 for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj llvm-split llvm-nm llvm-objcopy; do
     test -x "$destination/bin/$tool"
 done

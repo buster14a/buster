@@ -35,6 +35,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `correctness.tests, costs / CI selection` | `tools/ci/correctness.tests`, `tools/ci/costs.c` | [ci](ci.md) |
 | `rerun / setup failures re-run once` | `tools/ci/rerun.c`, `tools/ci/rerun.sh` | [ci](ci.md#setup-failures-re-run-once) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
+| `allcore counted, sampled, table, compare` (the all-core gauge) | `tools/allcore/allcore.c` | [all-core](all-core.md) |
 | `test-c-testsuite, test-sqlite, test-sqlite-testfixture` | `c_testsuite.c`, `sqlite_test.c`, `sqlite_testfixture.c` | [c-testsuite](c-testsuite.md) |
 | `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
 | `test-dataflow, benchmark-dataflow` | `dataflow.c` | [dataflow](dataflow.md) |
@@ -145,6 +146,7 @@ The original section titles are retained in their owning guides.
 - [Foreign benchmark](foreign.md#foreign-benchmark).
 - [Foreign corpus test](foreign-corpus.md#foreign-corpus-test).
 - [DCO sign-off tooling](dco.md#dco-sign-off-tooling).
+- [all-core gauge](all-core.md#all-core-gauge).
 - [Micro-architecture campaign](microarch.md#micro-architecture-campaign).
 - [Dataflow tests](dataflow.md#dataflow-tests).
 - [Dataflow benchmark](dataflow.md#dataflow-benchmark).
