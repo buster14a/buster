@@ -135,6 +135,13 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "enum __attribute__((mode(SF))) E { A };\nenum E e = 2.5;\nenum E g = 5000000000;\nenum E h = 1e20;\n"
         "void f(enum E x, double d) { enum E y = d; x = 3.5; e = 1ll << 40; (void)x; (void)y; }\n"
         "enum F { B } __attribute__((mode(DF)));\nenum F k = 1e30;\nenum F m = 1ll << 40;\nint after = B + A;\n",
+        // A tag's misplaced attribute list (#2468), which its declaration reads past: a later constant that reads the tag
+        // (_Alignof, sizeof, an array bound, an enumerator) keeps the unit's later warnings, at file scope and in a body.
+        "struct U [[gnu::aligned(8)]] { int a; };\n_Static_assert(_Alignof(struct U) == 8, \"\");\nint y = 1/0;\n",
+        "struct U [[gnu::aligned(8)]] { int a; };\nint arr[sizeof(struct U)];\nenum { E = sizeof(struct U) };\nint y = 1/0;\n"
+        "void f(int a) { a == 1; }\n",
+        "struct V [[gnu::packed]] { char c; int i; };\n_Static_assert(sizeof(struct V) == 8, \"\");\nint g(int a) { return a << 40; }\n"
+        "int z = 1 << 40;\n",
         // Last, gnu17's alone (C23 has no K&R definition): a K&R definition's parameter declarations' _Alignas, which the
         // parser takes as the function declarator's suffix, each declarator's "cannot be applied to a function parameter".
         "void kr(a) _Alignas(3) int a; {}\nvoid kr2(a, b) _Alignas(8) int a, b; { (void)a; (void)b; }\n"
