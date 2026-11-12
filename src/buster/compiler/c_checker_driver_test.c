@@ -901,6 +901,54 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
     unlink(object);
 }
 
+// An asm label naming a block-scope static's symbol, `f.n` (#2439), which clang joins to the static where it emits the
+// static's function before the label's first use (the first source prints 6) and not otherwise (the second, whose link
+// fails), and makes one GLOBAL of the static's storage for a definition so labelled (the third). Both paths refuse the
+// three by name; a label of another dotted name, which no static has, compiles.
+static void check_test_driver_static_label(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char* const sources[4] = {
+        "int printf(const char*, ...);\nint f(void) { static int n = 5; return n++; }\nextern int fn __asm__(\"f.n\");\n"
+        "int main(void) { f(); printf(\"%d\\n\", fn); return 0; }\n",
+        "int printf(const char*, ...);\nextern int fn __asm__(\"f.n\");\nint g(void) { return fn; }\nint f(void) { static int n = 5; return n++; }\n"
+        "int main(void) { f(); printf(\"%d\\n\", g()); return 0; }\n",
+        "int f(void) { static int n = 5; return n++; }\nint fn __asm__(\"f.n\") = 9;\nint main(void) { return f() + fn; }\n",
+        "int f(void) { static int n = 5; return n++; }\nint fm __asm__(\"f.m\") = 9;\nint main(void) { return f() + fm; }\n",
+    };
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/static_label.c", directory);
+    snprintf(object, sizeof(object), "%s/static_label.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            const bool refused = status == 1 && text != NULL &&
+                                 strstr(text, "unsupported: an asm label naming a block-scope static's symbol, which clang joins to the static by its emission order") != NULL;
+            char description[160];
+            if (s < 3)
+            {
+                snprintf(description, sizeof(description), "an asm label naming a block-scope static's symbol, shape %u, is refused by name%s", s,
+                         path == 0 ? "" : ", scalar");
+            }
+            else
+            {
+                snprintf(description, sizeof(description), "an asm label of a dotted name no static has compiles%s", path == 0 ? "" : ", scalar");
+            }
+            check_test_expect(test, s < 3 ? refused : status == 0, description);
+            free(text);
+        }
+        check_test_expect(test, written, "the static labels' sources written");
+    }
+    unlink(source);
+    unlink(object);
+}
+
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding of an element past 4 GiB; an NSString of
 // no literal, which clang's code reads as one
@@ -8180,12 +8228,14 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_builtin_pointer_sign_driver_test.c"
 #include "c_check_shift_op_parentheses_driver_test.c"
 #include "c_check_alignment_builtin_driver_test.c"
+#include "c_check_lvalue_cast_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
 #include "c_check_asm_label_auto_driver_test.c"
 #include "c_check_assert_const_driver_test.c"
 #include "c_check_assert_bool_driver_test.c"
 #include "c_check_ident_driver_test.c"
 #include "c_check_c23_attributes_driver_test.c"
+#include "c_check_empty_unit_driver_test.c"
 #include "c_check_integer_overflow_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
@@ -9131,12 +9181,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);
             check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
             check_test_driver_alignment_builtins(&test, clang, executable, directory);
+            check_test_driver_lvalue_casts(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_asm_label_auto(&test, clang, executable, directory);
             check_test_driver_assert_const(&test, clang, executable, directory);
             check_test_driver_assert_bool(&test, clang, executable, directory);
             check_test_driver_ident(&test, clang, executable, directory);
             check_test_driver_c23_attributes(&test, clang, executable, directory);
+            check_test_driver_empty_unit(&test, clang, executable, directory);
             check_test_driver_integer_overflow(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
@@ -9679,6 +9731,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_asm_symbols(&test, executable, directory);
                 check_test_driver_setjmp_held(&test, executable, directory);
+                check_test_driver_static_label(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
