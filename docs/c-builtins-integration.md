@@ -1473,8 +1473,12 @@ code whose runs equal clang -O0's on both paths.
   complete object of a size but an `_Atomic` or `_BitInt` one (records, unions,
   arrays and long double among them), whose values are pointers converting to
   pointers to its unqualified type, but a store's value and a compare-exchange's
-  desired one to the first argument's own pointer type, qualifiers kept, as
-  clang's ByValType. The lowering copies the values into C11's representation
+  desired one (and an exchange's result) to the first argument's own pointer
+  type, qualifiers kept, as clang's ByValType. One of those in an address space
+  the object's doesn't include is clang's "passing 'int *' to parameter of type
+  '__attribute__((address_space(256))) int *' changes address space of
+  pointer", at the argument (#2233); the others, pointers to the value type,
+  drop the space, as clang's do. The lowering copies the values into C11's representation
   buffers and the results back out (`CheckLowerAtomic.by_pointer`), through the
   native leaves for aligned objects of 1, 2, 4 or 8 bytes and libatomic's generic
   functions otherwise, as clang's code calls them.
@@ -1923,7 +1927,13 @@ refuses each by name, as clang's code generation does for x86:
 object p points to, as clang's `PaddingClearer` does.
 
 - **Sema.** p is a pointer as written (an array isn't one) to a complete object
-  type that isn't const. Volatile and `_Atomic` pointees are fine.
+  type that isn't const. Volatile and `_Atomic` pointees are fine. Each refusal
+  is clang's error at the argument's first token (#2414,
+  `check_semantic_clear_padding`): "passing 'T' to parameter of incompatible
+  type pointer: type mismatch at 1st parameter ('T' vs pointer)", a function
+  pointer's "must be a pointer to a trivially-copyable type", "variable has
+  incomplete type 'T'" with a tag's note, and "read-only variable is not
+  assignable".
 - **Bits.** The bits no scalar, bit-field or vector of the object holds are
   padding:
   - a record's holes and tail, and an unnamed bit-field;
