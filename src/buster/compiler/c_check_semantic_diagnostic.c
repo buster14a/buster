@@ -864,6 +864,25 @@ static bool check_semantic_useful(const Parser* parser, const CheckGraph* graph,
 // A static assertion operand's value as clang's ConvertAPValueToString prints it, by the operand's own type: a bool's
 // true or false; a plain char's character, its code unit and its value; an integer's value; a real floating one's
 // APFloat digits. False for any other (no note).
+// A failed requirement's operand's value for its note (#2214): its constant, or what a read of a const object loads from
+// its completed initializer's receipt (`const int k = 0; ... k == 45`'s 0), as clang's evaluation folds it; else its
+// value as the stream has it.
+static CheckValue check_semantic_operand_value(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, uint32_t at)
+{
+    CheckValue result = check_stream_value(stream, node);
+    const uint32_t qualifiers = type_qualifiers(result.type);
+    CheckValue loaded = { 0 };
+    const bool load = result.constant_kind == CHECK_CONSTANT_ADDRESS && result.category == CHECK_LVALUE && result.fault == CHECK_FAULT_NONE &&
+                      (qualifiers & BUSTER_TYPE_CONST) != 0 && (qualifiers & BUSTER_TYPE_VOLATILE) == 0 &&
+                      (result.flags & (BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                      graph->const_values != NULL && graph->source_positions != NULL &&
+                      check_const_load(types, graph->const_values, result.object, result.offset, result.object_bit_offset, result.bit_width,
+                                       result.type, graph->source_positions[at], &loaded) &&
+                      loaded.constant_kind == CHECK_CONSTANT_INTEGER;
+    result = load ? loaded : result;
+    return result;
+}
+
 static bool check_semantic_value_text(char* output, uint64_t capacity, const TypeTable* types, const CheckValue* value)
 {
     const TypeId type = value->type != 0 ? type_unqualified(type_strip_aligned(types, value->type)) : 0;
@@ -1029,7 +1048,11 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
         const uint32_t right = binary ? check_semantic_bare(graph, graph->operand1[failed]) : BUSTER_CHECK_NONE;
         if (left < stream->count && right < stream->count && (check_semantic_useful(parser, graph, left) || check_semantic_useful(parser, graph, right)))
         {
-            const CheckValue values[2] = { check_stream_value(stream, left), check_stream_value(stream, right) };
+            const CheckValue values[2] =
+            {
+                check_semantic_operand_value(types, graph, stream, left, failed),
+                check_semantic_operand_value(types, graph, stream, right, failed),
+            };
             char texts[2][192];
             const String8 operator = check_semantic_token(parser, pp, graph->tokens[failed], scratch);
             // (A comparison of a bool with C23's true or false prints nothing.)

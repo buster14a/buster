@@ -10227,7 +10227,10 @@ enables, which this checker doesn't all give.
   literal, nor a unary operator's, nor a comparison, logical or comma
   operator), each value by its operand's own type (ConvertAPValueToString): a
   bool's `true`, a plain char's `'A' (0x41, 65)` with a control's `<U+001B>` and
-  a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. Still
+  a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. A read of
+  a const object is its completed initializer's value (#2214,
+  `check_semantic_operand_value`): `const int k = 0;`'s `k == 45` is
+  `'0 == 45'`, a member's and an element's too. Still
   separate: a type name's literals print as written (`sizeof(int[0x10])`, clang
   `int[16]`); `_Generic`'s and a comma operator's spacing (`(A,0)`, clang
   `(A , 0)`); a complex value's note.
