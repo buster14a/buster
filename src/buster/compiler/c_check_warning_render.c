@@ -2230,6 +2230,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_C23_ATTRIBUTES:
             result = "[[]] attributes are a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT:
             result = check_warning_text(scratch, (payload->data & 2u) != 0 ? "%s without named members is a GNU extension" : "empty %s is a GNU extension",
                                         (payload->data & 1u) != 0 ? "union" : "struct");
