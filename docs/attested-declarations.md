@@ -63,10 +63,10 @@ The other rows are in "What it leaves".
 A file-scope token costs the checker 407 user cycles in musl's units without
 bodies (1,477 M for 3,630,633 tokens in `check-input` alone), where the parser
 takes 38 for the same token, and tcc parses, checks and generates code for
-about 131 ([the node machine's record](node-machine.md)). The reader's
-declaration steps (`check_input_declarator_step`, `check_input_declaration`,
-`check_input_specifiers` and their kin) are 784 M of those units' 2,057 M
-sampled user cycles, with flat profiles.
+about 131 ([the node machine's design](node-machine.md), "Two references").
+The reader's declaration steps (`check_input_declarator_step`,
+`check_input_declaration`, `check_input_specifiers` and their kin) are 784 M
+of those units' 2,057 M sampled user cycles, with flat profiles.
 
 What those steps read is the same text, over and over. musl's command, by a
 count of its preprocessed units' file-scope declarations, bodies cut:
@@ -121,11 +121,12 @@ declarations (each a subtree whose root is the parser's root's child):
    depend on was declared by the same tokens in the same way, back to the
    unit's start.
 2. **The memo.** The lane keeps the set of semantic hashes of the declarations
-   that its earlier units read *silently* (no diagnostic, no recovery) and
-   *purely* (nothing changed but the bindings of the names they declare and
-   the type table: no definition, nothing with a consequence at the unit's
-   end). A declaration whose hash is in the set is **attested**: reading it
-   here would report nothing and define nothing.
+   that its earlier units read *silently* (no diagnostic of the unit, from any
+   stage, lies in their tokens, and no recovery) and *purely* (nothing changed
+   but the bindings of the names they declare and the type table: no
+   definition, nothing with a consequence at the unit's end). A declaration
+   whose hash is in the set is **attested**: reading it here would report
+   nothing and define nothing.
 3. **The reach.** The declarations the unit's own code reaches by name. The
    roots are every function definition, every pragma and every declaration
    that isn't attested. A reached declaration reaches (a) every earlier
@@ -278,8 +279,11 @@ pre-passes ran, before `check_input_resolve_range`:
   reader notes its counters (reports, warning events, recoveries, binding
   events, and the tables whose entries have consequences later: objects to
   emit, aliases, sections, strings, static data, pending initializers); at
-  the next declaration's start it knows whether the reading was silent and
-  pure, and whether its events were for listed names.
+  the next declaration's start it knows whether the reading was pure and
+  whether its events were for listed names. Silence is settled at the unit's
+  end, when every stage has reported: a diagnostic whose place is in a
+  declaration's tokens, a warning of the program's passes among them, keeps
+  it out of the memo.
 - **The memo is the lane's**, beside its intern table and file cache
   (`CheckUnitsLane`): a set of 128-bit hashes, 16 bytes a distinct
   declaration (2,826 for musl's command). Names' ids are the lane's intern
@@ -421,7 +425,7 @@ today's path throughout.
 | 1. Shadow | `--verify`'s mode, on by an option: the passes decide and everything is read; each would-be skipped declaration's reading is checked. No compile skips. | No failure on the corpora as many-unit commands, with `-g` and with `-Wall -Wextra`, on 1 and 8 lanes, with the bodies deferred. |
 | 2. Skip | The walk passes the skipped declarations; the units' ends fill the memo. | musl's command on one lane at least 1.15 times faster (expected 1.29) and not slower on 8; every unit's object and diagnostics its own alone and `--scalar`'s; `-c sqlite3.c` and a small unit's process within the A/A floor. |
 | 3. Out of the unit-wide passes | A skipped declaration's tokens leave the per-token passes that still read them and the tree's derived columns; the reach is offered to `-flazy-system-headers`' plan (#1364), which needs the same graph without a second parse. | At least 1.25 times cumulative on musl (expected 1.35). |
-| 4. A memo that outlives the process | Opt-in, and the owner's decision: the set of hashes kept in a file a build names, keyed by the compiler's build and the options. | A process a unit: musl at least 1.15 times (the emulation's bound is 1.27); `-c sqlite3.c` at least 1.04 (bound 1.07). |
+| 4. A memo that outlives the process | Opt-in, and the owner's decision: the set of hashes kept in a file a build names, keyed by the compiler's build and the options, its hashes over spellings where a lane's are over its intern table's ids. | A process a unit: musl at least 1.15 times (the emulation's bound is 1.27); `-c sqlite3.c` at least 1.04 (bound 1.07). |
 
 Step 4 is where a command of one unit gains. It is last because it is a
 decision about files a compiler writes, not because it is hard: the memo is a
