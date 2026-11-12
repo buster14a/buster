@@ -6,8 +6,9 @@ Status: step 0, the census, is built and its gate holds
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
 on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cost
-more a node), and it codes only part of the set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
-and the compound assignments). No compile takes it. Its gains are estimates that
+more a node), and it now codes every operator the census takes (calls, `&&`,
+`||` and `?:` [below](#calls), the increments and the compound assignments
+[below](#increments-and-compound-assignments)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
