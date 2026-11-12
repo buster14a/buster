@@ -5,8 +5,8 @@ Status: step 0, the census, is built and its gate holds
 ([below](#step-1-the-shadow)): the machine's entries are the pipeline's on every
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
-on its own, their expressions costing more a node), and it codes only part of the
-set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
+on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cost
+more a node), and it codes only part of the set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
 and the compound assignments). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
@@ -362,6 +362,10 @@ targets as it does today.
   bit-fields).
 - **Per unit:** only the pointer-pair memo and the member lookup's own index,
   both of which exist.
+- **They need a cheap key.** A table is cheaper than the branches it replaces
+  only where its key is a few bytes the record already holds. Step 1 measured
+  C's and X's tables on whole values as records, and lost to the branches
+  ([below](#the-baked-tables-measured)).
 
 ### Silence
 
@@ -806,6 +810,9 @@ sweeps' IPC. The levers, in order:
    class and standing read once from its declaration, as step 2 reads them
    (done, below: worth less than this expected).
 2. **The context and template tables baked** in place of C's and X's branches.
+   Measured on today's records, they cost more than the branches
+   ([below](#the-baked-tables-measured)): they wait for the first lever's
+   records to carry what C's key reads.
 
 Coverage comes after: calls first ([below](#calls)).
 
@@ -884,8 +891,8 @@ placement's 3%:
   53.3), which was then left out.
 
 C's most sampled instruction is still its branch on whether a record is
-evaluated. The levers for the cost are the ones above, the records and the
-baked tables, not this code. `-c sqlite3.c` is unchanged: 123.978 ms against
+evaluated. The lever for the cost is the records above, not this code; the
+baked tables wait for them ([below](#the-baked-tables-measured)). `-c sqlite3.c` is unchanged: 123.978 ms against
 main's 123.923, user cycles +0.02%, 5,323 more instructions (the inventory's
 log's test, once a body).
 
@@ -907,6 +914,23 @@ behavior. On the 9700X at `34748d68`, on main `0af27a30`
 - **All three:** 659.9 against 669.9. Main's X formed and spilled each record's
   value address before its template's branch; the accessors form it only where
   a value field is read.
+
+The split merged as `f5b919f2`, after #2569's `&&`, `||` and `?:` were ported into
+its files and #2575's calls (below) merged with them. Calls take a template of
+their own after the logical operators' three, and a label's subtree starts at
+T's `lowest` record, which counts a call's arguments. On the 9700X
+([the record's "The merged head"](https://github.com/buster14a/buster-performance/tree/9a7d2b01a26dfe47410eebac3e5d993f50b503a2/docs/measurements/node-machine-split-2524-2026-11-12)):
+
+- **The port costs nothing.** Ported over main `f2faf255` (`3878feb1`), the
+  machine takes main's set with no difference, at 371.5 instructions a node for
+  T (main 371.5), 575.4 for T and C (575.3) and 687.9 for all three (695.3).
+- **With calls too,** it takes 93.0% of `sqlite3.c`'s census-taken nodes (Lua
+  87.2%, musl 82.1%), with no difference, `-g` included. It compares 7,346
+  labels on `sqlite3.c` against main's 5,438, because the expressions that mix
+  calls with the logical operators are taken now.
+- **Its cost** is 222.6 cycles and 764.1 instructions a taken node on
+  `sqlite3.c` (T 446.7, T and C 651.1). As #2569 and #2575 each found, the
+  newly taken expressions cost more a node than those taken before.
 
 ### Calls
 
@@ -1081,6 +1105,59 @@ not 50.2%, and the figures move:
 - **The gate is further off:** 211.3 cycles in one run and 160.5 warm against
   120. `--verify` at `04abc91b` shows no difference on the corpora, with `-g`
   too.
+
+### The baked tables, measured
+
+The second lever was built and measured on today's records, a whole 96-byte
+`CheckValue` each. With those records, **neither table beats the branches it
+replaces.** Every variant was exact: its entries were the lowering's, and
+`--verify` compared it with the branches, its twin, on every expression. None
+merged. The variants are kept as diffs in
+[the record](https://github.com/buster14a/buster-performance/tree/f942b79e49e55c1d92beabcbc91623443c20032f/docs/measurements/node-machine-baked-tables-2524-2026-11-12),
+each against its base: main `0af27a30`, and the split's head `27ee009a`.
+
+- **C by tables.** Each record's facts go into a word, and a per-operator
+  mask's `pext` indexes a baked table of rows: the template, the operands'
+  contexts and targets, and X's row.
+- **X by rows.** Each record's row is written by three stores of eight entries:
+  its kinds; its classes, a byte shuffle; its values, a permute. Its conversion's
+  row is baked by running the twin's `node_machine_conversion` at every key.
+
+In instructions a taken node on `sqlite3.c`, the least of 11 passes, on the
+9700X:
+
+| | C | X |
+| --- | ---: | ---: |
+| the branches (main; the split) | 189.0 | 112.8; 102.8 |
+| C and X by tables, C choosing X's rows (4 variants) | 436.4 to 647.7 | 54.8 to 65.4 |
+| X by rows choosing its own, C's branches unchanged (3 variants) | 189.1 | 124.2 to 138.4 |
+
+- **C's cost is its key, not its lookup.** The table reads about 25 bits a
+  record: from its value, its type and its operands' types. Each bit is a load
+  or two and a compare, and together they cost more than the branches they
+  replace, which mispredict 0.19 times a node. Three remedies narrowed the gap
+  without closing it:
+  - a pass that reads each record's context-free facts before the walk;
+  - the columns copied into locals against `-fno-strict-aliasing`'s reloads;
+  - fewer bits a record.
+- **X's rows win only where C has chosen them.** Choosing a record's row reads
+  what the branches read, and costs about what they cost. The three stores save
+  little at 1.28 entries a node.
+
+**What would make them pay:** a key of a few byte loads. C's rows read about 11
+context-free facts of a record, beside its class and its type's facts:
+- its category;
+- its constant's kind, where it is pure;
+- its object's kind (none, a local, a global, past the unit's, a compound
+  literal that isn't static);
+- an overload set, a nonzero offset, the type exactly `void`.
+
+The 28-byte records ([#2580](https://github.com/buster14a/buster/pull/2580))
+carry the category, the constant's kind and a nonzero offset in their standing
+byte. The rest would take a second byte, written where T writes a value. With
+it, C's row is one lookup on (code, context, standing, class), and X's row is
+C's choice at no extra cost. The record is the baseline that version has to
+beat.
 
 ## Expected gains
 
