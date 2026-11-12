@@ -61,6 +61,12 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   `EXCLUSIVE_OWNER=<name> EXCLUSIVE_TITLE=<title> EXCLUSIVE_LINK=<link> ~/buster-fast-bench/exclusive.sh COMMAND...`,
   per run, never around a series: a CI job waits at most 10 minutes for it.
   `cat /var/lib/buster-9700x/owner` shows who holds it.
+- As it takes the lock, `exclusive.sh` lists on stderr the other processes
+  that have used half a CPU or more over their lives (`exclusive.sh: other
+  processes busy as the lock is taken`, then a line each, with no command
+  lines), and appends them to `/var/lib/buster-9700x/busy.log`. Keep those
+  lines in a record, and trace a listed process as "A command by hand" says.
+  Nothing is printed when there are none (#2555).
 - Keep a task's trees and results in `~/buster-fast-bench/<issue>-<agent>/`
   (`1282-claude`, `615-codex`): a clone of the repository at the commit it
   measures, its scripts and its results. Don't build in another session's
