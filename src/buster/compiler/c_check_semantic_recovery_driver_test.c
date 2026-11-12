@@ -53,6 +53,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "__attribute__((patchable_function_entry(3, 4), patchable_function_entry(1, 9))) void h(void) {}\n"
         "__attribute__((patchable_function_entry(1, 2))) void p(void), q(void);\n"
         "int use(void) { f(); g(); h(); p(); q(); return 0; }\n",
+        // A block's thread-local object without static or extern (#2420): clang's "'_Thread_local' variables must have global
+        // storage" at the keyword ('__thread' for GNU's, '_Thread_local' for C23's thread_local), and the reading goes on.
+        "void c(void) { _Thread_local int z; __thread int w = 1; (void)z; (void)w; int u = undeclared; }\n"
+        "void d(void) { static _Thread_local int s; extern _Thread_local int e; (void)s; (void)e; }\n"
+        "void k(int p) { for (_Thread_local int i = 0; i < 1; i++) {} }\n"
+        "void m(void) { _Thread_local int q __asm__(\"q\"); thread_local int t; }\n",
         // Each of the attribute errors' passes: an item's reading (a string's), its arguments' values, its subject, its
         // function type's and its place on a definition; the declarations stay usable.
         "__attribute__((section(1))) int a1;\n"
@@ -686,6 +692,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int typeof(int) _Atomic(int) unsigned unsigned v;\nint a4 = u4;\n_Complex _Complex int _Bool cb;\nint a5 = u5;\n"
         "unsigned float unsigned y;\nint a6 = u6;\nint _Atomic(int) z;\nint a7 = u7;\n"
         "void f(void) { int float char x; char *p = &x; int typeof(long) y; p = &y; }\n",
+        // A definition that is also an alias or ifunc (#2449): clang's handler drops the attribute, and the declaration stays a
+        // valid definition, its later uses quiet.
+        "int x __attribute__((alias(\"y\")));\n"
+        "int y;\n"
+        "int use(void) { return x + y; }\n"
+        "int z = undeclared;\n"
+        "void *r(void) { return 0; }\n"
+        "int h(void) __attribute__((ifunc(\"r\"))) { return 3; }\n"
+        "int k(void) { return h() + x + nope; }\n"
+        "extern int w __attribute__((alias(\"y\"))) = 4;\n"
+        "int m(void) { return w + nope2; }\n"
+        "static int s __attribute__((alias(\"y\")));\n"
+        "int n(void) { return s; }\n",
         // A recovered error in a definition's head, a specifier's or an attribute's, and then errors that stop the reader
         // (#1835): the later bodies keep their warnings, and the definitions' own bodies theirs, since clang gives those
         // errors before the body opens its scope; a body with an error of its own loses its unused variables.

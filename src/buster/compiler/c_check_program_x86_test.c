@@ -1751,12 +1751,16 @@ static void check_test_program_x86_refusals(CheckTest* test)
         check_test_program_boundary_target(test, masks[i], "integer-only-opmask-without-avx512", true, false, 0, 0,
                                            "x86 builtins whose instructions the target hasn't", &baseline);
     }
-    // Baseline SSE success is covered by --program-vectors. AVX2 still requires its target feature.
+    // Baseline SSE success is covered by --program-vectors. A 32-byte AVX2 builtin runs on its halves where their 128-bit
+    // builtin's row does (#2426, check_lower_x86_split): pshufd's at the baseline, but not palignr's, which needs SSSE3.
     if (baseline_parsed)
     {
         check_test_program_boundary_target(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
                                                  "v8si b=__builtin_ia32_pshufd256(a,0x1b);return b[0];}",
-                                           "avx2-pshufd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
+                                           "avx2-pshufd-without-avx", true, true, 0, 2, NULL, &baseline);
+        check_test_program_boundary_target(test, "typedef char v32qi __attribute__((vector_size(32)));int tested(int n){v32qi a={(char)n,1};"
+                                                 "v32qi b=__builtin_ia32_palignr256(a,a,3);return b[0];}",
+                                           "avx2-palignr-without-ssse3", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
     }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);
@@ -2063,6 +2067,32 @@ static void check_test_program_x86_target_attributes(CheckTest* test, const char
         {
             check_test_program_boundary_target(test, versions[i].source, versions[i].name, true, true, 0, 0, NULL, &baseline);
         }
+        // A target_clones body of 256-bit builtins its first version's features cover, whose baseline copy runs them on
+        // their halves (#2426), as LLVM's legalization splits them for clang's: the host runs that copy where it hasn't
+        // AVX10.2, against clang's.
+        check_test_program_source_native_limits(test,
+                                                "typedef long long m256i __attribute__((vector_size(32)));typedef float m256 __attribute__((vector_size(32)));"
+                                                "typedef double m256d __attribute__((vector_size(32)));typedef long long m128i __attribute__((vector_size(16)));"
+                                                "typedef int v8si __attribute__((vector_size(32)));typedef short v16hi __attribute__((vector_size(32)));"
+                                                "typedef float v4sf __attribute__((vector_size(16)));"
+                                                "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned halves(int n){"
+                                                "v8si z={n,n*3,n^5,n+7,n*n,~n,n>>1,n-9};v8si s=(v8si)__builtin_ia32_pshufd256(z,0x1b);"
+                                                "v16hi h=__builtin_ia32_pshufhw256((v16hi)s,0x4e);h=__builtin_ia32_pshuflw256(h,0xb1);"
+                                                "h=__builtin_ia32_vec_set_v16hi(h,(short)n,11);"
+                                                "m256i l=(m256i)__builtin_ia32_pslldqi256_byteshift((m256i)h,3);m256i r=(m256i)__builtin_ia32_psrldqi256_byteshift(l,5);"
+                                                "m256 f=__builtin_ia32_shufps256((m256)z,(m256)r,0x93);f=__builtin_ia32_vpermilps256(f,0x2d);"
+                                                "m256d d=__builtin_ia32_shufpd256((m256d)l,(m256d)z,0x6);"
+                                                "m256 c=__builtin_ia32_cmpps256(f,(m256)z,1);"
+                                                "m128i x=(m128i)__builtin_ia32_extract128i256((m256i)c,1);m256i y=__builtin_ia32_insert128i256(r,x,0);"
+                                                "m256i p=__builtin_ia32_permti256(y,(m256i)d,0x29);p=__builtin_ia32_permdi256(p,0x93);"
+                                                "m256d q=__builtin_ia32_permdf256(d,0x1e);q=__builtin_ia32_vperm2f128_pd256(q,(m256d)p,0x83);"
+                                                "v4sf e=__builtin_ia32_vextractf128_ps256(f,1);m256 g=__builtin_ia32_vinsertf128_ps256((m256)q,e,1);"
+                                                "unsigned u=(unsigned)__builtin_ia32_vec_ext_v8si((v8si)g,6)*7u+(unsigned)__builtin_ia32_vec_ext_v16hi((v16hi)p,13);"
+                                                "u=u*31u+(unsigned)__builtin_ia32_vec_ext_v4di(p,2)+(unsigned)__builtin_ia32_vec_ext_v4di((m256i)q,1);"
+                                                "for(int i=0;i<8;i++){u=u*131u+(unsigned)((v8si)g)[i]+(unsigned)((v8si)p)[i]*3u+(unsigned)((v8si)c)[i];}return u;}"
+                                                "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^halves(n*37+i);}return (int)h;}",
+                                                "target-clones-halves", clang, false, -1, 0, &baseline, true);
+        check_test_program_build_release();
         check_test_program_march = "-march=x86-64-v3";
         check_test_program_boundary_target(test, "__attribute__((target(\"no-bmi2\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
                                            "target-attribute-off", true, false, 0, 0, "x86 builtins whose instructions the target hasn't", &v3);
