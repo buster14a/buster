@@ -736,9 +736,11 @@ static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
     const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA | BUSTER_CHECK_WARNING_PACK_PRAGMA;
     const uint32_t payload = flags & histories;
-    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
+    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED |
+                      BUSTER_CHECK_WARNING_DEFAULT_ERROR)) == 0 &&
            (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && (payload & (payload - 1)) == 0 &&
-           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
+           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE) &&
+           ((flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) == 0 || (flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0);
 }
 
 static uint32_t check_warning_capacity(uint32_t capacity, uint32_t needed)
