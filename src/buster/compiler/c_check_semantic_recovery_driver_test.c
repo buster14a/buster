@@ -985,6 +985,14 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int h(void) { int unused; return 0; }\nvoid k(void) { int m = X; }\n",
         "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nint g(void) { return Z; }\nint h(void) { int unused; return X; }\n"
         "struct Z { int a; };\nint i(void) { int u2; return 0; }\n",
+        // A deprecated declaration's uses before a parse error (#2202): the view of the unit that the error leaves (a
+        // prefix, a repair) gives their -Wdeprecated-declarations, with the attribute's message and the note: an object's,
+        // a function's, a typedef's and a tag's, at file scope and in bodies.
+        "int w __attribute__((deprecated)); int v = w; int z = ;\n",
+        "int w __attribute__((deprecated)); int f(void) { return w; } int z = ;\n",
+        "int w __attribute__((deprecated(\"old\"))); void g(int) __attribute__((deprecated));\nint f(void) { g(w); return w; }\nvoid h(void) { g(1);\n",
+        "typedef int T __attribute__((deprecated));\nstruct S { int m; } __attribute__((deprecated));\nT t; struct S s;\nint f(void) { T x = 1; return x + t; }\n"
+        "int z = ;\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"

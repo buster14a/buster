@@ -8628,6 +8628,15 @@ arguments against the function. The checker now gives these as clang does.
   It counts each visited token's bracket levels and parameter lists from
   64-token masks by popcount. Both paths run the same step at each token they
   visit (`check_input_availability_token`, `check_input_deprecated_use`).
+
+  A unit a parse error rejects runs the pass over the view its checking
+  reads (a prefix, a repair, a whole resumed parse; #2202), so the uses
+  before the error keep their warnings, which publish as the view's other
+  warnings do. An unavailable use's error, and a member's use (which the
+  graph reads), stay a complete unit's (`CheckInputDeprecatedPass.errors`):
+  the view's reports select no error of its own. Differences left: a use
+  after the parse error that the view doesn't hold, and an unavailable use
+  before it, get nothing.
 - **Deprecated and unavailable members** (`check_input_member_uses`). A
   struct's or union's member that such an attribute marks is recorded when
   its record is completed, by its index in the type table's members
@@ -9793,8 +9802,7 @@ arguments against the function. The checker now gives these as clang does.
   on with the declaration: the view drops the tokens from the error to that
   `)` (`ParseDiagnostic.resume_delete`), so the list's earlier attributes and
   the unit's later declarations are checked, by both paths. Differences left:
-  the warnings a rejected unit drops still drop (`-Wdeprecated-declarations`
-  among them), and the caret display's "expanded from macro '__clang__'" note.
+  the warnings a rejected unit drops still drop, and the caret display's "expanded from macro '__clang__'" note.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original

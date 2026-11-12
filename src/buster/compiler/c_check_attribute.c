@@ -10362,6 +10362,9 @@ struct CheckInputDeprecatedPass
     uint32_t delayed_end;
     const uint8_t* contexts;
     const uint32_t* evaluated;
+    // Whether an unavailable use's error is given: a complete unit's alone. A rejected unit's view (#2202) gives its
+    // deprecated uses' warnings, which publish as its other warnings do, but not errors the view's reports don't select.
+    bool errors;
 };
 
 // The use at `t`, if it is one, of what a deprecated or unavailable attribute marks (check_input_deprecated_uses): its
@@ -10563,7 +10566,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
     // The attribute's message, its first argument's string.
     const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
                              parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
-    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE)
+    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE && pass->errors)
     {
         // Its note is at the declaration, not the attribute: at the name of the one the use's lookup finds, or a
         // tag's latest declaration, which an enumerator's note names; an anonymous tag's keyword, whose type the
@@ -10582,7 +10585,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
             reader->output->reports[before].value = copies - 1;
         }
     }
-    else if (attribute != NULL)
+    else if (attribute != NULL && attribute->kind != CHECK_ATTRIBUTE_UNAVAILABLE)
     {
         CheckWarningEvent event =
         {
@@ -10786,7 +10789,7 @@ static CheckInputDeprecatedBlock check_input_deprecated_block(const Parser* pars
 // (glibc's headers mark a handful of functions), so the vector path visits only the tokens a use may be at and the
 // braces that open and close the scopes they read, with the brackets between them counted 64 tokens a mask (#1489):
 // sqlite3.c's 716,158 tokens took 25 M cycles of the 9700X's for the scalar walk.
-static void check_input_deprecated_uses(CheckInputReader* reader)
+static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
@@ -10925,6 +10928,7 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             .delayed_first = count,
             .contexts = reader->output->availability_contexts,
             .evaluated = check_input_evaluated_members(reader),
+            .errors = errors,
         };
         // Where the function body a use is in ends.
         uint32_t body_end = 0;

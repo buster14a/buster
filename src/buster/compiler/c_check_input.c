@@ -16987,9 +16987,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             {
                 check_input_condition_uses(&reader);
             }
+            // A view of a rejected unit too (#2202): its uses are the view's, whose warnings publish as its other warnings do;
+            // an unavailable use's error, and a member's use, which the graph reads, a complete unit's alone.
+            if (reader.deprecated_attributes && !input->resource)
+            {
+                check_input_deprecated_uses(&reader, complete_translation_unit);
+            }
             if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
             {
-                check_input_deprecated_uses(&reader);
                 // The initializers' walk reads the marks through the graph (#147, check_init_member_use).
                 input->graph.marked_members = input->marked_members;
                 input->graph.marked_member_count = input->marked_member_count;
