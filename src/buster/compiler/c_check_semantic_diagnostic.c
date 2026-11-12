@@ -21,6 +21,26 @@ static uint32_t check_semantic_note_count(const PPOutputDiagnosticNote* notes)
     return count;
 }
 
+// The first token of `node`'s subtree, whose tokens are contiguous before it: the tokens before it whose parents reach it
+// (an error's path alone asks).
+static uint32_t check_semantic_first_token(const Parser* parser, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t first = node;
+    bool inside = true;
+    while (inside && first != 0)
+    {
+        uint32_t ancestor = first - 1;
+        for (uint32_t steps = 0; ancestor < count && ancestor < node && steps < count; steps += 1)
+        {
+            ancestor = parser->tree.parents[ancestor];
+        }
+        inside = ancestor == node;
+        first -= inside ? 1u : 0u;
+    }
+    return first;
+}
+
 static const char* check_semantic_text(Preprocessor* pp, const char* text)
 {
     // Do not quietly replace a failed contextual rendering with a successful generic diagnostic.
@@ -209,6 +229,10 @@ static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp,
             }
             texts[1] = report->detail == 7 ? texts[1] : "no corresponding enumerator here";
         } break;
+        case 9: // CHECK_TAG_MISMATCH_KIND (#1826): the earlier unnamed record, its kind
+            texts[0] = check_warning_text(scratch, "'%.*s' is a %s here", (int)first_name.length, first_name.pointer,
+                                          report->value != 0 ? "union" : "struct");
+            break;
         default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
         {
             const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
@@ -872,6 +896,25 @@ static bool check_semantic_useful(const Parser* parser, const CheckGraph* graph,
 // A static assertion operand's value as clang's ConvertAPValueToString prints it, by the operand's own type: a bool's
 // true or false; a plain char's character, its code unit and its value; an integer's value; a real floating one's
 // APFloat digits. False for any other (no note).
+// A failed requirement's operand's value for its note (#2214): its constant, or what a read of a const object loads from
+// its completed initializer's receipt (`const int k = 0; ... k == 45`'s 0), as clang's evaluation folds it; else its
+// value as the stream has it.
+static CheckValue check_semantic_operand_value(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, uint32_t at)
+{
+    CheckValue result = check_stream_value(stream, node);
+    const uint32_t qualifiers = type_qualifiers(result.type);
+    CheckValue loaded = { 0 };
+    const bool load = result.constant_kind == CHECK_CONSTANT_ADDRESS && result.category == CHECK_LVALUE && result.fault == CHECK_FAULT_NONE &&
+                      (qualifiers & BUSTER_TYPE_CONST) != 0 && (qualifiers & BUSTER_TYPE_VOLATILE) == 0 &&
+                      (result.flags & (BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                      graph->const_values != NULL && graph->source_positions != NULL &&
+                      check_const_load(types, graph->const_values, result.object, result.offset, result.object_bit_offset, result.bit_width,
+                                       result.type, graph->source_positions[at], &loaded) &&
+                      loaded.constant_kind == CHECK_CONSTANT_INTEGER;
+    result = load ? loaded : result;
+    return result;
+}
+
 static bool check_semantic_value_text(char* output, uint64_t capacity, const TypeTable* types, const CheckValue* value)
 {
     const TypeId type = value->type != 0 ? type_unqualified(type_strip_aligned(types, value->type)) : 0;
@@ -1037,7 +1080,11 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
         const uint32_t right = binary ? check_semantic_bare(graph, graph->operand1[failed]) : BUSTER_CHECK_NONE;
         if (left < stream->count && right < stream->count && (check_semantic_useful(parser, graph, left) || check_semantic_useful(parser, graph, right)))
         {
-            const CheckValue values[2] = { check_stream_value(stream, left), check_stream_value(stream, right) };
+            const CheckValue values[2] =
+            {
+                check_semantic_operand_value(types, graph, stream, left, failed),
+                check_semantic_operand_value(types, graph, stream, right, failed),
+            };
             char texts[2][192];
             const String8 operator = check_semantic_token(parser, pp, graph->tokens[failed], scratch);
             // (A comparison of a bool with C23's true or false prints nothing.)
@@ -1628,6 +1675,19 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         format = "passing %.*s to parameter of type %.*s changes address space of %spointer";
         check_semantic_parameter_note(parser, pp, input, callee < graph->count ? graph->tokens[callee] : BUSTER_CHECK_NONE, argument, note, scratch);
     }
+    else if (op == CHECK_OP_BUILTIN_ATOMIC && graph->argument_tokens != NULL)
+    {
+        // A generic atomic builtin's value pointer in another address space than its object's (#2233): the pointer type its
+        // check converted it to (CheckBuiltinAtomicEffect.space_target), at the argument.
+        const uint32_t argument = stream->diagnostic_operands[node];
+        for (uint32_t i = 0; i < stream->atomic_count; i += 1)
+        {
+            to = stream->atomics[i].node == node ? stream->atomics[i].space_target : to;
+        }
+        from_node = argument < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + argument] : BUSTER_CHECK_NONE;
+        format = to != 0 ? "passing %.*s to parameter of type %.*s changes address space of %spointer" : NULL;
+        *location = to != 0 ? graph->argument_tokens[graph->argument_offsets[node] + argument] : token;
+    }
     if (format != NULL)
     {
         from = from_node < stream->count ? check_semantic_value_type(types, check_stream_type(stream, from_node), false) : 0;
@@ -1827,8 +1887,65 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     return result;
 }
 
+// The first token of call `node`'s argument `argument`, its parentheses included: clang's getBeginLoc of it.
+static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument)
+{
+    const uint32_t value = graph->argument_nodes[graph->argument_offsets[node] + argument];
+    uint32_t first = graph->argument_tokens[graph->argument_offsets[node] + argument];
+    const uint32_t token = value < graph->count ? graph->tokens[value] : first;
+    while (first > 0 && first < parser->tokens.count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN &&
+           parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first - 1] > token)
+    {
+        first -= 1;
+    }
+    return first;
+}
+
+// __builtin_clear_padding's argument refused (#2414, clang's BuiltinClearPadding), at its first token, its parentheses
+// included: no pointer, "passing 'T' to parameter of incompatible type pointer: type mismatch at 1st parameter ('T' vs
+// pointer)", the argument's type as written (an array isn't decayed); a function pointer, "argument to
+// __builtin_clear_padding must be a pointer to a trivially-copyable type ('T' invalid)"; an incomplete pointee, "variable
+// has incomplete type 'T'" with a tag's "forward declaration" note; a const one, "read-only variable is not assignable".
+// NULL for another report.
+static const char* check_semantic_clear_padding(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
+                                                Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = report->node;
+    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node]];
+    const uint32_t first = check_semantic_argument_begin(parser, graph, node, 0);
+    const TypeId written = argument < stream->count ? check_stream_type(stream, argument) : 0;
+    const TypeId bare = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId pointee = pointer ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : 0;
+    const char* result = NULL;
+    if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && written != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, written, check_semantic_operand_spelling(parser, input, stream, types, argument));
+        result = type.length == 0 ? NULL :
+                 pointer ? check_warning_text(scratch, "argument to __builtin_clear_padding must be a pointer to a trivially-copyable type (%.*s invalid)",
+                                              (int)type.length, type.pointer) :
+                           check_warning_text(scratch, "passing %.*s to parameter of incompatible type pointer: type mismatch at 1st parameter (%.*s vs pointer)",
+                                              (int)type.length, type.pointer, (int)type.length, type.pointer);
+    }
+    else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && pointee != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0);
+        result = type.length != 0 ? check_warning_text(scratch, "variable has incomplete type %.*s", (int)type.length, type.pointer) : NULL;
+        *note = result != NULL ? check_semantic_forward_note(parser, pp, input, types, spell, pointee, scratch) : *note;
+    }
+    else if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && pointer)
+    {
+        result = "read-only variable is not assignable";
+    }
+    *location = result != NULL ? first : report->token;
+    return result;
+}
+
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
+
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
@@ -1852,6 +1969,28 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     {
         result = overloaded;
     }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING &&
+             graph->argument_counts[node] == 1 && report->diagnostic == CHECK_DIAG_INCOMPATIBLE)
+    {
+        // CFString's argument that converts but is no ordinary literal (#2189, clang's CheckObjCString), at its first token.
+        CheckBuiltinMiscConstraint constraint = CHECK_BUILTIN_MISC_CONSTRAINT_NONE;
+        for (uint32_t i = 0; i < stream->misc_count; i += 1)
+        {
+            constraint = stream->misc[i].node == node ? stream->misc[i].constraint : constraint;
+        }
+        if (constraint == CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT)
+        {
+            result = "CFString literal is not a string constant";
+            *location = check_semantic_argument_begin(parser, graph, node, 0);
+        }
+    }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CLEAR_PADDING &&
+             graph->argument_counts[node] == 1 &&
+             (report->diagnostic == CHECK_DIAG_INCOMPATIBLE || report->diagnostic == CHECK_DIAG_INCOMPLETE || report->diagnostic == CHECK_DIAG_INVALID_TYPE))
+    {
+        const char* refused = check_semantic_clear_padding(parser, pp, input, stream, types, report, spell, location, note, scratch);
+        result = refused != NULL ? refused : result;
+    }
     else if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
         result = check_semantic_assert(parser, pp, input, stream, types, report, location, note, &note_count, scratch);
@@ -1870,10 +2009,28 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         if (report->diagnostic == CHECK_DIAG_MEMBER && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && token + 1 < parser->tokens.count)
         {
             const TypeId record = op == CHECK_OP_ARROW ? type_element(types, operand_type) : operand_type;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(record), 0);
             const String8 name = check_semantic_name(parser, pp, token + 1);
+            // A base of no structure or union is clang's err_typecheck_member_reference_struct_union at the operator
+            // (LookupMemberExpr, #2288), the operand's type as written for `.`; `.` of a pointer to one is its
+            // err_typecheck_member_reference_suggestion there, naming the pointer. A record's missing member is at its name.
+            const uint8_t kind = record != 0 ? type_kind(types, type_strip_aligned(types, record)) : 0;
+            const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+            const uint8_t pointee = op == CHECK_OP_MEMBER && kind == BUSTER_TYPE_KIND_POINTER ? type_kind(types, type_strip_aligned(types, type_element(types, record))) : 0;
+            const bool suggestion = pointee == BUSTER_TYPE_KIND_STRUCT || pointee == BUSTER_TYPE_KIND_UNION;
+            const uint32_t spelling = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling);
+            *location = aggregate ? token + 1 : token;
+            result = type.length == 0 ? NULL :
+                     aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
+                     suggestion ? check_warning_text(scratch, "member reference type %.*s is a pointer; did you mean to use '->'?", (int)type.length, type.pointer) :
+                     check_warning_text(scratch, "member reference base type %.*s is not a structure or union", (int)type.length, type.pointer);
+        }
+        else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_ARROW && operand_type != 0 && token + 1 < parser->tokens.count)
+        {
+            // `->` of no pointer: clang's err_typecheck_member_reference_arrow, at the member's name (#2288).
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type, check_input_operand_type_spelling(input, parser, operand));
             *location = token + 1;
-            result = type.length != 0 ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
+            result = type.length != 0 ? check_warning_text(scratch, "member reference type %.*s is not a pointer", (int)type.length, type.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op == CHECK_OP_POSITIVE && operand_type != 0 && graph->tokens[node] < parser->tokens.count &&
                  parser->tree.roles[graph->tokens[node]] == PARSE_ROLE_CLOSE_CONDITION && graph->tokens[node] != 0 &&
@@ -1976,16 +2133,25 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool first_pointer = operand_type != 0 && check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER;
             const uint32_t pointer = first_pointer ? operand : second;
             const TypeId pointer_type = first_pointer ? operand_type : second_type;
-            const TypeId pointee = pointer_type != 0 && check_action_kind(types, pointer_type) == BUSTER_TYPE_KIND_POINTER ?
+            // (A function's name, either operand, which the subscript decays: its function type is the pointee's.)
+            const bool designator = op == CHECK_OP_SUBSCRIPT && operand_type != 0 && check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_FUNCTION;
+            const bool designator_second = op == CHECK_OP_SUBSCRIPT && !designator && second_type != 0 && check_action_kind(types, second_type) == BUSTER_TYPE_KIND_FUNCTION;
+            const TypeId pointee = designator ? operand_type : designator_second ? second_type :
+                                   pointer_type != 0 && check_action_kind(types, pointer_type) == BUSTER_TYPE_KIND_POINTER ?
                                    type_element(types, type_unqualified(type_strip_aligned(types, pointer_type))) : 0;
             const TypeId bare = pointee != 0 ? type_unqualified(type_strip_aligned(types, pointee)) : 0;
             const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
             const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+            // A subscript of a function's pointer (a function's name decayed): clang's err_subscript_function_type (#2406).
+            const bool function = op == CHECK_OP_SUBSCRIPT && kind == BUSTER_TYPE_KIND_FUNCTION;
             const String8 type = tag ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, stream, types, pointer)) :
-                                       (String8){ "", 0 };
+                                 function && !designator && !designator_second ?
+                                 check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, stream, types, pointer)) :
+                                 function ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0) : (String8){ "", 0 };
             if (type.length != 0)
             {
-                result = check_warning_text(scratch, op == CHECK_OP_SUBSCRIPT ? "subscript of pointer to incomplete type %.*s" :
+                result = check_warning_text(scratch, function ? "subscript of pointer to function type %.*s" :
+                                                     op == CHECK_OP_SUBSCRIPT ? "subscript of pointer to incomplete type %.*s" :
                                                      "arithmetic on a pointer to an incomplete type %.*s", (int)type.length, type.pointer);
                 // (A subscript's at its `[`, the opener of its node's `]`.)
                 uint32_t open = token;
@@ -1994,9 +2160,22 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 {
                     open -= 1;
                 }
-                *location = open;
-                *note = check_semantic_forward_note(parser, pp, input, types, spell, bare, scratch);
+                // (A function's pointer's at that operand, as clang's is at the base.)
+                const uint32_t based = designator ? operand : designator_second ? second : pointer;
+                *location = function && based < count && graph->tokens[based] < parser->tokens.count ? check_semantic_first_token(parser, graph->tokens[based]) : open;
+                *note = function ? *note : check_semantic_forward_note(parser, pp, input, types, spell, bare, scratch);
             }
+        }
+        else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_SUBSCRIPT && token < parser->tokens.count)
+        {
+            // A subscript of neither an array, a pointer nor a vector: clang's err_typecheck_subscript_value at its `[` (#2406).
+            uint32_t open = token;
+            while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE && parser->tree.parents[open] == token))
+            {
+                open -= 1;
+            }
+            *location = open;
+            result = "subscripted value is not an array, pointer, or vector";
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && token < parser->tokens.count &&
                  graph->tokens[node] == token)

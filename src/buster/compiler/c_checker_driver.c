@@ -170,6 +170,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
         case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
         case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_CASE_OUTSIDE_SWITCH: result = "'case' statement not in switch statement"; break;
+        case CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH: result = "'default' statement not in switch statement"; break;
         case CHECK_INPUT_JUMP_ASM: result = "cannot jump from this asm goto statement to one of its possible targets"; break;
         case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
         case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;
@@ -3135,7 +3137,13 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
     const bool incompatible = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE;
     const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const bool void_return = returning && check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_VOID;
-    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    // The argument the report is at (#2413: a call's later failed arguments' reports, at each one's token), else the
+    // action's diagnostic operand.
+    uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    for (uint32_t i = 0; op == CHECK_OP_CALL && graph->argument_tokens != NULL && i < graph->argument_counts[node]; i += 1)
+    {
+        argument_index = graph->argument_tokens[graph->argument_offsets[node] + i] == token ? i + 1 : argument_index;
+    }
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     uint32_t source = BUSTER_CHECK_NONE;
     TypeId target = 0;
@@ -3609,7 +3617,13 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     // message gives.)
     const bool returning = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
                            check_action_kind(types, graph->types[node]) != BUSTER_TYPE_KIND_VOID;
-    const uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    // The argument the report is at (#2413: a call's later failed arguments' reports, at each one's token), else the
+    // action's diagnostic operand.
+    uint32_t argument_index = op == CHECK_OP_CALL ? stream->diagnostic_operands[node] : 0;
+    for (uint32_t i = 0; op == CHECK_OP_CALL && graph->argument_tokens != NULL && i < graph->argument_counts[node]; i += 1)
+    {
+        argument_index = graph->argument_tokens[graph->argument_offsets[node] + i] == token ? i + 1 : argument_index;
+    }
     const bool passing = op == CHECK_OP_CALL && argument_index != 0 && graph->argument_counts != NULL && argument_index <= graph->argument_counts[node];
     const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE &&
                          (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || returning || passing);
@@ -3695,6 +3709,90 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
                                                                  target_declaration, target_node, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
+    return result;
+}
+
+// __builtin_dump_struct's rest argument that doesn't convert to its printer's parameter (#2189, clang's BuiltinDumpStruct,
+// whose printer calls convert as a call's arguments): the conversion's words as a call's argument's
+// (check_driver_conversion_words), at the argument's first token, with clang's notes "in call to printing function with
+// arguments '(rest..., "%s", "struct S")' while dumping struct" at the builtin's name, the arguments of its first line's
+// call as clang's printer spells them, and "passing argument to parameter 'x' here" at the printer's parameter where it
+// is a function's name. NULL for another report.
+static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                            CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, PPOutputDiagnosticNote* notes, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && node < stream->count &&
+                           graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_DUMP_STRUCT && graph->argument_counts != NULL;
+    const uint32_t operand = candidate ? stream->diagnostic_operands[node] : 0;
+    const uint32_t count = candidate ? graph->argument_counts[node] : 0;
+    const char* result = NULL;
+    if (operand >= 2 && operand < count)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        const uint32_t index = operand - 2;
+        const uint32_t source = graph->argument_nodes[offset + operand];
+        const uint32_t printer = graph->argument_nodes[offset + 1];
+        TypeId function = printer < stream->count ? type_strip_aligned(types, check_stream_type(stream, printer)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        const TypeId target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+        // The function the printer names, as clang's getCalleeDecl finds it: `p`, `(p)` and `&p`.
+        const uint32_t called = printer < stream->count && graph->ops[printer] == CHECK_OP_ADDRESS ? graph->operand0[printer] : printer;
+        const uint32_t name = called < stream->count && graph->ops[called] == CHECK_OP_VALUE ? graph->tokens[called] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = declaration < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        uint32_t parameter = direct && target != 0 && check_action_kind(types, target) == BUSTER_TYPE_KIND_POINTER ?
+                             check_driver_parameter_source(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        const bool placed = parameter < input->token_count;
+        const char* words = target != 0 ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target,
+                                                                         placed ? check_driver_parameter_spelling(parser, input, parameter) : 0, 0,
+                                                                         placed ? parameter : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 3, scratch) : NULL;
+        // The first line's call: the rest as written, then the record's line's format and type name.
+        const uint32_t opening = graph->argument_tokens[offset] > 0 ? check_semantic_argument_begin(parser, graph, node, 0) - 1 : 0;
+        const uint32_t closing = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
+        const uint32_t record = graph->argument_nodes[offset];
+        const TypeId pointer = record < stream->count ? type_strip_aligned(types, check_stream_type(stream, record)) : 0;
+        const TypeId pointee = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_element(types, pointer)) : 0;
+        String8 type = pointee != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0) : (String8){ 0 };
+        // Its name as the call's string has it: the first quoted text, without the quotes.
+        uint64_t end = 1;
+        while (end < type.length && type.pointer[end] != '\'')
+        {
+            end += 1;
+        }
+        const String8 named = type.length > 2 && type.pointer[0] == '\'' ? (String8){ .pointer = type.pointer + 1, .length = end - 1 } : (String8){ 0 };
+        const char* arguments = "";
+        for (uint32_t k = 2; k < count && closing < parser->tokens.count && named.length != 0 && arguments != NULL; k += 1)
+        {
+            const uint32_t begin = check_semantic_argument_begin(parser, graph, node, k);
+            const uint32_t stop = k + 1 < count ? check_semantic_argument_begin(parser, graph, node, k + 1) - 1 : closing;
+            const char* text = begin < stop ? check_semantic_requirement(parser, pp, begin, stop, NULL, scratch) : NULL;
+            arguments = text != NULL ? check_warning_text(scratch, "%s%s, ", arguments, text) : NULL;
+        }
+        const uint32_t callee = opening > 0 ? opening - 1 : BUSTER_CHECK_NONE;
+        if (words != NULL && arguments != NULL && named.length != 0 && callee < parser->tokens.count)
+        {
+            result = words;
+            *located = check_semantic_argument_begin(parser, graph, node, operand);
+            uint32_t note_count = 0;
+            check_semantic_add_note(parser, notes, &note_count, callee,
+                                    check_warning_text(scratch, "in call to printing function with arguments '(%s\"%%s\", \"%.*s\")' while dumping struct", arguments,
+                                                       (int)named.length, named.pointer));
+            if (placed)
+            {
+                const bool identified = parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER && input->declarations[parameter] == parameter &&
+                                        input->declaration_kinds[parameter] == C_BINDING_OBJECT;
+                const uint32_t identifier = identified ? parser->tokens.names[parameter] : 0;
+                check_semantic_add_note(parser, notes, &note_count, parameter,
+                                        identified ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
+                                                                        intern_bytes(pp->table, identifier)) : "passing argument to parameter here");
+            }
+        }
+    }
     return result;
 }
 
@@ -4351,6 +4449,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_dump_struct(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
                     }
                     // A failed assignment conversion's clang words, with an argument's parameter note (#147).
                     uint32_t conversion_note_token = BUSTER_CHECK_NONE;
