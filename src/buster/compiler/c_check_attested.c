@@ -78,6 +78,7 @@ typedef enum CheckAttestedPass
 {
     CHECK_ATTESTED_PASS_LISTS,
     CHECK_ATTESTED_PASS_HASHES,
+    CHECK_ATTESTED_PASS_LITERALS,
     CHECK_ATTESTED_PASS_CHAIN,
     CHECK_ATTESTED_PASS_REACH,
     CHECK_ATTESTED_PASS_MARKS,
@@ -88,6 +89,7 @@ static const char* const check_attested_pass_names[CHECK_ATTESTED_PASSES] =
 {
     "lists",
     "own-hashes",
+    "literals",
     "chain",
     "reach",
     "marks",
@@ -268,8 +270,10 @@ struct CheckAttested
     uint8_t* spelling;
     uint64_t spelling_capacity;
     bool any_definition;
-    // The thread's user-mode cycle counter, and the thread it counts.
+    // The thread's user-mode cycle counter, its page (read with rdpmc where the kernel allows, so that no system call
+    // comes between two passes), and the thread it counts.
     int cycles;
+    volatile struct perf_event_mmap_page* cycles_page;
     pid_t cycles_thread;
     bool counted;
     // The counts.
@@ -295,6 +299,11 @@ struct CheckAttested
     uint64_t declare_events;
     uint64_t use_events;
     uint64_t pass_tokens;
+    // The own hashes' literals (counted on every run of the passes): all, those spelled (not an integer's value), and
+    // the searches of the ranges their spellings took.
+    uint64_t literal_count;
+    uint64_t spelled_literals;
+    uint64_t range_searches;
     uint64_t pass_cycles[CHECK_ATTESTED_PASSES];
     uint64_t first_cycles[CHECK_ATTESTED_PASSES];
     uint64_t pass_ticks[CHECK_ATTESTED_PASSES];
@@ -665,7 +674,7 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
 // The lists of `parser`'s unit into the census's unit arrays; whether there was room. One pass in source order, with a
 // stack of the open groups: on the vector path 64 tokens at a time, their parts from the tables by vpermb and the
 // parser's roots by compares, stepping through the tokens that have either; on the scalar path, its twin, every token.
-static bool check_attested_lists(CheckAttested* census, const Parser* parser)
+static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census, const Parser* parser)
 {
     const uint32_t count = parser->tokens.count;
     const uint8_t* const kinds = parser->tokens.kinds;
@@ -754,7 +763,7 @@ static bool check_attested_lists(CheckAttested* census, const Parser* parser)
 
 // The pragmas' places, hashes and spelled names. A pragma whose parser position is a declaration's first token (or the
 // unit's end) is between declarations; one inside a declaration marks it.
-static bool check_attested_pragmas(CheckAttested* census, const Parser* parser, Preprocessor* pp)
+static __attribute__((noinline)) bool check_attested_pragmas(CheckAttested* census, const Parser* parser, Preprocessor* pp)
 {
     const uint32_t pragmas = parser->tokens.pragma_count;
     const PPTokens* output = &pp->output;
@@ -833,6 +842,7 @@ static uint32_t check_attested_literal(CheckAttested* census, Preprocessor* pp, 
     else if (fits)
     {
         const bool held = *range < pp->range_count && location >= pp->ranges[*range].base && location - pp->ranges[*range].base < pp->ranges[*range].length;
+        census->range_searches += held ? 0 : 1;
         *range = held ? *range : pp_find_range(pp, location);
         result = *range != BUSTER_PP_NONE ?
                  pp_without_splices(pp, kind, pp->ranges[*range].bytes + (location - pp->ranges[*range].base), end - location, census->spelling, spelling) :
@@ -857,6 +867,7 @@ static void check_attested_literal_word(CheckAttested* census, Preprocessor* pp,
         const uint32_t length = check_attested_literal(census, pp, source, range, &spelling);
         word ^= length != UINT32_MAX ? check_attested_bytes(spelling, length) : (uint64_t)output->locations[source] << 24;
     }
+    census->spelled_literals += output->kinds[source] != BUSTER_PP_KIND_INTEGER ? 1 : 0;
     const uint64_t placed = word ^ (uint64_t)place * BUSTER_ATTESTED_K1;
     const unsigned __int128 product = (unsigned __int128)(placed ^ BUSTER_ATTESTED_K2) * BUSTER_ATTESTED_K3;
     hash->low += (uint64_t)product ^ (uint64_t)(product >> 64);
@@ -867,12 +878,11 @@ static void check_attested_literal_word(CheckAttested* census, Preprocessor* pp,
 // literals' spellings' (the sum's order is none, so they come after), then its length mixed in. One pass over every
 // token, its declaration's sum kept where it ends (no branch a token, none a declaration); the literals stepped
 // through by their kinds' mask 64 tokens at a time, or every token on the scalar path, its twin.
-static void check_attested_hashes(CheckAttested* census, const Parser* parser, Preprocessor* pp)
+static __attribute__((noinline)) void check_attested_hashes(CheckAttested* census, const Parser* parser)
 {
     const uint8_t* const kinds = parser->tokens.kinds;
     const uint8_t* const roles = parser->tree.roles;
     const uint32_t* const names = parser->tokens.names;
-    const uint32_t* const sources = parser->tokens.sources;
     const uint8_t* const levels = census->token_levels;
     const uint32_t* const parents = parser->tree.parents;
     const uint32_t* const firsts = census->firsts;
@@ -880,14 +890,15 @@ static void check_attested_hashes(CheckAttested* census, const Parser* parser, P
     CheckAttestedHash* const owns = census->owns;
     const uint32_t declarations = census->declaration_count;
     uint32_t d = 0;
-    uint32_t first = declarations != 0 ? firsts[0] : 0;
+    // The token's place in its declaration times BUSTER_ATTESTED_K3, kept as a running sum.
+    uint64_t place = 0;
     uint64_t low = BUSTER_ATTESTED_K0;
     uint64_t high = BUSTER_ATTESTED_K1;
     const uint32_t end = declarations != 0 ? lasts[declarations - 1] + 1 : 0;
-    for (uint32_t t = first; t < end; t += 1)
+    for (uint32_t t = declarations != 0 ? firsts[0] : 0; t < end; t += 1)
     {
         const uint64_t word = (uint64_t)names[t] << 32 | (uint64_t)levels[t] << 16 | (uint64_t)roles[t] << 8 | kinds[t];
-        const uint64_t placed = word ^ (uint64_t)(t - first) * BUSTER_ATTESTED_K3;
+        const uint64_t placed = word ^ place;
         const unsigned __int128 product = (unsigned __int128)(placed ^ BUSTER_ATTESTED_K0) * BUSTER_ATTESTED_K1;
         low += (uint64_t)product ^ (uint64_t)(product >> 64);
         high += (uint64_t)(product >> 64) + placed;
@@ -896,11 +907,23 @@ static void check_attested_hashes(CheckAttested* census, const Parser* parser, P
         owns[d] = (CheckAttestedHash){ .low = low, .high = high };
         const bool ends = parents[t] == BUSTER_PARSE_ROOT;
         d += ends ? 1u : 0u;
-        first = ends ? t + 1 : first;
+        place = ends ? 0 : place + BUSTER_ATTESTED_K3;
         low = ends ? BUSTER_ATTESTED_K0 : low;
         high = ends ? BUSTER_ATTESTED_K1 : high;
     }
-    // The literals, each at its declaration (a cursor that only rises, as the literals do).
+}
+
+// The own hashes' literals: each one's word added to its declaration's sum (a cursor that only rises, as the literals
+// do), then every declaration's sum finished with its length.
+static __attribute__((noinline)) void check_attested_literals(CheckAttested* census, const Parser* parser, Preprocessor* pp)
+{
+    const uint8_t* const kinds = parser->tokens.kinds;
+    const uint32_t* const sources = parser->tokens.sources;
+    const uint32_t* const firsts = census->firsts;
+    const uint32_t* const lasts = census->lasts;
+    CheckAttestedHash* const owns = census->owns;
+    const uint32_t declarations = census->declaration_count;
+    const uint32_t end = declarations != 0 ? lasts[declarations - 1] + 1 : 0;
     const __m512i number = _mm512_set1_epi8(PARSE_KIND_NUMBER);
     const __m512i character = _mm512_set1_epi8(PARSE_KIND_CHARACTER);
     const __m512i string = _mm512_set1_epi8(PARSE_KIND_STRING);
@@ -932,6 +955,7 @@ static void check_attested_hashes(CheckAttested* census, const Parser* parser, P
                 at += 1;
             }
             check_attested_literal_word(census, pp, sources[token], token - firsts[at], &range, owns + at);
+            census->literal_count += 1;
             literals &= literals - 1;
         }
     }
@@ -985,7 +1009,7 @@ static void check_attested_declarer(CheckAttested* census, uint32_t key, uint32_
     *entries = entry + 1;
 }
 
-static void check_attested_chain(CheckAttested* census)
+static __attribute__((noinline)) void check_attested_chain(CheckAttested* census)
 {
     const uint32_t declarations = census->declaration_count;
     const uint32_t* const name_starts = census->name_starts;
@@ -1008,18 +1032,23 @@ static void check_attested_chain(CheckAttested* census)
             }
             pragma += 1;
         }
+        // Its own hash and the ambient state, then a sum over its listed names of each one's entry and current hash at its
+        // place in the list (no chain from one name to the next), then the sum mixed in.
         const CheckAttestedHash own = census->owns[d];
-        CheckAttestedHash hash = check_attested_step((CheckAttestedHash){ .low = own.low ^ ambient.low, .high = own.high ^ ambient.high }, BUSTER_ATTESTED_K2);
+        const uint32_t start = name_starts[d];
         const uint32_t end = name_starts[d + 1];
-        for (uint32_t n = name_starts[d]; n < end; n += 1)
+        uint64_t low = 0;
+        uint64_t high = 0;
+        for (uint32_t n = start; n < end; n += 1)
         {
             const uint32_t entry = name_entries[n];
-            if ((entry >> BUSTER_ATTESTED_CLASS_SHIFT & (BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP)) != 0)
-            {
-                const CheckAttestedHash name = check_attested_name_hash(census, entry & BUSTER_ATTESTED_KEY_MASK);
-                hash = check_attested_step((CheckAttestedHash){ .low = hash.low ^ name.low, .high = hash.high ^ name.high }, entry);
-            }
+            const bool listed = (entry >> BUSTER_ATTESTED_CLASS_SHIFT & (BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP)) != 0;
+            const CheckAttestedHash name = check_attested_name_hash(census, entry & BUSTER_ATTESTED_KEY_MASK);
+            const uint64_t placed = (uint64_t)entry ^ (uint64_t)(n - start) << 32;
+            low += listed ? check_attested_mum(name.low ^ placed ^ BUSTER_ATTESTED_K0, BUSTER_ATTESTED_K1) : 0;
+            high += listed ? check_attested_mum(name.high ^ placed ^ BUSTER_ATTESTED_K2, BUSTER_ATTESTED_K3) : 0;
         }
+        const CheckAttestedHash hash = check_attested_step((CheckAttestedHash){ .low = own.low ^ ambient.low ^ low, .high = own.high ^ ambient.high ^ high }, end - start);
         census->semantics[d] = hash;
         const bool eligible = (census->flags[d] & (BUSTER_ATTESTED_DEFINITION | BUSTER_ATTESTED_PRAGMA)) == 0;
         census->hits[d] = eligible && check_attested_memo_has(census, hash);
@@ -1141,7 +1170,7 @@ static void check_attested_string_names(CheckAttested* census, const Parser* par
     }
 }
 
-static void check_attested_reach(CheckAttested* census, const Parser* parser, Preprocessor* pp, uint8_t* reached, bool runtime)
+static __attribute__((noinline)) void check_attested_reach(CheckAttested* census, const Parser* parser, Preprocessor* pp, uint8_t* reached, bool runtime)
 {
     const uint32_t declarations = census->declaration_count;
     uint32_t pending = 0;
@@ -1202,7 +1231,7 @@ static void check_attested_reach(CheckAttested* census, const Parser* parser, Pr
 // ---------------------------------------------------------------------------------------------------------------------
 // The marks: a bit for each token of a skipped declaration (attested and not reached), 64 tokens a word.
 
-static void check_attested_marks(CheckAttested* census)
+static __attribute__((noinline)) void check_attested_marks(CheckAttested* census)
 {
     const uint32_t words = census->token_count / 64 + 1;
     memset(census->marks, 0, (uint64_t)words * sizeof(uint64_t));
@@ -1228,10 +1257,32 @@ static void check_attested_marks(CheckAttested* census)
 // ---------------------------------------------------------------------------------------------------------------------
 // The unit before its reader: its arrays, the passes timed, then the reader with its environment published.
 
+// The counter's value: with rdpmc from its page under the page's sequence lock, as linux/perf_event.h describes (the
+// parser benchmark's reader), or with read() where the kernel doesn't allow rdpmc.
 static uint64_t check_attested_cycles(const CheckAttested* census)
 {
     uint64_t value = 0;
-    if (census->cycles >= 0 && read(census->cycles, &value, sizeof(value)) != (ssize_t)sizeof(value))
+    volatile struct perf_event_mmap_page* page = census->cycles_page;
+    if (page != NULL && page->cap_user_rdpmc)
+    {
+        bool stable = false;
+        while (!stable)
+        {
+            const uint32_t sequence = page->lock;
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);
+            const uint32_t index = page->index;
+            int64_t count = page->offset;
+            if (index != 0)
+            {
+                const uint32_t shift = 64 - page->pmc_width;
+                count += (int64_t)(__rdpmc((int)index - 1) << shift) >> shift;
+            }
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);
+            stable = page->lock == sequence;
+            value = (uint64_t)count;
+        }
+    }
+    else if (census->cycles >= 0 && read(census->cycles, &value, sizeof(value)) != (ssize_t)sizeof(value))
     {
         value = 0;
     }
@@ -1244,6 +1295,11 @@ static void check_attested_counter(CheckAttested* census)
     const pid_t thread = (pid_t)syscall(SYS_gettid);
     if (census->cycles < 0 || census->cycles_thread != thread)
     {
+        if (census->cycles_page != NULL)
+        {
+            munmap((void*)census->cycles_page, (size_t)sysconf(_SC_PAGESIZE));
+            census->cycles_page = NULL;
+        }
         if (census->cycles >= 0)
         {
             close(census->cycles);
@@ -1255,7 +1311,9 @@ static void check_attested_counter(CheckAttested* census)
         attribute.config = PERF_COUNT_HW_CPU_CYCLES;
         attribute.exclude_kernel = 1;
         attribute.exclude_hv = 1;
-        census->cycles = (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, 0);
+        census->cycles = (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+        void* page = census->cycles >= 0 ? mmap(0, (size_t)sysconf(_SC_PAGESIZE), PROT_READ, MAP_SHARED, census->cycles, 0) : MAP_FAILED;
+        census->cycles_page = page != MAP_FAILED ? (volatile struct perf_event_mmap_page*)page : NULL;
         census->cycles_thread = thread;
         census->counted = census->cycles >= 0;
         // A read's own cycles, from a pair of reads with nothing between them, the least of a few.
@@ -1362,28 +1420,34 @@ static bool check_attested_passes(CheckAttested* census, const Parser* parser, P
     laps[1] = check_attested_cycles(census);
     if (listed)
     {
-        check_attested_hashes(census, parser, pp);
+        check_attested_hashes(census, parser);
     }
     times[2] = __rdtsc();
     laps[2] = check_attested_cycles(census);
     if (listed)
     {
-        check_attested_chain(census);
+        check_attested_literals(census, parser, pp);
     }
     times[3] = __rdtsc();
     laps[3] = check_attested_cycles(census);
     if (listed)
     {
-        check_attested_reach(census, parser, pp, census->reached, true);
+        check_attested_chain(census);
     }
     times[4] = __rdtsc();
     laps[4] = check_attested_cycles(census);
     if (listed)
     {
-        check_attested_marks(census);
+        check_attested_reach(census, parser, pp, census->reached, true);
     }
     times[5] = __rdtsc();
     laps[5] = check_attested_cycles(census);
+    if (listed)
+    {
+        check_attested_marks(census);
+    }
+    times[6] = __rdtsc();
+    laps[6] = check_attested_cycles(census);
     for (uint32_t p = 0; p < CHECK_ATTESTED_PASSES; p += 1)
     {
         const uint64_t lap = laps[p + 1] - laps[p];
@@ -1717,6 +1781,8 @@ static void check_attested_report(const CheckAttested* census)
     printf("attested: events declares=%" PRIu64 " unlisted=%" PRIu64 " completions-unlisted=%" PRIu64 " uses=%" PRIu64 " unlisted-uses=%" PRIu64 "\n", census->declare_events,
            census->unlisted_declares, census->unlisted_completions, census->use_events, census->unlisted_uses);
     printf("attested: diagnostics=%" PRIu64 " unplaced=%" PRIu64 "\n", census->diagnostics, census->unplaced_diagnostics);
+    printf("attested: literals=%" PRIu64 " spelled=%" PRIu64 " range-searches=%" PRIu64 " (of every run of the passes)\n", census->literal_count, census->spelled_literals,
+           census->range_searches);
     uint64_t all = 0;
     uint64_t first_all = 0;
     uint64_t ticks = 0;
@@ -1748,6 +1814,7 @@ static bool check_attested_number(const char* text, uint32_t* result)
 
 static bool check_attested_open(CheckAttested* census)
 {
+    census->cycles = -1;
     const uint64_t keys = 2 * (uint64_t)BUSTER_ATTESTED_MAX_IDS;
     const uint32_t runtimes = check_attested_runtime_count();
     // Room for every size the memo takes, each table after the last: twice its most slots.
@@ -1767,13 +1834,16 @@ static bool check_attested_open(CheckAttested* census)
         census->runtime_lengths[r] = check_lower_runtime_names[r] != NULL ? (uint32_t)strlen(check_lower_runtime_names[r]) : UINT32_MAX;
     }
     census->unit_arena = arena_reserve(UINT64_C(1) << 36);
-    census->cycles = -1;
     check_attested_actions(census->kind_actions, census->role_actions);
     return census->memo != NULL && census->keys != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL;
 }
 
 static void check_attested_close(CheckAttested* census)
 {
+    if (census->cycles_page != NULL)
+    {
+        munmap((void*)census->cycles_page, (size_t)sysconf(_SC_PAGESIZE));
+    }
     if (census->cycles >= 0)
     {
         close(census->cycles);
@@ -1800,7 +1870,9 @@ static int check_attested_run(CheckAttested* census, int count, char** arguments
         forwarded[i] = arguments[i];
     }
     int result = 1;
-    if (valid && check_attested_open(census))
+    // (Closed only where it was opened: a census's counter is -1 from its opening on, and 0 before, stdin's.)
+    const bool opened = valid && check_attested_open(census);
+    if (opened)
     {
         forwarded[count] = "--lanes";
         forwarded[count + 1] = "1";
@@ -1815,7 +1887,10 @@ static int check_attested_run(CheckAttested* census, int count, char** arguments
         fflush(stdout);
         result = result == 0 && !census->failed && census->units_observed != 0 ? 0 : 1;
     }
-    check_attested_close(census);
+    if (valid)
+    {
+        check_attested_close(census);
+    }
     free(forwarded);
     return valid ? result : 2;
 }
