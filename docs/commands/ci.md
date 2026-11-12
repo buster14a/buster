@@ -37,7 +37,11 @@ rule change together, after the capacity gate and the owner's decision.
   - the vector pool;
   - the three fuzz campaigns.
 
-  It takes its own run-id concurrency group, and its rows don't fail fast.
+  It takes its own run-id concurrency group. Like a pull request's run, it
+  stops at its first failure (the owner's choice on 2026-11-12):
+  - its tests and fuzz campaigns wait for the policy job;
+  - its rows, shards, vector draws and fuzz campaigns fail fast, each within
+    its own matrix.
   It never uses the 9700X (`hardware=skip`, reason `merge-group`), and
   SQLite's full Tcl suite stays nightly.
 - **Selector.** `changes --event merge_group --workflow
@@ -128,7 +132,8 @@ the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
 fail fast, and its tests don't start when the guide-size or DCO hook check
-fails. Pushes to main, the daily and dispatched runs report every row. The
+fails. A merge-queue candidate's run does too, and its fuzz campaigns fail fast
+as well. Pushes to main, the daily and dispatched runs report every row. The
 existing required check name is retained by a hosted aggregation job that fails
 when either stage fails.
 Draft and ready PRs alike get hosted feedback and never queue hardware.

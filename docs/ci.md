@@ -264,7 +264,9 @@ selector's own policy mutants pin the draft guard and ready/draft triggers.
 A pull request's run stops at its first failure. Its two test rows' shards fail
 fast, and its tests wait for the policy job (`Measurement storage policy`: the
 measurement storage, agent-guide size and DCO hook checks in one job, #2334), which
-finishes about when the `changes` job does, and don't start when it fails. Pushes
+finishes about when the `changes` job does, and don't start when it fails. A
+merge-queue candidate's run does the same, and its fuzz campaigns fail fast too
+(see "The merge queue"). Pushes
 to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
@@ -688,8 +690,19 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   `merge-group`. A candidate never uses the 9700X. Its merged first-parent
   state gets native correctness and measurements in the nightly window.
 - **Concurrency.** Each candidate has its own run-id group, because the queue
-  builds several at once: none cancels or replaces another. Rows don't fail
-  fast, so every row reports.
+  builds several at once: none cancels or replaces another.
+- **Failing fast.** A candidate stops at its first failure, as a pull request
+  does (the owner's choice on 2026-11-12). A failing candidate then leaves the
+  queue sooner and holds fewer runners.
+  - Its tests and fuzz campaigns don't start when the policy job fails.
+  - Its first failing row cancels the other rows, and within a row its first
+    failing shard or vector draw cancels the rest.
+  - Its first failing fuzz campaign cancels the other campaigns.
+
+  GitHub's fail-fast works within one matrix only. So a test failure doesn't
+  stop the fuzz campaigns, nor a fuzz failure the test rows, and the aggregate
+  reports when both have ended. In the full dispatch 43261314947 the longest
+  campaign (`frontend`) took 19 minutes and the longest test shards about 21.
 - **Aggregate.** `Build and execute on Ryzen 7 9700X` runs for a candidate.
   It passes only when the hosted rows, the fuzz campaigns, the policy job and
   the coverage step all succeeded and the 9700X was skipped. There is no
