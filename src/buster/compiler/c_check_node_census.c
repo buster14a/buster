@@ -889,39 +889,50 @@ static uint32_t node_census_local_object(const CheckProgram* program, uint32_t n
 }
 
 // Whether the value a return gives is a local's address, followed through conversions, casts, a comma's value, a
-// conditional's arms and pointer arithmetic: an address of a local, or a local array's value, which decays to it.
-static bool node_census_returns_address(const CheckProgram* program, uint32_t node, uint32_t depth)
+// conditional's arms and pointer arithmetic: an address of a local, or a local array's value, which decays to it. The
+// operands followed wait in a list of BUSTER_NODE_CENSUS_FOLLOWED (a deeper tree's further nodes are refused).
+#define BUSTER_NODE_CENSUS_FOLLOWED 64u
+static bool node_census_returns_address(const CheckProgram* program, uint32_t root)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
+    uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
+    uint32_t count = 0;
+    uint32_t visited = 0;
     bool result = false;
-    if (node < graph->count && depth < 64)
+    pending[count++] = root;
+    while (count != 0 && !result)
     {
-        const CheckOp op = graph->ops[node];
-        if (op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_INITIALIZE)
+        const uint32_t node = pending[--count];
+        visited += 1;
+        if (node < graph->count)
         {
-            result = node_census_returns_address(program, graph->operand0[node], depth + 1);
-        }
-        else if (op == CHECK_OP_COMMA)
-        {
-            result = node_census_returns_address(program, graph->operand1[node], depth + 1);
-        }
-        else if (op == CHECK_OP_CONDITIONAL)
-        {
-            result = node_census_returns_address(program, graph->operand1[node], depth + 1) || node_census_returns_address(program, graph->operand2[node], depth + 1);
-        }
-        else if (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
-        {
-            result = node_census_returns_address(program, graph->operand0[node], depth + 1) || node_census_returns_address(program, graph->operand1[node], depth + 1);
-        }
-        else if (op == CHECK_OP_ADDRESS)
-        {
-            result = node_census_local_object(program, graph->operand0[node]) != 0;
-        }
-        else
-        {
-            result = type_kind_is_array(node_census_kind(types, check_stream_type(stream, node))) && node_census_local_object(program, node) != 0;
+            const CheckOp op = graph->ops[node];
+            const bool through = op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_INITIALIZE;
+            const bool both = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT;
+            const uint32_t first = through ? graph->operand0[node] : op == CHECK_OP_COMMA ? graph->operand1[node] :
+                                   op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : both ? graph->operand0[node] : BUSTER_CHECK_NONE;
+            const uint32_t second = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : both ? graph->operand1[node] : BUSTER_CHECK_NONE;
+            if (op == CHECK_OP_ADDRESS)
+            {
+                result = node_census_local_object(program, graph->operand0[node]) != 0;
+            }
+            else if (first == BUSTER_CHECK_NONE)
+            {
+                result = type_kind_is_array(node_census_kind(types, check_stream_type(stream, node))) && node_census_local_object(program, node) != 0;
+            }
+            else
+            {
+                // A tree past the list's room, or past as many visits, is refused rather than followed.
+                result = count + 2 > BUSTER_NODE_CENSUS_FOLLOWED || visited > BUSTER_NODE_CENSUS_FOLLOWED;
+                pending[count] = first;
+                count += !result;
+                if (second != BUSTER_CHECK_NONE && !result)
+                {
+                    pending[count++] = second;
+                }
+            }
         }
     }
     return result;
@@ -1031,38 +1042,44 @@ static bool node_census_unsequenced(const NodeCensusScratch* s, uint32_t count, 
 }
 
 // Whether a discarded node gives -Wunused-value or its kin, following the discard down a comma's and a conditional's
-// operands: a value without an effect, or a call whose callee asks for its result. A cast to void is explicit.
-static bool node_census_discarded(const NodeCensusScratch* s, uint32_t node, uint32_t depth)
+// operands: a value without an effect, or a call whose callee asks for its result. A cast to void is explicit. The
+// operands followed wait in a list of BUSTER_NODE_CENSUS_FOLLOWED (a deeper tree is refused).
+static bool node_census_discarded(const NodeCensusScratch* s, uint32_t root)
 {
     const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
+    uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
+    uint32_t count = 0;
+    uint32_t visited = 0;
     bool result = false;
-    if (node < graph->count && depth < 64)
+    pending[count++] = root;
+    while (count != 0 && !result)
     {
-        const CheckOp op = graph->ops[node];
-        const TypeId type = check_stream_type(stream, node);
-        const bool to_void = type != 0 && node_census_kind(types, type) == BUSTER_TYPE_KIND_VOID;
-        if (op == CHECK_OP_CAST && to_void)
+        const uint32_t node = pending[--count];
+        visited += 1;
+        if (node < graph->count)
         {
-            result = false;
-        }
-        else if (op == CHECK_OP_COMMA)
-        {
-            result = node_census_discarded(s, graph->operand0[node], depth + 1) || node_census_discarded(s, graph->operand1[node], depth + 1);
-        }
-        else if (op == CHECK_OP_CONDITIONAL)
-        {
-            result = node_census_discarded(s, graph->operand1[node], depth + 1) || node_census_discarded(s, graph->operand2[node], depth + 1);
-        }
-        else if (op == CHECK_OP_CALL)
-        {
-            result = s->policy.unused_result && node_census_wants_result(s, node);
-        }
-        else if (!node_census_modifies(op) && !to_void)
-        {
-            result = (s->policy.unused_value || s->policy.unused_comparison) && (check_stream_flags(stream, node) & BUSTER_CHECK_SIDE_EFFECT) == 0;
+            const CheckOp op = graph->ops[node];
+            const TypeId type = check_stream_type(stream, node);
+            const bool to_void = type != 0 && node_census_kind(types, type) == BUSTER_TYPE_KIND_VOID;
+            if (op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
+            {
+                result = count + 2 > BUSTER_NODE_CENSUS_FOLLOWED || visited > BUSTER_NODE_CENSUS_FOLLOWED;
+                pending[count] = op == CHECK_OP_COMMA ? graph->operand0[node] : graph->operand1[node];
+                count += !result;
+                pending[count] = op == CHECK_OP_COMMA ? graph->operand1[node] : graph->operand2[node];
+                count += !result;
+            }
+            else if (op == CHECK_OP_CALL)
+            {
+                result = s->policy.unused_result && node_census_wants_result(s, node);
+            }
+            else if (!(op == CHECK_OP_CAST && to_void) && !node_census_modifies(op) && !to_void)
+            {
+                result = (s->policy.unused_value || s->policy.unused_comparison) && (check_stream_flags(stream, node) & BUSTER_CHECK_SIDE_EFFECT) == 0;
+            }
         }
     }
     return result;
@@ -1394,7 +1411,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     tests |= parentheses ? UINT64_C(1) << NODE_CENSUS_PARENTHESES : 0;
     bool unused = policy->unused_comparison && check_common_comparison_role(role) && parent < count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
                   check_common_statement_terminator(parser, parent);
-    unused |= op == CHECK_OP_COMMA && node_census_discarded(s, a, 0);
+    unused |= op == CHECK_OP_COMMA && node_census_discarded(s, a);
     tests |= unused ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
     if (policy->self_assign && op == CHECK_OP_ASSIGN && binary)
     {
@@ -1487,7 +1504,7 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
                          parser->tree.roles[root_token] != PARSE_ROLE_OPEN_CAST;
     const uint32_t discarded_node = wrapper ? graph->operand0[root] : root;
     const bool discarded = context == NODE_CENSUS_ROOT_STATEMENT || (flags & 4u) != 0;
-    tests |= discarded && node_census_discarded(s, discarded_node, 0) ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
+    tests |= discarded && node_census_discarded(s, discarded_node) ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
     tests |= s->policy.loops && node_census_for_clause(parser, graph->tokens[root]) ? UINT64_C(1) << NODE_CENSUS_LOOP : 0;
     tests |= s->policy.unmodeled ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
     // A scalar object's initializer converts its value to the object's type in its plan, not at a node.
@@ -1495,7 +1512,7 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     tests |= (s->policy.constant_conversion || s->policy.assign_enum) && declared != 0 && node_census_constant_changes(stream, program->types, root, declared) ?
              UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     tests |= declared != 0 && node_census_special_type(program->types, declared) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
-    tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(program, root, 0) ?
+    tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(program, root) ?
              UINT64_C(1) << NODE_CENSUS_RETURN_ADDRESS : 0;
     tests |= s->policy.unsequenced && node_census_unsequenced(s, count, root) ? UINT64_C(1) << NODE_CENSUS_UNSEQUENCED : 0;
     const bool events = lowest <= highest && s->event_prefix[highest + 1] != s->event_prefix[lowest];
