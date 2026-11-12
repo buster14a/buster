@@ -202,9 +202,22 @@ enum
     // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
     // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
     CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 142,
+    // A relational comparison whose left operand is one, unparenthesized (#2264, clang's diagnoseChainedComparison):
+    // -Wparentheses', an error by default.
+    CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
+    // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
+    CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
+    // An alignment builtin's alignment of 1 (#2221, clang's SemaBuiltinAlignment): align_up's and align_down's "aligning a
+    // value to 1 byte is a no-op", is_aligned's "the result of checking whether a value is aligned to 1 byte is always
+    // true", -Wtautological-compare's, on by default.
+    CHECK_WARNING_ID_ALIGNMENT_NO_OP = 145,
+    CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE = 146,
+    // A cast of a struct or a union to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar):
+    // -Wpedantic's own, off by default.
+    CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 147,
     // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
     // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
-    CHECK_WARNING_ID_PSABI = 143,
+    CHECK_WARNING_ID_PSABI = 148,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -526,6 +539,14 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // An asm label on a block-scope object of automatic storage, not `register` (#2370, check_input_asm_labels): at the
+    // label's first string token, payload.token that token.
+    CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
+    // An alignment builtin's alignment of 1 (#2221, check_input_alignment_one), at the alignment: its description's words.
+    CHECK_WARNING_EVENT_ALIGNMENT_ONE,
+    // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
+    // cast's type, payload.name its spelling.
+    CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

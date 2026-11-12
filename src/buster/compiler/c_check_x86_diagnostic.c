@@ -56,7 +56,7 @@ static void check_x86_diagnostic_switch(CheckX86DiagnosticWalk* walk, uint32_t i
     uint32_t next = index + 1;
     uint32_t selected = BUSTER_CHECK_NONE;
     unsigned __int128 value = 0;
-    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value);
+    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value, NULL);
     while (next < walk->body->count && controls[next].kind == CHECK_CONTROL_CASE)
     {
         const CheckProgramCase* item = program->cases + controls[next].target;

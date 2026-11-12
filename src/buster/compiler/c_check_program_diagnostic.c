@@ -240,9 +240,10 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
         for (uint32_t i = values + 1; valid && i < ranges; i += 1)
         {
             const CheckProgramCase* item = program->cases + order[i];
-            if (program->cases[order[i - 1]].lower == item->lower)
+            if (check_program_case_compare(program, program->cases + order[i - 1], false, item, false) == 0)
             {
-                const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE, .type = item->type, .value = item->lower };
+                const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE, .type = item->type, .value = item->lower,
+                                                      .wide = item->wide_lower };
                 valid = valid && check_program_conflict_ends(program, parser, &ends, scratch);
                 if (valid)
                 {
@@ -255,9 +256,7 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
         for (uint32_t i = ranges; valid && i < end; i += 1)
         {
             const CheckProgramCase* item = program->cases + order[i];
-            const unsigned __int128 lower = check_program_case_order(program, item, false);
-            const unsigned __int128 upper = check_program_case_order(program, item, true);
-            if (lower <= upper)
+            if (check_program_case_compare(program, item, false, item, true) <= 0)
             {
                 // The first singleton not below the range, then the first above it.
                 uint32_t begin = values;
@@ -265,7 +264,7 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
                 while (begin < limit)
                 {
                     const uint32_t middle = begin + (limit - begin) / 2;
-                    const bool below = check_program_case_order(program, program->cases + order[middle], false) < lower;
+                    const bool below = check_program_case_compare(program, program->cases + order[middle], false, item, false) < 0;
                     begin = below ? middle + 1 : begin;
                     limit = below ? limit : middle;
                 }
@@ -274,30 +273,35 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
                 while (above < limit)
                 {
                     const uint32_t middle = above + (limit - above) / 2;
-                    const bool within = check_program_case_order(program, program->cases + order[middle], false) <= upper;
+                    const bool within = check_program_case_compare(program, program->cases + order[middle], false, item, true) <= 0;
                     above = within ? middle + 1 : above;
                     limit = within ? limit : middle;
                 }
                 uint32_t overlap = BUSTER_CHECK_NONE;
                 unsigned __int128 duplicate = 0;
-                if (begin < ranges && check_program_case_order(program, program->cases + order[begin], false) < upper)
+                const uint64_t* duplicate_wide = NULL;
+                if (begin < ranges && check_program_case_compare(program, program->cases + order[begin], false, item, true) < 0)
                 {
                     overlap = order[begin];
                     duplicate = program->cases[overlap].lower;
+                    duplicate_wide = program->cases[overlap].wide_lower;
                 }
-                if (above > values && check_program_case_order(program, program->cases + order[above - 1], false) >= lower)
+                if (above > values && check_program_case_compare(program, program->cases + order[above - 1], false, item, false) >= 0)
                 {
                     overlap = order[above - 1];
                     duplicate = program->cases[overlap].lower;
+                    duplicate_wide = program->cases[overlap].wide_lower;
                 }
-                if (previous != BUSTER_CHECK_NONE && lower <= check_program_case_order(program, program->cases + previous, true))
+                if (previous != BUSTER_CHECK_NONE && check_program_case_compare(program, item, false, program->cases + previous, true) <= 0)
                 {
                     overlap = previous;
                     duplicate = program->cases[previous].upper;
+                    duplicate_wide = program->cases[previous].wide_upper;
                 }
                 if (overlap != BUSTER_CHECK_NONE)
                 {
-                    const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE, .type = item->type, .value = duplicate };
+                    const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE, .type = item->type, .value = duplicate,
+                                                          .wide = duplicate_wide };
                     valid = valid && check_program_conflict_ends(program, parser, &ends, scratch);
                     if (valid)
                     {
@@ -413,11 +417,9 @@ static bool check_program_diagnose_all(CheckProgramDiagnostic* result, const Che
         {
             const uint32_t owner = selection ? end : check_sparse_get(input->control_owners, end);
             const uint32_t condition = owner < cutoff ? input->token_nodes[owner] : BUSTER_CHECK_NONE;
-            uint32_t width = 0;
-            bool sign = false;
             if (condition < stream->count && complete[condition])
             {
-                if (!check_action_integer_type(types, check_stream_type(stream, condition), &width, &sign))
+                if (!check_program_switch_type(types, check_stream_type(stream, condition)))
                 {
                     // Once, by its switch, where there's a list.
                     if (selection || program.constraints == 0)
@@ -439,8 +441,8 @@ static bool check_program_diagnose_all(CheckProgramDiagnostic* result, const Che
                     {
                         CheckProgramCase item = { .type = check_stream_type(stream, condition), .token = end, .owner = owner,
                                                   .fallback = fallback, .range = check_sparse_get(input->case_ranges, end) != BUSTER_CHECK_NONE };
-                        if (!fallback && (!check_program_case_value(&program, node, item.type, &item.lower) ||
-                            !check_program_case_value(&program, high, item.type, &item.upper)))
+                        if (!fallback && (!check_program_case_value(&program, node, item.type, &item.lower, &item.wide_lower) ||
+                            !check_program_case_value(&program, high, item.type, &item.upper, &item.wide_upper)))
                         {
                             // The reader's error, which a list doesn't repeat: clang drops the case.
                             if (program.constraints == 0)

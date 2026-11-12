@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original _BitInt format-argument sources (#1392), with independent default-warning counts. The shared harness
+// Original _BitInt format-argument sources (#1392), and _Atomic ones (#2234), with independent default-warning counts. The shared harness
 // compares complete Clang diagnostics, -Werror/output preservation and -w, both kernels and requested lane counts.
 
 static const CheckDriverDefaultWarningFixture check_driver_format_bitint_fixtures[] =
@@ -157,6 +157,33 @@ static const CheckDriverDefaultWarningFixture check_driver_format_bitint_fixture
         .options = { "-Wno-gcc-compat" },
         .warnings = 1,
         .c23 = true,
+    },
+    // _Atomic arguments are their value types (#2234): clang's lvalue conversion drops _Atomic, so a matching one gives no
+    // warning and a mismatched one names its value type.
+    {
+        .name = "atomic format arguments by their value types",
+        .source = "int printf(const char*, ...);\n"
+                  "static _Atomic int a = 5;\n"
+                  "static _Atomic long l = 6;\n"
+                  "static _Atomic double d = 6;\n"
+                  "static _Atomic short s = 6;\n"
+                  "static _Atomic char c = 6;\n"
+                  "int main(void) { printf(\"%d %ld %f %hd %c\\n\", a, l, d, s, c); return 0; }\n",
+        .warnings = 0,
+    },
+    {
+        .name = "atomic format arguments that don't match, by their value types",
+        .source = "int printf(const char*, ...);\n"
+                  "typedef _Atomic long AL;\n"
+                  "typedef _Atomic(int) AI;\n"
+                  "static AL al = 1;\n"
+                  "static AI ai = 2;\n"
+                  "static _Atomic unsigned char uc = 3;\n"
+                  "static _Atomic(int *) ap;\n"
+                  "static _Atomic(float) af;\n"
+                  "struct S { _Atomic int m; } s;\n"
+                  "int main(void) { printf(\"%d %d %s %d %p %f %x %*d\\n\", al, ai, uc, s.m, ap, af, ai, ai, 1); printf(\"%s %c\\n\", ap, ai); return 0; }\n",
+        .warnings = 3,
     },
 };
 

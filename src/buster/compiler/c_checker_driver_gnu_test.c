@@ -171,6 +171,14 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "a block's extern const __auto_type", "int u;\nvoid f(void) {\n    int u;\n    {\n        extern const __auto_type u = 2;\n    }\n}\n" },
         { "an _Atomic __auto_type over no atomic type", "int p;\n_Atomic __auto_type p = 1;\n" },
         { "a restrict __auto_type over an unrestricted pointer", "int *q;\n__auto_type restrict q = (int *)0;\n" },
+        // A cast to an atomic type is an atomic rvalue (#2230), which converts to no other type, which an atomic object of
+        // another value type doesn't take, and which the usual arithmetic conversions take on the left alone.
+        { "an atomic cast's rvalue converted",
+          "int *gp;\nint g(int x, int *p) {\n    int y = (_Atomic int)x;\n    _Bool b = (_Atomic(int *))p;\n    gp = (_Atomic(int *))p;\n"
+          "    int *s = (_Atomic(int *))p;\n    int t = (_Atomic(int *))p;\n    _Atomic long u = (_Atomic int)x;\n    return (_Atomic int)x;\n}\n" },
+        { "an atomic cast's rvalue as an operand",
+          "int g(int x) {\n    int r = 1 + (_Atomic int)x;\n    r = (_Atomic int)x + (_Atomic int)x;\n    r = (_Atomic long)x * 3 + (_Atomic short)x;\n"
+          "    return r + (_Atomic int)x * 2;\n}\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {
@@ -198,7 +206,8 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         }
         unlink(source);
     }
-    // C23's auto and constexpr (#793) are accepted by both paths, as clang accepts them, and must write no diagnostic.
+    // C23's auto and constexpr (#793), and atomic casts (#2230), are accepted by both paths, as clang accepts them, and must
+    // write no diagnostic.
     static const struct
     {
         const char* name;
@@ -208,6 +217,13 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "C23 auto: a pointer's deduction", "int main(void) { __auto_type x = 1; auto p = \"x\"; return p[1] + x; }\n" },
         { "C23 auto: a double's deduction", "int main(void) { auto x = 3.5; return (int)sizeof x - 8; }\n" },
         { "C23 constexpr: an array's bound", "int main(void) { constexpr int y = 2; int a[y]; return sizeof a - 8; }\n" },
+        // A cast to an atomic type (#2230) deduced by __auto_type and taken by an _Atomic object, and __auto_type's
+        // redeclarations of atomic entities (#1844).
+        { "an atomic cast's deduction and an atomic merge",
+          "_Atomic int r; __auto_type r = 1; _Atomic int *ap; __auto_type *ap = &r; _Atomic double d; _Atomic __auto_type d = 2.5;\n"
+          "static _Atomic int z = (_Atomic int)41;\n"
+          "int main(void) { __auto_type a = (_Atomic int)1; _Atomic long b = (_Atomic long)a; (void)(_Atomic int)a;\n"
+          "  return a + (int)b + _Generic(&a, _Atomic int *: 0, default: 1) + (int)sizeof((_Atomic int)a) - 6 + r + *ap + (int)d + z - 45; }\n" },
         { "C23 constexpr: a double and a null pointer", "int main(void) { constexpr double d = 2.5; constexpr int *p = nullptr; return (int)d + (p != 0); }\n" },
         // Past the eight values that start check_input_constexpr_find's index (#1381): a file-scope chain, a block-scope
         // constexpr shadowing one of it, and a body's own chain, each read back by a static assertion.

@@ -2610,7 +2610,23 @@ static void parse_scalar_tag(ParseScalar* parser, uint32_t i, ParseFrame* frame,
     else if (kind == PARSE_KIND_IDENTIFIER && frame->mode == PARSE_MODE_TAG)
     {
         const uint8_t next = parser->kinds[i + 1];
-        const bool body = next == PARSE_KIND_L_BRACE || (next == PARSE_KIND_COLON && frame->tag_kind == PARSE_KIND_ENUM && parse_scalar_starts_type(parser, i + 2));
+        // C23 lists between a struct's or a union's name and its body (#2268), which clang's parser refuses and reads on
+        // past as the tag's own (CheckMisplacedCXX11Attribute): the checker reports them.
+        uint32_t listed = i + 1;
+        while (frame->tag_kind == PARSE_KIND_STRUCT && listed + 1 < parser->count && parse_scalar_standard_attribute(parser, listed))
+        {
+            uint32_t depth = 0;
+            bool inside = true;
+            while (inside && listed < parser->count)
+            {
+                depth += parser->kinds[listed] == PARSE_KIND_L_SQUARE ? 1u : 0u;
+                depth -= parser->kinds[listed] == PARSE_KIND_R_SQUARE && depth != 0 ? 1u : 0u;
+                listed += 1;
+                inside = depth != 0;
+            }
+        }
+        const bool body = next == PARSE_KIND_L_BRACE || (next == PARSE_KIND_COLON && frame->tag_kind == PARSE_KIND_ENUM && parse_scalar_starts_type(parser, i + 2)) ||
+                          (listed > i + 1 && listed < parser->count && parser->kinds[listed] == PARSE_KIND_L_BRACE);
         parse_scalar_bind_tag(parser, i, frame, body, next == PARSE_KIND_SEMI);
         step->role = body ? PARSE_ROLE_LEAF_RIGHT : PARSE_ROLE_TAG;
         frame->mode = body ? PARSE_MODE_TAG_BODY : PARSE_MODE_SPECIFIERS;
@@ -2941,9 +2957,10 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // (#147). A parameter's does.
         parse_scalar_close_expected(parser, i, PARSE_KIND_L_PAREN, true);
     }
-    else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && definition_scope && !kr))
+    else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && (definition_scope || group == PARSE_ROLE_OPEN_FOR) && !kr))
     {
-        // An attribute after the declarator, or an asm label, which renames the declared symbol.
+        // An attribute after the declarator, or an asm label, which renames the declared symbol: a block's or a for
+        // statement's declaration's too (#2419).
         step->role = PARSE_ROLE_LEAF_RIGHT;
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE;

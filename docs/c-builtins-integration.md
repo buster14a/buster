@@ -1473,8 +1473,12 @@ code whose runs equal clang -O0's on both paths.
   complete object of a size but an `_Atomic` or `_BitInt` one (records, unions,
   arrays and long double among them), whose values are pointers converting to
   pointers to its unqualified type, but a store's value and a compare-exchange's
-  desired one to the first argument's own pointer type, qualifiers kept, as
-  clang's ByValType. The lowering copies the values into C11's representation
+  desired one (and an exchange's result) to the first argument's own pointer
+  type, qualifiers kept, as clang's ByValType. One of those in an address space
+  the object's doesn't include is clang's "passing 'int *' to parameter of type
+  '__attribute__((address_space(256))) int *' changes address space of
+  pointer", at the argument (#2233); the others, pointers to the value type,
+  drop the space, as clang's do. The lowering copies the values into C11's representation
   buffers and the results back out (`CheckLowerAtomic.by_pointer`), through the
   native leaves for aligned objects of 1, 2, 4 or 8 bytes and libatomic's generic
   functions otherwise, as clang's code calls them.
@@ -1718,8 +1722,19 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   const objects' constant initializers wherever the expression holds them
   (`const int c = 3;` makes `__builtin_align_up(x, c + 0)` an error), must be at
   least 1, at most 2 to the source's width less 1 (a pointer's 64), and a power
-  of 2, in that order; 1 draws clang's `-Wtautological-compare`, which the
-  checker records but doesn't report. The checker's runtime view of the argument
+  of 2, in that order, each error in clang's words at the alignment as clang's
+  getExprLoc places it, a binary operator's at its operator (#2221,
+  `check_semantic_alignment`): "requested alignment must be 1 or greater",
+  "requested alignment must be N or smaller" (N in decimal, past 128 bits
+  too) and "requested alignment is not a power of 2". A source of another type
+  is "operand of type 'T' where arithmetic or pointer type is required", with
+  a floating one's or a function pointer's note, and an alignment of no
+  integer type "used type 'T' where integer is required". An alignment of 1
+  draws clang's `-Wtautological-compare` at the alignment, unevaluated
+  operands' too (`check_input_alignment_one`): "aligning a value to 1 byte is
+  a no-op", or is_aligned's "the result of checking whether a value is aligned
+  to 1 byte is always true", but not where the source's own type is refused.
+  The checker's runtime view of the argument
   reads no const object, so the source adapter evaluates it as a constant
   context would (`check_input_misc_evidence`), and the call's checks and
   folds take that value from its evidence (`CheckBuiltinCall.alignment_evaluated`)
@@ -1923,7 +1938,13 @@ refuses each by name, as clang's code generation does for x86:
 object p points to, as clang's `PaddingClearer` does.
 
 - **Sema.** p is a pointer as written (an array isn't one) to a complete object
-  type that isn't const. Volatile and `_Atomic` pointees are fine.
+  type that isn't const. Volatile and `_Atomic` pointees are fine. Each refusal
+  is clang's error at the argument's first token (#2414,
+  `check_semantic_clear_padding`): "passing 'T' to parameter of incompatible
+  type pointer: type mismatch at 1st parameter ('T' vs pointer)", a function
+  pointer's "must be a pointer to a trivially-copyable type", "variable has
+  incomplete type 'T'" with a tag's note, and "read-only variable is not
+  assignable".
 - **Bits.** The bits no scalar, bit-field or vector of the object holds are
   padding:
   - a record's holes and tail, and an unnamed bit-field;
@@ -2139,7 +2160,10 @@ scope `sizeof`'s).
 - **Sema.** s converts to `const char *` as a prototype's parameter. CFString's
   is, past its parentheses and casts, an ordinary string literal
   (`CheckObjCString`): a pointer, a wide literal, `__func__` or a UTF-8 one
-  (`u8"x"`, or `"a" u8"b"`, `CheckStringLiteral.utf8`) is refused. NSString's
+  (`u8"x"`, or `"a" u8"b"`, `CheckStringLiteral.utf8`) is refused, with clang's
+  "CFString literal is not a string constant" at the argument (#2189). An
+  argument that doesn't convert keeps the generic error, where clang gives its
+  conversion error and then that one. NSString's
   is any `const char *`: clang checks its literal in Objective-C alone.
 - **Warning.** A CFString literal that isn't UTF-8 as LLVM's strict conversion
   reads it (an overlong form, a surrogate, past U+10FFFF, or cut short;
@@ -2340,7 +2364,11 @@ record dump, as `BuiltinDumpStruct` checks it.
   and up to five for a field's. A prototyped printer must take every such
   call. It is variadic, with no more parameters than the rest and the
   format, and the rest and the format (a `char *`) convert to those
-  parameters. An unprototyped printer takes any calls.
+  parameters. An unprototyped printer takes any calls. A rest argument that
+  doesn't convert is clang's conversion error, as a call's argument's, with
+  its notes "in call to printing function with arguments '(rest..., "%s",
+  "struct S")' while dumping struct" at the builtin and "passing argument to
+  parameter 'x' here" (#2189, `check_driver_dump_struct`).
 - **Bit-fields no format prints.** A named bit-field of a `_BitInt` or a
   128-bit integer type, which clang's dump would print by its address, is
   refused as clang's Sema refuses it ("address of bit-field requested").
@@ -2689,12 +2717,12 @@ cast's operand must point to plain char (or be an array of it), qualifiers
 aside: `(const char *)(char *)m` reads `m`, but `(const char *)(const void *)m`,
 `(const char *)u` of an `unsigned char` array, `(const char *)&s` of a record
 and `(const char *)&m` of the array itself are clang's "must be a pointer to a
-constant string". An object whose bytes the reader doesn't keep is still refused
-by name.
+constant string". A const pointer object's own initializer's casts count too
+(#2189): `static const char *const q = (const char *)(const void *)m;` lost
+the designator it stores. An object whose bytes the reader doesn't keep is
+still refused by name.
 
-Differences left: a const pointer object whose own initializer converted its
-value through such a cast is read here, where clang's stored designator is lost;
-and `-Wstring-plus-int` at such an argument isn't given here (#2190). A
+Differences left: `-Wstring-plus-int` at such an argument isn't given here (#2190). A
 builtin's argument's `-Wpointer-sign` and qualifier warnings are clang's
 words, "passing 'const unsigned char[5]' to parameter of type 'const char *'
 converts between pointers to integer types where one is of the unique plain
@@ -3535,7 +3563,12 @@ library builtins too, of the implicit declarations' rules: undeclared, a call
 declares the function with its row's prototype where the unit has a `FILE`
 (C99's error, C89's warning), and warns that it needs `<stdio.h>` where it
 hasn't, as clang does. `test-checker-driver` compares the errors of calls
-without a `FILE` with clang's (`c_check_generic_builtin_driver_test.c`).
+without a `FILE` with clang's (`c_check_generic_builtin_driver_test.c`). A
+library builtin named outside a call before any call declares it
+(`int *q = malloc;`, #2348) is declared as clang's lookup declares it, as
+its name is resolved: its error and note come before the error of the
+expression around it, which completes at the same place
+(`c_check_implicit_value_driver_test.c`).
 
 `test-checker` (`c_check_program_library_test.c`, alone with
 `--program-library`) checks the lists against clang's table and accounts for
