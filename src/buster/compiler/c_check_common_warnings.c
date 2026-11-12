@@ -2282,27 +2282,25 @@ static bool check_common_range_out(const CheckGraph* graph, const CheckStream* s
     return wide || out;
 }
 
-// Of the 16 nodes from `first` whose operators are `ops` (`lanes` live), the comparisons that may give
-// -Wtautological-constant-out-of-range-compare (check_common_range_out), a bit each, for the comparison walk's reach where
-// -Wsign-compare doesn't take every comparison. The comparisons' lanes gather both operands' value flags from the stream's
-// flag column: one of them an integer constant expression's, which every candidate has, and, where only one is, the other
-// operand neither an int or long class builtin that covers the constant's type (the TypeIds' builtin codes, gathered too)
-// nor a narrow builtin compared with an int or unsigned int constant in its range (the constant's value gathered from its
-// payload row), but for a boolean operator's, which no candidate's is; only the lanes left take the scalar test. A stream
-// without the columns tests every comparison, as the scalar path, the twin and oracle, does through
-// check_common_own_reach.
-static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t first, __m512i ops,
-                                         __mmask16 lanes)
+// Of up to 16 comparison nodes `nodes` (`lanes` live), those that may give -Wtautological-constant-out-of-range-compare
+// (check_common_range_out), a bit each, for the comparison walk's reach where -Wsign-compare doesn't take every comparison.
+// The lanes gather both operands and their value flags from the stream's flag column: one of them an integer constant
+// expression's, which every candidate has, and, where only one is, the other operand neither an int or long class builtin
+// that covers the constant's type (the TypeIds' builtin codes, gathered too) nor a narrow builtin compared with an int or
+// unsigned int constant in its range (the constant's value gathered from its payload row), but for a boolean operator's,
+// which no candidate's is; only the lanes left take the scalar test. A stream without the columns tests every comparison,
+// as the scalar path, the twin and oracle, does through check_common_own_reach.
+static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* nodes, __mmask16 lanes)
 {
     const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
-    const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
-                                                             _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
+    const __m512i indices = _mm512_maskz_loadu_epi32(lanes, nodes);
+    const __mmask16 compares = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32((int)count));
     uint32_t selected = compares;
     if (compares != 0 && stream->dense_values == NULL && stream->value_flags != NULL && stream->value_types != NULL)
     {
         const __m512i limit = _mm512_set1_epi32((int)count);
-        const __m512i left = _mm512_maskz_loadu_epi32(compares, graph->operand0 + first);
-        const __m512i right = _mm512_maskz_loadu_epi32(compares, graph->operand1 + first);
+        const __m512i left = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), compares, indices, graph->operand0, 4);
+        const __m512i right = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), compares, indices, graph->operand1, 4);
         const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(_mm512_mask_cmplt_epu32_mask(compares, left, limit), right, limit);
         const __m512i ice = _mm512_set1_epi32(BUSTER_CHECK_ICE);
         const __m512i left_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, left, stream->value_flags, 4);
@@ -2366,8 +2364,8 @@ static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStr
     uint32_t result = 0;
     for (uint32_t bits = selected; bits != 0; bits &= bits - 1)
     {
-        const uint32_t node = first + (uint32_t)__builtin_ctz(bits);
-        result |= node < count && check_common_range_out(graph, stream, types, node) ? 1u << (node - first) : 0u;
+        const uint32_t lane = (uint32_t)__builtin_ctz(bits);
+        result |= check_common_range_out(graph, stream, types, nodes[lane]) ? 1u << lane : 0u;
     }
     return result;
 }
@@ -4312,11 +4310,10 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
     return result;
 }
 
-// check_common_next_op for the reach scan: with `range`, a block's comparisons that may give
-// -Wtautological-constant-out-of-range-compare join its nodes in `set` (check_common_range_lanes, from the same operator
-// load), so that the comparisons need no pass of their own and the rest of them no scalar test.
-static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckCommonOps* set, bool range,
-                                           CheckCommonScan* scan)
+// check_common_next_op for the reach scan: with `comparisons`, each block's comparison nodes are appended to it (`*listed`
+// of them so far), compressed from the same operator load, for -Wtautological-constant-out-of-range-compare's batches
+// (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
+static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonOps* set, uint32_t* comparisons, uint32_t* listed, CheckCommonScan* scan)
 {
     while (scan->pending == 0 && scan->next < graph->count)
     {
@@ -4324,10 +4321,17 @@ static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckS
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
         const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
         const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-        const uint32_t selected = check_common_op_lanes(set, ops, lanes) | (range ? check_common_range_lanes(graph, stream, types, first, ops, lanes) : 0u);
+        if (comparisons != NULL)
+        {
+            const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                                     _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
+            const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+            _mm512_mask_compressstoreu_epi32(comparisons + *listed, compares, nodes);
+            *listed += (uint32_t)__builtin_popcount(compares);
+        }
         scan->base = first;
         scan->next = first + live;
-        scan->pending = selected;
+        scan->pending = check_common_op_lanes(set, ops, lanes);
     }
     const uint32_t result = check_common_scan_take(scan, graph->count);
     return result;
@@ -9770,12 +9774,13 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     {
         memset(reach, 0, count);
         // The comparisons, last in the list, only where -Wsign-compare may warn: it takes every one. Otherwise only those
-        // -Wtautological-constant-out-of-range-compare may warn of join them (check_common_next_reach_op).
+        // -Wtautological-constant-out-of-range-compare may warn of reach their roots, in batches after the scan.
         const CheckCommonOps own = check_common_ops(check_common_reach_ops, BUSTER_ARRAY_LENGTH(check_common_reach_ops) - (enabled->sign_compare ? 0u : 6u));
         CheckCommonScan owners = { 0 };
-        const bool range = enabled->out_of_range && !enabled->sign_compare;
-        for (uint32_t node = check_common_next_reach_op(graph, stream, types, &own, range, &owners); node < count;
-             node = check_common_next_reach_op(graph, stream, types, &own, range, &owners))
+        uint32_t* comparisons = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
+        uint32_t listed = 0;
+        for (uint32_t node = check_common_next_reach_op(graph, &own, comparisons, &listed, &owners); node < count;
+             node = check_common_next_reach_op(graph, &own, comparisons, &listed, &owners))
         {
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
             if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
@@ -9788,8 +9793,26 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
+        // The comparisons, 16 at a time: those -Wtautological-constant-out-of-range-compare may warn of reach their roots.
+        // (A reach's bits are a union up the parents, so the comparisons' order after the others' changes nothing.)
+        for (uint32_t batch = 0; comparisons != NULL && batch < listed; batch += 16)
+        {
+            const uint32_t live = listed - batch < 16 ? listed - batch : 16;
+            for (uint32_t bits = check_common_range_lanes(graph, stream, types, comparisons + batch, (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1));
+                 bits != 0; bits &= bits - 1)
+            {
+                uint8_t reached = BUSTER_CHECK_REACH_SIGN;
+                for (uint32_t at = comparisons[batch + (uint32_t)__builtin_ctz(bits)]; reached != 0 && at < count; at = parents[at])
+                {
+                    reached &= (uint8_t)~reach[at];
+                    reach[at] |= reached;
+                }
+            }
+        }
+        // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
+        const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
         check_common_assertion_reach(graph, stream, reach);
-        evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
+        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
     }
     else if (allocated)
     {
