@@ -2702,6 +2702,24 @@ static __attribute__((noinline, cold)) void check_input_duplicate_specifier(Chec
 // brace, group close or a type's keyword cannot. `declaration` is the declaration's name token; 0 says its base was spelled
 // directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
 // then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
+// The `__attribute__` keyword of the GNU attribute list whose last `)` is `close`, or BUSTER_CHECK_NONE where `close` closes
+// no such list: its matching `(` follows the keyword.
+static uint32_t check_input_attribute_list_open(const Parser* parser, uint32_t close)
+{
+    uint32_t depth = 0;
+    uint32_t open = close;
+    for (bool scanning = true; scanning && open > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[open];
+        depth += kind == PARSE_KIND_R_PAREN ? 1 : 0;
+        depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1 : 0;
+        scanning = depth != 0;
+        open -= scanning ? 1 : 0;
+    }
+    const bool list = open > 0 && depth == 0 && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tokens.kinds[open - 1] == PARSE_KIND_ATTRIBUTE;
+    return list ? open - 1 : BUSTER_CHECK_NONE;
+}
+
 static uint32_t check_input_typedef_use(const CheckInput* input, const Parser* parser, uint32_t declaration, uint32_t* use)
 {
     uint32_t result = 0;
@@ -2729,6 +2747,10 @@ static uint32_t check_input_typedef_use(const CheckInput* input, const Parser* p
             found = kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE &&
                     kind != PARSE_KIND_COLON && kind != PARSE_KIND_TYPE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM &&
                     role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
+            // A GNU attribute list is crossed whole (#2417): its arguments' names (a counted_by's count, which a member
+            // declares) are no specifier, and a member's declaration has the typedef's binding kind.
+            const uint32_t open = found && kind == PARSE_KIND_R_PAREN ? check_input_attribute_list_open(parser, token) : BUSTER_CHECK_NONE;
+            token = open != BUSTER_CHECK_NONE ? open : token;
         }
     }
     return result;
