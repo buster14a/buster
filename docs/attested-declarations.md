@@ -502,7 +502,7 @@ page state. `--scalar` keeps today's path throughout.
 | 0. Census | `measure-attested`: the pipeline as it is, with the lists, the chain, a memo over the command's units and the reach computed beside it, and after each declaration's reading what it did (silent, pure, its events against its list). Counts by reason, per declaration and per token. | No reading declares an unlisted name on the corpora. The reader's own test makes at least 75% of musl's and of the glibc units' file-scope declaration tokens skippable (the emulation: 87% and more). The passes cost at most 25 cycles a token in the compile. |
 | 1. Shadow | `--verify`'s mode, on by an option: the passes decide and everything is read; each would-be skipped declaration's reading is checked. No compile skips. | No failure on the corpora as many-unit commands, with `-g` and with `-Wall -Wextra`, on 1 and 8 lanes, with the bodies deferred. |
 | 2. Skip | The walk passes the skipped declarations; the units' ends fill the memo. | musl's command on one lane at least 1.15 times faster (expected 1.23; the reader's skip alone measures 1.247) and the glibc units at least 1.4 (expected 1.62), neither slower on 8 lanes; every unit's object and diagnostics its own alone and `--scalar`'s; `-c sqlite3.c` and a small unit's process within the A/A floor. |
-| 3. Out of the unit-wide passes | The reader's unit-wide passes and its columns' fills take the unit's read ranges (the complement of the marks) where they take every token, and the program's passes after them; the reach is offered to `-flazy-system-headers`' plan (#1364), which needs the same graph without a second parse. | A skipped token costs `check-input` at most 20 user cycles (68 after the skip alone, by the experiment); cumulative at least 1.26 on musl (expected 1.30) and 1.7 on the glibc units (expected 1.83). |
+| 3. Out of the unit-wide passes | The design's passes run first in `check_input_run`, before `check_input_count_tokens`; the reader's unit-wide passes and its columns' fills then take the unit's read ranges (the complement of the marks) where they take every token, and the program's passes after them. Under `--verify` every column's skipped ranges hold a poison value, and a pass that reads one fails. The reach is offered to `-flazy-system-headers`' plan (#1364), which needs the same graph without a second parse. | A skipped token costs `check-input` at most 20 user cycles (68 after the skip alone, by the experiment); cumulative at least 1.26 on musl (expected 1.30) and 1.7 on the glibc units (expected 1.83). |
 | 4. A memo that outlives the process | Opt-in, and the owner's decision: the set of hashes kept in a file a build names, keyed by the compiler's build and the options, its hashes over spellings where a lane's are over its intern table's ids. | A process a unit: musl's preprocessed units at least 1.08 times (expected 1.12; the emulation's bound with the tokens gone is 1.27); `-c sqlite3.c` at least 1.02 (the reader's skip alone measures 1.056). |
 
 Step 4 is where a command of one unit gains. It is last because it is a
@@ -613,8 +613,10 @@ stage counters of the command with the skip:
   quarter of them fall between two units. An empty unit in a command costs
   72 µs, 149,000 user and 246,000 kernel cycles.
   [#1213](https://github.com/buster14a/buster/issues/1213) has the lanes'
-  side of it; on one lane a lane that keeps its small units' pages is the
-  lever. And a run in three is given no huge pages at all, by its randomized
+  side of it and what was tried there (keeping a unit's pages and clearing
+  what the next unit takes was slower), and
+  [#1444](https://github.com/buster14a/buster/issues/1444) a process's
+  start. And a run in three is given no huge pages at all, by its randomized
   layout, for 75,000 more page faults and 2.3% of the command (the record,
   section 13); which mapping decides isn't known.
 - **The preprocessor, 20%** (884 M), and 46% of the glibc units' command with
