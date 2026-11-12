@@ -120,6 +120,15 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
 // frame keeps no frame pointer in it (#1116), which the frame's reservations say before allocation.
 #define BUSTER_TIER1_EMIT_CFG_CALLEE ((1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15))
 
+// The caller-saved registers a recomputable value read on every iteration of a loop may hold across its calls besides the
+// callee-saved ones (#2574, tier1_emit_cfg_preference): those no call takes but past its fourth argument, nor any
+// instruction implicitly (rax a result's and a division's, rcx a shift's, rdx a division's), as clang keeps Lua's
+// dispatch table in r10. A call evicts the value from them (the preferred problem's clobbers): it is recomputed where it
+// is next needed, never stored.
+#define BUSTER_TIER1_EMIT_CFG_RESIDENT ((1u << X86_REGISTER_R8) | (1u << X86_REGISTER_R9) | (1u << X86_REGISTER_R10))
+// The most edges the every-iteration test visits per block of its function, all values and loops together.
+#define BUSTER_TIER1_EMIT_CFG_ITERATION_VISITS 64u
+
 // A register the CFG consumer's values may be in: the selector's caller-saved ones, and the callee-saved ones that values
 // live across a call take (tier1_emit_cfg_preference); never rsp or the scratch register, and rbp only where the frame
 // doesn't reserve it.
@@ -4137,6 +4146,131 @@ static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t c
     }
 }
 
+// The recomputable values read on every iteration of the loops they are live across (#2574), `hot[v]` 1 for each of
+// `candidates` (general values with a recipe, in no phi web, `hot[v]` 2 on entry, any other value 0). The loops are a
+// value's outermost ones: a loop whose header the value is live into (an interval of it covers the header's start,
+// which isn't its definition), but not its parent's. Each must be reducible, and every path from its header back to it
+// must pass a block that reads the value. Lua's dispatch table is read at the end of every handler, a switch's table
+// where it dispatches; a frame object's address read in a few of a loop's blocks is not, nor one read on every turn of
+// an inner loop but live across its parent: the value's registers are chosen for its whole range. Such a value is worth
+// a register over its loops, as LLVM's spill weights find from block frequencies: read once per iteration, it weighs as
+// much as the loop's hottest value. The test walks each loop's body from its header, the value's readers stopping it,
+// for a back edge; at most BUSTER_TIER1_EMIT_CFG_ITERATION_VISITS edges per block in all, past which no further value is
+// found hot. False where an arena is short; a CFG the loop analysis refuses finds none. Scalar: it runs for the few values
+// with recipes that cross calls (luaV_execute's are its frame objects' addresses and its dispatch table's), each walk
+// bounded by its loop's blocks, and the loop analysis it runs once is dominators.c's, vector where that chooses.
+// Whether the CFG has an edge to its own block or to an earlier one in layout: without one its layout is a topological
+// order, and it has no loop to analyze.
+static bool tier1_emit_cfg_cyclic(const Tier1CfgInput* input)
+{
+    bool cyclic = false;
+    for (uint32_t b = 0; !cyclic && b < input->block_count; b += 1)
+    {
+        for (uint32_t e = input->successor_offsets[b]; e < input->successor_offsets[b + 1]; e += 1)
+        {
+            cyclic |= input->successors[e] <= b;
+        }
+    }
+    return cyclic;
+}
+
+static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, uint32_t candidates, Arena* output, Arena* scratch, uint8_t* hot)
+{
+    const uint32_t blocks = input->block_count;
+    bool ok = true;
+    Dominators loops = { 0 };
+    const DominatorCfg graph = {
+        .block_count = blocks,
+        .edge_count = input->edge_count,
+        .entry = 0,
+        .successor_offsets = input->successor_offsets,
+        .successors = input->successors,
+        .predecessor_offsets = input->predecessor_offsets,
+        .predecessors = input->predecessors,
+    };
+    DominatorOptions options = dominators_options();
+    options.outputs = BUSTER_DOMINATOR_LOOPS;
+    // A CFG without a backward edge in layout has no loop: most functions without one skip the analysis.
+    const DominatorStatus analyzed = candidates != 0 && tier1_emit_cfg_cyclic(input) ? dominators_analyze(scratch, output, &graph, options, &loops) : DOMINATOR_INVALID;
+    ok = analyzed != DOMINATOR_NO_MEMORY;
+    const bool looped = analyzed == DOMINATOR_OK && loops.loop_count != 0;
+    // Per block: the stamp of the value whose readers it holds, and of the walk that reached it.
+    uint32_t* reads = looped ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
+    uint32_t* seen = looped ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
+    uint32_t* stack = looped ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
+    // Per loop, whether the value being tested is live into its header.
+    uint8_t* live = looped ? ir_allocate(scratch, (uint64_t)loops.loop_count + 1, 1, &ok) : 0;
+    if (reads != 0 && seen != 0)
+    {
+        memset(reads, 0, ((uint64_t)blocks + 1) * 4);
+        memset(seen, 0, ((uint64_t)blocks + 1) * 4);
+    }
+    uint64_t budget = (uint64_t)BUSTER_TIER1_EMIT_CFG_ITERATION_VISITS * blocks;
+    uint32_t walk = 0;
+    for (uint32_t v = 0; v < input->value_count; v += 1)
+    {
+        const bool candidate = hot[v] == 2;
+        hot[v] = 0;
+        for (uint32_t u = input->use_offsets[v]; candidate && stack != 0 && u < input->use_offsets[v + 1]; u += 1)
+        {
+            reads[tier1_cfg_block_of(input, input->use_positions[u])] = v + 1;
+        }
+        // Live into each loop's header: an interval of the value covers its start, which isn't the value's definition.
+        for (uint32_t l = 0; candidate && live != 0 && l < loops.loop_count; l += 1)
+        {
+            const uint32_t start = input->block_starts[loops.loop_header[l]];
+            uint32_t low = intervals->value_interval_offsets[v];
+            uint32_t high = intervals->value_interval_offsets[v + 1];
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = intervals->intervals.ends[middle] <= start ? middle + 1 : low;
+                high = intervals->intervals.ends[middle] <= start ? high : middle;
+            }
+            live[l] = low < intervals->value_interval_offsets[v + 1] && intervals->intervals.starts[low] <= start && input->definitions[v] != start;
+        }
+        // Hot where it has an outermost loop and every one is read on every iteration.
+        bool every = candidate && live != 0;
+        bool any = false;
+        for (uint32_t l = 0; every && l < loops.loop_count; l += 1)
+        {
+            const uint32_t parent = loops.loop_parent[l];
+            const bool outermost = live[l] != 0 && (parent == BUSTER_DOMINATOR_NONE || live[parent] == 0);
+            any |= outermost;
+            if (outermost)
+            {
+                const uint32_t header = loops.loop_header[l];
+                // A back edge reached without passing a reader is an iteration that doesn't read the value.
+                const uint64_t* body = loops.loop_bodies + (uint64_t)l * loops.row_words;
+                bool open = reads[header] != v + 1 && loops.loop_irreducible[l] == 0;
+                const bool read = reads[header] == v + 1;
+                uint32_t depth = 0;
+                walk += 1;
+                seen[header] = walk;
+                stack[depth++] = header;
+                while (open && depth != 0 && budget != 0)
+                {
+                    const uint32_t b = stack[--depth];
+                    for (uint32_t e = input->successor_offsets[b]; open && budget != 0 && e < input->successor_offsets[b + 1]; e += 1)
+                    {
+                        const uint32_t next = input->successors[e];
+                        budget -= 1;
+                        open = next != header;
+                        if (open && seen[next] != walk && reads[next] != v + 1 && ((body[next >> 6] >> (next & 63)) & 1) != 0)
+                        {
+                            seen[next] = walk;
+                            stack[depth++] = next;
+                        }
+                    }
+                }
+                every = read || (open && budget != 0 && loops.loop_irreducible[l] == 0);
+            }
+        }
+        hot[v] = every && any ? 1 : 0;
+    }
+    return ok;
+}
+
 // Values live across a call into callee-saved registers, which the prologue saves once, rather than in caller-saved ones
 // that every call saves and restores around itself: from the plain problem's intervals (`intervals`), each value whose
 // interval covers a call's definition phase, but the call's own result, is allowed the callee-saved registers alone (and a
@@ -4152,7 +4286,8 @@ static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t c
 // (tier1_emit_cfg_calls_before_vector, or its scalar twin without `vector`): a call in [start, end), unless the first is
 // the value's own, which only a call's result's interval can start at. Without it, the first call at or past the start
 // by halving the calls, the form tier1_emit_cfg_two_calls keeps, which --verify compares.
-static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, bool vector, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing)
+static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, bool vector, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing,
+                                      Tier1CfgPreference* clobbering)
 {
     const IrFunction* function = plan->function;
     const uint32_t callee = emitted->callee_registers;
@@ -4229,70 +4364,105 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
     }
     uint32_t count = 0;
     const uint32_t caller = input->registers[0];
+    // The recomputable values that cross a call, outside phi webs (2), of which tier1_emit_cfg_hot_recipes keeps those
+    // read on every iteration of a loop (1).
+    uint8_t* hot = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    uint32_t candidates = 0;
+    uint32_t hot_count = 0;
     for (uint32_t pass = 0; ok && pass < 2; pass += 1)
-    for (uint32_t v = 0; ok && v < input->value_count; v += 1)
     {
-        const uint32_t node = emitted->value_nodes[v];
-        const uint32_t own = base + 2 * node + 1;
-        // Where the value is a call's result: then its definition's interval starts at that call, which it doesn't cross.
-        const bool called = before != 0 && tier1_select_function_call(function, node);
-        // A mask keeps its class's registers (#179): no opmask register survives a call.
-        const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
-        bool crosses = false;
-        uint32_t avoid = 0;
-        for (uint32_t i = intervals->value_interval_offsets[v]; i < intervals->value_interval_offsets[v + 1]; i += 1)
+        if (pass == 1 && candidates != 0)
         {
-            const uint32_t start = intervals->intervals.starts[i];
-            const uint32_t end = intervals->intervals.ends[i];
-            if (before != 0)
+            ok = tier1_emit_cfg_hot_recipes(input, intervals, candidates, output, scratch, hot);
+        }
+        for (uint32_t v = 0; ok && v < input->value_count; v += 1)
+        {
+            const uint32_t node = emitted->value_nodes[v];
+            const uint32_t own = base + 2 * node + 1;
+            // Where the value is a call's result: then its definition's interval starts at that call, which it doesn't cross.
+            const bool called = before != 0 && tier1_select_function_call(function, node);
+            // A mask keeps its class's registers (#179): no opmask register survives a call.
+            const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
+            bool crosses = false;
+            uint32_t avoid = 0;
+            for (uint32_t i = intervals->value_interval_offsets[v]; i < intervals->value_interval_offsets[v + 1]; i += 1)
             {
-                // A call in [start, end), and the first of them not the value's own: none before its own in the interval.
-                const bool inside = called && start <= own && own < end;
-                crosses |= before[end] != before[start] && !(inside && before[own] == before[start]);
-            }
-            else
-            {
-                // The first call at or past the interval's start, by halving: the calls are in position order.
-                uint32_t low = 0;
-                uint32_t high = call_count;
-                while (low < high)
+                const uint32_t start = intervals->intervals.starts[i];
+                const uint32_t end = intervals->intervals.ends[i];
+                if (before != 0)
                 {
-                    const uint32_t middle = low + (high - low) / 2;
-                    low = calls[middle] < start ? middle + 1 : low;
-                    high = calls[middle] < start ? high : middle;
+                    // A call in [start, end), and the first of them not the value's own: none before its own in the interval.
+                    const bool inside = called && start <= own && own < end;
+                    crosses |= before[end] != before[start] && !(inside && before[own] == before[start]);
                 }
-                crosses |= low < call_count && calls[low] < end && calls[low] != own;
+                else
+                {
+                    // The first call at or past the interval's start, by halving: the calls are in position order.
+                    uint32_t low = 0;
+                    uint32_t high = call_count;
+                    while (low < high)
+                    {
+                        const uint32_t middle = low + (high - low) / 2;
+                        low = calls[middle] < start ? middle + 1 : low;
+                        high = calls[middle] < start ? high : middle;
+                    }
+                    crosses |= low < call_count && calls[low] < end && calls[low] != own;
+                }
+                // The bodies the interval covers (a body defines no value), each's registers.
+                uint32_t first = 0;
+                uint32_t past = body_count;
+                while (first < past)
+                {
+                    const uint32_t middle = first + (past - first) / 2;
+                    first = bodies[middle] < start ? middle + 1 : first;
+                    past = bodies[middle] < start ? past : middle;
+                }
+                for (uint32_t b = first; general && b < body_count && bodies[b] < end; b += 1)
+                {
+                    avoid |= touched[b];
+                }
             }
-            // The bodies the interval covers (a body defines no value), each's registers.
-            uint32_t first = 0;
-            uint32_t past = body_count;
-            while (first < past)
+            // A parameter keeps its incoming register over its definition's interval, as in the plain allocation
+            // (tier1_cfg_preferred adds it): free there too, in a callee-saved register from the entry on, it would hold one
+            // for the whole entry block, which spilled more than its saves around the calls there cost (on speedtest1, a slower
+            // run). A parameter the plain allocation already freed stays free, the entry's moves bringing it.
+            uint32_t root = v;
+            while (parents[root] != root)
             {
-                const uint32_t middle = first + (past - first) / 2;
-                first = bodies[middle] < start ? middle + 1 : first;
-                past = bodies[middle] < start ? past : middle;
+                root = parents[root];
             }
-            for (uint32_t b = first; general && b < body_count && bodies[b] < end; b += 1)
-            {
-                avoid |= touched[b];
-            }
+            const bool recipe = general && crosses && root == v && input->rematerializable != 0 && input->rematerializable[v] != 0;
+            hot[v] = pass == 0 ? (recipe ? 2 : 0) : hot[v];
+            candidates += pass == 0 && recipe;
+            crossed[root] |= pass == 0 && crosses;
+            crosses = crossed[root] != 0;
+            avoided[root] |= pass == 0 ? avoid : 0;
+            avoid = avoided[root];
+            // A recomputable value read on every iteration of a loop (#2574) may hold a caller-saved register past calls too,
+            // which evict it: recomputed after one, where it is next needed, rather than evicted first from the callee-saved
+            // registers the loop's other values crowd.
+            const uint32_t across = hot[v] == 1 ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
+            allowed[v] = general ? (crosses ? across : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
+            count += pass == 1 && general && (crosses || avoid != 0);
+            hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
         }
-        // A parameter keeps its incoming register over its definition's interval, as in the plain allocation
-        // (tier1_cfg_preferred adds it): free there too, in a callee-saved register from the entry on, it would hold one
-        // for the whole entry block, which spilled more than its saves around the calls there cost (on speedtest1, a slower
-        // run). A parameter the plain allocation already freed stays free, the entry's moves bringing it.
-        uint32_t root = v;
-        while (parents[root] != root)
-        {
-            root = parents[root];
-        }
-        crossed[root] |= pass == 0 && crosses;
-        crosses = crossed[root] != 0;
-        avoided[root] |= pass == 0 ? avoid : 0;
-        avoid = avoided[root];
-        allowed[v] = general ? (crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
-        count += pass == 1 && general && (crosses || avoid != 0);
     }
+    // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
+    // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
+    uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
+    if (clobbers != 0 && call_count != 0)
+    {
+        memcpy(clobbers, calls, (uint64_t)call_count * 4);
+    }
+    *clobbering = (Tier1CfgPreference){
+        .clobbers = clobbers,
+        .clobber_count = clobbers != 0 ? call_count : 0,
+        .clobber_registers = {
+            clobbers != 0 ? caller : 0,
+            0,
+            0,
+        },
+    };
     *preferred = allowed;
     *crossing = count;
     return ok;
@@ -4342,9 +4512,10 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
     Tier1EmitError error = tier1_emit_cfg_allocated(allocated, cfg);
     uint32_t* allowed = 0;
     uint32_t moved = 0;
+    Tier1CfgPreference clobbering = { 0 };
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, vector, output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, vector, output, scratch, &allowed, &moved, &clobbering) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     Tier1CfgInput problem = *input;
     const Tier1CfgPreference preference = {
@@ -4353,6 +4524,13 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
             input->registers[0] | emitted->callee_registers,
             input->registers[1],
             input->registers[2],
+        },
+        .clobbers = clobbering.clobbers,
+        .clobber_count = clobbering.clobber_count,
+        .clobber_registers = {
+            clobbering.clobber_registers[0],
+            clobbering.clobber_registers[1],
+            clobbering.clobber_registers[2],
         },
     };
     error = error == TIER1_EMIT_OK && moved != 0 && !tier1_cfg_preferred(input, &preference, output, &problem) ? TIER1_EMIT_MEMORY : error;
@@ -4393,9 +4571,10 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
     Tier1EmitError error = tier1_emit_cfg_allocated(allocated, &order.prepared.candidate);
     uint32_t* sets = 0;
     uint32_t moved = 0;
+    Tier1CfgPreference clobbering = { 0 };
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &sets, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &sets, &moved, &clobbering) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -4405,6 +4584,13 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
                 input->registers[0] | emitted->callee_registers,
                 input->registers[1],
                 input->registers[2],
+            },
+            .clobbers = clobbering.clobbers,
+            .clobber_count = clobbering.clobber_count,
+            .clobber_registers = {
+                clobbering.clobber_registers[0],
+                clobbering.clobber_registers[1],
+                clobbering.clobber_registers[2],
             },
             .verdict = true,
         };

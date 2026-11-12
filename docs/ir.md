@@ -982,6 +982,18 @@ receiving block; `JUMP_VALUE` therefore preserves conditional-expression arms
 even with an outer expression still live.
 
 A separate preheader materializes slot addresses and initializes parameters.
+It also defines, once, each jump table's base that #1740's column names, and
+each direct symbol address the function takes at least twice
+(`ir_typed_plan_hoisted`, #2574): a `GLOBAL_ADDRESS` of a U64 whose symbol the
+access column reaches directly, counted in an open-addressed table of the
+symbols and numbered in entry order. Every entry that takes it reads that one
+value, which Tier 1 keeps in a register around a loop that reads it on every
+iteration (Lua's dispatch table) and otherwise recomputes where it is read
+([the allocation guide](tier1-allocation.md)'s "Recomputable values read on
+every iteration"). A GOT slot's or a thread-local's address stays where it is
+taken. `test-ir-lowering` checks both lowering paths and the interpreter's
+result for a symbol taken three times, one taken once and one through its GOT
+slot.
 Backedges to source entry zero skip that initialization. The typed stream's U64
 pointer representation becomes explicit `inttoptr` / `ptrtoint` at memory and
 address operations; ordinary U64 arithmetic remains integer arithmetic. Integer

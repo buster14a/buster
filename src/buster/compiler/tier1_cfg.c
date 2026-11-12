@@ -132,6 +132,12 @@ struct Tier1CfgInput
     // Optional, per value: its slot's width. A phi and an operand of its class and width then share a slot where
     // neither is live at the other's definition (tier1_cfg_share_slots, #1216); without it each value has its own.
     const uint8_t* slot_widths;
+    // Optional (#2574): the allocator's clobbers (Tier1AllocationInput.clobbers), nondecreasing positions where
+    // clobber_registers lose their values, as at a call: a recomputable value there leaves its register, to be recomputed
+    // where a required use next needs it. The consumer saves every other value around them.
+    const uint32_t* clobbers;
+    uint32_t clobber_count;
+    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -1754,6 +1760,13 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .use_offsets = use_offsets,
                     .use_positions = input->use_positions,
                     .use_required = input->use_required,
+                    .clobbers = input->clobbers,
+                    .clobber_count = input->clobber_count,
+                    .clobber_registers = {
+                        input->clobber_registers[BUSTER_TIER1_ALLOCATE_GPR],
+                        input->clobber_registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+                        input->clobber_registers[BUSTER_TIER1_ALLOCATE_MASK],
+                    },
                     .use_count = input->use_count,
                     .count = count,
                     .value_count = values,
@@ -1800,6 +1813,19 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
     return error;
 }
 
+// A problem's registers in the prepared intervals' allocator input: its classes' registers and its clobbers, which
+// differ between problems over the same intervals (the CFG consumer's preferred problem has clobbers, #2574).
+static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1AllocationInput* intervals)
+{
+    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        intervals->registers[c] = input->registers[c];
+        intervals->clobber_registers[c] = input->clobber_registers[c];
+    }
+    intervals->clobbers = input->clobbers;
+    intervals->clobber_count = input->clobber_count;
+}
+
 // One assignment (3. above) over the prepared intervals, for `input`'s registers and `column`, the registers each
 // interval may take: null for the prepared column, the input the preparation was given; else tier1_cfg_column's for
 // another problem over the same values. Failure leaves the result unchanged; tier1_allocate restores the output arena.
@@ -1807,10 +1833,7 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
 {
     Tier1CfgAllocation candidate = prepared->candidate;
     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
-    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
-    {
-        candidate.intervals.registers[c] = input->registers[c];
-    }
+    tier1_cfg_problem_registers(input, &candidate.intervals);
     const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(prepared->vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
@@ -2188,9 +2211,9 @@ static Tier1CfgError tier1_cfg_assign_verdict(const Tier1CfgInput* input, const 
         .allowed_registers = other_column != 0 ? other_column : candidate.intervals.allowed_registers,
     };
     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
+    tier1_cfg_problem_registers(input, &candidate.intervals);
     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
     {
-        candidate.intervals.registers[c] = input->registers[c];
         verdict.registers[c] = other->registers[c];
     }
     const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, prepared->vector, &verdict, &candidate.allocation);
@@ -2213,6 +2236,10 @@ struct Tier1CfgPreference
 {
     const uint32_t* sets;
     uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    // The preferred problem's clobbers (Tier1CfgInput.clobbers, #2574), or none.
+    const uint32_t* clobbers;
+    uint32_t clobber_count;
+    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     bool verdict;
 };
 
@@ -2227,9 +2254,12 @@ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* inp
     }
     *preferred = *input;
     preferred->allowed_registers = allowed;
+    preferred->clobbers = preference->clobbers;
+    preferred->clobber_count = preference->clobber_count;
     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
     {
         preferred->registers[c] = preference->registers[c];
+        preferred->clobber_registers[c] = preference->clobber_registers[c];
     }
     return allowed != 0;
 }
@@ -2376,10 +2406,11 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
     const uint64_t values = input->value_count;
     const uint64_t edges = input->edge_count;
     uint32_t differs = 0;
-    bool same = a->count == b->count && a->value_count == b->value_count && a->position_count == b->position_count && a->use_count == b->use_count && a->fixed.count == b->fixed.count;
+    bool same = a->count == b->count && a->value_count == b->value_count && a->position_count == b->position_count && a->use_count == b->use_count && a->fixed.count == b->fixed.count &&
+                a->clobber_count == b->clobber_count && tier1_cfg_same_column(a->clobbers, b->clobbers, (uint64_t)a->clobber_count * 4);
     for (uint32_t c = 0; same && c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
     {
-        same = a->registers[c] == b->registers[c];
+        same = a->registers[c] == b->registers[c] && a->clobber_registers[c] == b->clobber_registers[c];
     }
     differs = same ? differs : 1;
     same = same && tier1_cfg_same_column(a->starts, b->starts, count * 4) && tier1_cfg_same_column(a->ends, b->ends, count * 4) && tier1_cfg_same_column(a->values, b->values, count * 4) &&
