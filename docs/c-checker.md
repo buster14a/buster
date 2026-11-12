@@ -4253,6 +4253,21 @@ What the lowering covers past scalars (#145's programs):
   function's identifier counts as its name here, where clang's mangled name
   replaces it. `test-checker-driver --asm-definitions-only` compares the
   objects' symbols with clang 23's and runs them.
+  A label that names a symbol multiversioning makes and the unit defines
+  (#2204: a `target` version's `f.avx2`, a `target_clones` body's or
+  version's `f.avx2.0` or `f.default.1`, a `cpu_specific` version's) is that
+  definition too: once the groups' symbols exist, the label's symbol, of an
+  object the unit doesn't define, is forwarded to the made one
+  (`check_program_label_forwards` in `c_check_program_emit.c`), and
+  `check_program_sections` moves its fixups there once every atom (static
+  data's too) exists, so neither `-c`'s object nor the direct path's
+  executable has an undefined symbol of the name, as clang's hasn't.
+  `test-checker-driver --target-versions-only` compares such a unit's object
+  with clang's and runs its direct path's executable. Left: a label naming a
+  block-scope static's made name (`extern int fn __asm__("f.n")`) is the
+  static when clang emits the static's function before the label's first use,
+  and the static is renamed `f.n.1` otherwise; here the static is always
+  renamed, so the first order's link fails where clang's doesn't (#2439).
 - **GNU's `retain` attribute** (#147). A definition with one before it (the
   reader drops one after it) that the unit emits keeps its section: its named
   section's (a section attribute's), or a section of its own, its class's
