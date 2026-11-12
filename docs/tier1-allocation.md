@@ -766,7 +766,15 @@ address in a register over several reads) and a few lose: a hoisted address
 computed at the entry on a path that never reads it, as
 `yy_find_shift_action`'s two tables on its early return, or one that takes a
 callee-saved register its prologue then saves. Placing the one definition at
-its readers' nearest common dominator would remove both.
+its readers' nearest common dominator would remove both (#2593).
+
+After #2573's rip-relative symbols (main `9750b3f0`, against this change merged
+at `f8aeb145`), Lua's scripts run 5,954.3 M and 5,912.9 M instructions and
+`disptab`'s `lea`s are as above, but speedtest1 runs 3,233.3 M and 3,235.7 M:
+#2573 already reads `mem5` through `rip`-relative operands, so memsys5's gains
+are #2573's, and the losses above remain. Counting only the takes inside the
+typed stream's loops (backward jumps' ranges) left those losers hoisted and
+cost Lua 7.5 M.
 
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's
