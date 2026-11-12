@@ -859,6 +859,75 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .errors = 1,
         .notes = 3,
     },
+    // An overload call's candidate that fails by an argument's conversion (#2384): clang's "no known conversion" note,
+    // these first in display order; and an overload set's address that matches no candidate, '<overloaded function
+    // type>' with each candidate's note (check_driver_overload_address).
+    {
+        .name = "a candidate that fails by an argument's conversion",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "struct S { int x; };\n"
+                  "int f(int a) OV;\n"
+                  "int f(int *a, int b) OV;\n"
+                  "void g(struct S s) { f(s); }\n",
+        .errors = 1,
+        .notes = 2,
+    },
+    {
+        .name = "conversion failures first, with clang's fix-it words",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "struct S { int x; };\n"
+                  "struct T { int y; };\n"
+                  "int f(int a) OV;\n"
+                  "int f(struct T t, int b) OV;\n"
+                  "int f(int a, int b, int c) OV;\n"
+                  "void g(struct S s, long *lp) { f(s); f(s, 1); f(1, s); f(s, s); }\n"
+                  "int h(long *a) OV;\n"
+                  "int h(struct T t) OV;\n"
+                  "void k(int i) { h(i); h(1.5); }\n",
+        .errors = 6,
+        .notes = 16,
+    },
+    {
+        .name = "an overload set's address that matches no candidate",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "int f(int a) OV __attribute__((enable_if(a > 0, \"pos\")));\n"
+                  "int f(double a) OV;\n"
+                  "int f(int a, int b) OV;\n"
+                  "long f(char *s) OV;\n"
+                  "int (*p)(int) = f;\n"
+                  "void g(void) { int (*q)(long) = f; q = f; (void)q; }\n"
+                  "int (*r)(int) = &f;\n",
+        .errors = 4,
+        .notes = 16,
+    },
+    {
+        .name = "an overload set's address with one candidate the enable_ifs leave",
+        .source = "long fc(char*);\n"
+                  "int (*p)(int) = fc;\n"
+                  "#define OV __attribute__((overloadable))\n"
+                  "int f(int a) OV __attribute__((enable_if(a > 0, \"pos\")));\n"
+                  "int f(double a) OV;\n"
+                  "int (*p2)(int) = f;\n"
+                  "int g(double a) OV;\n"
+                  "int g(char a) OV;\n"
+                  "int (*p3)(int) = g;\n"
+                  "long h(double a) OV;\n"
+                  "long h(char a) OV;\n"
+                  "int (*p4)(int) = h;\n",
+        .errors = 4,
+        .notes = 6,
+    },
+    {
+        .name = "an overload set's address: parameter counts, return types, variadic",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "long h(int a) OV;\n"
+                  "int h(int a, ...) OV;\n"
+                  "int h(int a, int b) OV;\n"
+                  "int (*p4)(int) = h;\n"
+                  "void (*p5)(int) = h;\n",
+        .errors = 2,
+        .notes = 6,
+    },
     {
         .name = "diagnose_if on the selected overload",
         .source = "int k(int a) __attribute__((overloadable, diagnose_if(1, \"always\", \"warning\"), diagnose_if(a > 1, \"dep\", \"warning\")));\n"
@@ -887,6 +956,39 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
                   "void t(int *q) { p1(&x); p1(arr); p1(0); p1(q); p1(g); p1((int *)0); e1(&x); e1(q); e1(g); }\n",
         .errors = 6,
         .notes = 10,
+    },
+    // A user's function with a pass_object_size parameter reads its conditions as any other's (#2147): an undeclared name,
+    // a constant condition at a call, enable_if's and diagnose_if's at calls, overloads, and its address.
+    {
+        .name = "pass_object_size functions' undeclared and constant conditions",
+        .source = "void *f(void *p __attribute__((pass_object_size(0))), unsigned long n)\n"
+                  "    __attribute__((diagnose_if(zz, \"always\", \"warning\")));\n"
+                  "void *f2(void *p __attribute__((pass_object_size(0))), unsigned long n)\n"
+                  "    __attribute__((diagnose_if(1, \"always\", \"warning\")));\n"
+                  "void g(void) { char b[4]; f2(b, 8); }\n",
+        .warnings = 1,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pass_object_size functions' conditions at calls",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "void *f(void *p __attribute__((pass_object_size(0))), unsigned long n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "int g(int *p __attribute__((pass_object_size(1))), int k) OV __attribute__((enable_if(k > 0, \"pos\")));\n"
+                  "int g(int *p, int k) OV;\n"
+                  "int h(char *p __attribute__((pass_object_size(0))), int k) __attribute__((diagnose_if(k == 3, \"three\", \"warning\"), diagnose_if(k == 4, \"four\", \"error\")));\n"
+                  "void t(void) { char b[4]; int i[2]; f(b, 8); f(b, 200); g(i, 1); g(i, 0); h(b, 3); h(b, 4); h(b, 5); (void)&f; }\n",
+        .warnings = 1,
+        .errors = 3,
+        .notes = 3,
+    },
+    {
+        .name = "pass_object_size functions' conditions that hold",
+        .source = "void *f(void *p __attribute__((pass_object_size(0))), unsigned long n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "char gb[4];\n"
+                  "int h(char *p __attribute__((pass_object_size(0))), int k) __attribute__((enable_if(k == 3, \"three\")));\n"
+                  "int h2(int k, char *p __attribute__((pass_object_size(0)))) __attribute__((enable_if(k == 3, \"three\")));\n"
+                  "void t(char *q) { char b[4]; f(0, 8); f(gb, 8); f(&gb[1], 8); f(q, 8); h(b, 3); h(gb, 3); h2(3, b); }\n",
     },
 };
 
