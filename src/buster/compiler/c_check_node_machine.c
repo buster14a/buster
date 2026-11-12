@@ -82,15 +82,12 @@
 // An entry's standing: filled, and its key's record an lvalue.
 #define BUSTER_NODE_MACHINE_MEMO_FILLED 0x80u
 #define BUSTER_NODE_MACHINE_MEMO_LVALUE 0x01u
-
-// What an argument memo entry answers: node_machine_argument took the argument, it refused it, or the answer is the rule's
-// at each argument (a conversion whose value check_action_inherit could read: a complex, a vector or a _BitInt one).
-typedef enum NodeMachineMemoAnswer
-{
-    NODE_MACHINE_MEMO_TAKEN,
-    NODE_MACHINE_MEMO_REFUSED,
-    NODE_MACHINE_MEMO_RULE,
-} NodeMachineMemoAnswer;
+// What an entry answers (node_machine_argument_memo): node_machine_argument took the key's arguments (else it refused
+// them); their conversion changes nothing that check_action_inherit reads of them, so that a hit inherits the record's
+// value itself (else the rule takes them each time); and an integer constant of the key takes the same answer.
+#define BUSTER_NODE_MACHINE_MEMO_TAKEN 0x01u
+#define BUSTER_NODE_MACHINE_MEMO_SAME 0x02u
+#define BUSTER_NODE_MACHINE_MEMO_INTEGERS 0x04u
 
 // One entry of the argument memo (node_machine_argument_memo): its key, an argument's record's type, whether the record is
 // an lvalue and its parameter's type (0 for a variadic argument), and node_machine_argument's answer for the key, with the
