@@ -260,9 +260,16 @@ takes its entries.
   `check_lower_logical`'s for `&&`, `||` and `?:`, whose test, branch and jump
   X writes as a segment after an operand's row. Their labels are numbered from
   the expression's first, in the order the tasks number them, with each
-  label's place in the tape. The machine's set is the census's within those
-  rules: the increments and the compound assignments are refused by code, and
-  `a ?: b` by its template.
+  label's place in the tape. For the increments and the compound assignments
+  they are the lowering's own (`check_lower_update`): an update's first row
+  (the old value read, by name or through its destination's kept address, and
+  converted) follows its destination's entries, and its second (the operation,
+  the conversion back and the store) follows its value's. T types an update of
+  an arithmetic destination by its computation's row and of a pointer by
+  `check_action_pointer_arithmetic`'s steps, the action taking the rest. The
+  machine's set is the census's within those rules: `a ?: b` and an update of
+  a `long double`, a 128-bit integer or a vector are refused by template (the
+  census refuses a bit-field's and an atomic's).
 - **A call** is typed by its callee's prototype (`node_machine_call_rule`):
   each argument converted as an assignment converts it, a variadic one by the
   default promotions, the action taking the rest. A callee with semantics of
@@ -285,7 +292,10 @@ takes its entries.
   an entry after `check_lower_resolve_labels`, is compared by label: the log
   keeps each pop's next label and each body's labels' entries, so each of the
   expression's labels must be the lowering's of the same number counted from
-  the expression's first, at the same entry.
+  the expression's first, at the same entry. A temporary (a postfix update's
+  through an address keeps the address and the old value in two) is numbered
+  on the tape in the order the tape first names it, and must be a local the
+  body hasn't met, the same one every time the expression names it.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps

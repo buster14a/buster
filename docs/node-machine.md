@@ -6,8 +6,9 @@ Status: step 0, the census, is built and its gate holds
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
 on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cost
-more a node), and it codes only part of the set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
-and the compound assignments). No compile takes it. Its gains are estimates that
+more a node), and it now codes every operator the census takes (calls, `&&`,
+`||` and `?:` [below](#calls), the increments and the compound assignments
+[below](#increments-and-compound-assignments)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -715,9 +716,9 @@ takes it.
   lookup.
 
 The machine's set is the census's within those rules. It refuses by code what
-they don't take: the increments, the compound assignments. They are the next
-constructs, one a pull request; calls and `&&`, `||` and `?:` came first
-([below](#calls)).
+they don't take: none of the census's operators now. Calls and `&&`, `||` and
+`?:` came first ([below](#calls)), then the increments and the compound
+assignments ([below](#increments-and-compound-assignments)).
 
 ### What it measured
 
@@ -1010,6 +1011,108 @@ on `sqlite3.c`, against the split's 171.0 and 659.9. The nodes calls add cost
 
 `-c sqlite3.c` is unchanged: 124.1 ms against 124.0 ms, with the same
 instructions.
+
+### Increments and compound assignments
+
+`++x`, `--x`, `x++`, `x--` and the ten compound assignments are the
+machine's codes. Their entries aren't one row after their operands': the
+lowering's `check_lower_update` reads the old value between the destination's
+entries and the value's, and computes and stores after the value's. So an
+update writes two rows, each of at most 8 entries:
+
+- **The first, after its destination's entries:** the old value, read by name
+  (`LOCAL` or `GLOBAL`, and a `DUP` for a postfix one) or through the address
+  the destination left (a `DUP` of it and a `LOAD`; a postfix one keeps the
+  address and the old value in two temporaries), then converted to the
+  computation's type. A destination read by name isn't evaluated, and writes
+  nothing of its own.
+- **The second, its own:** the operation (an increment's one, or an unsigned
+  division's or remainder's shift or mask by a power of two, as the tasks write
+  them), the result converted back to the destination's type, and the store.
+
+C marks the destination's record and keeps the update's plan, which X reads at
+both rows. A temporary is its number in the expression on the tape; the shadow
+matches it with a local the body hasn't met. In step 2 the splice gives it a
+local, as `check_lower_temporary` does. T types an update by
+`check_action_update`'s own steps: an arithmetic destination's by its
+computation's row of the transition table, a pointer's by
+`check_action_pointer_arithmetic`'s, and the rest by the action, which
+`--verify` checks the rules against. The machine refuses an update of a
+`long double`, a 128-bit integer, a vector, an atomic, a register variable or
+an object in a segment's space; the census refuses a bit-field's.
+
+On the 9700X at `6196395c`, on main `0af27a30` before #2569 had merged (CPU 2,
+under the lock;
+[the record](https://github.com/buster14a/buster-performance/tree/722bc1ea492efa797596744b847cdb34c5053803/docs/measurements/node-machine-updates-2524-2026-11-12)):
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main | 130,559 (50.2%) | 25,073 (41.0%) | 56,144 (46.7%) |
+| machine-taken evaluated nodes, with the updates | 145,386 (55.9%) | 27,971 (45.7%) | 65,409 (54.4%) |
+| machine-taken expressions, main and with the updates | 63.5%, 70.2% | 51.8%, 58.6% | 58.6%, 68.5% |
+| entries compared | 199,540 | 34,955 | 87,335 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **What the machine refused by code** was then calls, `&&`, `||` and `?:`.
+  On `sqlite3.c` the first such operator is a call in 12,856 of 15,214
+  expressions. At main, `x++` came second.
+- **T's rules type all but 2 of `sqlite3.c`'s updates,** and all of Lua's.
+- **The sweeps run 690.4 instructions a taken node on `sqlite3.c`** against
+  main's 669.9, at 173.4 to 178.9 cycles against main's 169.8 (Lua: 861.0
+  against 838.6).
+  - X's instructions an entry are main's: the new expressions write 1.37
+    entries a node against 1.28.
+  - On main's own expressions the code costs nothing. A build with the update
+    codes refused runs 669.2 instructions a node.
+- **Two things that cost every node.** They were found on the way, and the
+  record has the series:
+  - `node_machine_convert` as a call of its own in X, once the updates' rows
+    called it too: 11 instructions a node;
+  - C's and X's tests for the updates ahead of the common cases: 9.8.
+
+  Both are fixed. **A machine code that adds a caller of a function X or C
+  inlines should check the symbols** (`nm build/compiler | grep node_machine_`).
+- **Cycles move without the instructions,** by up to about 4% between
+  processes running one binary. Compare instructions.
+
+With the logical operators (#2569) merged, an update's first row is one more
+segment after an operand's row, by its own state bit beside theirs. At
+`58ca4ea7`, against main `f2faf255`:
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main | 154,280 (59.3%) | 29,595 (48.4%) | 65,775 (54.7%) |
+| machine-taken evaluated nodes, with the updates | 169,496 (65.2%) | 32,547 (53.2%) | 75,541 (62.8%) |
+| machine-taken expressions, main and with the updates | 67.6%, 74.3% | 54.6%, 61.5% | 62.6%, 72.7% |
+| entries compared | 249,280 | 42,862 | 107,086 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **Calls were then the only code the machine lacked.** They were every
+  expression it refused by code: 13,069 of `sqlite3.c`'s, 3,885 of Lua's and
+  5,141 of musl's.
+- **Instructions a taken node on `sqlite3.c`:** 714.8 against main's 695.3.
+  On main's own expressions the code costs 0.4.
+
+With the split files (#2571) and calls (#2575) merged too, the updates live in
+the sweeps' files, reading the records through the accessors. At `5200426e`,
+against main `5f75ea52`:
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main | 242,002 (93.0%) | 53,385 (87.2%) | 98,763 (82.1%) |
+| machine-taken evaluated nodes, with the updates | 258,466 (99.4%) | 57,954 (94.7%) | 110,248 (91.6%) |
+| refused by code, main and with the updates | 3,616, 0 | 837, 0 | 2,630, 0 |
+| entries compared, calls compared | 353,246, 13,473 | 70,723, 4,064 | 149,651, 5,357 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **The machine now has a code for every operator the census takes.** What it
+  refuses is templates (on `sqlite3.c`, 159 expressions, most at a `-` or a
+  `/`), a few callees and rows. `main.c` and c-testsuite, run locally, take
+  98.4% and 99.8% of their census-taken nodes, with no difference.
+- **Instructions a taken node on `sqlite3.c`:** 779.5 against main's 764.1.
+  On main's own expressions the code costs 2.8. Of those, 2.0 are X's tests
+  for an update's destination, which one test of a state past `EVALUATED`
+  would fold.
 
 ### The baked tables, measured
 
