@@ -915,7 +915,7 @@ an object in a segment's space; the census refuses a bit-field's.
 
 On the 9700X at `6196395c`, on main `0af27a30` before #2569 had merged (CPU 2,
 under the lock;
-[the record](https://github.com/buster14a/buster-performance/tree/1a80f724cd2da8d5c0578a43071fb1f8c817df80/docs/measurements/node-machine-updates-2524-2026-11-12)):
+[the record](https://github.com/buster14a/buster-performance/tree/19494ae80595883601d191fbc05dace4ac1db93e/docs/measurements/node-machine-updates-2524-2026-11-12)):
 
 | | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
 | --- | ---: | ---: | ---: |
@@ -946,6 +946,24 @@ under the lock;
   inlines should check the symbols** (`nm build/compiler | grep node_machine_`).
 - **Cycles move without the instructions,** by up to about 4% between
   processes running one binary. Compare instructions.
+
+With the logical operators (#2569) merged, an update's first row is one more
+segment after an operand's row, by its own state bit beside theirs. At
+`58ca4ea7`, against main `f2faf255`:
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main | 154,280 (59.3%) | 29,595 (48.4%) | 65,775 (54.7%) |
+| machine-taken evaluated nodes, with the updates | 169,496 (65.2%) | 32,547 (53.2%) | 75,541 (62.8%) |
+| machine-taken expressions, main and with the updates | 67.6%, 74.3% | 54.6%, 61.5% | 62.6%, 72.7% |
+| entries compared | 249,280 | 42,862 | 107,086 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **Calls are now the only code the machine lacks.** They are every expression
+  it refuses by code: 13,069 of `sqlite3.c`'s, 3,885 of Lua's and 5,141 of
+  musl's.
+- **Instructions a taken node on `sqlite3.c`:** 714.8 against main's 695.3.
+  On main's own expressions the code costs 0.4.
 
 ## Expected gains
 
