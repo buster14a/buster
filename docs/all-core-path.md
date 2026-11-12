@@ -1,7 +1,8 @@
 # The all-core path: a compile whose working memory is a window of the unit (#2536): design
 
-Status: design only. Nothing below is implemented, and its gains are a model's
-that its first steps exist to confirm or refute. It is
+Status: design. Step 0, the gauge, is built: `tools/allcore/allcore.c`
+([its guide](commands/all-core.md)). Nothing else below is implemented, and its
+gains are a model's that its first steps exist to confirm or refute. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s all-core target's
 design: what eight workers cost a compile on the 9700X, what the designs
 already in hand remove of that, and the change that removes the rest. The issue
