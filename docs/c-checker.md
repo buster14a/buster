@@ -3291,7 +3291,13 @@ What the lowering covers past scalars (#145's programs):
     operands' bits zero-extended to 32 or 64 bits, the result truncated to
     the scalar. A `_BitInt` scalar of up to 64 bits, of any width, takes the
     integer sequences of `check_lower_integer_elements` as a 1-, 2-, 4- or
-    8-byte scalar does, a funnel shift's count modulo a width no power of two. These expansions, ordered floating sums
+    8-byte scalar does, a funnel shift's count modulo a width no power of two.
+    `__int128` and `_BitInt`s of 65 to 128 bits take the same sequences in
+    Tier 0's 128-bit classes: their shift counts are U32 values, a constant
+    past 64 bits is built of its halves (`check_lower_sequence_halves`), a
+    `_BitInt`'s operands are masked by shifting up and back, and a funnel
+    count of a width no power of two is reduced modulo it through its 64-bit
+    halves, `(hi % w) * (2^64 % w) + lo % w`. These expansions, ordered floating sums
     and floating reduction trees are bounded to 1,024 elements and preserve
     the ordinary rows' element-type and target-feature refusals.
   - boolean elementwise builtins use packed bit operations at scalar and
@@ -3340,8 +3346,8 @@ What the lowering covers past scalars (#145's programs):
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 64 bits (`__int128` and `_BitInt` past 64 bits, #2410), and of scalars, pdep and pext
-  without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
+  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410), and of scalars, pdep, pext and clmul of more than 64
+  bits, pdep and pext without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
@@ -4507,6 +4513,14 @@ take clang's words and places:
   binary expression". Other failures keep the generic error. A bound's
   failure before its first undeclared name is reported with it, in source
   order.
+- **Statement checks in clang's words** (#2406): a `case` or a `default`
+  outside any switch is "'case' statement not in switch statement" (or
+  'default') at its keyword (`CHECK_INPUT_CASE_OUTSIDE_SWITCH`, the control
+  pass); a subscript of neither an array, a pointer nor a vector is
+  "subscripted value is not an array, pointer, or vector" at its `[`; and a
+  subscript of a function's name or pointer is "subscript of pointer to
+  function type 'int (void)'" at that operand, a typedef'd pointee as written
+  (`check_semantic_constraint`).
 - **A member access** whose base is no structure or union, anywhere else
   (#2288, `check_semantic_constraint`'s member branch): clang's "member
   reference base type 'int' is not a structure or union" at the operator,
@@ -10375,7 +10389,10 @@ enables, which this checker doesn't all give.
   literal, nor a unary operator's, nor a comparison, logical or comma
   operator), each value by its operand's own type (ConvertAPValueToString): a
   bool's `true`, a plain char's `'A' (0x41, 65)` with a control's `<U+001B>` and
-  a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. Still
+  a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. A read of
+  a const object is its completed initializer's value (#2214,
+  `check_semantic_operand_value`): `const int k = 0;`'s `k == 45` is
+  `'0 == 45'`, a member's and an element's too. Still
   separate: a type name's literals print as written (`sizeof(int[0x10])`, clang
   `int[16]`, and a compound literal's `(int[]){1, 2}`, clang `(int[2])`);
   `_Generic`'s associations (`int:1`, clang `int: 1`); a record type defined
@@ -10409,7 +10426,16 @@ enables, which this checker doesn't all give.
     declarator reader puts its missing name, for a pointer parameter
     (`check_driver_parameter_source`), and the end of its declarator for
     another (`check_driver_parameter_place`). Both read the declaration's
-    tokens when a note is given; no prototype keeps them;
+    tokens when a note is given; no prototype keeps them. A call's later
+    arguments that don't convert either get their own errors, in order, as
+    clang's ConvertArgumentsForCall goes on past an error-by-default
+    conversion (incompatible pointers, an integer and a pointer) and stops at
+    a hard one (incompatible types, another address space) (#2413,
+    `check_graph_report_arguments`, which checks the call again with each failed
+    argument taken as its parameter's type: only for a call already in error).
+    Still apart: a later argument's `-Wpointer-sign` or qualifier warning comes
+    before an earlier argument's error here, where clang gives them in argument
+    order;
   - the types as written: an array's and a function's unconverted, a qualified
     lvalue's qualified, with their typedefs;
   - clang's fix-it words (`check_driver_conversion_hint`,
@@ -10532,7 +10558,10 @@ enables, which this checker doesn't all give.
   is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared
   where its typedef holds them itself, as clang's `getUnqualifiedType` does
   (`CI`'s `'int'`). An array decays to a pointer to its qualified element
-  (`'const int *'`).
+  (`'const int *'`). An `_Atomic` argument is checked and printed as its value
+  type, which the lvalue conversion leaves (#2234,
+  `check_common_format_argument_type`): `%d` of an `_Atomic int` is quiet, and
+  `%s` of one is "the argument has type 'int'".
   A declaration's calling convention keeps clang's `AttributedType` where it
   is written, in a type sugar node of its own (`c_types_sugar.c`, made by
   `c_check_type_sugar_input.c`; `docs/c-types.md`'s "Type sugar"). A failed

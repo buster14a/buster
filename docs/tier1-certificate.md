@@ -591,8 +591,10 @@ The decoding:
   emitted ones, which carry no reference, and the body's own branches must be
   exactly its branches, each to its target's record (its end's for one to the
   body's end); a branch of a node's origin is taken only from a body. The
-  records are one ORIGINAL that reads no value (the block's memory isn't a value
-  the allocation keeps) and kills every register the body touches
+  records are one ORIGINAL that reads its register operands (#2144), each in
+  its own register, where the operands' moves before it must have left it (the
+  block's memory isn't a value the allocation keeps), and kills every register
+  the body touches
   (`IrAsmBody.touched` and `.masks`, callee-saved ones too, which the prologue
   saved) and the frame bytes its stores write; a record of a form the
   semantics' tables don't cover (`cpuid`, the x87's, MMX's) writes no register

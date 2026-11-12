@@ -232,7 +232,8 @@ static bool check_builtin_atomic_generic(CBuiltinId id)
 // _Atomic or a _BitInt one (long double, records, unions and arrays among them), and not const but for a load. The value
 // pointers convert to pointers to its unqualified type, but a store's value and a compare-exchange's desired one to the
 // first argument's own pointer type, its qualifiers kept (clang's ByValType: a pointer to const passed for any of them
-// is clang's discarded-qualifiers warning), the weak flag to bool and the orders to int, which an integer constant
+// is clang's discarded-qualifiers warning, and one in an address space the object's doesn't include its "changes address
+// space of pointer", #2233), the weak flag to bool and the orders to int, which an integer constant
 // expression checks as the _n forms' are. No width or alignment is refused: the lowering calls libatomic's generic
 // functions for what no native leaf takes, as clang's code calls them.
 static void check_builtin_atomic_generic_one(TypeTable* table, const CheckBuiltinAtomicAction* input, CheckBuiltinAtomicResult* output)
@@ -311,6 +312,15 @@ static void check_builtin_atomic_generic_one(TypeTable* table, const CheckBuilti
             {
                 const bool keeps = (store && i == 1) || (exchange && i == 2) || (compare && i == 2);
                 const TypeId destination = i >= pointers ? (compare && i == 3 ? BUSTER_TYPE_BOOL : BUSTER_TYPE_INT) : keeps ? by_value : unqualified;
+                // (Only these, which take the object's pointer type: clang's ValType pointers drop the address space.)
+                const bool pointed = keeps && check_action_kind(table, values[i].type) == BUSTER_TYPE_KIND_POINTER;
+                const uint32_t to_space = pointed ? type_address_space(type_object_qualifiers(table, object)) : 0;
+                const uint32_t from_space = pointed ? type_address_space(type_object_qualifiers(table, type_element(table, type_strip_aligned(table, values[i].type)))) : 0;
+                if (!type_space_includes(to_space, from_space))
+                {
+                    check_action_diagnose(&output->action, CHECK_DIAG_ADDRESS_SPACE, i);
+                    output->space_target = destination;
+                }
                 check_builtin_atomic_convert(table, input, output, values + i, i, destination);
             }
             output->store_value = values[store || exchange ? 1 : compare ? 2 : 0];
