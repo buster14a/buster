@@ -24,6 +24,8 @@ static const char node_census_test_warnings[] =
     "    x = i << 40; // refuse: constant\n"
     "    x = i / 0; // refuse: constant\n"
     "    x = -1 << 2; // refuse: constant\n"
+    "    x = 1 << 31; // refuse: constant\n"
+    "    e = 5; // refuse: constant\n"
     "    if (x = i) x = 1; // refuse: parentheses\n"
     "    x = (x & 2 == 2); // refuse: parentheses\n"
     "    x = !x == 3; // refuse: parentheses\n"
@@ -131,15 +133,19 @@ static const char node_census_test_system[] =
     "    return x; // take\n"
     "}\n";
 
-// The same warnings as the first fixture's where they are off by default: read with neither -Wall nor -Wextra, they
-// refuse nothing.
+// The same warnings as the first fixture's where they are off by default: read without the options that enable them,
+// they refuse nothing.
 static const char node_census_test_quiet[] =
+    "enum A { A0, A1 };\n"
     "int g(unsigned u, int i)\n"
     "{\n"
     "    int x = 0;\n"
+    "    enum A e = A0;\n"
     "    x = u < i; // take\n"
     "    x = x; // take\n"
-    "    return x; // take\n"
+    "    x = 1 << 31; // take\n"
+    "    e = 5; // take\n"
+    "    return x + e; // take\n"
     "}\n";
 
 // The test whose name `name` (`length` bytes) is, or NODE_CENSUS_TESTS.
@@ -215,7 +221,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");
-    char* loud[] = { "-nostdinc", "-Wall", "-Wextra" };
+    char* loud[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum" };
     char* quiet[] = { "-nostdinc" };
     uint64_t system = 0;
     check_test_expect(test, ready && node_census_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud), &system),
@@ -241,6 +247,18 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         unlink(header);
         rmdir(headers);
     }
+    // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
+    uint32_t unclassified = 0;
+    for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
+    {
+        if (node_census_warning_classes[id] == NODE_CENSUS_WARNING_UNCLASSIFIED)
+        {
+            unclassified += 1;
+            fprintf(stderr, "test-checker: node-census: warning %u (%s) has no class of the census's\n", id,
+                    id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && check_warning_descriptions[id].option != NULL ? check_warning_descriptions[id].option : "-");
+        }
+    }
+    check_test_expect(test, unclassified == 0, "node-census classifies every warning: a test stands for it, or it is no expression's");
     // The command refuses a run without a file.
     char* missing[] = { "--list", "1" };
     fflush(stdout);

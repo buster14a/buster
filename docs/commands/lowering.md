@@ -168,9 +168,18 @@ unevaluated operands too; its counts are the evaluated nodes, the inventory's.
   an effect or a discarded call of a `warn_unused_result`, `const` or `pure`
   callee, a self-assignment, a return of a local's address, a for statement's
   clauses with `-Wfor-loop-analysis` on, an object written and named again
-  unsequenced, and a body with a diagnostic or floating-point pragma. A system
-  header's macro in a user's expression is counted apart, not refused (the
-  design's "Silence" says why).
+  unsequenced, a signed left shift by a constant with `-Wshift-sign-overflow`
+  on, an integer constant converted to an enumeration with `-Wassign-enum` on,
+  and a body with a diagnostic or floating-point pragma. A system header's macro
+  in a user's expression is counted apart, not refused (the design's "Silence"
+  says why).
+- **Every warning has a class** (`node_census_warning_classes`): a test stands
+  for it (by its own reading or by the set's refusal of what it fires on), it
+  fires on no expression the census reads, or its scans read the events a
+  taken expression records. One no test models (`-Wc++-compat`) refuses every
+  expression where it is enabled, and so does one without a class, with its
+  default taken to be on; `test-checker` fails until a new warning ID has a
+  class. A new diagnostic lands with its refusal.
 
 The report gives the gate's two shares (the set's of the evaluated nodes, and
 the silence tests' refusals of all of them), the nodes taken by root kind, the

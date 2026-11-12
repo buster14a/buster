@@ -587,7 +587,12 @@ are conservative. Two things make that low share trustworthy:
 - **Every test is checked against the warnings it stands for.** `test-checker`'s
   fixture has one warning a line, each reported by the compiler with `-Wall
   -Wextra`, and the census must refuse each by its test; disabling one test
-  fails it. A warning added inside an expression adds its test there.
+  fails it. Every warning ID has a class of the census's (a test stands for
+  it, it is no expression's, or it reads the events a taken expression keeps),
+  and `test-checker` fails on an ID without one: the two warnings main gained
+  while the census was written (`-Wshift-sign-overflow`, `-Wassign-enum`) got
+  their tests that way. A warning no test models refuses every expression
+  where it is enabled.
 - **Its first version refused 1.75% of `sqlite3.c`'s nodes**, and each false
   refusal was a test coarser than its warning, not a warning: a discarded
   `memset` (only `const` and `pure` builtins warn), unsigned 64-bit constants,

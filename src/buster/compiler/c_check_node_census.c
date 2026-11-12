@@ -89,6 +89,7 @@ typedef enum NodeCensusTest
     NODE_CENSUS_LOOP,
     NODE_CENSUS_UNSEQUENCED,
     NODE_CENSUS_REGION,
+    NODE_CENSUS_UNMODELED,
     NODE_CENSUS_TESTS,
 } NodeCensusTest;
 
@@ -125,6 +126,7 @@ static const char* const node_census_test_names[NODE_CENSUS_TESTS] = {
     [NODE_CENSUS_LOOP] = "for-loop-analysis",
     [NODE_CENSUS_UNSEQUENCED] = "unsequenced",
     [NODE_CENSUS_REGION] = "region",
+    [NODE_CENSUS_UNMODELED] = "unmodeled-warning",
 };
 
 // The roots by the control that pushed them.
@@ -148,6 +150,179 @@ static const char* const node_census_root_names[NODE_CENSUS_ROOTS] = {
     [NODE_CENSUS_ROOT_INITIALIZER] = "initializer",
     [NODE_CENSUS_ROOT_BRACE] = "brace-initializer",
     [NODE_CENSUS_ROOT_OTHER] = "other-control",
+};
+
+// What the census does with each warning (node_census_warning_classes): a test stands for it, by its own reading or by
+// the set's refusal of what it fires on (TESTED); it fires on no expression the census reads (OUTSIDE: declarations,
+// attributes, pragmas, statements, brace initializers); its scans read the events a taken expression records (EVENTS:
+// the uninitialized and unused-but-set ones); or no test models it, and wherever it is enabled every expression is
+// refused (WHOLE). A warning without a class, as one added since, is refused as WHOLE with its default taken to be on,
+// and test-checker fails until it has one (c_check_node_census_test.c): a new diagnostic lands with its refusal.
+typedef enum NodeCensusWarningClass
+{
+    NODE_CENSUS_WARNING_UNCLASSIFIED,
+    NODE_CENSUS_WARNING_TESTED,
+    NODE_CENSUS_WARNING_OUTSIDE,
+    NODE_CENSUS_WARNING_EVENTS,
+    NODE_CENSUS_WARNING_WHOLE,
+} NodeCensusWarningClass;
+
+static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
+    [CHECK_WARNING_ID_DISCARDED_QUALIFIERS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_GNU_CONSTANT] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ENUM_TOO_LARGE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_INTEGER_OVERFLOW] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SHIFT_OVERFLOW] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_EXCESS_INITIALIZERS] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNKNOWN_PRAGMA] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_IGNORED_ATTRIBUTES] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_POINTER_SIGN] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_POINTER_INTEGER_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_DISTINCT_POINTER_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CONDITIONAL_POINTER_INTEGER] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CONDITIONAL_POINTER_TYPES] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ADDRESS_OF_PACKED_MEMBER] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_RETURN_TYPE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_VISIBILITY_PRAGMA] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_KR_DEFINITION] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_NON_PROTOTYPE_CALL] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_KR_TOO_FEW] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_KR_TOO_MANY] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_NON_LITERAL_NULL] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_LITERAL_RANGE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ORDERED_POINTER_INTEGER] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_MISSING_DECLARATIONS] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_PLAIN_COMPLEX] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_STATIC_LOCAL_INLINE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_MANY_SCALAR_BRACES] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_INITIALIZER_OVERRIDES] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNDEFINED_INTERNAL] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_C23_PARAMETER] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNRECOGNIZED_PRAGMA] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_IGNORED_PRAGMA] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_SOURCE_OPENMP] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_LIBRARY_REDECLARATION] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_BUILTIN_HEADER] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_DIVISION_BY_ZERO] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CONSTANT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ARRAY_BOUNDS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SIGN_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNUSED_COMPARISON] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNUSED_VALUE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_PARENTHESES] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_EMPTY_BODY] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_SELF_ASSIGN] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_RETURN_STACK_ADDRESS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FORMAT] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FORMAT_SECURITY] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNUSED_VARIABLE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNUSED_FUNCTION] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNUSED_PARAMETER] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNINITIALIZED] = NODE_CENSUS_WARNING_EVENTS,
+    [CHECK_WARNING_ID_SWITCH] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_DANGLING_ELSE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER] = NODE_CENSUS_WARNING_EVENTS,
+    [CHECK_WARNING_ID_UNUSED_CONST_VARIABLE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_FORMAT_EXTRA_ARGS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FORMAT_INVALID_SPECIFIER] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_EMPTY_CASE_RANGE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_GCC_COMPAT] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_DEPRECATED_DECLARATIONS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CFSTRING_LITERAL] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNSUPPORTED_AVAILABILITY_GUARD] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_AVAILABILITY] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_COUNTED_BY_ELEMENT] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_EXTERN_INITIALIZER] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNKNOWN_SANITIZERS] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_OVERFLOW_BEHAVIOR] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_INDEPENDENT_CLASS] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_ASSUME] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_DUPLICATE_DECLSPEC] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_INVALID_NORETURN] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_PRIVATE_EXTERN] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_LITERAL_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_WEAK_UNDECLARED] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_REDEFINE_EXTNAME] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_THREAD_SAFETY_ATTRIBUTES] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_NODEREF] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_EXCESSIVE_REGSAVE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TCB_ENFORCEMENT] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_VOID_PTR_DEREFERENCE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_MULTICHAR] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FOUR_CHAR_CONSTANTS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CHARACTER_TOO_LONG] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_NULL_DEREFERENCE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_USER_DEFINED_WARNINGS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FUNCTION_MULTIVERSION] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNUSED_RESULT] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ENUM_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ENUM_ENUM_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FOR_LOOP_ANALYSIS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_VISIBILITY] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_ODR] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_NONSTANDARD_ESCAPE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_DELIMITED_ESCAPE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_INVALID_CPU_SUPPORTS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ATTRIBUTE_ALIAS] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_TYPE_SAFETY] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_PRAGMA_PACK] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_POINTER_TO_INT_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TENTATIVE_ARRAY] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_UNSEQUENCED] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_CXX_COMPAT] = NODE_CENSUS_WARNING_WHOLE,
+    [CHECK_WARNING_ID_GNU_UNION_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_GNU_DESIGNATOR] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_GNU_ARRAY_RANGE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_STRING_PLUS_INT] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SHIFT_OP_PARENTHESES] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CHAINED_COMPARISON] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ASM_LABEL_ON_AUTO] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_ALIGNMENT_NO_OP] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_NONSCALAR_SAME_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_C23_ATTRIBUTES] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_ELABORATED_ENUM_BASE] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_PSABI] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = NODE_CENSUS_WARNING_EVENTS,
+    [CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_ASSIGN_ENUM] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -185,6 +360,11 @@ struct NodeCensusPolicy
     bool return_address;
     bool loops;
     bool unsequenced;
+    bool shift_sign_overflow;
+    bool assign_enum;
+    bool type_safety;
+    // A warning enabled in the unit that no test stands for (NODE_CENSUS_WARNING_WHOLE, or without a class).
+    bool unmodeled;
 };
 
 // One expression's result, for the census's tests (NodeCensus.records): its root's line, its root kind and its tests.
@@ -237,6 +417,8 @@ struct NodeCensus
 
 // --list N: the first N expressions each test refuses.
 static uint32_t node_census_list;
+// The current unit's -Wassign-enum (NodeCensusPolicy.assign_enum), for node_census_constant_changes.
+static bool node_census_assign_enum;
 
 // One file's state: the program and the unit's, and per node and pop the walks' columns, valid for the current
 // expression's stamp alone.
@@ -335,6 +517,16 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
     policy.return_address = check_common_enabled(pp, input, CHECK_WARNING_ID_RETURN_STACK_ADDRESS, false);
     policy.loops = check_common_enabled(pp, input, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true);
     policy.unsequenced = check_common_enabled(pp, input, CHECK_WARNING_ID_UNSEQUENCED, false);
+    policy.shift_sign_overflow = check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW, true);
+    policy.assign_enum = check_common_enabled(pp, input, CHECK_WARNING_ID_ASSIGN_ENUM, true);
+    policy.type_safety = check_common_enabled(pp, input, CHECK_WARNING_ID_TYPE_SAFETY, false) && input->type_tags != NULL &&
+                         input->type_tags->declaration_count != 0;
+    for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
+    {
+        const uint8_t class = node_census_warning_classes[id];
+        policy.unmodeled |= (class == NODE_CENSUS_WARNING_WHOLE && check_common_enabled(pp, input, id, true)) ||
+                            (class == NODE_CENSUS_WARNING_UNCLASSIFIED && check_common_enabled(pp, input, id, false));
+    }
     return policy;
 }
 
@@ -897,7 +1089,10 @@ static bool node_census_constant_changes(const CheckStream* stream, const TypeTa
     bool sign = false;
     __int128 value = 0;
     const CheckConstantKind kind = operand < stream->count ? check_stream_constant_kind(stream, operand) : CHECK_CONSTANT_NONE;
-    if (target != 0 && kind == CHECK_CONSTANT_INTEGER && node_census_integer(types, target, &width, &sign))
+    // -Wassign-enum: an integer constant converted to an enumeration, whatever its value (node_census_constants' callers
+    // ask only where it or -Wconstant-conversion is enabled).
+    result = node_census_assign_enum && kind == CHECK_CONSTANT_INTEGER && target != 0 && node_census_enum(types, target);
+    if (!result && target != 0 && kind == CHECK_CONSTANT_INTEGER && node_census_integer(types, target, &width, &sign))
     {
         // A conversion to a type at least as wide changes no value but its sign, which -Wsign-conversion says, not
         // -Wconstant-conversion: only a narrower one is tested.
@@ -906,11 +1101,11 @@ static bool node_census_constant_changes(const CheckStream* stream, const TypeTa
         const bool narrows = source_width == 0 || source_width > width;
         result = narrows && (!node_census_integer_constant(stream, types, operand, &value) || !node_census_fits(value, width, sign));
     }
-    else if (target != 0 && kind == CHECK_CONSTANT_FLOATING && node_census_integer(types, target, &width, &sign))
+    else if (!result && target != 0 && kind == CHECK_CONSTANT_FLOATING && node_census_integer(types, target, &width, &sign))
     {
         result = true;
     }
-    else if (target != 0 && kind == CHECK_CONSTANT_INTEGER && node_census_floating(types, target))
+    else if (!result && target != 0 && kind == CHECK_CONSTANT_INTEGER && node_census_floating(types, target))
     {
         // Exact where its significant bits fit the type's significand: float's 24, double's 53, long double's 64.
         const TypeId base = node_census_base(types, target);
@@ -938,13 +1133,14 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
     const uint32_t b = graph->operand1[node];
     bool result = false;
     // The operands' implicit conversions, and a call's arguments'.
-    for (uint32_t i = 0; i < 3 && op != CHECK_OP_CAST && op != CHECK_OP_VALUE && stream->conversions != NULL && policy->constant_conversion && !result; i += 1)
+    const bool conversions = policy->constant_conversion || policy->assign_enum;
+    for (uint32_t i = 0; i < 3 && op != CHECK_OP_CAST && op != CHECK_OP_VALUE && stream->conversions != NULL && conversions && !result; i += 1)
     {
         const uint32_t operand = i == 0 ? a : i == 1 ? b : graph->operand2[node];
         const CheckConversion conversion = stream->conversions[node].operands[i];
         result = operand < graph->count && node_census_constant_changes(stream, types, operand, conversion.type);
     }
-    if (op == CHECK_OP_CALL && stream->argument_conversions != NULL && policy->constant_conversion && !result)
+    if (op == CHECK_OP_CALL && stream->argument_conversions != NULL && conversions && !result)
     {
         const uint32_t first = graph->argument_offsets[node];
         for (uint32_t i = 0; i < graph->argument_counts[node] && !result; i += 1)
@@ -964,6 +1160,13 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
         result = node_census_integer_constant(stream, types, b, &value) && (value < 0 || width == 0 || value >= promoted);
         const bool left_constant = node_census_integer_constant(stream, types, a, &value);
         result |= (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_LEFT_ASSIGN) && left_constant && value < 0;
+    }
+    // -Wshift-sign-overflow: a signed left shift by a constant (whose fold may set the sign bit).
+    if (policy->shift_sign_overflow && (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_LEFT_ASSIGN) && !result)
+    {
+        bool sign = false;
+        const uint32_t width = a < graph->count ? node_census_width(types, check_stream_type(stream, a), &sign) : 0;
+        result = (sign || width < 32) && node_census_integer_constant(stream, types, b, &value);
     }
     const bool through = op == CHECK_OP_DEREFERENCE || op == CHECK_OP_ARROW || op == CHECK_OP_SUBSCRIPT;
     if (policy->null_dereference && through && !result)
@@ -1083,7 +1286,8 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
                               node_census_attributed(input, declaration, node_census_flagged_kinds, BUSTER_ARRAY_LENGTH(node_census_flagged_kinds)));
         tests |= flagged ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0;
     }
-    tests |= op == CHECK_OP_CALL && node_census_callee(s, node) ? UINT64_C(1) << NODE_CENSUS_CALLEE : 0;
+    // -Wtype-safety reads a call's arguments against its callee's type tags: in a unit that declares any, every call.
+    tests |= op == CHECK_OP_CALL && (node_census_callee(s, node) || policy->type_safety) ? UINT64_C(1) << NODE_CENSUS_CALLEE : 0;
     // The silence tests.
     const uint32_t warnings = stream->warnings != NULL ? stream->warnings[node] & 0x01ffffffu : 0;
     const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
@@ -1285,9 +1489,10 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     const bool discarded = context == NODE_CENSUS_ROOT_STATEMENT || (flags & 4u) != 0;
     tests |= discarded && node_census_discarded(s, discarded_node, 0) ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
     tests |= s->policy.loops && node_census_for_clause(parser, graph->tokens[root]) ? UINT64_C(1) << NODE_CENSUS_LOOP : 0;
+    tests |= s->policy.unmodeled ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
     // A scalar object's initializer converts its value to the object's type in its plan, not at a node.
     const TypeId declared = context == NODE_CENSUS_ROOT_INITIALIZER ? node_census_initialized_type(s, root) : 0;
-    tests |= s->policy.constant_conversion && declared != 0 && node_census_constant_changes(stream, program->types, root, declared) ?
+    tests |= (s->policy.constant_conversion || s->policy.assign_enum) && declared != 0 && node_census_constant_changes(stream, program->types, root, declared) ?
              UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     tests |= declared != 0 && node_census_special_type(program->types, declared) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
     tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(program, root, 0) ?
@@ -1551,6 +1756,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
         }
         NodeCensusScratch s = { .program = &selected.program, .pp = &source.pp, .file = file };
         s.policy = node_census_policy(&source.pp, selected.program.input);
+        node_census_assign_enum = s.policy.assign_enum;
         uint32_t** node_columns[] = { &s.marks, &s.parents, &s.depths, &s.node_controls, &s.list, &s.stack, &s.node_pop };
         bool room = node_census_events(&s, path, &scratch);
         for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(node_columns); c += 1)
