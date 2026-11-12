@@ -15781,6 +15781,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_records = plan->inline_label_records,
                     .label_names = plan->inline_label_names,
                     .label_count = plan->label_count,
+                    .exits = plan->inline_exits,
                     .leaves = plan->inline_leaves,
                     .stack = plan->inline_stack,
                 };
