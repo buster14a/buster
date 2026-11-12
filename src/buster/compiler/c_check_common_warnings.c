@@ -2183,51 +2183,6 @@ static int32_t check_common_range_truth(CheckOp op, uint32_t place, bool constan
     return result;
 }
 
-// An integer operand's width and signedness after the integer promotions: narrower than int becomes int; a _BitInt
-// isn't promoted. _Bool reads as one unsigned bit.
-static bool check_common_range_promoted(const TypeTable* types, TypeId type, uint32_t* width, bool* is_signed)
-{
-    const TypeId base = type_unqualified(type_strip_aligned(types, type));
-    bool result = check_common_integer(types, type, width, is_signed) || check_wide_type(types, type, width, is_signed);
-    if (result && *width < 32 && type_kind(types, base) != BUSTER_TYPE_KIND_BIT_INT)
-    {
-        *width = 32;
-        *is_signed = true;
-    }
-    return result;
-}
-
-// Whether a comparison is one clang's CheckTautologicalComparison may find out of range: an integer constant expression on
-// exactly one side, and on the other an operand whose range is narrower than the comparison's type, a narrower type's
-// or a boolean's. An operand of the comparison's width covers all of its values, wrapped or not. The comparison walk's
-// candidates test it before they take the comparison, so that the common `x == 0` costs no walk.
-static bool check_common_range_candidate(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
-{
-    const uint32_t left = graph->operand0[node];
-    const uint32_t right = graph->operand1[node];
-    const bool left_constant = check_common_integer_constant(stream, left) && (check_stream_flags(stream, left) & BUSTER_CHECK_ICE) != 0;
-    const bool right_constant = check_common_integer_constant(stream, right) && (check_stream_flags(stream, right) & BUSTER_CHECK_ICE) != 0;
-    bool result = left < graph->count && right < graph->count && left_constant != right_constant;
-    const uint32_t constant = right_constant ? right : left;
-    const uint32_t other = right_constant ? left : right;
-    const CheckOp other_op = result ? graph->ops[other] : CHECK_OP_COUNT;
-    const bool known_boolean = other_op == CHECK_OP_NOT || other_op == CHECK_OP_LOGICAL_AND || other_op == CHECK_OP_LOGICAL_OR ||
-                               (other_op >= CHECK_OP_LESS && other_op <= CHECK_OP_NOT_EQUAL);
-    uint32_t own_width = 0;
-    uint32_t other_width = 0;
-    uint32_t constant_width = 0;
-    bool own_signed = false;
-    bool other_signed = false;
-    bool constant_signed = false;
-    const TypeId other_type = result ? check_stream_type(stream, other) : 0;
-    const bool narrow = result && !known_boolean && (check_common_integer(types, other_type, &own_width, &own_signed) || check_wide_type(types, other_type, &own_width, &own_signed)) &&
-                        check_common_range_promoted(types, other_type, &other_width, &other_signed) &&
-                        check_common_range_promoted(types, check_stream_type(stream, constant), &constant_width, &constant_signed) &&
-                        own_width < (constant_width > other_width ? constant_width : other_width);
-    result &= known_boolean || narrow;
-    return result;
-}
-
 // A comparison's range facts for -Wtautological-constant-out-of-range-compare (#2218): which side is the constant, the
 // comparison's type of the usual arithmetic conversions (`width`, up to 128 bits here, `is_signed`), the other operand's
 // own range (its type's, or a boolean's one bit), and the constant converted to the comparison's type.
@@ -2254,27 +2209,48 @@ struct CheckCommonValueRange
 static CheckCommonValueRange check_common_range_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
 {
     CheckCommonValueRange range = { .place = BUSTER_CHECK_RANGE_IN };
+    // A candidate (clang's CheckTautologicalComparison may find it out of range): outside a required constant, an integer
+    // constant expression on exactly one side, and on the other an operand whose range is narrower than the comparison's
+    // type, a narrower type's or a boolean's. An operand of the comparison's width covers all of its values, wrapped or not.
+    // Each operand's type is asked once: its own width, then its promotion's.
     const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
-    const bool candidate = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) == 0 && check_common_range_candidate(graph, stream, types, node);
-    range.constant_right = candidate && check_common_integer_constant(stream, graph->operand1[node]);
-    range.constant = range.constant_right ? graph->operand1[node] : graph->operand0[node];
-    range.other = range.constant_right ? graph->operand0[node] : graph->operand1[node];
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    const bool left_constant = check_common_integer_constant(stream, left) && (check_stream_flags(stream, left) & BUSTER_CHECK_ICE) != 0;
+    const bool right_constant = check_common_integer_constant(stream, right) && (check_stream_flags(stream, right) & BUSTER_CHECK_ICE) != 0;
+    const bool one = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) == 0 && left < graph->count && right < graph->count &&
+                     left_constant != right_constant;
+    range.constant_right = one && right_constant;
+    range.constant = range.constant_right ? right : left;
+    range.other = range.constant_right ? left : right;
+    range.other_type = one ? check_stream_type(stream, range.other) : 0;
+    const TypeId constant_type = one ? check_stream_type(stream, range.constant) : 0;
+    uint32_t own_width = 0;
+    bool own_signed = false;
     uint32_t constant_width = 0;
-    uint32_t other_width = 0;
     bool constant_signed = false;
-    bool other_signed = false;
-    range.other_type = candidate ? check_stream_type(stream, range.other) : 0;
-    const bool integers = candidate && check_common_range_promoted(types, check_stream_type(stream, range.constant), &constant_width, &constant_signed) &&
-                          check_common_range_promoted(types, range.other_type, &other_width, &other_signed);
-    // The operand's own range: its type's, or a boolean's.
-    const CheckOp other_op = integers ? graph->ops[range.other] : CHECK_OP_COUNT;
+    const bool own = one && (check_common_integer(types, range.other_type, &own_width, &own_signed) ||
+                             check_wide_type(types, range.other_type, &own_width, &own_signed));
+    const bool constant_integer = one && (check_common_integer(types, constant_type, &constant_width, &constant_signed) ||
+                                          check_wide_type(types, constant_type, &constant_width, &constant_signed));
+    // (The integer promotions: narrower than int becomes int, but a _BitInt isn't promoted.)
+    const bool other_bit = own && type_kind(types, type_unqualified(type_strip_aligned(types, range.other_type))) == BUSTER_TYPE_KIND_BIT_INT;
+    const bool constant_bit = constant_integer && type_kind(types, type_unqualified(type_strip_aligned(types, constant_type))) == BUSTER_TYPE_KIND_BIT_INT;
+    const uint32_t other_width = own && own_width < 32 && !other_bit ? 32 : own_width;
+    const bool other_signed = own && own_width < 32 && !other_bit ? true : own_signed;
+    const bool constant_promoted = constant_integer && constant_width < 32 && !constant_bit;
+    constant_width = constant_promoted ? 32 : constant_width;
+    constant_signed = constant_promoted || constant_signed;
+    const CheckOp other_op = one ? graph->ops[range.other] : CHECK_OP_COUNT;
     range.known_boolean = other_op == CHECK_OP_NOT || other_op == CHECK_OP_LOGICAL_AND || other_op == CHECK_OP_LOGICAL_OR ||
                           (other_op >= CHECK_OP_LESS && other_op <= CHECK_OP_NOT_EQUAL);
+    const bool narrow = own && constant_integer && own_width < (constant_width > other_width ? constant_width : other_width);
+    const bool integers = one && own && constant_integer && (range.known_boolean || narrow);
+    range.known_boolean = integers && range.known_boolean;
     const bool boolean_type = integers && type_unqualified(type_strip_aligned(types, range.other_type)) == BUSTER_TYPE_BOOL;
-    range.ranged = integers && (check_common_integer(types, range.other_type, &range.range_width, &range.range_signed) ||
-                                check_wide_type(types, range.other_type, &range.range_width, &range.range_signed));
-    range.range_width = range.known_boolean || boolean_type ? 1 : range.range_width;
-    range.range_signed = !(range.known_boolean || boolean_type) && range.range_signed;
+    range.ranged = integers;
+    range.range_width = range.known_boolean || boolean_type ? 1 : integers ? own_width : 0;
+    range.range_signed = !(range.known_boolean || boolean_type) && own_signed;
     // The comparison's type, of the usual arithmetic conversions.
     const bool same_sign = constant_signed == other_signed;
     const uint32_t signed_width = constant_signed ? constant_width : other_width;
@@ -2285,10 +2261,10 @@ static CheckCommonValueRange check_common_range_facts(const CheckGraph* graph, c
     {
         TypeId value_type = 0;
         const unsigned __int128 integer = check_common_stream_integer(stream, range.constant, &value_type);
-        uint32_t own_width = 0;
-        bool own_signed = false;
-        check_common_integer(types, value_type, &own_width, &own_signed);
-        range.converted = (unsigned __int128)check_common_integer_bits(integer, own_width, own_signed) & check_action_mask(range.width);
+        uint32_t value_width = 0;
+        bool value_signed = false;
+        check_common_integer(types, value_type, &value_width, &value_signed);
+        range.converted = (unsigned __int128)check_common_integer_bits(integer, value_width, value_signed) & check_action_mask(range.width);
         range.place = check_common_range_compare(range.converted, range.width, range.is_signed, range.range_width, !range.range_signed);
     }
     return range;
@@ -2333,7 +2309,7 @@ static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStr
         const __mmask16 right_ice = _mm512_mask_test_epi32_mask(inside, right_flags, ice);
         // Where one operand alone is an integer constant expression, it is the constant: the other one is no candidate's
         // when it is an int or a long class builtin at least as wide as the constant's type promoted, and no boolean
-        // operator's (check_common_range_candidate's own_width test, its types' codes read from their TypeIds).
+        // operator's (check_common_range_facts' narrowness test, its types' codes read from their TypeIds).
         const __mmask16 one = (__mmask16)(left_ice ^ right_ice);
         const __m512i left_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, stream->value_types, 4);
         const __m512i right_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, stream->value_types, 4);
