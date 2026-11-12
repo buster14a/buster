@@ -130,11 +130,13 @@ struct IrTypedPlan
     // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
     uint8_t vector_copies;
     // The direct U64 symbol addresses the function takes at least twice (GLOBAL_ADDRESS entries, #2574), each defined once
-    // in the preheader after the jump tables' (ir_typed_plan_hoisted): hoisted_symbols[k] in order of first use, and per
-    // entry its symbol's k where the entry takes one, UINT32_MAX for any other (or a null column for none).
+    // in the preheader after the jump tables' (ir_typed_plan_hoisted): hoisted_symbols[k] in order of first use; and the
+    // entries that take one, hoisted_takes of them in entry order, each's symbol's k in hoisted_numbers.
     uint32_t* hoisted_symbols;
     uint32_t* hoisted_entries;
+    uint32_t* hoisted_numbers;
     uint32_t hoisted_count;
+    uint32_t hoisted_takes;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -1296,20 +1298,39 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
 // The symbols whose addresses the preheader computes once (IrTypedPlan.hoisted_symbols, #2574): each one the function
 // takes at least twice outside its jump tables' entries, which #1740's column hoists already. The address is then one
 // value over the function, which Tier 1's allocation can keep in a register around a loop that reads it (Lua's dispatch
-// table, read by every handler's goto) or recompute where it is read, as for any address with a recipe. Counted by an
-// open-addressed table of the symbols, sized to twice the entries that take one, then numbered in entry order. Scalar:
-// it visits the GLOBAL_ADDRESS entries alone, a few in a hundred of a function's. False where the arena is short.
+// table, read by every handler's goto) or recompute where it is read, as for any address with a recipe. One byte compare
+// per entry finds the GLOBAL_ADDRESS entries, and most functions, with fewer than two, stop there; the others' takes
+// are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
+// order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
+// alone, a few in a hundred of a function's entries. False where the arena is short.
 static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
 {
     const uint32_t* tables = input->table_addresses;
     const uint32_t table_count = tables != 0 ? input->table_count : 0;
-    uint32_t addresses = 0;
+    // The GLOBAL_ADDRESS entries, a byte compare each: most functions have fewer than two, and stop here.
+    uint32_t globals = 0;
     for (uint32_t i = 0; i < input->count; i += 1)
     {
-        addresses += ir_typed_hoistable(input, i);
+        globals += input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS;
     }
-    bool ok = true;
-    if (addresses >= 2)
+    uint32_t* taken = globals >= 2 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)globals + 1) : 0;
+    bool ok = globals < 2 || taken != 0;
+    // The entries that may take a hoisted address, in entry order: a jump table's stays the table's.
+    uint32_t addresses = 0;
+    uint32_t table = 0;
+    for (uint32_t i = 0; taken != 0 && i < input->count; i += 1)
+    {
+        while (table < table_count && tables[table] < i)
+        {
+            table += 1;
+        }
+        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i))
+        {
+            taken[addresses] = i;
+            addresses += 1;
+        }
+    }
+    if (ok && addresses >= 2)
     {
         uint32_t capacity = 4;
         while (capacity < 2 * addresses)
@@ -1319,46 +1340,44 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
         uint32_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
         uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
         uint32_t* numbers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
-        plan->hoisted_entries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->count + 1);
+        plan->hoisted_entries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses + 1);
+        plan->hoisted_numbers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses + 1);
         plan->hoisted_symbols = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses / 2 + 1);
-        ok = keys != 0 && counts != 0 && numbers != 0 && plan->hoisted_entries != 0 && plan->hoisted_symbols != 0;
+        ok = keys != 0 && counts != 0 && numbers != 0 && plan->hoisted_entries != 0 && plan->hoisted_numbers != 0 && plan->hoisted_symbols != 0;
         if (ok)
         {
             memset(keys, 0, (uint64_t)capacity * sizeof(uint32_t));
-            memset(plan->hoisted_entries, 0xff, ((uint64_t)input->count + 1) * sizeof(uint32_t));
         }
-        // Each entry's slot in the table (its symbol's), counted in the first pass and numbered in the second.
+        // Each take's slot in the table (its symbol's), counted in the first pass and numbered in the second.
         for (uint32_t pass = 0; ok && pass < 2; pass += 1)
         {
-            uint32_t table = 0;
-            for (uint32_t i = 0; i < input->count; i += 1)
+            for (uint32_t k = 0; k < addresses; k += 1)
             {
-                while (table < table_count && tables[table] < i)
+                const uint32_t i = taken[k];
+                const uint32_t key = (uint32_t)input->values[i];
+                uint32_t slot = (key * 0x9e3779b1u) & (capacity - 1);
+                while (keys[slot] != 0 && keys[slot] != key)
                 {
-                    table += 1;
+                    slot = (slot + 1) & (capacity - 1);
                 }
-                if (ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i))
+                if (pass == 0 && keys[slot] == 0)
                 {
-                    const uint32_t key = (uint32_t)input->values[i];
-                    uint32_t slot = (key * 0x9e3779b1u) & (capacity - 1);
-                    while (keys[slot] != 0 && keys[slot] != key)
-                    {
-                        slot = (slot + 1) & (capacity - 1);
-                    }
-                    if (pass == 0 && keys[slot] == 0)
-                    {
-                        keys[slot] = key;
-                        counts[slot] = 0;
-                        numbers[slot] = UINT32_MAX;
-                    }
-                    counts[slot] += pass == 0;
-                    if (pass == 1 && counts[slot] >= 2 && numbers[slot] == UINT32_MAX)
-                    {
-                        numbers[slot] = plan->hoisted_count;
-                        plan->hoisted_symbols[plan->hoisted_count] = key;
-                        plan->hoisted_count += 1;
-                    }
-                    plan->hoisted_entries[i] = pass == 1 && counts[slot] >= 2 ? numbers[slot] : UINT32_MAX;
+                    keys[slot] = key;
+                    counts[slot] = 0;
+                    numbers[slot] = UINT32_MAX;
+                }
+                counts[slot] += pass == 0;
+                if (pass == 1 && counts[slot] >= 2 && numbers[slot] == UINT32_MAX)
+                {
+                    numbers[slot] = plan->hoisted_count;
+                    plan->hoisted_symbols[plan->hoisted_count] = key;
+                    plan->hoisted_count += 1;
+                }
+                if (pass == 1 && counts[slot] >= 2)
+                {
+                    plan->hoisted_entries[plan->hoisted_takes] = i;
+                    plan->hoisted_numbers[plan->hoisted_takes] = numbers[slot];
+                    plan->hoisted_takes += 1;
                 }
             }
         }

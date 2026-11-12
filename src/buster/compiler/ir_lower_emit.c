@@ -163,6 +163,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     uint32_t table = 0;
     // The next hoisted address, also in entry order. Skip any entry the plan leaves out, as for lifetime events below.
     uint32_t table_address = 0;
+    // The next entry that takes a hoisted symbol's address (#2574), in entry order too.
+    uint32_t hoisted_take = 0;
     // The next lifetime event (Tier0Function.lifetime_entries, in entry order, #177), a marker of its local's slot before
     // its entry's instructions; an event of an entry the plan's blocks leave out (unreachable code) is dropped.
     uint32_t lifetime = 0;
@@ -246,7 +248,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 {
                     table_address += 1;
                 }
-                const uint32_t hoisted = plan->hoisted_entries != 0 ? plan->hoisted_entries[i] : UINT32_MAX;
+                while (hoisted_take < plan->hoisted_takes && plan->hoisted_entries[hoisted_take] < i)
+                {
+                    hoisted_take += 1;
+                }
+                const uint32_t hoisted = hoisted_take < plan->hoisted_takes && plan->hoisted_entries[hoisted_take] == i ? plan->hoisted_numbers[hoisted_take] : UINT32_MAX;
                 if (table_address < hoisted_tables && table_addresses[table_address] == i)
                 {
                     stack[depth] = table_first + 2 * table_address + 1;

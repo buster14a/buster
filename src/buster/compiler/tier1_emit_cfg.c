@@ -4113,6 +4113,21 @@ static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t c
 // found hot. False where an arena is short; a CFG the loop analysis refuses finds none. Scalar: it runs for the few values
 // with recipes that cross calls (luaV_execute's are its frame objects' addresses and its dispatch table's), each walk
 // bounded by its loop's blocks, and the loop analysis it runs once is dominators.c's, vector where that chooses.
+// Whether the CFG has an edge to its own block or to an earlier one in layout: without one its layout is a topological
+// order, and it has no loop to analyze.
+static bool tier1_emit_cfg_cyclic(const Tier1CfgInput* input)
+{
+    bool cyclic = false;
+    for (uint32_t b = 0; !cyclic && b < input->block_count; b += 1)
+    {
+        for (uint32_t e = input->successor_offsets[b]; e < input->successor_offsets[b + 1]; e += 1)
+        {
+            cyclic |= input->successors[e] <= b;
+        }
+    }
+    return cyclic;
+}
+
 static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, uint32_t candidates, Arena* output, Arena* scratch, uint8_t* hot)
 {
     const uint32_t blocks = input->block_count;
@@ -4129,7 +4144,8 @@ static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1Cf
     };
     DominatorOptions options = dominators_options();
     options.outputs = BUSTER_DOMINATOR_LOOPS;
-    const DominatorStatus analyzed = candidates != 0 ? dominators_analyze(scratch, output, &graph, options, &loops) : DOMINATOR_INVALID;
+    // A CFG without a backward edge in layout has no loop: most functions without one skip the analysis.
+    const DominatorStatus analyzed = candidates != 0 && tier1_emit_cfg_cyclic(input) ? dominators_analyze(scratch, output, &graph, options, &loops) : DOMINATOR_INVALID;
     ok = analyzed != DOMINATOR_NO_MEMORY;
     const bool looped = analyzed == DOMINATOR_OK && loops.loop_count != 0;
     // Per block: the stamp of the value whose readers it holds, and of the walk that reached it.
