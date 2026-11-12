@@ -293,8 +293,9 @@ standalone native regression, run by `tools/ci/correctness.tests`: every
 width's loads, stores, comparisons with an immediate after the displacement
 field and branches on them, the operations that take a memory operand,
 floating accesses, a sequentially consistent store, a loop, comparisons with
-a constant a signed byte holds (#2600), and indexed (three accesses sharing one
-`lea`, #2601) and address-of uses, by both host paths with `--tier1-strict --verify`, linked by
+a constant a signed byte holds (#2600), indexed (three accesses sharing one
+`lea`, #2601) and address-of uses, and `sqlite3LogEstAdd`'s shape, whose two
+extensions of one operand to I32 must stay apart, by both host paths with `--tier1-strict --verify`, linked by
 the system linker against a Clang oracle; `objdump -dr` must find no `lea` of
 a direct symbol but the indexed table's and the address's, each branch fused
 with its comparison, and the GOT's and thread-locals' sequences, with no

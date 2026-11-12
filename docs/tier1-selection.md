@@ -93,9 +93,14 @@ patterns are:
   (`yy_lookahead`, `sqlite3Stat.nowValue[op]`) keeps its symbol's `lea` as the
   base. The lowering makes a symbol's address again for every access, and the
   index's sign extension too: a pattern reads its block's first symbol address,
-  sign extension or zero extension of the same operand in their place
+  or sign or zero extension to I64, of the same operand in their place
   (`tier1_select_symbol_firsts`, #2601), so a block's accesses of one table
-  share one `lea` and one index register. `sqlite3StatusUp`'s five `lea`s of
+  share one `lea` and one index register. An extension to I32 stays its own:
+  `tier1_select_storage.c`'s column keeps each I32 sign-extended,
+  zero-extended or neither above its 32 bits by its own users, so two of one
+  operand can differ (`sqlite3LogEstAdd`'s `a + x[a - b]`, whose index read
+  the addition's zero-extended `a` as sign-extended and faulted in SQLite's
+  `autoindex5.test`). `sqlite3StatusUp`'s five `lea`s of
   `sqlite3Stat` are two, one per block (speedtest1's 1.73 M to 0.97 M). Only
   a block's: hoisting a symbol's address past its blocks made
   `luaV_execute`'s `disptab` worse in #2572's experiment, where the loop's

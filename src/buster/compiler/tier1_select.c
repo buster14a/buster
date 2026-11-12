@@ -4691,22 +4691,28 @@ static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
 }
 
 // Whether `node` is one of the pure leaves the lowering makes again at each use (#2601): a symbol's address, or a sign or
-// zero extension (an index's, which every access of an array extends again).
+// zero extension to 64 bits (an index's, which every access of an array extends again). An extension to I32 is not: its
+// register holds the value sign-extended, zero-extended or neither by its own users' needs (tier1_select_storage.c's
+// column), so two of one operand may differ, and a pattern that reads the other's would see the wrong upper half
+// (sqlite3LogEstAdd's `a + x[a - b]`, whose index read the addition's zero-extended `a` as sign-extended).
 static bool tier1_select_repeated_leaf(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
-    return op == IR_SYMBOL_ADDR || op == IR_SEXT || op == IR_ZEXT;
+    const uint32_t type = function->type[node];
+    return op == IR_SYMBOL_ADDR || ((op == IR_SEXT || op == IR_ZEXT) && type == IR_I64);
 }
 
-// The repeated leaves among the 64 nodes from `first` (tier1_select_repeated_leaf's), their operations compared at once:
-// the vector path's scan, whose twin is the scalar loop over the nodes.
+// The repeated leaves among the 64 nodes from `first` (tier1_select_repeated_leaf's), their operations and types compared
+// at once: the vector path's scan, whose twin is the scalar loop over the nodes.
 static uint64_t tier1_select_leaves_mask(const IrFunction* function, uint32_t first, uint32_t count)
 {
     const uint32_t left = count - first;
     const __mmask64 active = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
     const __m512i op = _mm512_maskz_loadu_epi8(active, function->op + first);
-    return (_mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_SYMBOL_ADDR)) | _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_SEXT)) |
-            _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ZEXT))) & active;
+    const __m512i type = _mm512_maskz_loadu_epi8(active, function->type + first);
+    const __mmask64 extensions = (_mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_SEXT)) | _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ZEXT))) &
+                                 _mm512_cmpeq_epi8_mask(type, _mm512_set1_epi8(IR_I64));
+    return (_mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_SYMBOL_ADDR)) | extensions) & active;
 }
 
 // Puts leaf `node` in the table of firsts (`slots`, each a node plus one, 0 empty, `capacity` a power of two): its first
