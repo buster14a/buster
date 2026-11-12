@@ -2587,6 +2587,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_DIVISION_BY_ZERO:
             result = payload->data != 0 ? "remainder by zero is undefined" : "division by zero is undefined";
+            break;
         case CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF:
             result = check_warning_text(scratch, "unused typedef '%.*s'", (int)name.length, name.pointer);
             break;
