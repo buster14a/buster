@@ -3169,13 +3169,21 @@ static bool check_lower_global_register_write(CheckLowerWriter* writer, uint32_t
     }
     else if (reg >= 0)
     {
+        // The value is a temporary's, the expression's after the write (#2432): a copy left under STACK_RESTORE's operand
+        // of another class than its own (a long's I64) breaks Tier 0's rule for its consumer.
+        const uint32_t kept = check_lower_temporary(writer, class);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, kept);
         check_lower_instruction(writer, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
         if (class != BUSTER_TYPED_CLASS_U64)
         {
             check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        if (bytes == 4)
+        {
             check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_DUP, class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, kept);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, kept);
         check_lower_operand(writer, node, 1, false, check_stream_type(writer->program->stream, node));
     }
     return reg >= 0;
@@ -13552,6 +13560,86 @@ static __attribute__((noinline)) void check_lower_segment_refused(CheckLowerWrit
     }
 }
 
+// A global register variable's update `node` (#2432: `sp += 8`, `sp++`, `--sp`), of an integer type: clang -O0's read of
+// its register (check_lower_global_register_read's), the operation in the calculation's type, and the write of the
+// result (check_lower_global_register_write's), the expression's value the new one, or the old one for a postfix
+// increment or decrement. rbp's and ebp's are refused by name, as their assignments are; so is a pointer's, whose
+// arithmetic scales. False for an object that is no such variable.
+static bool check_lower_global_register_update(CheckLowerWriter* writer, uint32_t node, uint32_t object)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    uint32_t bytes = 0;
+    const int32_t reg = object != 0 && object < program->object_count ? check_program_global_register(program, object, &bytes) : -1;
+    if (reg >= 0)
+    {
+        const CheckOp op = graph->ops[node];
+        const TypeId stored = check_stream_type(stream, graph->operand0[node]);
+        const TypeId calculated = stream->conversions[node].operands[0].type;
+        const uint8_t stored_class = check_lower_class(writer, stored);
+        const uint8_t calculated_class = check_lower_class(writer, calculated);
+        const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
+        const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
+        const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT;
+        const bool integer = (stored_class == BUSTER_TYPED_CLASS_U64 || stored_class == BUSTER_TYPED_CLASS_I64 || stored_class == BUSTER_TYPED_CLASS_U32 ||
+                              stored_class == BUSTER_TYPED_CLASS_I32) &&
+                             type_kind(program->types, stored) != BUSTER_TYPE_KIND_POINTER && calculated_class < BUSTER_TYPED_CLASSES &&
+                             check_lower_computed(calculated_class) == calculated_class;
+        if (reg == X86_REGISTER_RBP)
+        {
+            check_lower_unsupported(writer, "assignments to global register variables in rbp or ebp");
+        }
+        else if (!integer)
+        {
+            check_lower_unsupported(writer, "updates of global register variables of this type");
+        }
+        else
+        {
+            // The expression's value, the new one or the old one, is a temporary's, so that the write's operands follow
+            // the entries that make them. Emitted last first: the value, the write, the operation, the read.
+            const uint32_t kept = check_lower_temporary(writer, stored_class);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, stored_class, kept);
+            check_lower_instruction(writer, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+            if (stored_class != BUSTER_TYPED_CLASS_U64)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            if (bytes == 4)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+            }
+            if (!postfix)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, stored_class, kept);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, stored_class, kept);
+            }
+            check_lower_convert(writer, calculated, stored);
+            check_lower_instruction(writer, increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op), calculated_class, 0);
+            if (increment)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, calculated_class, 1);
+            }
+            else
+            {
+                check_lower_operand(writer, node, 1, false, stream->conversions[node].operands[1].type);
+            }
+            check_lower_convert(writer, stored, calculated);
+            if (postfix)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, stored_class, kept);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, stored_class, kept);
+            }
+            if (stored_class != BUSTER_TYPED_CLASS_U64)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored_class, 0);
+            }
+            check_lower_instruction(writer, reg == X86_REGISTER_RSP ? BUSTER_TYPED_STACK_SAVE : BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+        }
+    }
+    return reg >= 0;
+}
+
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
 // (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
@@ -14067,6 +14155,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_ASSIGN && graph->ops[a] == CHECK_OP_VALUE && check_lower_global_register_write(writer, node, check_stream_object(stream, a), class))
     {
         // A global register variable's assignment (#1846): its register set to the value, which stays the expression's.
+    }
+    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && graph->ops[a] == CHECK_OP_VALUE &&
+             check_lower_global_register_update(writer, node, check_stream_object(stream, a)))
+    {
+        // A global register variable's update (#2432): its register read, the operation, the result written back.
     }
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
@@ -16793,7 +16886,8 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic || member == CBUILTIN_ELEMENTWISE_PDEP || member == CBUILTIN_ELEMENTWISE_PEXT ||
                                                    member == CBUILTIN_ELEMENTWISE_CLMUL) && !vector)
         {
-            counts->transport_entries += 144;
+            // A 128-bit scalar's sequences build their constants of halves and mask its operands by shifts (#2410).
+            counts->transport_entries += type_size(types, type_unqualified(type_strip_aligned(types, type))) > 8 ? 320 : 144;
             counts->transport_locals += 12;
         }
         // An integer vector's product, division, remainder or shift, or its assignment's, that runs element by element
