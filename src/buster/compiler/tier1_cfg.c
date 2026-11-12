@@ -1996,6 +1996,220 @@ static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate_scalar(const Tie
     return tier1_cfg_allocate_impl(input, output, scratch, false, result);
 }
 
+// Whether each value's registers lie in its class's, and its definition's in its allowed ones: tier1_cfg_input_valid's
+// two conditions on a value's registers, 16 values a step, the class's registers by an in-register lookup of the three
+// and each condition an andnot. The classes were validated with the prepared input.
+static bool tier1_cfg_sets_valid_vector(const Tier1CfgInput* input)
+{
+    const __m512i table = _mm512_maskz_loadu_epi32((__mmask16)((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1), input->registers);
+    const uint32_t values = input->value_count;
+    __mmask16 bad = 0;
+    for (uint32_t v = 0; v < values; v += 16)
+    {
+        const uint32_t left = values - v;
+        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i sets = _mm512_permutexvar_epi32(_mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, input->classes + v)), table);
+        const __m512i allowed = _mm512_maskz_loadu_epi32(lanes, input->allowed_registers + v);
+        const __m512i outside = _mm512_andnot_si512(sets, allowed);
+        const __m512i defined = input->definition_registers != 0 ? _mm512_maskz_loadu_epi32(lanes, input->definition_registers + v) : _mm512_setzero_si512();
+        const __m512i unallowed = _mm512_andnot_si512(allowed, defined);
+        bad |= _mm512_mask_test_epi32_mask(lanes, outside, outside) | _mm512_mask_test_epi32_mask(lanes, unallowed, unallowed);
+    }
+    return bad == 0;
+}
+
+// The scalar twin of tier1_cfg_sets_valid_vector: tier1_cfg_input_valid's two compares per value.
+static bool tier1_cfg_sets_valid_scalar(const Tier1CfgInput* input)
+{
+    bool valid = true;
+    for (uint32_t v = 0; valid && v < input->value_count; v += 1)
+    {
+        valid = (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
+    }
+    return valid;
+}
+
+// The registers each prepared interval may take in another problem over the same values (#2538): `input` is the
+// prepared one but for its registers, allowed_registers and definition_registers. Each value's run of intervals takes its
+// allowed set, and the interval that holds its definition its definition's registers where some are bound, as
+// tier1_cfg_piece gives them; the column is on `output`. TIER1_CFG_INVALID where the problem breaks what
+// tier1_cfg_input_valid checks of those three, or where the input has a fixed range, around which a value's intervals
+// depend on its registers (2. above), so that no column of the prepared ones fits another problem.
+static __attribute__((unused)) Tier1CfgError tier1_cfg_column(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Arena* output, uint32_t** column)
+{
+    const Tier1CfgAllocation* intervals = &prepared->candidate;
+    bool valid = input->fixed.count == 0 && (input->value_count == 0 || input->allowed_registers != 0);
+    for (uint32_t c = 0; valid && c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        valid = input->scratch_registers[c] < 32 && ((input->registers[c] >> input->scratch_registers[c]) & 1) == 0;
+    }
+    valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR] < 16;
+    valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_MASK] < 8;
+    valid = valid && (BUSTER_VECTOR_PATH(prepared->vector) ? tier1_cfg_sets_valid_vector(input) : tier1_cfg_sets_valid_scalar(input));
+    uint32_t* written = valid ? arena_push_array(output, (uint64_t)intervals->intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    for (uint32_t v = 0; written != 0 && v < input->value_count; v += 1)
+    {
+        const uint32_t allowed = input->allowed_registers[v];
+        const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
+        const uint32_t definition = input->definitions[v];
+        for (uint32_t i = intervals->value_interval_offsets[v]; i < intervals->value_interval_offsets[v + 1]; i += 1)
+        {
+            written[i] = defined != 0 && intervals->intervals.starts[i] <= definition && definition < intervals->intervals.ends[i] ? defined : allowed;
+        }
+    }
+    *column = written;
+    return !valid ? TIER1_CFG_INVALID : written == 0 ? TIER1_CFG_CAPACITY : TIER1_CFG_OK;
+}
+
+// Whether a preferred problem's allocation replaces the plain one (tier1_emit_cfg.c's callee-saved preference, #1116):
+// allocated, without a split, each class's temporary slot a frame row of its own.
+static __attribute__((unused)) bool tier1_cfg_taken(Tier1CfgError error, const Tier1CfgAllocation* allocation)
+{
+    return error == TIER1_CFG_OK && allocation->split_count == 0 && (allocation->temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0;
+}
+
+// The one-call order's state between its halves (#2538): the intervals, prepared once, and the plain problem's
+// assignment, which nothing has finished yet.
+typedef struct Tier1CfgOrder Tier1CfgOrder;
+struct Tier1CfgOrder
+{
+    Tier1CfgPrepared prepared;
+    Tier1CfgAllocation plain;
+};
+
+// The one-call order's first half: the intervals (tier1_cfg_prepare) and the plain problem's assignment, its verdict.
+// Where a definition bound to its registers (definition_registers, a parameter's incoming one) leaves a use no register,
+// every definition is freed, `input->definition_registers` made null, and the plain problem is assigned again, over the
+// same intervals. The preference reads `order->prepared.candidate`'s intervals; tier1_cfg_order_finish or
+// tier1_cfg_release ends what this holds. Failure restores both arenas.
+static __attribute__((unused)) Tier1CfgError tier1_cfg_order_plain(Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgOrder* order)
+{
+    *order = (Tier1CfgOrder){ 0 };
+    Tier1CfgError error = tier1_cfg_prepare(input, output, scratch, vector, &order->prepared);
+    const bool held = error == TIER1_CFG_OK;
+    error = held ? tier1_cfg_assign(input, &order->prepared, 0, output, &order->plain) : error;
+    if (error == TIER1_CFG_CONSTRAINT)
+    {
+        input->definition_registers = 0;
+        uint32_t* column = 0;
+        error = tier1_cfg_column(input, &order->prepared, output, &column);
+        error = error == TIER1_CFG_OK ? tier1_cfg_assign(input, &order->prepared, column, output, &order->plain) : error;
+    }
+    if (held && error != TIER1_CFG_OK)
+    {
+        arena_pop_to(output, order->prepared.output_saved);
+        tier1_cfg_release(&order->prepared, scratch);
+    }
+    return error;
+}
+
+// The one-call order's second half: with `preferred` (the plain problem `input` but for its registers and allowed sets),
+// its column, assignment and finish, its allocation the result where tier1_cfg_taken takes it, with `*taken` set and its
+// outcome in `*preferred_error`; else, or without `preferred`, the plain assignment finished. Returns the outcome of the
+// allocation that stands, and gives back the scratch arena the order held. Failure restores both arenas.
+static __attribute__((unused)) Tier1CfgError tier1_cfg_order_finish(const Tier1CfgInput* input, const Tier1CfgInput* preferred, Arena* output, Arena* scratch, Tier1CfgOrder* order, Tier1CfgAllocation* result, Tier1CfgError* preferred_error, bool* taken)
+{
+    Tier1CfgError error = TIER1_CFG_OK;
+    Tier1CfgError second_error = TIER1_CFG_OK;
+    Tier1CfgAllocation second = { 0 };
+    uint32_t* column = 0;
+    if (preferred != 0)
+    {
+        second_error = tier1_cfg_column(preferred, &order->prepared, output, &column);
+        second_error = second_error == TIER1_CFG_OK ? tier1_cfg_assign(preferred, &order->prepared, column, output, &second) : second_error;
+        second_error = second_error == TIER1_CFG_OK ? tier1_cfg_finish(preferred, &order->prepared, output, scratch, &second) : second_error;
+    }
+    const bool replaced = preferred != 0 && tier1_cfg_taken(second_error, &second);
+    if (replaced)
+    {
+        *result = second;
+    }
+    else
+    {
+        error = tier1_cfg_finish(input, &order->prepared, output, scratch, &order->plain);
+        if (error == TIER1_CFG_OK)
+        {
+            *result = order->plain;
+        }
+        else
+        {
+            arena_pop_to(output, order->prepared.output_saved);
+        }
+    }
+    tier1_cfg_release(&order->prepared, scratch);
+    *preferred_error = second_error;
+    *taken = replaced;
+    return error;
+}
+
+static bool tier1_cfg_same_column(const void* left, const void* right, uint64_t bytes)
+{
+    return (left == 0) == (right == 0) && (left == 0 || bytes == 0 || memcmp(left, right, bytes) == 0);
+}
+
+// 0 where two allocations of `input`'s problem are the same, field by field, else the first group of fields that
+// differs, from 1: the allocator's input and its counts; its interval columns; the hints and recomputations; the use
+// slices; the assignment's counts; its fragments; its per-value and slot columns; the values' runs of intervals; the
+// edges' placements; the moves; the splits; the liveness counts and temporary slots; and the lookup columns. Memory
+// counts aren't compared: they depend on where each allocation's arenas stood.
+static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* input, const Tier1CfgAllocation* left, const Tier1CfgAllocation* right)
+{
+    const Tier1AllocationInput* a = &left->intervals;
+    const Tier1AllocationInput* b = &right->intervals;
+    const Tier1Allocation* x = &left->allocation;
+    const Tier1Allocation* y = &right->allocation;
+    const uint64_t count = a->count;
+    const uint64_t fragments = x->fragment_count;
+    const uint64_t values = input->value_count;
+    const uint64_t edges = input->edge_count;
+    uint32_t differs = 0;
+    bool same = a->count == b->count && a->value_count == b->value_count && a->position_count == b->position_count && a->use_count == b->use_count && a->fixed.count == b->fixed.count;
+    for (uint32_t c = 0; same && c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        same = a->registers[c] == b->registers[c];
+    }
+    differs = same ? differs : 1;
+    same = same && tier1_cfg_same_column(a->starts, b->starts, count * 4) && tier1_cfg_same_column(a->ends, b->ends, count * 4) && tier1_cfg_same_column(a->values, b->values, count * 4) &&
+           tier1_cfg_same_column(a->allowed_registers, b->allowed_registers, count * 4) && tier1_cfg_same_column(a->classes, b->classes, count);
+    differs = same || differs != 0 ? differs : 2;
+    same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
+           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
+    differs = same || differs != 0 ? differs : 3;
+    same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
+    differs = same || differs != 0 ? differs : 4;
+    same = same && x->fragment_count == y->fragment_count && x->interval_count == y->interval_count && x->spill_count == y->spill_count && x->vector_intervals == y->vector_intervals &&
+           x->scalar_intervals == y->scalar_intervals && x->splits == y->splits && memcmp(x->peak_pressure, y->peak_pressure, sizeof(x->peak_pressure)) == 0;
+    differs = same || differs != 0 ? differs : 5;
+    same = same && tier1_cfg_same_column(x->fragment_offsets, y->fragment_offsets, ((uint64_t)x->interval_count + 1) * 4) && tier1_cfg_same_column(x->starts, y->starts, fragments * 4) &&
+           tier1_cfg_same_column(x->ends, y->ends, fragments * 4) && tier1_cfg_same_column(x->kinds, y->kinds, fragments) && tier1_cfg_same_column(x->registers, y->registers, fragments);
+    differs = same || differs != 0 ? differs : 6;
+    same = same && tier1_cfg_same_column(x->value_registers, y->value_registers, values) && tier1_cfg_same_column(x->spill_ids, y->spill_ids, values * 4) &&
+           tier1_cfg_same_column(x->spill_values, y->spill_values, (uint64_t)x->spill_count * 4);
+    differs = same || differs != 0 ? differs : 7;
+    same = same && tier1_cfg_same_column(left->value_interval_offsets, right->value_interval_offsets, (values + 1) * 4);
+    differs = same || differs != 0 ? differs : 8;
+    same = same && tier1_cfg_same_column(left->edge_placements, right->edge_placements, edges) && tier1_cfg_same_column(left->edge_move_offsets, right->edge_move_offsets, (edges + 1) * 4);
+    differs = same || differs != 0 ? differs : 9;
+    same = same && left->move_count == right->move_count && tier1_cfg_same_column(left->move_sources, right->move_sources, (uint64_t)left->move_count * 4) &&
+           tier1_cfg_same_column(left->move_destinations, right->move_destinations, (uint64_t)left->move_count * 4) && tier1_cfg_same_column(left->move_values, right->move_values, (uint64_t)left->move_count * 4);
+    differs = same || differs != 0 ? differs : 10;
+    same = same && left->split_count == right->split_count && left->split_edges == right->split_edges && tier1_cfg_same_column(left->split_positions, right->split_positions, (uint64_t)left->split_count * 4) &&
+           tier1_cfg_same_column(left->split_move_offsets, right->split_move_offsets, ((uint64_t)left->split_count + 1) * 4);
+    differs = same || differs != 0 ? differs : 11;
+    same = same && left->cross_block_values == right->cross_block_values && left->temp_slots == right->temp_slots && left->liveness_iterations == right->liveness_iterations;
+    differs = same || differs != 0 ? differs : 12;
+    // The block column's rows: one per value with a base.
+    uint64_t rows = 0;
+    for (uint32_t v = 0; same && left->value_block_base != 0 && v < values; v += 1)
+    {
+        rows += left->value_block_base[v] != BUSTER_TIER1_CFG_NONE;
+    }
+    same = same && tier1_cfg_same_column(left->position_blocks, right->position_blocks, (uint64_t)input->position_count * 4) && tier1_cfg_same_column(left->value_block_base, right->value_block_base, values * 4) &&
+           tier1_cfg_same_column(left->value_block_intervals, right->value_block_intervals, rows * input->block_count * 4);
+    differs = same || differs != 0 ? differs : 13;
+    return differs;
+}
+
 typedef struct Tier1CfgCheck Tier1CfgCheck;
 struct Tier1CfgCheck
 {

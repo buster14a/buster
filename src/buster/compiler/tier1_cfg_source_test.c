@@ -84,6 +84,16 @@ struct Tier1CfgSourceTotals
     uint64_t mask_values;
     // The promoted IR's loads and stores of its slots, beside each path's stores and reloads: the frame's traffic.
     uint64_t slot_accesses;
+    // #2538: each function's plain problem and a random preferred one, with its definitions unbound and bound in clashing
+    // pairs (tier1_cfg_test_preference), allocated in one call and in two on both paths
+    // (tier1_cfg_test_two_orders): the cases whose plain problem allocated, those whose preferred allocation was taken,
+    // those freed of their definitions' registers by a constraint, those with fixed ranges (which run without them), and
+    // the orders' disagreements.
+    uint64_t two_cases;
+    uint64_t two_taken;
+    uint64_t two_freed;
+    uint64_t two_fixed;
+    uint64_t two_disagreed;
     Tier1CfgSourcePath paths[2];
 };
 
@@ -253,6 +263,43 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
             }
             totals->disagreed += (errors[0] == TIER1_CFG_OK) != (errors[1] == TIER1_CFG_OK);
             failed = failed || (errors[0] == TIER1_CFG_OK) != (errors[1] == TIER1_CFG_OK);
+            const uint64_t two_mark = output->length;
+            uint32_t* chosen = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+            uint32_t* defined = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+            uint32_t* allowed = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+            uint32_t* holders = arena_push_array(output, (uint64_t)input->position_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+            uint64_t random = (totals->functions + f) * UINT64_C(0x9e3779b97f4a7c15) + 1;
+            totals->two_fixed += input->fixed.count != 0;
+            const bool columns = chosen != 0 && defined != 0 && allowed != 0 && holders != 0;
+            failed = failed || !columns;
+            // Bound definitions need a register: each gets a required use there.
+            Tier1CfgInput needing = { 0 };
+            const bool needs = columns && tier1_cfg_test_definition_uses(input, output, &needing);
+            failed = failed || !needs;
+            // Unbound, and in clashing pairs; test-tier1-cfg's random cases bind at random too.
+            for (uint32_t bind = 0; needs && bind < 3; bind += 2)
+            {
+                const Tier1CfgInput* problem = bind == 0 ? input : &needing;
+                const uint32_t extra = tier1_cfg_test_preference(problem, &random, bind, chosen, defined, holders);
+                // A function with fixed ranges runs without them: with them, the CFG consumer would take the order before.
+                Tier1CfgInput plain = *problem;
+                plain.definition_registers = bind != 0 ? defined : 0;
+                plain.fixed = (Tier1FixedIntervals){ 0 };
+                for (uint32_t p = 0; p < 2; p += 1)
+                {
+                    const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, p == 0, output, scratch, allowed);
+                    if (!outcome.agreed || !outcome.verified)
+                    {
+                        printf("tier1-cfg-source: file=%s function=%s path=%s bound=%u two_orders=%s fields=%u\n", name, source->name, p == 0 ? "vector" : "scalar", bind, outcome.agreed ? "rejected" : "disagree", outcome.differs);
+                    }
+                    totals->two_disagreed += !outcome.agreed || !outcome.verified;
+                    failed = failed || !outcome.agreed || !outcome.verified;
+                    totals->two_cases += p == 0 && outcome.allocated;
+                    totals->two_taken += p == 0 && outcome.taken;
+                    totals->two_freed += p == 0 && outcome.freed;
+                }
+            }
+            arena_pop_to(output, two_mark);
         }
         if (promotion.error != IR_OK || (adapted != TIER1_CFG_IR_OK && adapted != TIER1_CFG_IR_UNSUPPORTED))
         {
@@ -352,6 +399,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
         tier1_cfg_source_print_path("scalar", &totals.paths[1], totals.instructions);
         printf("tier1-cfg-source: frame traffic: slot_accesses=%" PRIu64 " vector=%" PRIu64 " scalar=%" PRIu64 "\n", totals.slot_accesses, totals.slot_accesses + totals.paths[0].stores + totals.paths[0].reloads,
                totals.slot_accesses + totals.paths[1].stores + totals.paths[1].reloads);
+        printf("tier1-cfg-source: two problems in one call and in two: cases=%" PRIu64 " taken=%" PRIu64 " freed=%" PRIu64 " fixed=%" PRIu64 " disagreed=%" PRIu64 "\n", totals.two_cases, totals.two_taken, totals.two_freed, totals.two_fixed, totals.two_disagreed);
     }
     else
     {
@@ -366,5 +414,5 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.disagreed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
+    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.disagreed == 0 && totals.two_disagreed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
 }

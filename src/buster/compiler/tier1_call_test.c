@@ -533,7 +533,7 @@ static bool tier1_call_indirect_fixture(Tier1EmitTest* test, Tier1CallFixture* f
 // A run of calls (#1116): two calls through the first two parameters, the helpers' addresses, the first of the third
 // parameter and the second of the first's result; then the second's result plus the third, fourth and fifth parameters.
 // Those three live past both calls in their incoming registers, caller-saved ones (a parameter keeps its register over
-// its definition's interval, tier1_emit_cfg_callee), and the second call reads none of them. The CFG consumer stores
+// its definition's interval, tier1_emit_cfg_preference), and the second call reads none of them. The CFG consumer stores
 // each once, at the first call, and loads it once, where an addition reads it; the second parameter, the second call's
 // callee, is stored at the first call and loaded before the second.
 static bool tier1_call_run_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
@@ -672,7 +672,7 @@ static bool tier1_call_carry_fixture(Tier1EmitTest* test, Tier1CallFixture* fixt
 
 // A call through the first parameter, of no arguments, past which `values` values live (six or five), each the second
 // parameter plus its own constant, which the function adds to the call's result (#1116). The CFG consumer's
-// callee-saved preference (tier1_emit_cfg_callee) gives each a callee-saved register: six take all six, rbp among them,
+// callee-saved preference (tier1_emit_cfg_preference) gives each a callee-saved register: six take all six, rbp among them,
 // where the frame keeps no frame pointer, and five take rbx and r12 to r15 where BUSTER_TIER1_FRAME_KEEP_POINTER makes
 // rbp the frame's.
 static bool tier1_call_callee_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture, uint32_t values)
@@ -1254,7 +1254,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
                 // Each value takes a callee-saved register, which the frame pushes, and no call-save row (#1116). Without a
                 // frame pointer, six take all six, rbp among them, and five any five. With one, rbp is the frame's (its
                 // own push, not a saved register's), and five take exactly the other five. Six values past those five
-                // would split one, which discards the preference whole (tier1_emit_cfg_callee), so that case only runs:
+                // would split one, which discards the preference whole (tier1_cfg_taken), so that case only runs:
                 // its registers prove nothing about rbp.
                 const uint32_t rbp = 1u << X86_REGISTER_RBP;
                 const uint32_t others = (1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15);
