@@ -8,7 +8,7 @@
 static const CheckDriverDefaultWarningFixture check_driver_assign_enum_fixtures[] =
 {
     {
-        // Assignments, compound assignments, initializers, returns, prototype arguments (not variadic ones), brace
+        // Assignments, compound assignments, initializers, returns, prototype arguments, brace
         // initializers and a typedef's spelling; a flag_enum's bits; enumerators, a variable and a cast don't warn.
         .name = "integer constants out of an enumeration",
         .source = "enum A { A1, A2 } a;\n"
