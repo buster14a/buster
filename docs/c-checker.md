@@ -709,7 +709,18 @@ Direct semantic actions keep strict integer folding unless the caller selects
 `BUSTER_CHECK_EXTENSION_GNU_CONSTANT`. Source enables that explicit policy in
 every C mode, as clang folds GNU's way in `-std=c99` and `-std=c17` too (only
 `-pedantic` warns): wrapped overflow and Clang-compatible shift extensions
-retain a warning witness and clear strict ICE eligibility. The other GNU
+retain a warning witness and clear strict ICE eligibility. A wrapped
+overflow's `-Winteger-overflow` is clang's "overflow in expression; result is V
+with type 'T'" (#2217, `check_driver_overflow_message`): V the wrapped result,
+its digits grouped by three with `'` as `APInt::toString` groups them, at every
+width (`check_wide_text` past 128 bits), and T the result's type, an operand's
+typedef where only that operand has it. What only the constant reader reads (an
+enumerator's value, a file-scope bound) keeps its result on the warning's event
+(`check_input_warning_add_value`). Differences left: there, a result wider than
+64 bits keeps the generic text "integer constant expression overflows its type";
+two operands of one typedef print the canonical type, where clang prints their
+common sugar; and an array bound folded with `-Wgnu-folding-constant` lacks
+clang's note "value V is outside the range of representable values of type 'T'". The other GNU
 extensions clang accepts in every C mode (zero-length arrays, `sizeof` and
 `__alignof__` of `void` and of functions, arithmetic on `void *` and function
 pointers, a conditional with one void side, `return` of a void expression from
