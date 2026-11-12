@@ -212,9 +212,12 @@ enum
     // true", -Wtautological-compare's, on by default.
     CHECK_WARNING_ID_ALIGNMENT_NO_OP = 145,
     CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE = 146,
+    // A cast of a struct or a union to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar):
+    // -Wpedantic's own, off by default.
+    CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 147,
     // A local variable only set (#2409, clang's DiagnoseUnusedButSetDecl): -Wunused-but-set-variable, -Wunused's, -Wall's.
     // Its event is an UNUSED_VARIABLE one whose payload.data is 1.
-    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 147,
+    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 148,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -541,6 +544,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
     // An alignment builtin's alignment of 1 (#2221, check_input_alignment_one), at the alignment: its description's words.
     CHECK_WARNING_EVENT_ALIGNMENT_ONE,
+    // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
+    // cast's type, payload.name its spelling.
+    CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
