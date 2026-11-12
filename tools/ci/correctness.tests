@@ -891,3 +891,10 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
 ./build/test-driver-tier1-truth "$BUSTER_COMPILER" "$(command -v clang)"
+== Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
+# #2554: the subject compiles at Tier 1 with no fallback, by both host paths, and runs against Clang's oracle; objdump
+# checks that the truth values became branches, constants are stores' immediates, no shift by zero is left and each
+# computed goto has its own indirect jump.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
+./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"

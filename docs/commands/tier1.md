@@ -232,6 +232,70 @@ even though their compiler child processes initialize their own. The test
 initializes the effects on demand and asserts jump, conditional-branch and
 return classification before applying the table-base proof (#1829).
 
+## Truth values, stored constants, identities and dispatch (#2554)
+
+Four of #138's patterns in Tier 1's executed code (its record's `patterns.py`),
+each removed where it is made:
+
+- **Truth values across blocks** (`ir_thread.c`). `&&`, `||`, `!` and `?:`
+  leave a block of phis, a short pure chain that tests them and a conditional
+  branch. The C driver threads such a block after `ir_truth_simplify` and before
+  if-conversion. A predecessor that jumps to it takes a copy of its chain and
+  branch, the phis read as that predecessor's inputs. A predecessor with a
+  conditional edge to it goes on that edge straight to the successor the chain
+  chooses, where its inputs are constants (one jump where both of its edges then
+  reach one block). The truth rewrite then runs again, so a copied
+  `icmp ne (zext c), 0` is `c`, the branch's own comparison. The block's values
+  must be read only by itself and by its successors' phis on its edges. It is not
+  the entry or a label's block, and its chain has at most four operations, at
+  most sixteen predecessors take copies, and the rewrite runs up to four rounds
+  (`a && b && c`). A block no reachable predecessor reaches any more is left an
+  `unreachable` alone. Its candidate scan has a scalar twin. `test-ir-optimize`
+  runs nine IR text fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's
+  found flag, a value read past the test, a switch's kept edge with mapped
+  successor phis, a collapse, `a && b && c`, a label's block and a self-loop.
+  Each runs through both paths, which must agree, and is verified as complete
+  SSA. Each is executed against its input before and after the truth rewrite
+  and the optimizer.
+- **Stored constants** (`tier1_select.c`, `tier1_select_burs.c`). A store of a
+  constant is `mov $imm, mem` at its width, an 8-byte store's where the constant
+  fits a sign-extended imm32, rather than the constant's register. The candidates
+  carry it as `compare_immediate` with no stored value. Maximal munch ranks it
+  above the register's form, and the grammar has a store of `IMM` with its own
+  action. A seq_cst store's exchange still takes a register.
+- **Identities** (`BUSTER_IR_OPTIMIZE_IDENTITY`, Tier 1's alone). After SCCP, an
+  integer operation that returns one of its operands is removed:
+  - `x + 0`, `0 + x`, `x - 0`, `x | 0`, `x ^ 0` and a shift by zero (Lua's
+    `>> 0` instruction decoding);
+  - `x * 1`, `1 * x` and a division by one (`n * sizeof (char)`);
+  - `x & -1`.
+
+  Its users read the operand instead, and DCE keeps the operand rather than it
+  (a shift is a root otherwise). `test-ir-optimize` runs every pass mask with
+  and without it.
+- **Dispatch** (`tier1_emit_cfg_dispatch`). A jump to a block whose first record
+  is an indirect jump takes a copy of that record. That is GNU C's computed
+  goto's dispatch block, so each handler ends in its own `jmp *%reg`, as LLVM's
+  tail duplication gives. The copies leave the branch columns. The code
+  certificate takes a copy as its arrival at the block
+  (`tier1_cert_emitted_walk`), and the emitter counts them
+  (`Tier1EmitResult.dispatch_copies`, which `test-tier1-pipeline` checks).
+
+`tests/driver/tier1_patterns.c` is the end-to-end regression, run by
+`tools/ci/correctness.tests` as the truth one is. It compiles each pattern's
+functions by `--tier1-strict --verify` on both host paths and runs them
+against Clang's oracle. objdump must find no setcc in the truth functions, six
+immediate stores and no constant in a register in the store function, and no
+shift by zero. In the computed goto, it must find at least four indirect jumps
+and no jump to one:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
+```
+
+The program measurements (speedtest1 and Lua's five scripts against
+#138's record) are in buster-performance, as #2554 asks.
+
 ## Address-arithmetic selection regressions
 
 `test-tier1-select` includes `tier1_address_arithmetic_test.c` (#1217) on
