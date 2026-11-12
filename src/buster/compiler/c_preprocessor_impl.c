@@ -191,6 +191,8 @@ typedef enum PPWarning
     PP_WARNING_INVALID_SOURCE_ENCODING,
     // A parsed unit without a declaration (#2222), an extension off by default.
     PP_WARNING_EMPTY_TRANSLATION_UNIT,
+    // A #define's or #undef's name reserved in every context (#2222), off by default.
+    PP_WARNING_RESERVED_MACRO_IDENTIFIER,
     // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
     // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
     // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
@@ -241,6 +243,7 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "implicitly-unsigned-literal", NULL, NULL, true, true, false, false },
     { "invalid-source-encoding", NULL, NULL, true, true, false, false },
     { "empty-translation-unit", NULL, NULL, true, false, false, false },
+    { "reserved-macro-identifier", NULL, "reserved-identifier", false, false, false, false },
     { NULL, NULL, NULL, false, true, false, false },
     { NULL, NULL, NULL, true, true, false, false },
 };
@@ -1865,6 +1868,35 @@ BUSTER_INLINE bool pp_define_parameters_tiny(const PPFileData* data, PPMacro* ma
 
 // #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
 // constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
+// -Wreserved-macro-identifier (#2222, clang's Preprocessor::CheckMacroName): a #define's or #undef's name `name` reserved in
+// every context, `__x` or `_X`, "macro name is a reserved identifier" at it, before the directive's other checks. A
+// #define of a feature-test macro clang's isFeatureTestMacro lists (`_GNU_SOURCE`) gives none, nor does a name in the
+// predefines or the command line's definitions, which are virtual files, as clang's are its <built-in> buffer.
+static void pp_reserved_macro_name(Preprocessor* pp, const PPFileData* data, IdentId name, uint32_t location, bool define)
+{
+    static const char* const features[] =
+    {
+        "_ATFILE_SOURCE", "_BSD_SOURCE", "_CRT_NONSTDC_NO_WARNINGS", "_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES", "_CRT_SECURE_NO_WARNINGS",
+        "_FILE_OFFSET_BITS", "_FORTIFY_SOURCE", "_GLIBCXX_ASSERTIONS", "_GLIBCXX_CONCEPT_CHECKS", "_GLIBCXX_DEBUG", "_GLIBCXX_DEBUG_PEDANTIC",
+        "_GLIBCXX_PARALLEL", "_GLIBCXX_PARALLEL_ASSERTIONS", "_GLIBCXX_SANITIZE_VECTOR", "_GLIBCXX_USE_CXX11_ABI", "_GLIBCXX_USE_DEPRECATED",
+        "_GNU_SOURCE", "_ISOC11_SOURCE", "_ISOC95_SOURCE", "_ISOC99_SOURCE", "_LARGEFILE64_SOURCE", "_POSIX_C_SOURCE", "_REENTRANT",
+        "_SVID_SOURCE", "_THREAD_SAFE", "_XOPEN_SOURCE", "_XOPEN_SOURCE_EXTENDED", "__STDCPP_WANT_MATH_SPEC_FUNCS__", "__STDC_FORMAT_MACROS",
+    };
+    const uint32_t length = intern_length(pp->table, name);
+    const char* bytes = (const char*)intern_bytes(pp->table, name);
+    const bool reserved = length >= 2 && bytes[0] == '_' && (bytes[1] == '_' || (bytes[1] >= 'A' && bytes[1] <= 'Z'));
+    const bool virtual_file = data->inode >= UINT64_MAX - BUSTER_PP_MAX_FILES;
+    bool feature = false;
+    for (uint32_t i = 0; reserved && define && !feature && i < BUSTER_ARRAY_LENGTH(features); i += 1)
+    {
+        feature = strlen(features[i]) == length && memcmp(features[i], bytes, length) == 0;
+    }
+    if (reserved && !feature && !virtual_file)
+    {
+        pp_diagnose_group(pp, PP_WARNING_RESERVED_MACRO_IDENTIFIER, location, "macro name is a reserved identifier");
+    }
+}
+
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
 {
     const PPFileData* data = &pp->datas[data_index];
@@ -1884,6 +1916,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
     else
     {
         const IdentId name = data->values[begin];
+        pp_reserved_macro_name(pp, data, name, location, true);
         PPMacro macro = {
             .name = name,
             .data = data_index,
@@ -11107,6 +11140,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
                 }
                 else
                 {
+                    pp_reserved_macro_name(pp, data, name, name_location, false);
                     if (hash + 3 < end)
                     {
                         pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
