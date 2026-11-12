@@ -3305,7 +3305,17 @@ What the lowering covers past scalars (#145's programs):
     past 64 bits is built of its halves (`check_lower_sequence_halves`), a
     `_BitInt`'s operands are masked by shifting up and back, and a funnel
     count of a width no power of two is reduced modulo it through its 64-bit
-    halves, `(hi % w) * (2^64 % w) + lo % w`. These expansions, ordered floating sums
+    halves, `(hi % w) * (2^64 % w) + lo % w`. Where no instruction takes pdep,
+    pext or clmul (without BMI2, without PCLMUL, a vector's without AVX and
+    PCLMUL, or a scalar of 65 to 128 bits), they are expanded element by element
+    as LLVM expands them (#2410). pext and pdep use Hacker's Delight's
+    compress and expand (`check_lower_sequence_deposit`): log2 of the class's
+    bits rounds of the mask's parallel xor prefix, moving the selected bits
+    right by 2^i in the mask and in x, or for expand undoing the rounds' moves
+    on x in reverse. clmul splits each operand into 4 interleaved classes of
+    bits (5 past 32 bits) and xors the integer products of every pair of
+    classes into its sum's class (`check_lower_sequence_clmul`), so that each
+    class's carries stay in the other classes' positions. These expansions, ordered floating sums
     and floating reduction trees are bounded to 1,024 elements and preserve
     the ordinary rows' element-type and target-feature refusals.
   - boolean elementwise builtins use packed bit operations at scalar and
@@ -3347,15 +3357,14 @@ What the lowering covers past scalars (#145's programs):
   minimum, maximumnum and minimumnum (x87 sequences in clang's code) and its
   ldexp by a 64-bit exponent; a scalar's roundings, round, canonicalize,
   copysign, maximum and minimum functions and ldexp without AVX-512F; ldexp by
-  an exponent wider than 64 bits; carry-less products without AVX and PCLMUL;
+  an exponent wider than 64 bits;
   the masked memory builtins without AVX-512F and AVX-512VL, of 8- and 16-bit
   elements without AVX-512BW (expanding loads and compressing stores without
   AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410), and of scalars, pdep, pext and clmul of more than 64
-  bits, pdep and pext without BMI2 and clmul without PCLMUL (clang's code expands them bit by bit); nontemporal builtins of scalars and at underaligned addresses; bit
+  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
