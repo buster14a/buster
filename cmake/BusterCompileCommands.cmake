@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
-# One configuration's compile commands: cmake -DINPUT=TREE/compile_commands.json -DOUTPUT=FILE -DCONFIG=Debug|Release
+# One configuration's compile commands: cmake -DINPUT=TREE/compile_commands.json -DOUTPUT=FILE -DCONFIG=Debug|Release|Develop
 # -P BusterCompileCommands.cmake
 #
 # Ninja Multi-Config's compile_commands.json has every unit once per configuration, which leaves an editor or a static

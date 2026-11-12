@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
-# Split one fully optimized source module (tools/codegen/split.c: PARTITIONS code parts in module order, then its global
-# variables), recording its public definitions before the split hides local ones another part refers to. Unchanged
+# Split one source module into PARTITIONS code parts and the part of its global variables, recording its public
+# definitions before the split hides local ones another part refers to: SPLIT is tools/codegen/split.c (Release's fully
+# optimized module, in module order) or tools/codegen/presplit.c (Develop's, before the optimizer), with OPTIONS. Unchanged
 # parts and exports retain their mtimes so Ninja can reuse their native objects. Changed files are renamed into place,
 # and the stamp is written last. An interrupted split cannot publish a successful collection.
 
@@ -34,7 +35,10 @@ execute_process(COMMAND "${NM}" --extern-only --defined-only --format=just-symbo
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "BusterCodegenSplit.cmake: couldn't read ${INPUT}'s public definitions")
 endif()
-execute_process(COMMAND "${SPLIT}" "${INPUT}" "${PARTITIONS}" "${partial}" RESULT_VARIABLE status)
+if(NOT DEFINED OPTIONS)
+    set(OPTIONS "")
+endif()
+execute_process(COMMAND "${SPLIT}" "${INPUT}" "${PARTITIONS}" "${partial}" ${OPTIONS} RESULT_VARIABLE status)
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "BusterCodegenSplit.cmake: couldn't split ${INPUT}")
 endif()

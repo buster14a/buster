@@ -299,14 +299,15 @@ computers:
 
 ## Build
 
-Use `./build.sh` (Clang, CMake 3.25+, Ninja): it builds Release (`-O3`), or
-Debug (`-O0 -g`) with `--config Debug`, incrementally in `build/cmake/VARIANT`,
-published as `build/compiler`. Pick whichever suits the job at hand: Debug to
-debug or rebuild faster, Release where runs dominate or for timings. Respect
-the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits debug
-information. Read [build details](docs/commands/build.md) before changing
-translation units, flags, baked tables or code-placement experiments.
-`build/` is disposable; never commit generated binaries or captures.
+Use `./build.sh` (Clang, CMake 3.25+, Ninja): Release (`-O3`) by default,
+`--config Develop` (`-O3` in parts, no benchmarks) or `--config Debug`
+(`-O0 -g`), incrementally in `build/cmake/VARIANT`, published as
+`build/compiler`. Develop where edits dominate, Release for every timing,
+Debug for a debugger. Respect the lock and `cores` rules above.
+`BUSTER_DEBUG_INFO=0` omits Release's `-g`. Read [build
+details](docs/commands/build.md) before changing translation units, flags,
+baked tables or code-placement experiments. `build/` is disposable; never
+commit generated binaries or captures.
 
 ## Current repository and exact smoke commands
 

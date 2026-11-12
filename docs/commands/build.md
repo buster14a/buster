@@ -24,9 +24,9 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 ## Commands
 
 ```sh
-./build.sh [build] [--config Debug|Release] [--target TARGET]... [--jobs N] [--verbose]
-./build.sh test [--config Debug|Release] [--jobs N] [-- CTEST_ARGUMENT...]
-./build.sh clean [--config Debug|Release | --all]
+./build.sh [build] [--config Debug|Release|Develop] [--target TARGET]... [--jobs N] [--verbose]
+./build.sh test [--config Debug|Release|Develop] [--jobs N] [-- CTEST_ARGUMENT...]
+./build.sh clean [--config Debug|Release|Develop | --all]
 ./build.sh configure
 ./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-host-flags | print-output [--config C]
 ./build.sh check-call-graph [--config C] [--jobs N]
@@ -35,8 +35,8 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 ```
 
-- **build** (the default) builds Release unless `--config Debug`, the
-  executable unless `--target` names CMake targets, then publishes the
+- **build** (the default) builds Release unless `--config Debug` or
+  `--config Develop`, the executable unless `--target` names CMake targets, then publishes the
   configuration's executable, `build/cmake/VARIANT/CONFIG/compiler`, as
   `build/compiler` and its compile commands as `build/compile_commands.json`.
   Plain `./build.sh` is the optimized build it has always been.
@@ -53,7 +53,9 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
   the sources in link order; a unit's compile arguments but `-c`, the source
   and the output (`-g`, the flags with `-Isrc`, `-O3`, `BUSTER_BUILD_DEFINES`;
   Debug's with `--config Debug`); and a sanitizer build's optimization, debug
-  information, sanitizer flags and link mode, or nothing. **print-host-flags**
+  information, sanitizer flags and link mode, or nothing (Develop's flags with
+  `--config Develop`, its units' own: the mechanics of its parts, below, aside).
+  **print-host-flags**
   prints the host target alone, `-march=$BUSTER_HOST_ARCH` or the explicit
   vector target's flags (below), which the inventory's commands that compile for
   the build's host pass to clang and to the compiler. Consumers read arrays
@@ -77,8 +79,10 @@ compiled, its time and the three longest compiles, from Ninja's log.
 
 ## Configurations
 
-One tree holds **Release** and **Debug**, in `CONFIG/` subdirectories of their
-own; switching between them builds nothing that is up to date.
+One tree holds **Release**, **Debug** and **Develop**, in `CONFIG/`
+subdirectories of their own; switching between them builds nothing that is up to
+date. Release is for the product and every timing, Develop for edits and tests,
+Debug for a debugger.
 
 - **Release** is the production build, with the flags the build has always had:
   `-g` (none with `BUSTER_DEBUG_INFO=0`), the host target (`-march=$BUSTER_HOST_ARCH`), `-Isrc
@@ -101,6 +105,13 @@ own; switching between them builds nothing that is up to date.
   sanitizers and definitions, with every variable readable in a debugger.
   It compiles in a fraction of Release's time, and its tests run several times
   slower. The bake and the canary check run on it as on Release.
+- **Develop** is Release's flags and optimization with DWARF 4 line tables
+  (`-gdwarf-4 -gline-tables-only`, whatever `BUSTER_DEBUG_INFO` says) in place
+  of `-g`, its `main.c` units optimized in parts, the tests' own functions
+  unoptimized and the benchmark units left out ([Develop](#develop), #2559):
+  the edit loop's configuration. Its executable runs the compile path about 1%
+  to 2% slower than Release's, writes the same outputs, and has lines, not
+  variables, for a debugger. The bake and the canary check run on it too.
 
 The flags differ from a direct clang command only in the build's mechanics:
 CMake's depfile options, `CMAKE_INTDIR`, a definition no source reads, the
@@ -142,7 +153,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | --- | --- | --- |
 | `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds; `vector` is the explicit vector target, `-march=x86-64-v4` and host_isa.h's other features (`-maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni`), which must select `BUSTER_HOST_VECTOR=1` (#2033; the hosted vector row's) |
 | `BUSTER_HOST_RUNTIME` | none | links CI's emulated old CPU's runtime from that root (`x86-64` alone) |
-| `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time |
+| `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time; Develop keeps its line tables |
 | `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link lld, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path; lld links at `-O0` |
 | `BUSTER_BUILD_DEFINES` | none | whitespace-separated arguments every unit's compile adds |
 | `BUSTER_SANITIZER` | `none` | `address` (with UBSan and bounds), `undefined`, `thread`, `memory`; `thread`, `memory` and fuzzing builds link a PIE, the others at a fixed address and baked |
@@ -152,7 +163,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
-| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
+| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code, and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -207,6 +218,9 @@ In `build/cmake/VARIANT/` (a preset's tree is the same):
 - `call-graph-ir` and `check-call-graph`: `call-graph/NAME.ll`, the units' IR,
   one capture for both configurations, and the check by `CONFIG/compiler`.
 - `shifts`, with `BUSTER_SHIFTS`: `CONFIG/shifts/compiler-SHIFT`.
+- In Develop: `Develop/develop/UNIT/`, each `main.c` unit's parts (`partN.bc`,
+  `partN.o`) and their join (`native.o`), and `Develop/develop/absent.o`, the
+  stand-ins for the benchmark units it leaves out.
 
 The executable is linked at a fixed address (`-no-pie`), from the same code: as
 a PIE, its pointer tables' 366,684 relative relocations made every start take 8
@@ -577,10 +591,11 @@ necessary sharing, remaining production boundaries and validation limits.
 
 `CMakePresets.json` has the configure presets `native`, `x86-64` and `znver5`,
 whose trees are `build.sh`'s `build/cmake/native`, `x86-64` and `znver5`; the
-build and test presets `debug` and `release` (native), `x86-64-debug`,
-`x86-64-release`, `znver5-debug` and `znver5-release`; the test presets
-`debug-build` and `release-build`, the `build` label alone; and the workflow
-presets `debug` and `release`, which configure, build and run those:
+build and test presets `debug`, `release` and `develop` (native),
+`x86-64-debug`, `x86-64-release`, `x86-64-develop`, `znver5-debug`,
+`znver5-release` and `znver5-develop`; the test presets `debug-build`,
+`release-build` and `develop-build`, the `build` label alone; and the workflow
+presets `debug`, `release` and `develop`, which configure, build and run those:
 
 ```sh
 cmake --preset native
@@ -679,7 +694,8 @@ never uses them. Sanitizers, fuzzing, PGO, an explicit host runtime,
 `BUSTER_BUILD_DEFINES` and lexer variants keep the single compile. The tools,
 beside the configured Clang or on `PATH`, at its version: `llvm-config` with
 LLVM's C API headers and library (the splitter is built in the tree, at
-`codegen-tools/split`, with the flags it gives), `clang++`, `llvm-nm`,
+`codegen-tools/split`, and Develop's at `codegen-tools/presplit`, with the
+flags it gives), `clang++`, `llvm-nm`,
 `llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
 where `llvm-config` finds them, else static, as the official release's
 archives do in CI, hosted and on the 9700X. A system library `llvm-config`
@@ -709,9 +725,100 @@ have the release's paths, so only the 9700X's build maps one. The full build
 regression also builds the real opt-in compiler once and runs its baking checks.
 
 The parts are made after the optimizer, so a unit's `-O3` pipeline is still one
-serial job. [A faster stage 1 build](../stage1-build-design.md) is the design,
-with its measurements, that moves the split in front of the optimizer in a
-configuration of its own; it isn't implemented.
+serial job. The Develop configuration ([below](#develop)) moves the split in
+front of the optimizer, in a configuration of its own; Release keeps this one.
+
+## Develop
+
+The edit loop's configuration (#2559; [A faster stage 1 build](../stage1-build-design.md)
+is its design, with the measurements that sized it). A Release edit waits for one
+clang process, a unit's front end and `-O3` pipeline, whatever the edit: the
+checker's unit's took 56.6 s on the 9700X. Develop stops each `main.c` unit's
+compile before LLVM's optimizer and optimizes it in parts, at once, so that an
+edit repeats only the parts it changed:
+
+```text
+UNIT.c --clang, no LLVM pass--> UNIT bitcode --presplit--> part0.bc ... partN.bc, the data part
+partK.bc --clang -x ir -O3--> partK.o      (a job a part, rerun only when its bitcode changed)
+part*.o --join, as Release's parts--> native.o --link--> Develop/compiler.link --bake--> Develop/compiler
+```
+
+1. The unit compiles with Develop's flags and `-Xclang -disable-llvm-passes
+   -emit-llvm`, keeping its depfile and its compile database record.
+2. `tools/codegen/presplit.c` (`Partitioning UNIT's IR before the optimizer`)
+   deals its functions into parts (`BUSTER_DEVELOP_PARTITIONS` in
+   `cmake/BusterCodegen.cmake`: 48 for the checker's unit, 32 for the
+   backend's, 16 for the front end's, 8 for each other one) and writes a part
+   only when its bytes changed, as `split.c` does.
+3. A job a part (`Optimizing and generating UNIT's part K`) runs clang's `-O3`
+   pipeline and code generator on it, with the unit's `-march` and Develop's
+   debug information.
+4. `cmake/BusterCodegenMerge.cmake` joins them as it joins Release's parts.
+
+The splitter's rules, each for a measured reason (the file's first comment has
+them in full; `--report` prints a plan's parts, files and largest functions):
+
+- **A function's part comes from its file and the names around it**, not from
+  a count of what came before. Each file's functions, in source order, are cut
+  at the functions whose name's hash is 0 modulo 24, and dealt over a run of
+  parts of the file's own by their place in the file, as many parts as the file
+  holds of half a part's mean size. An appended function changes one part; an
+  edit that moves a file's lines changes that file's parts.
+- **A static function that one function alone calls goes with its caller**,
+  where the caller can inline it, so that it still can: not into an `optnone`
+  caller.
+- **A part reads the bodies it may inline**: those of at most 100 unoptimized
+  instructions that its code calls and another part defines, and every
+  `always_inline` one, `available_externally` and without their line numbers.
+  Without them the compiler was 29% slower; with them, 1% to 2%.
+- **A part reads the constants it refers to**, as Release's parts do, and a
+  static variable more than one part uses lives once, in the data part.
+- **Nothing in a part names the rest of the unit**: string literals and
+  numbered statics are named by their contents, inline assembly loses its
+  `!srcloc`, struct types lose their names (`struct.anon.N`), and DWARF 4
+  records no file's checksum.
+- **A function whose inline assembly has text stays in part 0**, with the
+  module's own assembly, and no other part reads its body: its text can define
+  a label another function's names.
+- **The tests' own functions are `optnone` and `noinline`** (`--tests-optnone`),
+  as #681's pragma has the checker's: a function whose file's name has `_test_`,
+  `_test.`, `_tests.`, `test_` or `fuzz` in it. No source changes, and no
+  optimizer time on the tests; their commands run a few percent slower.
+- **The same input gives the same parts**, whatever the jobs: a rebuilt
+  executable is the one a clean build of the same sources makes.
+
+**The benchmark units are built on demand**: Develop's executable leaves out
+the 28 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
+(`cmake/BusterSettings.cmake`) names, whose only entry is a benchmark command's
+`run_*` function: the correctness inventory runs none of them. Their object
+libraries have no source in Develop, so Develop's executable doesn't wait for
+them, and `cmake/BusterDevelopAbsent.cmake` writes `Develop/develop/absent.o`
+from their sources, a stand-in for each `run_*` entry, which says that the
+command is Release's and Debug's and fails. `floors_benchmark.c` also holds
+`test-floors-input`'s tests and stays, as do `tier1_model_measure.c` and the two
+test units.
+
+**What it costs.** Develop's executable runs the compile path 1% to 2% slower
+than Release's (#2559's measurements) and writes the same outputs; its debug
+information has functions and lines, not variables, so `perf` and backtraces
+work and a debugger's `print` doesn't (Debug is for that). Release and Debug are
+untouched: their commands are the same, and so are their executables, byte for
+byte.
+
+**When it compiles whole.** Develop's units are split where Release's parallel
+native generation is allowed and its tools are there (`BUSTER_PARALLEL_CODEGEN`,
+above: the configure step's `Develop configuration: TRUE, in parts: ...` line
+says which). Otherwise, and in
+sanitizer, fuzzing, `BUSTER_BUILD_DEFINES` and lexer-variant trees, they compile
+whole with Develop's flags; a `BUSTER_PGO` tree has Release alone.
+
+**Checks.** `build-regression --develop-only` (and the full regression, in the
+Build workflow) builds Develop beside Release, checks that Release's executable
+doesn't change and that switching builds nothing, that a benchmark command names
+Release, that both executables write the same objects at both tiers, that a
+function appended to `c_check_input.c` optimizes one part of the checker's unit
+and one before its first line a few, that a header's time alone optimizes none,
+and that the executable after those edits is a clean build's, byte for byte.
 
 ## A profile-guided build
 

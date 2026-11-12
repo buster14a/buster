@@ -468,6 +468,24 @@ endfunction()
 set(BUSTER_DEBUG_CONFIGURATION_DEBUG -g)
 set(BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION -O0)
 
+# The Develop configuration's debug information, in place of the Release configuration's: DWARF 4 line tables, whatever
+# BUSTER_DEBUG_INFO says. Its optimization is Release's. Line tables name each function's file, by which presplit.c
+# places a unit's functions in parts and finds the tests' (BusterCodegen.cmake); DWARF 5 would record every file's MD5,
+# so that an edit changed every part that mentions its file (docs/stage1-build-design.md).
+set(BUSTER_DEVELOP_CONFIGURATION_DEBUG -gdwarf-4 -gline-tables-only)
+
+# The units of their own that the Develop configuration leaves out of its executable (#2559's step 2), built on demand
+# by Release and Debug: the benchmark units whose only entry is a benchmark command's run_* function, which
+# BusterDevelopAbsent.cmake's stand-ins replace in Develop. floors_benchmark.c also holds test-floors-input's tests, and
+# tier1_model_measure.c and the two test units serve the correctness inventory, so Develop builds them.
+set(BUSTER_DEVELOP_ON_DEMAND
+    c_lexer_benchmark.c x86_64_encoder_benchmark.c lane_benchmark.c dataflow_benchmark.c dominators_benchmark.c
+    tier1_allocate_benchmark.c object_writer_benchmark.c executable_benchmark.c import_benchmark.c
+    branch_sizing_benchmark.c bind_benchmark.c c_refine_benchmark.c c_preprocessor_benchmark.c c_files_benchmark.c
+    c_parser_benchmark.c c_types_benchmark.c c_builtin_benchmark.c c_checker_benchmark.c calling_convention_benchmark.c
+    tier1_frame_benchmark.c snapshot_benchmark.c link_benchmark.c foreign_benchmark.c x86_64_disassembler_benchmark.c
+    x86_semantics_benchmark.c tier0_benchmark.c tier1_schedule_benchmark.c tier1_select_benchmark.c)
+
 # The linker for the executable's link alone (compilation and IR capture keep their flags), from BUSTER_LINKER, into
 # buster_linker_flags (--ld-path=PATH, or none for clang's default) and buster_linker (its description).
 function(buster_settings_linker)
