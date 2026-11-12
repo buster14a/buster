@@ -10499,6 +10499,12 @@ enables, which this checker doesn't all give.
   lvalue gets "read-only variable is not assignable". A report carries up to
   `BUSTER_CHECK_SEMANTIC_NOTES` (32) notes, and the search visits at most 64
   records.
+- **GCC's cast as an lvalue** (#2264, clang's `IsModifiable` and its
+  `CM_LValueCast`): an assignment's, a compound assignment's, an increment's
+  or a decrement's operand that is a cast, through parentheses, of an lvalue
+  through its implicit conversions is "assignment to cast is illegal, lvalue
+  casts are not supported" at the cast's `(`. A cast of an rvalue (`(int)5 =
+  3`) and other rvalues keep "expression is not assignable" at the operator.
 - **Arithmetic on a pointer to an incomplete type**: clang's "arithmetic on a
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
