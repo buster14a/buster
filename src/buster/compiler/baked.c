@@ -32,7 +32,7 @@ static bool tier1_select_initialized(void);
 #include <sys/stat.h>
 #include <unistd.h>
 
-// The node machine's transition table (#2524, c_check_node_machine.c), the checker unit's alone; another unit's bake
+// The node machine's transition table (#2524, c_check_node_machine_type.c), the checker unit's alone; another unit's bake
 // has none to build.
 static bool bake_node_machine_initialize(void)
 {

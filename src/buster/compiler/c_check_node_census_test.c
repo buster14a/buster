@@ -151,13 +151,24 @@ static const char node_census_test_quiet[] =
 // The shadow's fixture (#2524's step 1): each line that ends with `// machine: taken` has expressions the census takes and
 // the machine takes them all, each that ends with `// machine: REFUSAL` one the machine refuses for that reason
 // (node_machine_refusal_names). Its taken expressions' records and entries must be the pipeline's, by T's rows and by
-// the action alike.
+// the action alike. Its calls: direct and discarded, nested (whose rows the tasks number in preorder, outer first, where
+// the entries are in postorder), variadic (a char and a float promoted), of pointers converted to a parameter's (to
+// const char and to void, and null), through a pointer, a member and a call's result; and refused, a long double's
+// parameter (the templates') and a pointer whose first parameter is a jmp_buf's (a callee that returns twice). Calls
+// under and around `&&`, `||` and `?:` too, whose labels are numbered from their subtrees' least records, a call's
+// arguments included, and whose calls' rows in the tasks' preorder.
 static const char node_shadow_test_text[] =
-    "struct S { long m; long n; int a[4]; unsigned char c; };\n"
+    "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
+    "struct __jmp_buf_tag { long b[8]; };\n"
     "int g;\n"
     "double gd;\n"
     "int f(int);\n"
-    "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r)\n"
+    "int v(int, ...);\n"
+    "void w(const char*, void*);\n"
+    "int (*pick(int))(int);\n"
+    "int ldf(long double);\n"
+    "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r, int (*fp)(int, double),\n"
+    "       int (*sj)(struct __jmp_buf_tag*))\n"
     "{\n"
     "    int x = a + b * 2; // machine: taken\n"
     "    long y = 0; // machine: taken\n"
@@ -202,8 +213,23 @@ static const char node_shadow_test_text[] =
     "    x = (q = 0, 0) && a; // machine: taken\n"
     "    x = (q = 0, 1) || a; // machine: taken\n"
     "    x = a ?: b; // machine: template\n"
-    "    x = f(a); // machine: code\n"
-    "    x = a && f(b); // machine: code\n"
+    "    x = f(a); // machine: taken\n"
+    "    f(b); // machine: taken\n"
+    "    x = f(f(a) + 1) * 2; // machine: taken\n"
+    "    x = f(f(a)) + f(b); // machine: taken\n"
+    "    x = v(a, c, e, q); // machine: taken\n"
+    "    w(\"ab\", q); // machine: taken\n"
+    "    w(0, 0); // machine: taken\n"
+    "    x = fp(c, e); // machine: taken\n"
+    "    x = p->cb(x); // machine: taken\n"
+    "    x = pick(a)(b); // machine: taken\n"
+    "    x = ldf(d); // machine: template\n"
+    "    x = sj(0); // machine: callee\n"
+    "    x = a && f(b); // machine: taken\n"
+    "    x = f(a) || f(b); // machine: taken\n"
+    "    x = f(a ? b : c); // machine: taken\n"
+    "    x = a ? f(b) : f(c); // machine: taken\n"
+    "    x = f(a && b) + f(c || u); // machine: taken\n"
     "    x++; // machine: code\n"
     "    x += 2; // machine: code\n"
     "    y = q - r; // machine: template\n"
