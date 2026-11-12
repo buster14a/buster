@@ -141,6 +141,35 @@ typedef enum NodeMachineTemplate
 #define BUSTER_NODE_MACHINE_TEMPLATE_CALL ((CheckLowerTemplate)NODE_MACHINE_TEMPLATE_CALL)
 #define BUSTER_NODE_MACHINE_TEMPLATE_UPDATE ((CheckLowerTemplate)NODE_MACHINE_TEMPLATE_UPDATE)
 
+// The argument memo's entries (NodeMachine.argument_memo), as a power of two: a unit's calls convert a few hundred pairs
+// of types (docs/node-machine.md, "Calls").
+#define BUSTER_NODE_MACHINE_MEMO_BITS 10u
+#define BUSTER_NODE_MACHINE_MEMO_ENTRIES (1u << BUSTER_NODE_MACHINE_MEMO_BITS)
+// An entry's standing, part of its key: filled, and its key's record an lvalue or an integer constant.
+#define BUSTER_NODE_MACHINE_MEMO_FILLED 0x80u
+#define BUSTER_NODE_MACHINE_MEMO_LVALUE 0x01u
+#define BUSTER_NODE_MACHINE_MEMO_INTEGER 0x02u
+// What an entry answers (node_machine_argument_memo): whether node_machine_argument took the key's arguments (else it
+// refused them), and whether a hit answers for it (else the rule takes the key's arguments each time).
+#define BUSTER_NODE_MACHINE_MEMO_TAKEN 0x01u
+#define BUSTER_NODE_MACHINE_MEMO_ANSWERS 0x02u
+
+// One entry of the argument memo (node_machine_argument_memo): its key, an argument's record's type, its standing and its
+// parameter's type (0 for a variadic argument), and node_machine_argument's answer for the key, with the argument's
+// conversion where it took it.
+typedef struct NodeMachineMemo NodeMachineMemo;
+struct NodeMachineMemo
+{
+    TypeId source;
+    TypeId parameter;
+    TypeId converted;
+    uint16_t flags;
+    uint8_t standing;
+    uint8_t answer;
+};
+
+_Static_assert(sizeof(NodeMachineMemo) == 16, "an argument memo entry is sixteen bytes");
+
 // Why the machine refuses an expression: the first sweep's reason that stopped it.
 typedef enum NodeMachineRefusal
 {
@@ -287,6 +316,16 @@ struct NodeMachine
     // columns and the history.
     uint32_t* type_complete_at;
     uint32_t type_count;
+    // Each function type's pointer type, type_pointer's (its exact twin), by type index: 0 until a call or an argument
+    // first converts a designator of the type (node_machine_function_pointer), where the type table's interning took a
+    // hash lookup each time.
+    TypeId* function_pointers;
+    // The argument memo: node_machine_argument's answers for the unit's recent argument keys, direct-mapped
+    // (node_machine_argument_memo), where the rule's conversion read the type table's columns at each argument. `memo_fills`
+    // counts the entries filled and `memo_rules` the arguments the rule took instead.
+    NodeMachineMemo* argument_memo;
+    uint64_t memo_fills;
+    uint64_t memo_rules;
     // --scalar: T types every node by the action, the rows' exact twin.
     bool scalar;
     // --verify: T types each row-typed node by the action too, and counts the nodes where the two differ.
@@ -358,6 +397,15 @@ struct NodeMachine
     uint32_t stopped;
 };
 
+// Forgets the unit's call answers, the function types' pointers and the argument memo, as a unit starts without them:
+// node_machine_begin, and the shadow's timing before each pass (c_check_node_census.c's node_shadow_time), so that each
+// pass pays their fills as one compile of the unit would.
+static void node_machine_forget(NodeMachine* machine)
+{
+    memset(machine->function_pointers, 0, (uint64_t)machine->type_count * sizeof(TypeId));
+    memset(machine->argument_memo, 0, BUSTER_NODE_MACHINE_MEMO_ENTRIES * sizeof(NodeMachineMemo));
+}
+
 // The sweeps' files' functions that this file calls: T's table, its types' completion positions and its operands' records
 // (c_check_node_machine_type.c), and the three sweeps.
 static bool node_machine_tables_initialize(void);
@@ -390,6 +438,8 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     };
     machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
     machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
+    machine->function_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)machine->type_count + 64);
+    machine->argument_memo = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineMemo, BUSTER_NODE_MACHINE_MEMO_ENTRIES);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     _Static_assert(sizeof(NodeMachineColumns) % 64 == 0 && sizeof(NodeMachineColumns) % 4096 == 25 * BUSTER_NODE_MACHINE_STAGGER % 4096,
@@ -414,9 +464,10 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
                       machine->calls_at != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
-                      machine->updates != NULL;
+                      machine->updates != NULL && machine->function_pointers != NULL && machine->argument_memo != NULL;
     if (room)
     {
+        node_machine_forget(machine);
         (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
         check_lower_classify_types(program->types, machine->type_count, classes, facts);
         for (uint32_t index = 0; index < machine->type_count; index += 1)

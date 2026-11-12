@@ -605,6 +605,25 @@ static bool node_machine_plain_kind(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
 }
 
+// The pointer type of function type `function`, type_pointer's: the unit's column's (NodeMachine.function_pointers), one
+// load once the type's first designator has filled it. A type past the column, or a qualified one (which type_pointer
+// takes unqualified), asks type_pointer each time.
+static TypeId node_machine_function_pointer(NodeMachine* machine, TypeId function)
+{
+    const uint32_t index = type_index(function);
+    const bool column = index < machine->type_count && function == (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+    TypeId pointer = column ? machine->function_pointers[index] : 0;
+    if (pointer == 0)
+    {
+        pointer = type_pointer(machine->types, function);
+        if (column)
+        {
+            machine->function_pointers[index] = pointer;
+        }
+    }
+    return pointer;
+}
+
 // An operand's value as its operator reads it (node_machine_operand_value): record `record`'s value with its type,
 // category, flags and constant kind replaced, the fields a conversion changes; on the stack, in registers once the rule
 // that reads it is inlined. `integer` is the record's integer's low 64 bits.
@@ -660,7 +679,7 @@ static inline __attribute__((always_inline)) bool node_machine_operand_value(Nod
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
-        const TypeId pointer = type_pointer(types, plain);
+        const TypeId pointer = node_machine_function_pointer(machine, plain);
         taken = pointer != 0;
         result = pointer;
         category = CHECK_RVALUE;
@@ -1212,6 +1231,98 @@ static bool node_machine_argument(NodeMachine* machine, uint32_t a, uint32_t nod
     return taken;
 }
 
+// The flags of an argument's record that node_machine_argument reads besides its type (a null pointer's, a bit-field's
+// promotion, a register's array, a volatile part's load): an argument with one takes the rule each time.
+#define BUSTER_NODE_MACHINE_MEMO_FLAGS (BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART)
+
+// Whether a conversion of a value from or to a type of kind `kind` changes nothing that check_action_inherit reads of it,
+// where the value has no constant but an address (check_action_convert_plain's flags are none of the inherited ones, and it
+// sets no fault there): an integer's, a floating type's, a pointer's and an enumeration's. A complex, a vector and a
+// _BitInt convert otherwise.
+static bool node_machine_memo_kind(uint8_t kind)
+{
+    return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ENUM;
+}
+
+// Whether an integer constant of an integer type takes, for a parameter of type `parameter` (0: a variadic one), the
+// answer any integer constant of its type takes, its conversion folding it without changing what check_action_inherit
+// reads: an integer, an enumeration, a float, a double or a long double parameter, or the promotions. A pointer's isn't: a
+// null pointer constant converts to it and another integer doesn't; nor a half-precision type's, whose fold can fault.
+static bool node_machine_memo_integers(const NodeMachine* machine, TypeId parameter)
+{
+    const TypeId destination = parameter != 0 ? type_unqualified(type_strip_aligned(machine->types, parameter)) : BUSTER_TYPE_INT;
+    const uint8_t kind = type_kind(machine->types, destination);
+    return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || destination == BUSTER_TYPE_FLOAT || destination == BUSTER_TYPE_DOUBLE ||
+           destination == BUSTER_TYPE_LONG_DOUBLE;
+}
+
+// Call node `node`'s argument, record `a`, for a parameter of type `parameter` (0: a variadic one), by the unit's argument
+// memo (NodeMachine.argument_memo): node_machine_argument's answer, its exact twin, into `conversion`, and the flags and
+// fault of its converted value that check_action_inherit reads added to the call's value `value`. Whether it took it.
+//
+// The key is the record's type, its standing (an lvalue, an integer constant, or neither) and the parameter's type. Where
+// the record isn't wide (no fault, overload set, bit-field's width or integer past 64 bits), its value has no constant but
+// an address, none of BUSTER_NODE_MACHINE_MEMO_FLAGS and isn't an enumeration's lvalue (whose completeness at the node the
+// rule asks), the rule reads of it only its type, whether it is an lvalue and the type table: check_action_null is its
+// type's alone, and no conversion folds. Its answer is then the key's, and a hit answers where the conversion changes
+// nothing that check_action_inherit reads (where the record's kind and the conversion's are node_machine_memo_kind's, an
+// array's or a function's, which decay to a pointer), adding the record's inherited flags themselves. An integer constant
+// (an rvalue of an integer type) is a key of its own, whose hit answers where node_machine_memo_integers says so. A miss
+// runs the rule and keeps its answer; any other argument takes the rule.
+static bool node_machine_argument_memo(NodeMachine* machine, uint32_t a, uint32_t node, TypeId parameter, CheckValue* value, CheckConversion* conversion)
+{
+    const NodeMachineColumns* columns = machine->columns;
+    const uint8_t record = columns->standings[a];
+    const TypeId type = columns->value_types[a];
+    const uint32_t flags = columns->value_flags[a];
+    const uint8_t kind = (uint8_t)(columns->words[a] >> 16);
+    const CheckConstantKind constant_kind = (CheckConstantKind)((record >> 2) & 0x07u);
+    const bool lvalue = (CheckCategory)(record & 0x03u) == CHECK_LVALUE;
+    const bool integer = constant_kind == CHECK_CONSTANT_INTEGER;
+    const bool constant = constant_kind == CHECK_CONSTANT_NONE || constant_kind == CHECK_CONSTANT_ADDRESS || (integer && !lvalue && kind == BUSTER_TYPE_KIND_INTEGER);
+    const bool eligible = (record & BUSTER_NODE_MACHINE_WIDE) == 0 && constant && (flags & BUSTER_NODE_MACHINE_MEMO_FLAGS) == 0 &&
+                          !(lvalue && kind == BUSTER_TYPE_KIND_ENUM);
+    const uint8_t standing = BUSTER_NODE_MACHINE_MEMO_FILLED | (lvalue ? BUSTER_NODE_MACHINE_MEMO_LVALUE : 0) | (integer ? BUSTER_NODE_MACHINE_MEMO_INTEGER : 0);
+    const uint32_t slot = ((type ^ parameter * 0x85ebca77u ^ standing) * 0x9e3779b1u) >> (32 - BUSTER_NODE_MACHINE_MEMO_BITS);
+    NodeMachineMemo* entry = machine->argument_memo + slot;
+    const bool matched = eligible && entry->source == type && entry->parameter == parameter && entry->standing == standing;
+    bool taken = false;
+    if (matched && (entry->answer & BUSTER_NODE_MACHINE_MEMO_ANSWERS) != 0)
+    {
+        taken = (entry->answer & BUSTER_NODE_MACHINE_MEMO_TAKEN) != 0;
+        *conversion = (CheckConversion){ .type = entry->converted, .flags = entry->flags };
+        // check_action_inherit of the record's value: its inherited flags, and no fault, which a record that isn't wide has.
+        value->flags |= taken ? flags & BUSTER_CHECK_INHERITED : 0;
+    }
+    else
+    {
+        CheckValue argument;
+        taken = node_machine_argument(machine, a, node, parameter, &argument, conversion);
+        if (taken)
+        {
+            check_action_inherit(value, &argument);
+        }
+        const bool fill = eligible && !matched;
+        if (fill)
+        {
+            const bool same = !taken || ((node_machine_memo_kind(kind) || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION) &&
+                                         node_machine_memo_kind(check_action_kind(machine->types, conversion->type)));
+            const bool answers = same && (!integer || node_machine_memo_integers(machine, parameter));
+            *entry = (NodeMachineMemo){
+                .source = type,
+                .parameter = parameter,
+                .converted = conversion->type,
+                .flags = (uint16_t)conversion->flags,
+                .standing = standing,
+                .answer = (uint8_t)((taken ? BUSTER_NODE_MACHINE_MEMO_TAKEN : 0) | (answers ? BUSTER_NODE_MACHINE_MEMO_ANSWERS : 0)),
+            };
+        }
+        machine->memo_fills += fill;
+        machine->memo_rules += !fill;
+    }
+    return taken;
+}
+
 // T's call, record `r` (node `node`) of callee record `a`, by check_action_call's steps where its callee's prototype takes
 // its arguments' count, its result is void or complete at the node's position and node_machine_argument takes each
 // argument: whether it typed the node, its arguments' conversions in their column (NodeMachine.argument_conversions).
@@ -1235,12 +1346,8 @@ static bool node_machine_call_rule(NodeMachine* machine, uint32_t r, uint32_t no
     const uint32_t first = machine->columns->argument_first[r];
     for (uint32_t i = 0; taken && i < count; i += 1)
     {
-        CheckValue argument;
-        taken = node_machine_argument(machine, machine->arguments[first + i], node, i < parameters ? parameter_types[i] : 0, &argument, machine->argument_conversions + first + i);
-        if (taken)
-        {
-            check_action_inherit(&value, &argument);
-        }
+        const TypeId parameter = i < parameters ? parameter_types[i] : 0;
+        taken = node_machine_argument_memo(machine, machine->arguments[first + i], node, parameter, &value, machine->argument_conversions + first + i);
     }
     if (taken)
     {
