@@ -1,8 +1,9 @@
 # The node machine: one visit per expression node (#2524): design
 
-Status: design only. Nothing below is implemented, and its gains are estimates
-that its first two steps exist to confirm or refute; a prototype of its three
-sweeps has been run over the compile's real nodes
+Status: step 0, the census, is built and its gate holds
+([below](#step-0-the-census)); nothing of the machine itself is. Its gains are
+estimates that its first two steps exist to confirm or refute; a prototype of
+its three sweeps has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design: the change that the measurements below rank first for one core. The
@@ -373,8 +374,15 @@ conjunction of cheap, conservative tests:
   a comparison of an object with itself, a discarded value of a pure operator,
   a `return` of a local's address.
 - **Effects.** An expression that writes an object and names it twice is
-  refused for the unsequenced check; one whose tokens come from a macro of a
-  system header, where the warnings' suppression differs, by a bit a token.
+  refused for the unsequenced check (the census's form: written twice, or
+  written below the root and named outside it, neither apart from a sequence
+  point nor in a conditional's two arms). The test first written here, of a
+  system header's macro's tokens in a user's expression, isn't one: in a
+  system header's macro the pipeline only suppresses diagnostics, so a taken
+  expression is as silent there as its other tests make it, and the census
+  measured that it would refuse 6.5% of `sqlite3.c`'s nodes and 7.7% of Lua's,
+  more than the silence budget, nearly all `assert`s' `((void)0)` under
+  `NDEBUG`.
 - **Regions.** A diagnostic pragma, a floating-point pragma or a statement
   attribute in the body refuses the body's expressions.
 
@@ -536,6 +544,109 @@ diagnostics. Step 3 needs the body whole, and `sqlite3.c`'s ten largest
 bodies hold 15.5% of its body tokens, so its set has to reach what those hold:
 `goto` and labels (in bodies with 27% of the body tokens), `switch` (20%),
 brace initializers (18.5%), `static` locals (15.5%).
+
+## Step 0: the census
+
+`measure-node-machine` (`c_check_node_census.c`, [the guide](commands/lowering.md#node-machine-census-2524))
+is step 0: the pipeline as it is, every full expression the tasks lowered read
+again from the finished graph, stream and parser's tree by the set's tests and
+the silence tests, each silence test only where a warning it stands for is
+enabled in the unit. No machine runs. On the 9700X at `eb62e20f` (counts, not
+times; [the record](https://github.com/buster14a/buster-performance/tree/151aeb6ce57582f20419567675862274a59f5cf1/docs/measurements/node-machine-census-2524-2026-11-12)):
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| evaluated nodes, in full expressions | 266,707 in 52,368 | 67,358 in 11,562 | 131,092 in 26,502 |
+| nodes in expressions the set takes (gate: 85%, 75%, 75%) | 97.54% | 90.89% | 93.03% |
+| nodes the silence tests then refuse (gate: under 3%) | 0.00% | 0.02% | 1.24% |
+| nodes taken | 97.54% | 90.87% | 91.79% |
+| bodies taken whole, and their share of the nodes | 87.6%, 60.2% | 78.7%, 55.4% | 60.8%, 49.5% |
+
+**The gate holds** on all three. What the set refuses, by the share of the
+nodes in the expressions it refuses:
+
+- **`sqlite3.c`:** bit-fields 1.54%, callees with semantics of their own 0.38%
+  (the library folds `strcmp`, `strlen`, `memcmp`, and the printf family),
+  builtins and `va_arg` 0.30%, struct copies 0.21%, brace initializers 0.04%,
+  `register` variables 0.02%.
+- **Lua:** builtins 4.51%, three quarters of their expressions
+  `__builtin_expect`'s (`l_likely`, `l_unlikely`, `luaL_argcheck`), the first
+  builtin worth a code of the machine's; the library folds 2.70%; struct copies
+  0.85%; other controls 1.05%.
+- **musl:** nodes popped twice, compound literals' values, 3.23% (as the
+  prototype found); controls 1.89%; complex values 1.62%; builtins 0.99%;
+  struct copies 0.58%; callees 0.52%.
+
+The silence tests refuse nothing of `sqlite3.c`, which reports no warning, and
+next to nothing of Lua. Of musl's 1.24%: a floating-point pragma's bodies
+(`fma.c` and its kin, by design) 0.84%, then parentheses 0.43% and three
+`-Wstring-plus-int`s, which are warnings the pipeline reports (`if (map =
+__map_file(...))`, `s[e]+0U<<24`), then comparisons at a type's bound, which
+are conservative. Two things make that low share trustworthy:
+
+- **Every test is checked against the warnings it stands for.** `test-checker`'s
+  fixture has one warning a line, each reported by the compiler with `-Wall
+  -Wextra`, and the census must refuse each by its test; disabling one test
+  fails it. Every warning ID has a class of the census's (a test stands for
+  it, it is no expression's, or it reads the events a taken expression keeps),
+  and `test-checker` fails on an ID without one: the two warnings main gained
+  while the census was written (`-Wshift-sign-overflow`, `-Wassign-enum`) got
+  their tests that way. A warning no test models refuses every expression
+  where it is enabled.
+- **Its first version refused 1.75% of `sqlite3.c`'s nodes**, and each false
+  refusal was a test coarser than its warning, not a warning: a discarded
+  `memset` (only `const` and `pure` builtins warn), unsigned 64-bit constants,
+  a conditional's two arms (never both evaluated), two fields of one struct
+  written in one expression, `&a[N]`, same-width sign changes, and comparisons
+  not taken in their common type. The machine's tests have to be that tight
+  and still cheap: what each reads (the operator, the operands' kinds and
+  constants, the parser's parent of an operator token, an object and member
+  offset) is in a node's record or the parser's tree.
+
+The census's set leaves calls, `&&`, `||` and `?:` in, as step 2 does. What it
+counts as refused but step 2 could take later: `__builtin_expect` (Lua), the
+library folds, bit-fields (`sqlite3.c`) and compound literals (musl). With them
+out, `sqlite3.c`'s taken expressions hold 97.5% of its nodes, above the
+estimate's optimistic 95% for step 2 ([below](#expected-gains)): the coverage
+is not what limits step 2's gain. Step 3's whole bodies are another matter:
+87.6% of `sqlite3.c`'s bodies have every expression taken, but they hold 60.2%
+of its nodes, the largest bodies being the ones with a bit-field or a call with
+semantics somewhere.
+
+Step 1 is next: the tables baked, the three sweeps run after the pipeline on
+every root the census takes, compared entry for entry and timed. The census is
+where its silence tests start: each is written here first, against a fixture
+line of the warning it stands for.
+
+### The readers of an expression's inside
+
+A summary node (step 2) hides its expression's nodes from every pass after the
+reader; each pass that reads below a root has to take the summary's side record
+or be shown not to need it. From the code at `eb62e20f`, by the files that read
+the graph's operators and operands after the graph run:
+
+- **The warnings:** `check_driver_common_warnings` (`c_check_common_warnings.c`:
+  the enumeration mixes, the parentheses, shifts and chained comparisons,
+  string plus int, sizeof's decay, the graph warnings, for loops, returned
+  stack addresses, the uninitialized and unused-but-set scans, format and
+  type-safety calls), the graph's own (`c_check_warning_graph.c`,
+  `c_check_noderef_graph.c`, `c_check_condition_graph.c`,
+  `c_check_overload_graph.c`, `c_check_region_graph.c`), `c_check_unsequenced.c`,
+  `c_check_ignored_result.c` and `c_check_musttail.c`. A taken expression has
+  none of their warnings by its silence tests; the scans that read events (a
+  local read, written or addressed; a call that may not return) take them
+  from the side record.
+- **The program:** `check_program`'s controls, references and return flow
+  (`c_check_program.c`, `c_check_return_flow.c`), which the selection reads,
+  the target features' checks (`c_check_target_feature.c`), asm operands
+  (`c_check_program_asm.c`) and the driver's own walks (`c_checker_driver.c`:
+  interrupt ranges, the x86 builtins' diagnostics).
+- **The lowering:** the tasks (`c_check_program_lower.c`, with
+  `c_check_program_templates.c` and `c_check_program_batch.c`) and their
+  helpers for half, atomic and transported values; `-g`'s rows come from the
+  lowering's entry tokens.
+- **Read only for a diagnostic**, which a taken expression has none of:
+  `c_check_semantic_diagnostic.c` and the warnings' wording.
 
 ## Expected gains
 

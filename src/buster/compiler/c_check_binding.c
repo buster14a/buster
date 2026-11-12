@@ -393,6 +393,10 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                     .token = event_kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && for_scope ? closing : BUSTER_CHECK_WARNING_NO_SOURCE,
                     .data = set_only ? 1u : 0u,
                 },
+                // A function body's declarations are its labels' scope too (#2264, -Wunused-label): clang sorts the
+                // scope's unused declarations by place as it pops it, the labels among the variables.
+                .suborder = event_kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && completion < count && parser->tree.roles[completion] == PARSE_ROLE_CLOSE_BODY ?
+                            (uint64_t)token + 1 : 0,
             };
             // From the first for initializer, stage this pass's remaining unused events privately: nested scopes
             // can share a statement end and must publish inner first. Their declarations follow that initializer;

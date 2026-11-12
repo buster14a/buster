@@ -659,6 +659,11 @@ is the sixth callee-saved register where the frame keeps no frame pointer in it.
 The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
 `reserved_registers`).
 
+That preference is a second, whole `tier1_cfg_allocate` over the first one's
+intervals. What the two calls cost a compile, and the design that makes them
+one call with the same result, are in
+[tier1-one-allocation.md](tier1-one-allocation.md) (#2538).
+
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's
 `luac.c:PrintCode` and its runs of `printf`, stays in a caller-saved register.
