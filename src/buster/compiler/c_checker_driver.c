@@ -3799,6 +3799,181 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     return result;
 }
 
+// A default-error conversion's severity at `token` (#1963): its group's command-line mapping, then the pragmas there;
+// -w then drops it only where it is a warning (an error, by default or by a pragma, stays one).
+static CheckWarningSeverity check_driver_default_error_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t source, uint32_t id)
+{
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, false, true);
+    const CheckWarningSeverity mapped = check_diagnostic_severity_id_from(input, token, source, id, command.mapped);
+    const CheckWarningSeverity severity = command.quiet && mapped == CHECK_WARNING_WARNING ? CHECK_WARNING_IGNORE : mapped;
+    return severity;
+}
+
+// One relaxed conversion's warning (#1963): the error clang would have given had nothing demoted it, worded as the
+// rejected conversion's (check_driver_conversion_error, else the semantic message), with its group's severity.
+static void check_driver_default_error_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                              CheckWarningSpelling* spell, const CheckReport* report, uint32_t id, uint32_t publication, uint64_t suborder,
+                                              Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t token = report->token < count ? report->token : BUSTER_CHECK_NONE;
+    const CheckWarningSeverity severity = token < count ? check_driver_default_error_severity(pp, input, token, parser->tokens.sources[token], id) : CHECK_WARNING_IGNORE;
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        uint32_t located = token;
+        uint32_t note_token = BUSTER_CHECK_NONE;
+        const char* note = NULL;
+        uint32_t argument = BUSTER_CHECK_NONE;
+        const char* message = check_driver_conversion_error(parser, pp, input, stream, types, spell, report, &located, &note_token, &note, &argument, scratch);
+        PPOutputDiagnosticNote notes[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
+        uint32_t note_count = 0;
+        if (message == NULL)
+        {
+            located = token;
+            message = check_semantic_expression(parser, pp, input, stream, types, report, spell, &located, notes, scratch);
+            note_count = check_semantic_note_count(notes);
+        }
+        else if (note != NULL && note_token < count)
+        {
+            notes[0] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[note_token], .message = note };
+            note_count = 1;
+        }
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (message != NULL && located < count)
+        {
+            const PPDiagnosticRecord* previous = pp->diagnostic_last;
+            pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[located], publication, notes, note_count, "%s", message);
+            if (suborder != 0)
+            {
+                pp_diagnostic_suborder(pp, previous, suborder);
+            }
+        }
+    }
+}
+
+// The warnings of the conversions that default to errors which the checker made at relaxed tokens (#1963,
+// BUSTER_CHECK_RELAXED_TOKEN): an initialization's, an assignment's, a return's and a prototype argument's that its
+// action refuses without a system header's leniency, a void function's returned value, and a non-void function's
+// `return;`. Each is clang's error with its group's severity there. A unit without relaxed tokens looks at nothing.
+static void check_driver_default_error_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                const CheckProgram* program, Arena* scratch)
+{
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const uint32_t count = parser->tokens.count;
+    if (input->relaxed_tokens && graph != NULL && graph->system_tokens != NULL && types != NULL && stream->conversions != NULL)
+    {
+        CheckWarningSpelling spell = { 0 };
+        for (uint32_t node = 0; !pp->fatal && node < stream->count; node += 1)
+        {
+            const CheckOp op = graph->ops[node];
+            const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
+            const uint8_t bits = token < graph->system_token_count ? graph->system_tokens[token] : 0;
+            const bool returning = op == CHECK_OP_CONVERT && token < count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+            const bool listed = op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL;
+            const uint32_t slots = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || returning ? 1 : listed ? graph->argument_counts[node] : 0;
+            for (uint32_t i = 0; (bits & BUSTER_CHECK_SYSTEM_TOKEN) == 0 && (bits & BUSTER_CHECK_RELAXED_TOKEN) != 0 && i < slots; i += 1)
+            {
+                const uint32_t source = listed ? graph->argument_nodes[graph->argument_offsets[node] + i] : op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
+                const CheckConversion conversion = listed ? stream->argument_conversions[graph->argument_offsets[node] + i] :
+                                                   stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1 : 0];
+                if (source < stream->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && conversion.type != 0)
+                {
+                    const CheckValue value = check_stream_value(stream, source);
+                    CheckAction action = { .node = node, .context = check_graph_context(graph, node, false) };
+                    action.context.extensions &= ~BUSTER_CHECK_EXTENSION_SYSTEM_HEADER;
+                    CheckActionResult result = { 0 };
+                    const bool void_target = check_action_kind(types, conversion.type) == BUSTER_TYPE_KIND_VOID;
+                    const bool refused = void_target ? check_action_kind(types, value.type) != BUSTER_TYPE_KIND_VOID :
+                                         !check_action_assignable_mode(types, conversion.type, &value, &action, &result, false) && result.diagnostic == CHECK_DIAG_NONE;
+                    const CheckDriverConversion kind = refused && !void_target ?
+                                                       check_driver_conversion_kind(types, conversion.type, check_driver_conversion_source(types, stream, source)) :
+                                                       CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+                    const uint32_t id = void_target ? CHECK_WARNING_ID_RETURN_MISMATCH :
+                                        kind == CHECK_DRIVER_CONVERSION_INT_POINTER || kind == CHECK_DRIVER_CONVERSION_POINTER_INT ? CHECK_WARNING_ID_INT_CONVERSION :
+                                        kind == CHECK_DRIVER_CONVERSION_POINTERS ? CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES :
+                                        kind == CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS ? CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES : CHECK_WARNING_ID_COUNT;
+                    const uint32_t at = listed && graph->argument_tokens != NULL ? graph->argument_tokens[graph->argument_offsets[node] + i] : token;
+                    if (refused && id != CHECK_WARNING_ID_COUNT && at < count)
+                    {
+                        const CheckReport report = { .node = node, .token = at, .message = CHECK_MESSAGE_ACTION, .diagnostic = CHECK_DIAG_INCOMPATIBLE };
+                        // A call's argument's takes its place among the call's conversion warnings, as its error does (#2481).
+                        const uint32_t first = listed ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+                        const uint64_t suborder = first < count ? (uint64_t)parser->tokens.sources[first] + 1u : 0;
+                        check_driver_default_error_report(parser, pp, input, stream, types, &spell, &report, id, parser->tokens.sources[token < count ? token : at],
+                                                          suborder, scratch);
+                    }
+                }
+            }
+        }
+        // A braced initializer's and a compound literal's values, which have no INITIALIZE node (an unbraced one's has).
+        const CheckInitializers* initializers = program != NULL ? program->initializers : NULL;
+        for (uint32_t index = 0; initializers != NULL && index < initializers->count && !pp->fatal; index += 1)
+        {
+            const CheckInitializer* plan = initializers->plans + index;
+            const uint32_t declaration = initializers->declaration_tokens[index];
+            const uint8_t role = declaration < count ? parser->tree.roles[declaration] : PARSE_ROLE_NONE;
+            const bool compound = role == PARSE_ROLE_OPEN_COMPOUND || role == PARSE_ROLE_CLOSE_COMPOUND || role == PARSE_ROLE_OPEN_COMPOUND_BODY;
+            const uint32_t begin = declaration < input->token_count ? check_sparse_get(input->initializer_begins, declaration) : BUSTER_CHECK_NONE;
+            const bool braced = compound || (begin < count && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE);
+            for (uint32_t p = 0; braced && p < plan->count && !pp->fatal; p += 1)
+            {
+                const CheckInitPart* part = plan->parts + p;
+                const uint32_t token = part->node < stream->count ? graph->tokens[part->node] : BUSTER_CHECK_NONE;
+                const uint8_t bits = token < graph->system_token_count ? graph->system_tokens[token] : 0;
+                if (part->kind == CHECK_INIT_VALUE && part->conversion.type != 0 && (bits & BUSTER_CHECK_SYSTEM_TOKEN) == 0 && (bits & BUSTER_CHECK_RELAXED_TOKEN) != 0)
+                {
+                    const CheckValue value = check_stream_value(stream, part->node);
+                    CheckAction action = { .node = part->node, .context = check_graph_context(graph, part->node, false) };
+                    action.context.extensions &= ~BUSTER_CHECK_EXTENSION_SYSTEM_HEADER;
+                    CheckActionResult result = { 0 };
+                    const bool refused = !check_action_assignable_mode(types, part->conversion.type, &value, &action, &result, false) && result.diagnostic == CHECK_DIAG_NONE;
+                    const CheckDriverConversion kind = refused ? check_driver_conversion_kind(types, part->conversion.type, check_driver_conversion_source(types, stream, part->node)) :
+                                                       CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+                    const uint32_t id = kind == CHECK_DRIVER_CONVERSION_INT_POINTER || kind == CHECK_DRIVER_CONVERSION_POINTER_INT ? CHECK_WARNING_ID_INT_CONVERSION :
+                                        kind == CHECK_DRIVER_CONVERSION_POINTERS ? CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES :
+                                        kind == CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS ? CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES : CHECK_WARNING_ID_COUNT;
+                    const uint32_t at = part->token < count ? part->token : token;
+                    const CheckWarningSeverity severity = id != CHECK_WARNING_ID_COUNT && at < count ?
+                                                          check_driver_default_error_severity(pp, input, at, parser->tokens.sources[at], id) : CHECK_WARNING_IGNORE;
+                    uint32_t located = at;
+                    const char* message = severity != CHECK_WARNING_IGNORE ?
+                                          check_driver_initializer_conversion(parser, pp, input, stream, types, part->conversion.type, part->node, declaration,
+                                                                              part->bit_offset / 8, at, &located, scratch) : NULL;
+                    if (message != NULL && located < count)
+                    {
+                        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[located], parser->tokens.sources[at], "%s", message);
+                    }
+                }
+            }
+        }
+        // A non-void function's `return;` (check_input_expression_return's report, which a relaxed token leaves out).
+        for (uint32_t token = 0; !pp->fatal && token + 1 < count && token < graph->system_token_count; token += 1)
+        {
+            const uint8_t bits = graph->system_tokens[token];
+            const bool bare = parser->tokens.kinds[token] == PARSE_KIND_RETURN && parser->tokens.kinds[token + 1] == PARSE_KIND_SEMI &&
+                              (bits & BUSTER_CHECK_SYSTEM_TOKEN) == 0 && (bits & BUSTER_CHECK_RELAXED_TOKEN) != 0;
+            const uint32_t function = bare ? check_semantic_function(parser, input, token) : BUSTER_CHECK_NONE;
+            const TypeId type = function < input->token_count ? type_strip_aligned(types, input->declared_types[function]) : 0;
+            const bool valued = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_FUNCTION &&
+                                check_action_kind(types, type_return(types, type)) != BUSTER_TYPE_KIND_VOID;
+            const String8 name = valued ? check_semantic_name(parser, pp, function) : (String8){ 0 };
+            const CheckWarningSeverity severity = name.length != 0 ?
+                                                  check_driver_default_error_severity(pp, input, token, parser->tokens.sources[token], CHECK_WARNING_ID_RETURN_MISMATCH) :
+                                                  CHECK_WARNING_IGNORE;
+            if (severity != CHECK_WARNING_IGNORE)
+            {
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], parser->tokens.sources[token],
+                                      "non-void function '%.*s' should return a value [-Wreturn-mismatch]", (int)name.length, name.pointer);
+            }
+        }
+    }
+}
+
 // __builtin_dump_struct's rest argument that doesn't convert to its printer's parameter (#2189, clang's BuiltinDumpStruct,
 // whose printer calls convert as a call's arguments): the conversion's words as a call's argument's
 // (check_driver_conversion_words), at the argument's first token, with clang's notes "in call to printing function with
@@ -7750,6 +7925,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const bool held = at < count ? bodies[at] != 0 : token != 0 && errored[token - 1] == 2;
             errored[token] = flushed[token] != 0 && held ? 2 : flushed[token];
         }
+        check_driver_default_error_warnings(parser, pp, &input, &stream, &types, &program, scratch);
         check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, errored != NULL ? errored : flushed, shifts, scratch);
         arena_pop_to(scratch, flushed_mark);
         round = CHECK_DRIVER_ROUND_DONE;
@@ -11193,6 +11369,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     if (input_valid && dump && !prefix_only)
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
+                    }
+                    // The relaxed conversions' warnings, which an error among them rejects (#1963), -w or not.
+                    if (program_checked)
+                    {
+                        check_driver_default_error_warnings(checking, pp, &input, &stream, &types, &program, scratch);
                     }
                     // A warning the publication promoted to an error rejects the unit.
                     result = pp->errors != 0 ? 1 : result;

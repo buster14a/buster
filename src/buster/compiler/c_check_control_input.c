@@ -3622,7 +3622,7 @@ static bool check_input_fallthrough_analyzed(const CheckInputReader* reader, uin
 {
     const Preprocessor* pp = reader->pp;
     const CheckGraph* graph = &reader->output->graph;
-    const bool system = graph->system_tokens != NULL && token < graph->system_token_count && graph->system_tokens[token] != 0;
+    const bool system = graph->system_tokens != NULL && token < graph->system_token_count && (graph->system_tokens[token] & BUSTER_CHECK_SYSTEM_TOKEN) != 0;
     return pp == NULL || (!pp->options.suppress_warnings && (!system || pp->options.system_header_warnings));
 }
 

@@ -1220,7 +1220,7 @@ static bool check_input_expression_return(CheckInputReader* reader, CheckInputBa
             reader->output->token_nodes[token] = node;
         }
     }
-    else if (acted && check_action_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && !check_graph_system_token(&reader->output->graph, token))
+    else if (acted && check_action_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && !check_graph_relaxed_token(&reader->output->graph, token))
     {
         check_input_report(reader, token, CHECK_INPUT_RETURN);
     }

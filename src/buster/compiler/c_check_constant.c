@@ -29,7 +29,7 @@ static CheckContext check_input_context(const CheckInputReader* reader, uint32_t
         .tag_completion_count = reader->types->tags.capacity,
         .source_position = position,
         .extensions = check_input_expression_extensions(reader->parser) |
-                      (check_graph_system_token(&reader->output->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
+                      (check_graph_relaxed_token(&reader->output->graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
         .fp_environment = reader->output->fp_environments != NULL && token < reader->parser->tokens.count ?
                           reader->output->fp_environments[token] & BUSTER_CHECK_FP_EVAL_MASK : 0,
         .const_values = &reader->output->const_values,

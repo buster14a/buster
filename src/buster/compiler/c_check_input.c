@@ -987,6 +987,9 @@ struct CheckInput
     bool kr_warning_policy;
     bool kr_warning_quiet;
     bool kr_warning_system;
+    // Whether a token is relaxed (#1963, BUSTER_CHECK_RELAXED_TOKEN): the driver then looks for the conversions that
+    // default to errors the checker made there, to warn of them.
+    bool relaxed_tokens;
     // Whether the command line may give -pedantic's warning of GNU's \e in an evaluated literal (#1447,
     // check_input_gnu_escapes): the literals the fast decoding read are scanned for one only then, or where a diagnostic
     // pragma is.
@@ -15231,9 +15234,10 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             reader->query_types[token] = reader->return_types[token];
         }
         else if (check_action_kind(reader->types, reader->return_types[token]) != BUSTER_TYPE_KIND_VOID &&
-                 !check_graph_system_token(graph, token))
+                 !check_graph_relaxed_token(graph, token))
         {
-            // No value for a non-void function: -Wreturn-mismatch, which clang suppresses in a system header.
+            // No value for a non-void function: -Wreturn-mismatch, which clang suppresses in a system header (and a
+            // relaxed token's the driver words, #1963).
             check_input_report(reader, token, CHECK_INPUT_RETURN);
         }
     }
@@ -15913,11 +15917,34 @@ static __attribute__((noinline)) void check_input_system_token_map(uint8_t* toke
 // line notes before it. The preprocessor gives every output token's level from the runs its main loop kept
 // (pp_system_levels), or by the expansion history: for --scalar, its twin, and for a unit whose runs can't say
 // (Preprocessor.system_runs_inexact), recording the history first if the unit put it off (pp_history_ensure).
+// (c_check_diagnostic.c's, after the warning policy.)
+static bool check_warning_default_error_relaxed(const PPOptions* options);
+static bool check_diagnostic_default_error_pragmas(const CheckInput* input);
+static bool check_diagnostic_default_error_relaxed_at(const CheckInput* input, uint32_t token, uint32_t source);
+
+// The relaxed tokens (BUSTER_CHECK_RELAXED_TOKEN, #1963): where an option or a pragma demotes or ignores one of clang's
+// conversions that default to errors, the checker makes it as a system header's, and the driver warns of it with its
+// group's severity there (check_driver_default_error_warnings). Every token where the command line does; else, where a
+// pragma names such a group, each token one of whose groups is no error there. A unit with neither marks none.
+static void check_input_relaxed_tokens(CheckInputReader* reader, Preprocessor* pp, uint8_t* tokens, uint32_t count, bool all)
+{
+    const CheckInput* input = reader->output;
+    const uint32_t* sources = reader->parser->tokens.sources;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        const bool relaxed = all || check_diagnostic_default_error_relaxed_at(input, token, sources[token]);
+        tokens[token] |= relaxed ? BUSTER_CHECK_RELAXED_TOKEN : 0;
+    }
+    (void)pp;
+}
+
 static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp, Arena* arena)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
     const uint32_t count = parser->tokens.count;
+    const bool relaxed_all = check_warning_default_error_relaxed(&pp->options);
+    const bool relaxed = relaxed_all || check_diagnostic_default_error_pragmas(reader->output);
     bool system = false;
     for (uint32_t i = 0; !system && i < pp->range_count; i += 1)
     {
@@ -15928,10 +15955,15 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         system = pp->line_directives[i].system != BUSTER_PP_USER_FILE;
     }
     const uint64_t mark = reader->scratch->length;
-    uint8_t* tokens = system && pp->output.locations != NULL ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 64) : NULL;
+    // With three bytes past the last token, which the transitions' gathers of four bytes at it read.
+    uint8_t* tokens = (system && pp->output.locations != NULL) || relaxed ? arena_push_array(arena, (uint64_t)count + 4, sizeof(uint8_t), 64) : NULL;
     // With three bytes past the entry after them all, which the vector path's gathers of four bytes at it read.
-    uint8_t* levels = tokens != NULL ? arena_push_array(reader->scratch, (uint64_t)pp->output.count + 4, sizeof(uint8_t), 64) : NULL;
-    reader->output->resource |= system && pp->output.locations != NULL && levels == NULL;
+    uint8_t* levels = tokens != NULL && system && pp->output.locations != NULL ? arena_push_array(reader->scratch, (uint64_t)pp->output.count + 4, sizeof(uint8_t), 64) : NULL;
+    reader->output->resource |= (((system && pp->output.locations != NULL) || relaxed) && tokens == NULL) || (system && pp->output.locations != NULL && levels == NULL);
+    if (tokens != NULL && levels == NULL)
+    {
+        memset(tokens, 0, (uint64_t)count + 4);
+    }
     if (levels != NULL)
     {
         if (BUSTER_SCALAR_PATH(parser->options.scalar) || pp->system_runs_inexact)
@@ -15950,7 +15982,15 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         levels[limit] = BUSTER_PP_USER_FILE;
         memset(levels + limit + 1, 0, 3);
         check_input_system_token_map(tokens, sources, count, levels, limit, parser->options.scalar);
-        tokens[count] = 0;
+        memset(tokens + count, 0, 4);
+    }
+    if (tokens != NULL && (levels != NULL || relaxed))
+    {
+        if (relaxed)
+        {
+            check_input_relaxed_tokens(reader, pp, tokens, count, relaxed_all);
+            reader->output->relaxed_tokens = true;
+        }
         graph->system_tokens = tokens;
         graph->system_token_count = count;
     }
