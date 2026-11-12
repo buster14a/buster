@@ -257,11 +257,17 @@ Memory operands may also fold shared same-block pointer conversions,
 full-width additions and address nodes. Each access publishes the original
 base/index as its effective uses; the shared producer remains only when another
 selected user needs its address value. A frame address may be shared in its
-block or the entry preheader. The walk still stops at narrow arithmetic,
-additional indices, out-of-range displacements and longer cross-block chains.
-This folds address computation without moving, merging or widening an access.
-`test-tier1-emit` executes shared and escaping frame/offset addresses with
-rematerialization on and off, kept frame pointers and realigned frames.
+block or the entry preheader. A pure address node of an earlier block folds
+too when every user takes it as an address (`tier1_select_sinkable`), so that
+no node computes it; one that another user keeps stays computed. The walk
+still stops at narrow arithmetic, additional indices and out-of-range
+displacements. This folds address computation without moving, merging or
+widening an access. `test-tier1-emit` executes shared and escaping
+frame/offset addresses with rematerialization on and off, kept frame pointers
+and realigned frames, and `tier1_address_sink_test.c` an entry block's address
+stored and loaded in both arms of a branch, by both selection paths, with and
+without a frame pointer: folded into each access where nothing else uses it,
+and kept, its value the accesses' base, where the returned sum does.
 
 `tier1_address_coalesce_test.c` checks that a simple unscaled, undisplaced
 base-plus-index uses `add` when allocation puts the result in either input
@@ -270,6 +276,16 @@ destinations, scales, displacements and `rsp` bases retain `lea`. Folded frame
 operands have their final base and offset before this decision. Both selector paths execute the
 32-bit, 64-bit and pointer fixtures against the independent IR interpreter.
 Flags are dead between IR nodes, as required by the existing emitter contract.
+Its in-place cases run a base plus each class of displacement (one, imm8,
+imm32, both signs) in the base's own register, an `add` (or `inc`, `sub`), and
+in another register or with no displacement, a `lea`, and a signed
+power-of-two quotient and remainder at both widths with the bias added in the
+dividend's register or by a `lea` into another, all natively against C.
+
+`test-tier1-cfg` counts the block entries where a recomputed value's register
+reads nothing before its recipe takes over (`tier1_cfg_entry_unread`), which
+its edges leave unfilled, and fails if its generated cases reach none; the CFG
+verifier and the certificate check every such entry the cases reach.
 
 The immediate-multiply candidate and both corresponding BURS productions
 have cost 3, versus 2 for a copy and shift and 1 for a 3/5/9 multiply's lea.
