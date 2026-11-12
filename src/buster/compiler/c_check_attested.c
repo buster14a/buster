@@ -570,6 +570,9 @@ struct CheckAttestedListing
 {
     const uint8_t* kinds;
     const uint32_t* names;
+    // The names' states, which the chain reads two passes on: each identifier's is fetched where the lists meet it, so
+    // that the chain finds the lines the compile between two units evicted.
+    const CheckAttestedKey* keys;
     uint32_t* firsts;
     uint32_t* lasts;
     uint8_t* flags;
@@ -592,51 +595,29 @@ struct CheckAttestedListing
 };
 
 // Token `t`, of role `role` and parts `action` (BUSTER_ATTESTED_ACT_*), into the lists, and the declaration it ends where
-// it is a root (`root`). Both paths call it for every token with a part or a root, the scalar one for every token. Its
-// common parts take no branch, since on a unit's first pass their order is a new one: an identifier's entry is written
-// at every step and counted at an identifier's, the level's flags are chosen, and the level above the stack's top is
-// written at every step and taken at an opener's (nothing reads a level above the top before an opener writes it). The
-// rare ones, a string in an asm or attribute group and a file-scope asm, and a root, branch.
+// it is a root (`root`). Both paths call it for every token with a part or a root, the scalar one for every token.
 static inline __attribute__((always_inline)) void check_attested_list_token(CheckAttestedListing* listing, uint32_t t, uint8_t role, uint8_t action, bool root)
 {
     uint8_t* const stack_flags = listing->stack_flags;
     uint8_t* const stack_bases = listing->stack_bases;
-    uint8_t* const stack_roles = listing->stack_roles;
-    const uint32_t depth = listing->depth;
-    const uint8_t level_flags = stack_flags[depth];
-    const uint8_t base = stack_bases[depth];
-    const bool identifier = (action & BUSTER_ATTESTED_ACT_IDENTIFIER) != 0;
-    const bool opens = (action & BUSTER_ATTESTED_ACT_OPEN) != 0;
-    const bool closes = (action & BUSTER_ATTESTED_ACT_CLOSE) != 0 && depth != 0;
-    // An identifier's class and entry.
-    const uint32_t id = listing->names[t] < BUSTER_ATTESTED_MAX_IDS ? listing->names[t] : 0;
-    const bool tag = role == PARSE_ROLE_TAG || role == PARSE_ROLE_LEAF_RIGHT;
-    const uint8_t operand = check_attested_level_class(base, level_flags);
-    const uint8_t name_class = tag ? BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP | BUSTER_ATTESTED_TAG :
-                               role == PARSE_ROLE_SPECIFIER ? BUSTER_ATTESTED_LOOKS_UP :
-                               role == PARSE_ROLE_MEMBER ? 0 : operand;
-    listing->name_entries[listing->names_count] = (id * 2 + (tag ? 1u : 0u)) | (uint32_t)name_class << BUSTER_ATTESTED_CLASS_SHIFT;
-    listing->names_count += identifier ? 1u : 0u;
-    // The level's flags: an identifier takes its enumerator, a comma starts the next item, a `;` the next member, and
-    // an `=` or a bit-field's `:` an expression.
-    const uint8_t item = base == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
-    const uint8_t flags = identifier ? level_flags & ~BUSTER_ATTESTED_LEVEL_ENUMERATOR :
-                          (action & BUSTER_ATTESTED_ACT_COMMA) != 0 ? item :
-                          (action & BUSTER_ATTESTED_ACT_SEMI) != 0 ? 0 :
-                          (action & BUSTER_ATTESTED_ACT_EXPRESSION) != 0 ? level_flags | BUSTER_ATTESTED_LEVEL_EXPRESSION : level_flags;
-    stack_flags[depth] = flags;
-    // The level an opener would open, above the top.
-    const uint8_t opened = check_attested_opened_base(role, check_attested_level_class(base, flags));
-    stack_roles[depth + 1] = role;
-    stack_bases[depth + 1] = opened;
-    stack_flags[depth + 1] = opened == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
-    listing->symbol_groups += opens && check_attested_symbol_group(role) ? 1u : 0u;
-    listing->symbol_groups -= closes && check_attested_symbol_group(stack_roles[depth]) && listing->symbol_groups != 0 ? 1u : 0u;
-    listing->declaration_flags |= opens && role == PARSE_ROLE_OPEN_BODY ? BUSTER_ATTESTED_DEFINITION : 0;
-    listing->depth = depth + (opens ? 1u : 0u) - (closes ? 1u : 0u);
-    if (__builtin_expect((action & (BUSTER_ATTESTED_ACT_STRING | BUSTER_ATTESTED_ACT_ASM)) != 0, 0))
+    uint32_t depth = listing->depth;
+    if (action != 0)
     {
-        if ((action & BUSTER_ATTESTED_ACT_STRING) != 0 && listing->symbol_groups != 0)
+        const uint8_t level_flags = stack_flags[depth];
+        if ((action & BUSTER_ATTESTED_ACT_IDENTIFIER) != 0)
+        {
+            const uint32_t id = listing->names[t] < BUSTER_ATTESTED_MAX_IDS ? listing->names[t] : 0;
+            const bool tag = role == PARSE_ROLE_TAG || role == PARSE_ROLE_LEAF_RIGHT;
+            const uint8_t operand = check_attested_level_class(stack_bases[depth], level_flags);
+            const uint8_t name_class = tag ? BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP | BUSTER_ATTESTED_TAG :
+                                       role == PARSE_ROLE_SPECIFIER ? BUSTER_ATTESTED_LOOKS_UP :
+                                       role == PARSE_ROLE_MEMBER ? 0 : operand;
+            stack_flags[depth] = level_flags & ~BUSTER_ATTESTED_LEVEL_ENUMERATOR;
+            listing->name_entries[listing->names_count] = (id * 2 + (tag ? 1u : 0u)) | (uint32_t)name_class << BUSTER_ATTESTED_CLASS_SHIFT;
+            listing->names_count += 1;
+            _mm_prefetch((const char*)(listing->keys + id * 2 + (tag ? 1u : 0u)), _MM_HINT_T0);
+        }
+        else if ((action & BUSTER_ATTESTED_ACT_STRING) != 0 && listing->symbol_groups != 0)
         {
             listing->string_tokens[listing->strings] = t;
             listing->string_declarations[listing->strings] = listing->declaration;
@@ -647,6 +628,34 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
                  (t == listing->first || (t == listing->first + 1 && listing->kinds[listing->first] == PARSE_KIND_EXTENSION)))
         {
             listing->declaration_flags |= BUSTER_ATTESTED_ASM;
+        }
+        else if ((action & BUSTER_ATTESTED_ACT_COMMA) != 0)
+        {
+            stack_flags[depth] = stack_bases[depth] == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
+        }
+        else if ((action & BUSTER_ATTESTED_ACT_SEMI) != 0)
+        {
+            // A struct body's member declaration ends: its bit-field's width with it.
+            stack_flags[depth] = 0;
+        }
+        else if ((action & BUSTER_ATTESTED_ACT_EXPRESSION) != 0)
+        {
+            stack_flags[depth] = level_flags | BUSTER_ATTESTED_LEVEL_EXPRESSION;
+        }
+        if ((action & BUSTER_ATTESTED_ACT_OPEN) != 0)
+        {
+            const uint8_t base = check_attested_opened_base(role, check_attested_level_class(stack_bases[depth], stack_flags[depth]));
+            depth += 1;
+            listing->stack_roles[depth] = role;
+            stack_bases[depth] = base;
+            stack_flags[depth] = base == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
+            listing->symbol_groups += check_attested_symbol_group(role) ? 1u : 0u;
+            listing->declaration_flags |= role == PARSE_ROLE_OPEN_BODY ? BUSTER_ATTESTED_DEFINITION : 0;
+        }
+        else if ((action & BUSTER_ATTESTED_ACT_CLOSE) != 0 && depth != 0)
+        {
+            listing->symbol_groups -= check_attested_symbol_group(listing->stack_roles[depth]) && listing->symbol_groups != 0 ? 1u : 0u;
+            depth -= 1;
         }
     }
     if (root)
@@ -667,10 +676,11 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
         listing->name_starts[declaration + 1] = listing->names_count;
         listing->declaration_flags = 0;
         listing->first = t + 1;
-        listing->depth = 0;
+        depth = 0;
         listing->symbol_groups = 0;
         stack_flags[0] = 0;
     }
+    listing->depth = depth;
 }
 
 // The lists of `parser`'s unit into the census's unit arrays; whether there was room. One pass in source order, with a
@@ -688,6 +698,7 @@ static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census
     CheckAttestedListing listing = {
         .kinds = kinds,
         .names = parser->tokens.names,
+        .keys = census->keys,
         .firsts = census->firsts,
         .lasts = census->lasts,
         .flags = census->flags,
@@ -826,10 +837,22 @@ static __attribute__((noinline)) bool check_attested_pragmas(CheckAttested* cens
 // The declarations' own hashes: each token's kind, role, system level and name (or literal: an integer's value, any
 // other's spelling), at its place in the declaration.
 
+// The ranges the last literals' spellings were in (a unit's literals are mostly in a few: the file's own text and the
+// macros' definitions it expands), each searched for again only where none holds a literal's location.
+#define BUSTER_ATTESTED_RANGES 4u
+typedef struct CheckAttestedRanges CheckAttestedRanges;
+struct CheckAttestedRanges
+{
+    uint32_t bases[BUSTER_ATTESTED_RANGES];
+    uint32_t lengths[BUSTER_ATTESTED_RANGES];
+    const uint8_t* bytes[BUSTER_ATTESTED_RANGES];
+    uint32_t next;
+};
+
 // The spelling of the literal at pp output token `source`, as pp_spelling gives it, into `*spelling`: its bytes found
-// through the range that held the last literal (`*range`, searched for again where it doesn't hold this one), since a
-// declaration's literals are mostly one file's. Its length, or UINT32_MAX where it doesn't fit the census's buffer.
-static uint32_t check_attested_literal(CheckAttested* census, Preprocessor* pp, uint32_t source, uint32_t* range, const uint8_t** spelling)
+// through the ranges that held the last literals (`ranges`), since a unit's literals are mostly in a few. Its length,
+// or UINT32_MAX where it doesn't fit the census's buffer.
+static uint32_t check_attested_literal(CheckAttested* census, Preprocessor* pp, uint32_t source, CheckAttestedRanges* ranges, const uint8_t** spelling)
 {
     const PPTokens* output = &pp->output;
     const uint8_t kind = output->kinds[source];
@@ -843,11 +866,26 @@ static uint32_t check_attested_literal(CheckAttested* census, Preprocessor* pp, 
     }
     else if (fits)
     {
-        const bool held = *range < pp->range_count && location >= pp->ranges[*range].base && location - pp->ranges[*range].base < pp->ranges[*range].length;
-        census->range_searches += held ? 0 : 1;
-        *range = held ? *range : pp_find_range(pp, location);
-        result = *range != BUSTER_PP_NONE ?
-                 pp_without_splices(pp, kind, pp->ranges[*range].bytes + (location - pp->ranges[*range].base), end - location, census->spelling, spelling) :
+        uint32_t held = BUSTER_ATTESTED_RANGES;
+        for (uint32_t r = 0; r < BUSTER_ATTESTED_RANGES; r += 1)
+        {
+            held = location - ranges->bases[r] < ranges->lengths[r] ? r : held;
+        }
+        if (held == BUSTER_ATTESTED_RANGES)
+        {
+            census->range_searches += 1;
+            const uint32_t found = pp_find_range(pp, location);
+            if (found != BUSTER_PP_NONE)
+            {
+                held = ranges->next;
+                ranges->bases[held] = pp->ranges[found].base;
+                ranges->lengths[held] = pp->ranges[found].length;
+                ranges->bytes[held] = pp->ranges[found].bytes;
+                ranges->next = (held + 1) % BUSTER_ATTESTED_RANGES;
+            }
+        }
+        result = held != BUSTER_ATTESTED_RANGES ?
+                 pp_without_splices(pp, kind, ranges->bytes[held] + (location - ranges->bases[held]), end - location, census->spelling, spelling) :
                  pp_spelling(pp, kind, end, location, census->spelling, spelling);
     }
     return result;
@@ -855,7 +893,7 @@ static uint32_t check_attested_literal(CheckAttested* census, Preprocessor* pp, 
 
 // A literal's word at its place `place` in its declaration (its own constants, apart from the tokens' words), into
 // `*hash`: an integer's value, or any other's spelling's hash.
-static void check_attested_literal_word(CheckAttested* census, Preprocessor* pp, uint32_t source, uint32_t place, uint32_t* range, CheckAttestedHash* hash)
+static void check_attested_literal_word(CheckAttested* census, Preprocessor* pp, uint32_t source, uint32_t place, CheckAttestedRanges* ranges, CheckAttestedHash* hash)
 {
     const PPTokens* output = &pp->output;
     uint64_t word = (uint64_t)1 << 63;
@@ -866,7 +904,7 @@ static void check_attested_literal_word(CheckAttested* census, Preprocessor* pp,
     else
     {
         const uint8_t* spelling = census->spelling;
-        const uint32_t length = check_attested_literal(census, pp, source, range, &spelling);
+        const uint32_t length = check_attested_literal(census, pp, source, ranges, &spelling);
         word ^= length != UINT32_MAX ? check_attested_bytes(spelling, length) : (uint64_t)output->locations[source] << 24;
     }
     census->spelled_literals += output->kinds[source] != BUSTER_PP_KIND_INTEGER ? 1 : 0;
@@ -929,7 +967,8 @@ static __attribute__((noinline)) void check_attested_literals(CheckAttested* cen
     const __m512i number = _mm512_set1_epi8(PARSE_KIND_NUMBER);
     const __m512i character = _mm512_set1_epi8(PARSE_KIND_CHARACTER);
     const __m512i string = _mm512_set1_epi8(PARSE_KIND_STRING);
-    uint32_t range = BUSTER_PP_NONE;
+    // No range held yet: each length 0, which no location's offset is below.
+    CheckAttestedRanges ranges = { 0 };
     uint32_t at = 0;
     for (uint32_t t = 0; t < end; t += 64)
     {
@@ -956,7 +995,7 @@ static __attribute__((noinline)) void check_attested_literals(CheckAttested* cen
             {
                 at += 1;
             }
-            check_attested_literal_word(census, pp, sources[token], token - firsts[at], &range, owns + at);
+            check_attested_literal_word(census, pp, sources[token], token - firsts[at], &ranges, owns + at);
             census->literal_count += 1;
             literals &= literals - 1;
         }
@@ -1060,13 +1099,19 @@ static __attribute__((noinline)) void check_attested_chain(CheckAttested* census
         census->semantics[d] = hash;
         const bool eligible = (census->flags[d] & (BUSTER_ATTESTED_DEFINITION | BUSTER_ATTESTED_PRAGMA)) == 0;
         census->hits[d] = eligible && check_attested_memo_has(census, hash);
+        // Its declared names, each once (a body names its locals again and again): a name whose list's last declarer is
+        // this declaration is declared already.
         for (uint32_t n = name_starts[d]; n < end; n += 1)
         {
             const uint32_t entry = name_entries[n];
-            if ((entry >> BUSTER_ATTESTED_CLASS_SHIFT & BUSTER_ATTESTED_DECLARES) != 0)
+            const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
+            const CheckAttestedKey* state = census->keys + key;
+            const bool again = state->stamp == census->stamp && state->local != BUSTER_ATTESTED_NONE &&
+                               census->entry_declarations[census->lists[state->local].last] == d;
+            if ((entry >> BUSTER_ATTESTED_CLASS_SHIFT & BUSTER_ATTESTED_DECLARES) != 0 && !again)
             {
-                check_attested_declare(census, entry & BUSTER_ATTESTED_KEY_MASK, hash);
-                check_attested_declarer(census, entry & BUSTER_ATTESTED_KEY_MASK, d, &entries, &distinct);
+                check_attested_declare(census, key, hash);
+                check_attested_declarer(census, key, d, &entries, &distinct);
             }
         }
     }
