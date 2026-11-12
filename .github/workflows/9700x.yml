@@ -257,14 +257,15 @@ jobs:
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
     needs: [changes, evidence, policy]
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}
     uses: ./.github/workflows/prepare-hosted-tools.yml
 
   test:
     name: Tests on Ubuntu 26.04 (${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
-    # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
-    # policy job (`policy`, #2334), which finishes about when `changes` does, and don't start when it fails: they wouldn't
-    # change a qualification that can't pass. Pushes to main, merge-queue candidates (#1430), the daily run and
+    # A pull request's run stops at its first failure, and so does a merge-queue candidate's (#1430, the owner's choice
+    # on 2026-11-12: a failing candidate leaves the queue sooner and holds fewer runners). GitHub has no fail-fast across
+    # jobs, so their tests wait for the policy job (`policy`, #2334), which finishes about when `changes` does, and don't
+    # start when it fails: they wouldn't change a qualification that can't pass. Pushes to main, the daily run and
     # dispatched runs test regardless, so that every row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     # Each row is hosted-correctness.yml: its shards, and for a portable row the job that builds its compiler once for
@@ -276,12 +277,12 @@ jobs:
     # (docs/ci.md, "The vector row"). It is one call of the row workflow, which `include` adds: its `sanitizer` lists
     # the configurations.
     needs: [changes, evidence, policy, prepare-hosted-tools]
-    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}
     strategy:
-      # On a pull request, the first failing row cancels the others (and each row's own shards fail fast). Elsewhere
-      # every row runs to its end: these rows are main's sanitizer coverage, and one detector's failure must not hide
-      # what the others find.
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      # On a pull request or a merge-queue candidate, the first failing row cancels the others (and each row's own shards
+      # and vector draws fail fast). Elsewhere every row runs to its end: these rows are main's sanitizer coverage, and
+      # one detector's failure must not hide what the others find.
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64"]' || '["x86-64", "native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
@@ -325,7 +326,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
-      fail-fast: false
+      # A merge-queue candidate's first failing campaign cancels the others, as its test rows fail fast (#1430). The
+      # daily and dispatched runs, and pushes before the nightly mode, run every campaign to its end.
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         include:
           - entry: frontend

@@ -171,10 +171,10 @@ jobs:
     # MSan rows 98, so the plain rows keep a 120-minute bound and the sanitizer rows 360.
     timeout-minutes: ${{ inputs.sanitizer == 'none' && 120 || 360 }}
     strategy:
-      # On a pull request, the first failing shard cancels the others, and 9700x.yml's matrix the other rows. Elsewhere
-      # every shard runs to its end: these rows are main's sanitizer coverage, and one detector's failure must not hide
-      # what the others find.
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      # On a pull request or a merge-queue candidate (#1430), the first failing shard cancels the others, and 9700x.yml's
+      # matrix the other rows. Elsewhere every shard runs to its end: these rows are main's sanitizer coverage, and one
+      # detector's failure must not hide what the others find.
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         # The row's inventory runs as its `shards` input's N shards, a runner each (`parallel --shard K/N`, dealt by the
         # row's own costs, tools/ci/costs/ROW.costs, #2031): this lookup's element N is the list 1 to N. A plain row's
@@ -911,7 +911,7 @@ jobs:
       contents: read
       actions: read
     strategy:
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         # 3 candidates per item (BUSTER_VECTOR_ITEMS): 12 for a pull request's `none`, 48 for all four configurations.
         # changes_shard_policy checks both counts, and the collector refuses another.
@@ -990,7 +990,7 @@ jobs:
       contents: read
       actions: read
     strategy:
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         candidate: ${{ fromJSON(needs.collect-1.outputs.candidates) }}
     defaults:
@@ -1033,7 +1033,7 @@ jobs:
       contents: read
       actions: read
     strategy:
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         candidate: ${{ fromJSON(needs.collect-2.outputs.candidates) }}
     defaults:
@@ -1076,7 +1076,7 @@ jobs:
       contents: read
       actions: read
     strategy:
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         candidate: ${{ fromJSON(needs.collect-3.outputs.candidates) }}
     defaults:
