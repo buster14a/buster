@@ -1355,6 +1355,72 @@ The tests:
   `_mm*_movemask_*` and `_mm_cvtsi128_si*`, compiled by `--tier1
   -march=x86-64-v4`, matches clang's output; its 17 machine rows are all gone.
 
+## Reductions (#1840)
+
+One more unary `intrinsic` kind, `reduce` (`BUSTER_IR_INTRINSIC_REDUCE`), reduces
+a vector's doublewords or quadwords:
+
+```text
+%6 = intrinsic.v4i32 %3 reduce 14
+%9 = intrinsic.i64 %8 lane_extract 3
+```
+
+- **Operands:** a is a vector of 16, 32 or 64 bytes; the result is a 16-byte
+  vector (`v4i32`), every lane of which holds the reduction of all of a's lanes.
+- **Flags:** the lanes' bytes' log2 in bits 0 and 1 (2 or 3) and the operation
+  in bits 2 to 5 (`BUSTER_IR_REDUCE_*`): the unsigned (0) and signed (1)
+  minimum, the unsigned (2) and signed (3) maximum, as `lane_op`'s, then the
+  wrapping sum (4) and product (5), and the and (6), or (7) and xor (8).
+- **Why a vector result:** clang's code halves the vector (`vextracti64x4`,
+  `vextracti32x4`, then `vpshufd 0x4e` and, of doublewords, `0xb1`), each half
+  combined with the other. That leaves the result in every lane of the last 16
+  bytes, and `lane_extract`'s lane 0 (`vmovd`, `vmovq`) then takes it. The
+  front end splits a doubleword reduction of 64 bytes into two rows (nine
+  records); its first row is exactly this vector.
+- **Model and passes:** `IR_SIMD_REDUCE`. SCCP folds a constant vector's
+  reduction, and GVN and LICM take it as pure and total.
+
+**Decoder** (`ir_simd_typed_reduce`): a row of one vector into an integer of
+the lane's bytes, every halving to the lane and then `vmovd` or `vmovq` of lane
+0, is `reduce` followed by `lane_extract`. The same halvings alone into a
+16-byte vector are `reduce`. The combining forms are `ir_simd_reduce_form`'s:
+`lane_op`'s minima and maxima, `vpaddd`/`vpaddq`, `vpmulld`/`vpmullq`, and the
+quadwords' `vpandq`, `vporq` and `vpxorq` whatever the lanes, as
+`check_vector_elementwise_forms` gives them. Bytes and words, whose last
+halvings shift rather than shuffle, stay machine rows. The producer's rows
+moved with the elementwise forms to `c_check_program_vector_convert.c`
+(`check_vector_reduce_shape_rows`), so that the backend unit's tests read them.
+
+**Tier 1** selects it as a `TIER1_RULE_VECTOR` kind (`tier1_select_reduce`):
+each halving moves the high half into the vector scratch register and
+combines both into the destination. A 64-byte doubleword reduction has eight
+records, so a node's room (`BUSTER_TIER1_SELECT_RECORDS_PER_NODE`) grew from 6
+to 8. Every form already had its Zen 5 row.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against main (`a221f633`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 15 | 6 |
+| `main_unit_backend.c` | 193 | 162 |
+
+`test-checker-driver`'s machine-rows fixture goes from 13 rows to 9, so its
+floor drops from 10 to 5.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `reduce` exactly at a `v4i32` result, of
+  a vector of each width, at every flags byte whose lanes are doublewords or
+  quadwords and whose operation is one of the nine. The model gives C's
+  reductions on random vectors with lanes at the signed and unsigned edges.
+- **`test-ir-parse`:** `tests/ir/reductions.ir` round-trips.
+- **`test-ir-simd`:** the producer's 54 reductions (min and max of both signs
+  and the five others, of doublewords and quadwords at 3 widths) decode at
+  exactly their features, the 9 split ones' second rows as `lane_extract`. Each
+  is refused without each feature it needs and under 6 changes.
+- **`test-tier1-masks`:** the 54 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C's reductions.
 ## Floating operations at their own rounding (#1840)
 
 One more binary `intrinsic` kind, `fround` (`BUSTER_IR_INTRINSIC_FROUND`), is
@@ -1395,12 +1461,13 @@ their forms without rounding are: `vaddpd`, `vsubps` and `vsubpd` 2 cycles,
 first five, and a `vdivps` every 2.5 cycles and a `vdivpd` every 4.
 
 Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
-compiling this change's sources, against main (`2331a9be`):
+compiling this change's sources, against main (`91a87ab2`), with the
+truncating conversions below:
 
 | Unit | Rows before | Rows after |
 | --- | ---: | ---: |
-| `main_unit_frontend.c` | 15 | 15 |
-| `main_unit_backend.c` | 193 | 177 |
+| `main_unit_frontend.c` | 6 | 6 |
+| `main_unit_backend.c` | 162 | 136 |
 
 The tests:
 
@@ -1441,8 +1508,8 @@ destination (`BUSTER_TIER1_VECTOR_CVTT`). The four EVEX forms had no Zen 5 row;
 they were measured on the 9700X in the same record: 7.5 cycles of latency
 across the register files, as the legacy forms', 2 per cycle, two macro-ops.
 
-Machine rows: `main_unit_backend.c` 177 → 167, after the floating operations
-above.
+Machine rows: 10 of the 26 the table above counts in `main_unit_backend.c`
+are these conversions.
 
 The tests:
 

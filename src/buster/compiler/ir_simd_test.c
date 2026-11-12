@@ -1176,6 +1176,92 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's lane moves and movemasks are C's");
 }
 
+// The reductions (#1840): both verifiers admit reduce exactly where its result is a V4I32, its operand a vector of any
+// width, its lanes doublewords or quadwords and its operation one of the nine, for every flags byte; and the model gives
+// C's minimum, maximum, sum, product, and, or and xor of all of the lanes in each of the result's lanes, on random
+// vectors with lanes at the signed and unsigned edges.
+static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x9b05688c2b3e6c1f);
+    uint32_t admitted_count = 0;
+    uint32_t expected_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t result = 0; result < 3; result += 1)
+            {
+                const IrType vector = (IrType)(IR_V4I32 + width);
+                const IrType type = result == 0 ? IR_V4I32 : result == 1 ? IR_V8I32 : IR_I32;
+                const bool admitted = result == 0 && (flags & 3) >= 2 && (flags >> 2) < BUSTER_IR_REDUCE_OPERATIONS;
+                expected_count += admitted;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "reduction verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, type, 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[1] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a reduction is admitted exactly at its lanes, operation and V4I32 result");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == expected_count && expected_count == 3 * 2 * BUSTER_IR_REDUCE_OPERATIONS, "reductions are admitted at every width, lanes and operation");
+    // The model against C's operations, lane by lane.
+    static const uint64_t edges[6] = { 0, 1, UINT64_MAX, UINT64_C(0x7fffffffffffffff), UINT64_C(0x8000000000000000), UINT64_C(0x80000000) };
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 2 * BUSTER_IR_REDUCE_OPERATIONS * 4; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t size = 2 + (trial / 3) % 2;
+        const uint32_t operation = (trial / 6) % BUSTER_IR_REDUCE_OPERATIONS;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const uint32_t lanes = bytes / element;
+        IrSimdValue a = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            const uint64_t random = ir_test_random(&state);
+            a.words[w] = (random & 3) == 0 ? edges[(random >> 2) % 6] : random;
+        }
+        uint64_t wanted = 0;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            uint64_t x = 0;
+            memcpy(&x, (const uint8_t*)a.words + lane * element, element);
+            const int64_t sx = size == 2 ? (int64_t)(int32_t)(uint32_t)x : (int64_t)x;
+            const int64_t sw = size == 2 ? (int64_t)(int32_t)(uint32_t)wanted : (int64_t)wanted;
+            const uint64_t combined[9] = { x < wanted ? x : wanted, sx < sw ? x : wanted, x > wanted ? x : wanted, sx > sw ? x : wanted, wanted + x, wanted * x, wanted & x, wanted | x, wanted ^ x };
+            wanted = lane == 0 ? x : combined[operation];
+            wanted = size == 2 ? wanted & UINT32_MAX : wanted;
+        }
+        IrSimdValue expected = {0};
+        for (uint32_t lane = 0; lane < 16 / element; lane += 1)
+        {
+            memcpy((uint8_t*)expected.words + lane * element, &wanted, element);
+        }
+        const IrSimdValue* operands[3] = { &a, 0, 0 };
+        const IrSimdAction action = {
+            .operation = IR_SIMD_REDUCE,
+            .result = IR_SIMD_V4I32,
+            .operands = { (IrSimdShape)(IR_SIMD_V4I32 + width), IR_SIMD_NONE, IR_SIMD_NONE },
+            .index = (uint8_t)(size | operation << 2),
+        };
+        IrSimdValue got = {0};
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && memcmp(&got, &expected, sizeof(got)) == 0;
+    }
+    ir_test_expect(test, exact, "the model's reductions are C's");
+}
+
 // C's operation of two lanes in the rounding mode the flags name (#1840's fround), by host_fesetround and volatile
 // operands, the oracle of the model's MXCSR rounding: the arithmetic happens between the volatile loads and the volatile
 // store, which no call reorders.
@@ -1676,6 +1762,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_compresses(test, output, scratch);
     ir_test_masked_memory(test, output, scratch);
     ir_test_lane_moves(test, output, scratch);
+    ir_test_reductions(test, output, scratch);
     ir_test_frounds(test, output, scratch);
     ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);

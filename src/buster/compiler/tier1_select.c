@@ -19,7 +19,8 @@
 #define BUSTER_TIER1_SELECT_NO_REGISTER UINT8_MAX
 #define BUSTER_TIER1_SELECT_LANES 16
 #define BUSTER_TIER1_SELECT_SCRATCH X86_REGISTER_R11
-#define BUSTER_TIER1_SELECT_RECORDS_PER_NODE 6
+// A node's room for its records: a doubleword reduction of 64 bytes (#1840, tier1_select_reduce) has 8.
+#define BUSTER_TIER1_SELECT_RECORDS_PER_NODE 8
 // The most records a rule that takes x86's fixed registers writes (tier1_select_fixed), before its consumer's saves: a
 // remainder by a constant's reciprocal whose multiplier takes the add sequence, whose divisor is past an imm32 and whose
 // dividend is in rax or rdx has 13.
@@ -325,12 +326,17 @@ typedef enum Tier1SelectRule
 #define BUSTER_TIER1_VECTOR_LANE_EXTRACT 21
 #define BUSTER_TIER1_VECTOR_LANE_INSERT 22
 #define BUSTER_TIER1_VECTOR_MOVEMASK 23
+// A reduction of values[0]'s doublewords or quadwords into each lane of a 16-byte destination (#1840,
+// tier1_select_reduce): `immediate` the IR's flags, `source_width` values[0]'s bytes. Clang's halvings: the high half
+// into the vector class's scratch register (vextracti64x4, vextracti32x4, then vpshufd 0x4e and, of doublewords, 0xb1),
+// then the operation of both halves into the destination.
+#define BUSTER_TIER1_VECTOR_REDUCE 24
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
-#define BUSTER_TIER1_VECTOR_FROUND 24
+#define BUSTER_TIER1_VECTOR_FROUND 25
 // A truncating conversion of values[0]'s lane 0 into the general destination (#1840): `immediate` the IR's flags, one
 // record of ir_simd_cvtt_forms'.
-#define BUSTER_TIER1_VECTOR_CVTT 25
+#define BUSTER_TIER1_VECTOR_CVTT 26
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1590,6 +1596,29 @@ static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles
     }
 }
 
+// A reduction (#1840, BUSTER_TIER1_VECTOR_REDUCE): each halving reads the source, then the destination, whose 16 bytes
+// end with the result in every lane, as ir_simd_typed_reduce decodes them.
+static void tier1_select_reduce(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t flags = (uint32_t)holes->immediate;
+    const uint32_t size = flags & 3;
+    const uint32_t operation = flags >> 2;
+    const uint8_t x = destination & 15;
+    const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    uint8_t from = holes->left & 15;
+    for (uint32_t span = holes->source_width / 2u; span >= (1u << size); span /= 2)
+    {
+        const X86Instruction halve = span >= 16 ? (X86Instruction){ .form = span == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8,
+                                                                    .reg = from, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 1 }
+                                                : (X86Instruction){ .form = X86_FORM_VPSHUFD_X_XM128_IMM8_EVEX, .reg = scratch, .rm = from, .mode = BUSTER_X86_REGISTER_DIRECT,
+                                                                    .immediate = span == 8 ? 0x4e : 0xb1 };
+        const X86Instruction combine = { .form = ir_simd_reduce_form(operation, size, span == 32 ? 1 : 0), .reg = x, .vvvv = from, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, halve);
+        tier1_select_append(result, combine);
+        from = x;
+    }
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -2238,6 +2267,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
         {
             tier1_select_lane(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_REDUCE)
+        {
+            tier1_select_reduce(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CVTT)
         {
@@ -4696,7 +4729,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
-                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_FROUND)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
+                                                                           c == BUSTER_IR_INTRINSIC_FROUND)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4807,6 +4841,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_REDUCE && a < function->instruction_count)
+        {
+            // A reduction (#1840): its source's width, and its lanes and operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_REDUCE;
+            base.source_width = (uint8_t)tier1_select_vector_width(function->type[a]);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }

@@ -307,18 +307,32 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_LANE_EXTRACT 31u
 #define BUSTER_IR_INTRINSIC_LANE_INSERT 32u
 #define BUSTER_IR_INTRINSIC_MOVEMASK 33u
+// A reduction of a vector's integer lanes (#1840), unary: its result a 16-byte vector (V4I32) each of whose lanes is
+// the operation of all of a's lanes, a a vector of 16, 32 or 64 bytes; its flags the lanes' bytes' log2 in bits 0 and 1
+// (2 or 3: doublewords or quadwords) and the operation in bits 2 to 5 (BUSTER_IR_REDUCE_*): the unsigned (0) and signed
+// (1) minimum, the unsigned (2) and signed (3) maximum, as lane_op's, then the wrapping sum (4) and product (5), and
+// the and (6), or (7) and xor (8). Clang's __builtin_reduce_* code halves the vector (vextracti64x4, vextracti32x4,
+// then vpshufd 0x4e and, of doublewords, 0xb1), each half combined with the other, which leaves every lane of the last
+// 16 bytes the result; lane_extract's lane 0 then takes it.
+#define BUSTER_IR_INTRINSIC_REDUCE 34u
+#define BUSTER_IR_REDUCE_ADD 4u
+#define BUSTER_IR_REDUCE_MUL 5u
+#define BUSTER_IR_REDUCE_AND 6u
+#define BUSTER_IR_REDUCE_OR 7u
+#define BUSTER_IR_REDUCE_XOR 8u
+#define BUSTER_IR_REDUCE_OPERATIONS 9u
 // A floating operation of two 64-byte vectors' lanes at a rounding of its own, its exceptions suppressed (#1840), a and
 // b of the result's type: its flags the operation in bits 0 and 1 (0 a + b, 1 a - b, 2 a * b, 3 a / b), the lanes in
 // bit 2 (0 floats, 1 doubles) and the rounding in bits 3 and 4 (to nearest, down, up, toward zero: EVEX's and MXCSR's
 // order). Each lane is x86's packed operation's, whatever MXCSR holds, and sets none of its flags: vaddps to vdivpd
 // with embedded rounding ({rn-sae} to {rz-sae}, _mm512_add_round_ps to _mm512_div_round_pd).
-#define BUSTER_IR_INTRINSIC_FROUND 34u
+#define BUSTER_IR_INTRINSIC_FROUND 35u
 // A truncating conversion of a 16-byte vector's lane 0 into an integer, x86's (#1840), unary: its flags' bit 0 the lane
 // a double (else a float) and bit 1 the result an I64 (else an I32), rounded toward zero; a NaN or a value past the result's range
 // gives its smallest value, x86's integer indefinite, where C's fptosi would be undefined (vcvttss2si, vcvttsd2si:
 // _mm_cvttss_si32 to _mm_cvttsd_si64).
-#define BUSTER_IR_INTRINSIC_CVTT 35u
-#define BUSTER_IR_INTRINSIC_COUNT 36u
+#define BUSTER_IR_INTRINSIC_CVTT 36u
+#define BUSTER_IR_INTRINSIC_COUNT 37u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -875,6 +889,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_extract",
     "lane_insert",
     "movemask",
+    "reduce",
     "fround",
     "cvtt",
 };
@@ -2121,6 +2136,11 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     valid = b == BUSTER_IR_NONE && lanes != 0 &&
                             (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
                                                                     type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_REDUCE)
+                {
+                    // A reduction of doublewords or quadwords into each lane of 16 bytes.
+                    valid = b == BUSTER_IR_NONE && type == IR_V4I32 && ir_vector_type(ta) && (part & 3) >= 2 && (part >> 2) < BUSTER_IR_REDUCE_OPERATIONS;
                 }
                 else if (c == BUSTER_IR_INTRINSIC_CVTT)
                 {
@@ -3606,7 +3626,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
                                 c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
-                                c == BUSTER_IR_INTRINSIC_FROUND || c == BUSTER_IR_INTRINSIC_CVTT)
+                                c == BUSTER_IR_INTRINSIC_REDUCE || c == BUSTER_IR_INTRINSIC_FROUND || c == BUSTER_IR_INTRINSIC_CVTT)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

@@ -361,8 +361,9 @@ static void check_test_prefix_lost_body(CheckTest* test)
     intern_release(&identifiers);
 }
 
-// A diagnosed missing parameter type preserves its complete declaration's tree, but never admits a later
-// declaration, an unknown type outside a parameter, or a declaration whose syntax recovery erased nodes.
+// A diagnosed missing parameter type preserves its complete declaration's tree and the later declarations' (#1447: each
+// later parameter's typo is searched), but never admits an unknown type outside a parameter, or a declaration whose
+// syntax recovery erased nodes.
 static void check_test_prefix_parameter_types(CheckTest* test)
 {
     static const struct
@@ -401,7 +402,7 @@ static void check_test_prefix_parameter_types(CheckTest* test)
                 const bool parsed = parse_translation_unit(&parser, &pp);
                 const uint32_t errors = parser.errors;
                 uint32_t end = 0;
-                for (uint32_t t = 0; cases[c].retain && end == 0 && t < parser.tokens.count; t += 1)
+                for (uint32_t t = 0; cases[c].retain && t < parser.tokens.count; t += 1)
                 {
                     if (parser.tree.roles[t] == PARSE_ROLE_TERMINATOR && parser.tree.parents[t] == BUSTER_PARSE_ROOT)
                     {
@@ -413,10 +414,10 @@ static void check_test_prefix_parameter_types(CheckTest* test)
                 check_test_expect(test, !parsed && errors != 0 && !parser.recovered_parameter_types && parser.errors == errors &&
                                       status == (cases[c].retain ? CHECK_PREFIX_READY : CHECK_PREFIX_EMPTY) && prefix.end == end &&
                                       prefix.parser.recovered_parameter_types == cases[c].retain && scratch.length == 0,
-                                  "parameter recovery retains only its complete declaration and preserves rejection");
-                check_test_expect(test, !cases[c].retain || (end != 0 && end < parser.tokens.count && parser.diagnostic_count == 1 &&
+                                  "parameter recovery retains its declaration and the later ones and preserves rejection");
+                check_test_expect(test, !cases[c].retain || (end != 0 && end == parser.tokens.count && parser.diagnostic_count == 1 &&
                                                             parser.diagnostics[0].parameter_type),
-                                  "parameter recovery is explicitly diagnosed and excludes the later declaration");
+                                  "parameter recovery is explicitly diagnosed and includes the later declaration");
                 if (cases[c].retain && parser.diagnostic_count != 0 && parser.diagnostics[0].message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME)
                 {
                     const uint32_t token = parser.diagnostics[0].token;
