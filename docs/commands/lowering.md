@@ -296,6 +296,27 @@ takes its entries.
   `template`. X writes the arguments, each converted, and a `CALL` whose value
   is the call's row numbered in the tasks' preorder, as the lowering allocates
   its rows, relative to the expression's first call.
+- **A call's per-unit answers** (`NodeMachine`, filled as T meets them and
+  forgotten by `node_machine_forget`):
+  - `function_pointers`, a function type's pointer type by type index
+    (`node_machine_function_pointer`), `type_pointer` its twin: a callee's and
+    a function argument's conversion is one load once the type's first
+    designator has filled it.
+  - `argument_memo`, 1,024 entries of 16 bytes, direct-mapped
+    (`node_machine_argument_memo`): `node_machine_argument`'s answer (taken or
+    refused, and the conversion) by the argument record's type, its standing
+    (an lvalue, an integer constant, or neither) and the parameter's type (0
+    for a variadic argument). Only an argument the rule reads nothing else of
+    is a key: no constant but an address or an integer, none of a null
+    pointer's, a bit-field's, a register array's or a volatile part's flags,
+    and no enumeration's lvalue. A hit answers where the conversion changes
+    nothing `check_action_inherit` reads (an integer, floating, pointer or
+    enumeration type's, from those or an array or a function), and inherits
+    the record's value; an integer constant's only where every integer of its
+    type converts alike (`node_machine_memo_integers`: not to a pointer, where
+    a null pointer constant is taken and another isn't). The rule fills a miss
+    and takes every other argument, and `--verify` checks the call against
+    the action either way.
 - **The comparison**, for every expression the machine takes: each record's
   value (every field), its operands' conversions, a call's arguments'
   conversions and a member's offset against the stream's, and its tape against
@@ -321,13 +342,17 @@ takes its entries.
   taken expressions N times a sweep set, T alone, T and C, and all three,
   interleaved, and keeps each set's least cycles and instructions (this
   thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X
-  only, under its lock, as `taskset -c 2`.
+  only, under its lock, as `taskset -c 2`. Each sweep set starts with the
+  unit's call answers forgotten, so that each pass pays their fills as one
+  compile of the unit does.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
 callee), the operators the code and template refusals stopped at, the
 differences (values, entries, twin), the labels compared, T's nodes by row or
-rule and by the action, by operator, and the times.
+rule and by the action, by operator, the argument memo's entries filled and the
+arguments the rule took instead (over every expression T typed, beside the taken
+calls' arguments), and the times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`

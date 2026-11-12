@@ -5,6 +5,7 @@
 # turns API responses into the facts tools/ci/nightly.c reads; every decision is the C tool's. Hosted runners only.
 #
 #   nightly.sh evidence DIRECTORY     9700x.yml's evidence job: reuse and hardware admission, to GITHUB_OUTPUT
+#   nightly.sh coverage DIRECTORY     9700x.yml's aggregate, for a merge-queue candidate: its full coverage, job by job
 #   nightly.sh record DIRECTORY       9700x.yml's record job: DIRECTORY/record.tsv and the outcome
 #   nightly.sh coordinate DIRECTORY --phase prepare|window --mode run|dry-run
 #                                     nightly-backfill.yml: harvest, plan and dispatch; DIRECTORY/ledger.tsv and report.md
@@ -16,8 +17,8 @@ set -euo pipefail
 shopt -s inherit_errexit
 repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 [[ "$repository" == buster14a/buster ]]
-command=${1:?usage: nightly.sh evidence|record|coordinate DIRECTORY [OPTIONS]}
-work=${2:?usage: nightly.sh evidence|record|coordinate DIRECTORY [OPTIONS]}
+command=${1:?usage: nightly.sh evidence|coverage|record|coordinate DIRECTORY [OPTIONS]}
+work=${2:?usage: nightly.sh evidence|coverage|record|coordinate DIRECTORY [OPTIONS]}
 shift 2
 mkdir -p "$work"
 gh=${NIGHTLY_GH:-gh}
@@ -116,6 +117,18 @@ evidence()
                 notes='the nightly mode runs a push'"'"'s plain rows only; its sanitizer rows and fuzzing run on the nightly snapshot, and its native correctness and measurements in the 02:00-08:00 Europe/Madrid window'
             fi
             ;;
+        merge_group)
+            # A merge-queue candidate (#1430): the commit main is fast-forwarded to if it passes, and the only
+            # per-merge correctness run. It runs the full hosted contract, its own whatever its pull request ran, and
+            # never the 9700X: its first-parent state's native correctness and measurements are the window's, as a
+            # push's are in the nightly mode. Reads no API.
+            scope=full
+            native=-
+            measurement=-
+            hardware=skip
+            reason=merge-group
+            notes='a merge-queue candidate runs every hosted row, the vector pool and the fuzz campaigns; its native correctness and measurements are its first-parent state'"'"'s, in the 02:00-08:00 Europe/Madrid window'
+            ;;
         schedule)
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
                 retired=true
@@ -159,7 +172,7 @@ evidence()
                         : > "$facts"
                         if "$gh" api "repos/$repository/actions/workflows/9700x.yml/runs?head_sha=$commit&per_page=50" > "$work/runs.json"; then
                             runs_facts < "$work/runs.json" >> "$facts"
-                            for found in $(jq -r '.workflow_runs[]? | select(.status == "completed" and (.event == "push" or .event == "workflow_dispatch")) | .id' "$work/runs.json"); do
+                            for found in $(jq -r '.workflow_runs[]? | select(.status == "completed" and (.event == "push" or .event == "workflow_dispatch" or .event == "merge_group")) | .id' "$work/runs.json"); do
                                 if [ "$found" != "$run" ]; then
                                     fetch_jobs "$found" >> "$facts" || true
                                 fi
@@ -223,15 +236,50 @@ evidence()
     printf 'scope=%s hosted=%s native=%s measurement=%s hardware=%s (%s) %s\n' "$scope" "$hosted" "$native" "$measurement" "$hardware" "$reason" "$notes"
 }
 
+# --- 9700x.yml's aggregate, for a merge-queue candidate ---
+
+# This run's jobs (its latest attempt's), and nightly.c's check of them. A job the API still shows in progress, a page
+# that failed, or an incomplete set is asked again, NIGHTLY_COVERAGE_TRIES times in all (3), NIGHTLY_SLEEP apart (15 s),
+# before the check fails: the aggregate starts as its last need ends, before the API may show it.
+coverage()
+{
+    local run=${GITHUB_RUN_ID:?} tries=${NIGHTLY_COVERAGE_TRIES:-3} try verdict=1
+    for (( try = 1; try <= tries; try += 1 )); do
+        : > "$work/coverage.tsv"
+        if fetch_jobs "$run" > "$work/coverage-facts.tsv" && "$tool" coverage --run "$run" < "$work/coverage-facts.tsv" > "$work/coverage.tsv"; then
+            verdict=0
+            break
+        fi
+        if [ "$try" -lt "$tries" ]; then
+            sleep "${NIGHTLY_SLEEP:-15}"
+        fi
+    done
+    {
+        printf '### Merge-queue coverage\n\n```text\n'
+        cat "$work/coverage.tsv"
+        printf '```\n'
+    } | summary
+    cat "$work/coverage.tsv"
+    if [ "$verdict" -ne 0 ]; then
+        printf '::error title=Merge-queue coverage::the candidate'"'"'s hosted rows, vector verdict or fuzz campaigns are incomplete (above)\n'
+    fi
+    return "$verdict"
+}
+
 # --- 9700x.yml's record job ---
 
 record()
 {
-    export RECORD_COMMIT RECORD_TREE RECORD_PARENT RECORD_PARENT_TREE RECORD_WORKFLOW RECORD_SELECTOR RECORD_INVENTORY RECORD_TOOLCHAIN RECORD_CORPUS RECORD_GATES
+    export RECORD_COMMIT RECORD_TREE RECORD_PARENT RECORD_PARENT_TREE RECORD_PR_HEAD RECORD_WORKFLOW RECORD_SELECTOR RECORD_INVENTORY RECORD_TOOLCHAIN RECORD_CORPUS RECORD_GATES
     RECORD_COMMIT=$(git rev-parse HEAD)
     RECORD_TREE=$(git rev-parse 'HEAD^{tree}')
     RECORD_PARENT=$(git rev-parse -q --verify 'HEAD^1' || true)
     RECORD_PARENT_TREE=$(git rev-parse -q --verify 'HEAD^1^{tree}' || true)
+    # A merge-queue candidate (#1430) is GitHub's merge of its base (main, or the entry ahead of it: the parent above)
+    # and its pull request's head, its second parent; the event names no head, so the commit does.
+    if [ "${RECORD_EVENT:-}" = merge_group ]; then
+        RECORD_PR_HEAD=$(git rev-parse -q --verify 'HEAD^2' || true)
+    fi
     RECORD_WORKFLOW=$(git rev-parse HEAD:.github/workflows/9700x.yml)
     RECORD_SELECTOR=$(git rev-parse HEAD:tools/ci/changes.c)
     RECORD_INVENTORY=$(git rev-parse HEAD:tools/ci/correctness.tests)
@@ -363,7 +411,7 @@ load_runs()
     local facts=$1 days=$2 since event
     since=$(date -u -d "@$(( $(now) - days * 86400 ))" +%Y-%m-%d)
     : > "$facts"
-    for event in push schedule workflow_dispatch; do
+    for event in push schedule workflow_dispatch merge_group; do
         if ! "$gh" api --paginate "repos/$repository/actions/workflows/9700x.yml/runs?event=$event&created=%3E%3D$since&per_page=100" > "$work/runs-$event.json"; then
             return 1
         fi
@@ -738,6 +786,7 @@ coordinate()
 
 case "$command" in
     evidence) evidence ;;
+    coverage) coverage ;;
     record) record ;;
     coordinate) coordinate "$@" ;;
     *) printf 'nightly.sh: unknown command %s\n' "$command" >&2; exit 2 ;;

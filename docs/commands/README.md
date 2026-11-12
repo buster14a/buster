@@ -107,6 +107,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 The original section titles are retained in their owning guides.
 
 - [C driver build-system integration](../cc-driver.md).
+- [The merge queue](ci.md#the-merge-queue).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
 - [Shard costs](ci.md#shard-costs).
 - [Setup failures re-run once](ci.md#setup-failures-re-run-once).

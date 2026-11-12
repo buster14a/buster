@@ -1431,7 +1431,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     {
                         // As the driver's --tier1 plans the optimizer's verified result, without verifying it again: the
                         // plan tier1_select_plan's verification gives (#141).
-                        const Tier1SelectError error = tier1_select_plan_verified(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
+                        const Tier1SelectError error = tier1_select_plan_verified(&function, &dominance, 0, 0, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
                         ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "select the actual optimized SSA function");
                         if (!ok)
                         {

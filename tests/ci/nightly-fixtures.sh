@@ -237,8 +237,22 @@ for draft in true false ''; do
     expect_line "$GITHUB_OUTPUT" 'measurement=-' 'and no measurements'
 done
 expect_no_match "$fixtures/calls.log" 'commits/|actions/' 'a pull request reads no API'
-# A merge queue, and any other event, is no supported path: the job fails and nothing runs.
-for event in merge_group pull_request_target workflow_run repository_dispatch; do
+# A merge-queue candidate (#1430), documentation alone or not: the full hosted scope, its own, and no hardware, whose
+# work is its first-parent state's in the window. No API call.
+for revision in "$merge" "$docs"; do
+    GITHUB_EVENT_NAME=merge_group GITHUB_SHA=$revision run_evidence "$history"
+    expect_line "$GITHUB_OUTPUT" 'scope=full' 'a merge-queue candidate runs every hosted row and the fuzz campaigns'
+    expect_line "$GITHUB_OUTPUT" 'hosted=run' 'its own'
+    expect_line "$GITHUB_OUTPUT" 'hosted_source=' 'reusing no run'
+    expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a merge-queue candidate keeps off the 9700X'
+    expect_line "$GITHUB_OUTPUT" 'hardware_reason=merge-group' 'and says why'
+    expect_line "$GITHUB_OUTPUT" 'native=-' 'a candidate runs no native correctness'
+    expect_line "$GITHUB_OUTPUT" 'measurement=-' 'and no measurements'
+    expect_line "$GITHUB_OUTPUT" 'retired=false' 'and is never retired'
+done
+expect_no_match "$fixtures/calls.log" 'commits/|actions/' 'a merge-queue candidate reads no API'
+# Any other event is no supported path: the job fails and nothing runs.
+for event in pull_request_target workflow_run repository_dispatch; do
     if GITHUB_EVENT_NAME=$event GITHUB_SHA=$head run_evidence "$history" 2> /dev/null; then
         fail "the evidence job accepted a $event run"
     fi
@@ -325,6 +339,96 @@ fi
 if GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$head EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=defer EVIDENCE_SNAPSHOT=$merge run_evidence "$history" 2> /dev/null; then
     fail 'a commit after the pinned snapshot was accepted'
 fi
+# A backlog run of a state that a merge-queue candidate's run tested (#1430): main was fast-forwarded to that very
+# commit, so the candidate's plain rows are the state's own.
+cat > "$fixtures/runs-head-$docs.json" <<JSON
+{"workflow_runs":[{"id":810,"run_attempt":1,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"$docs","path":".github/workflows/9700x.yml","head_branch":"gh-readonly-queue/main/pr-7-$merge","created_at":"2026-11-03T10:00:00Z","updated_at":"2026-11-03T11:30:00Z","head_repository":{"id":1421805693},"display_title":"docs"}]}
+JSON
+{
+    printf '{"jobs":['
+    for arch in x86-64 native; do
+        for shard in 1 2 3 4; do
+            printf '{"name":"Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %s of 4)","status":"completed","conclusion":"success"},' "$arch" "$shard"
+        done
+    done
+    printf '{"name":"Build and execute on Ryzen 7 9700X","status":"completed","conclusion":"success"}]}\n'
+} > "$fixtures/jobs-810.json"
+NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$docs EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'hosted=reused' 'a backlog run reuses the plain rows of its commit'"'"'s merge-queue run'
+expect_line "$GITHUB_OUTPUT" 'hosted_source=810' 'naming the candidate'"'"'s run'
+rm -f "$fixtures/runs-head-$docs.json"
+
+# --- The aggregate's coverage check for a merge-queue candidate (#1430), against this run's jobs ---
+
+# A full run's jobs as the API names them: each row's shards under its caller's name, the rows' builds, skipped jobs'
+# unexpanded names, the vector pool's verdict and the fuzz campaigns. ODD names a job to drop or to conclude otherwise.
+full_jobs()
+{
+    local odd=${1:-} conclusion=${2:-success} arch sanitizer shards shard name
+    printf '{"jobs":['
+    for arch in x86-64 native; do
+        for sanitizer in none address thread memory; do
+            shards=4
+            if [ "$arch" = x86-64 ] && { [ "$sanitizer" = thread ] || [ "$sanitizer" = memory ]; }; then shards=6; fi
+            if [ "$arch" = native ] && [ "$sanitizer" = memory ]; then shards=5; fi
+            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Build the compiler once for the row'"'"'s shards","status":"completed","conclusion":"success"},' "$arch" "$sanitizer"
+            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})","status":"completed","conclusion":"skipped"},' "$arch" "$sanitizer"
+            for shard in $(seq 1 "$shards"); do
+                name="Tests on Ubuntu 26.04 ($arch, $sanitizer, O3) / Tests on Ubuntu 26.04 (Clang 23, $arch, $sanitizer, O3, shard $shard of $shards)"
+                if [ "$odd" = "$arch $sanitizer $shard" ]; then
+                    if [ "$conclusion" = missing ]; then continue; fi
+                    printf '{"name":"%s","status":"completed","conclusion":"%s"},' "$name" "$conclusion"
+                else
+                    printf '{"name":"%s","status":"completed","conclusion":"success"},' "$name"
+                fi
+            done
+        done
+    done
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})","status":"completed","conclusion":"skipped"},'
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector draw 1, candidate 3 (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"success"},'
+    if [ "$odd" != vector ]; then
+        printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = vector-failed ] && echo failure || echo success )"
+    fi
+    for entry in frontend elf-override crash-replay-proof; do
+        if [ "$odd" != "fuzz $entry" ]; then
+            printf '{"name":"libFuzzer (ASan + UBSan + leaks, %s)","status":"completed","conclusion":"success"},' "$entry"
+        fi
+    done
+    printf '{"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"skipped"},'
+    printf '{"name":"Build and execute on Ryzen 7 9700X","status":"in_progress","conclusion":null}]}\n'
+}
+coverage_case()
+{
+    local run=$1 expected=$2 status=0
+    : > "$fixtures/calls.log"
+    : > "$GITHUB_STEP_SUMMARY"
+    rm -f "$fixtures"/count-*
+    GITHUB_RUN_ID=$run NIGHTLY_SLEEP=0 NIGHTLY_COVERAGE_TRIES=2 bash tools/ci/nightly.sh coverage "$work/coverage-$run" > "$work/coverage.log" 2>&1 || status=$?
+    [ "$status" -eq "$expected" ] || { cat "$work/coverage.log" >&2; fail "coverage of run $run: expected $expected, got $status"; }
+}
+full_jobs > "$fixtures/jobs-9100.json"
+coverage_case 9100 0
+expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s coverage is complete'
+expect_line "$work/coverage.log" $'row\tnative memory\tok\t5' 'each row by its own shard count'
+expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
+test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
+# Each way a candidate's coverage falls short fails it, after asking again.
+for odd in 'x86-64 address 3:missing' 'native memory 5:missing' 'x86-64 thread 2:cancelled' 'native none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:'; do
+    full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
+    coverage_case 9101 1
+    expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
+    expect_match "$work/coverage.log" '::error title=Merge-queue coverage' 'and says so'
+    test "$(grep -c 'actions/runs/9101/jobs' "$fixtures/calls.log")" -eq 2 || fail 'an incomplete set is asked for again'
+done
+# A shard beyond the row's count, or a row whose shards disagree.
+full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
+coverage_case 9101 1
+expect_line "$work/coverage.log" $'row\tx86-64 none\tshard counts disagree\t5' 'shard counts that disagree are no coverage'
+# A failed API call, then the full set: the second read passes it.
+full_jobs > "$fixtures/jobs-9102.json"
+touch "$fixtures/jobs-9102.json.1.fail"
+coverage_case 9102 0
+test "$(grep -c 'actions/runs/9102/jobs' "$fixtures/calls.log")" -eq 2 || fail 'a failed read is asked for again'
 
 # --- The 9700X job's window step, as the workflow has it, with a stand-in clock ---
 
@@ -538,6 +642,45 @@ RECORD_REPOSITORY=1421805693 RECORD_RUN=41 RECORD_ATTEMPT=1 RECORD_EVENT=workflo
     bash tools/ci/nightly.sh record "$work/record-job" > /dev/null
 expect_line "$GITHUB_OUTPUT" 'outcome=complete' 'a backlog run that measured is complete'
 expect_line "$work/record-job/record.tsv" $'gates\tchecker' 'the record names the selector'"'"'s true outputs'
+# A merge-queue candidate's record (#1430), in a checkout of GitHub's merge: its base, and its pull request's head as
+# the merge's second parent. It passes through the aggregate alone.
+candidate="$work/candidate"
+git init -q -b main "$candidate"
+for file in .github/workflows/9700x.yml tools/ci/changes.c tools/ci/correctness.tests tools/ci/setup-benchpress.sh tools/ci/fetch-corpus.sh; do
+    mkdir -p "$candidate/$(dirname "$file")"
+    cp "$file" "$candidate/$file"
+done
+git -C "$candidate" add -A
+git -C "$candidate" -c user.name=t -c user.email=t@example.com commit -q -m base
+candidate_base=$(git -C "$candidate" rev-parse HEAD)
+git -C "$candidate" checkout -q -b pull
+echo change >> "$candidate/tools/ci/correctness.tests"
+git -C "$candidate" -c user.name=t -c user.email=t@example.com commit -q -am pull
+candidate_head=$(git -C "$candidate" rev-parse HEAD)
+git -C "$candidate" checkout -q main
+git -C "$candidate" -c user.name=t -c user.email=t@example.com merge -q --no-ff -m 'Merge pull request #7' pull
+queue_record()
+{
+    : > "$GITHUB_OUTPUT"
+    (cd "$candidate" && RECORD_REPOSITORY=1421805693 RECORD_RUN=42 RECORD_ATTEMPT=1 RECORD_EVENT=merge_group RECORD_MODE=on RECORD_CODE=true \
+        RECORD_MEASURE=all CHANGES_OUTPUTS='{"code":"true","performance":"true","measure":"all"}' RECORD_CHANGES_RESULT=success \
+        RECORD_EVIDENCE_RESULT=success RECORD_SCOPE=full RECORD_HOSTED=run RECORD_HARDWARE=skip RECORD_HARDWARE_REASON=merge-group \
+        RECORD_TEST_RESULT="$1" RECORD_FUZZ_RESULT="$2" RECORD_BENCHMARK_RESULT=skipped RECORD_QUALIFICATION_RESULT="$3" \
+        bash "$root/tools/ci/nightly.sh" record "$work/queue-record") > /dev/null
+}
+queue_record success success success
+expect_line "$GITHUB_OUTPUT" 'outcome=deferred' 'a candidate the aggregate passed is deferred to the window'
+expect_line "$work/queue-record/record.tsv" $'purpose\tqueue' 'its record is a queue record'
+expect_line "$work/queue-record/record.tsv" $'coverage\tnone' 'that measures nothing'
+expect_line "$work/queue-record/record.tsv" "parent	$candidate_base" 'with its base'
+expect_line "$work/queue-record/record.tsv" "pr_head	$candidate_head" 'and its pull request'"'"'s head'
+expect_line "$work/queue-record/record.tsv" $'gates\tperformance' 'and the profile'"'"'s one gate'
+queue_record success success failure
+expect_line "$GITHUB_OUTPUT" 'outcome=interrupted' 'a candidate the aggregate failed is no pass, even with its tests green'
+queue_record success skipped success
+expect_line "$GITHUB_OUTPUT" 'outcome=deferred' 'the aggregate decides whether the fuzz campaigns had to run'
+queue_record failure success failure
+expect_line "$GITHUB_OUTPUT" 'outcome=blocked-hosted' 'a candidate whose tests failed is blocked'
 "$work/nightly" harvest --ledger /dev/null --facts /dev/null --states /dev/null --list 2> /dev/null && fail 'an empty state list was accepted'
 
 # --- The coordinator ---

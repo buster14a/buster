@@ -416,6 +416,7 @@ static uint16_t tier1_emit_cfg_inverse(uint16_t form)
 //   pointers being 64-bit integers, has its operand's bits (TIER1_RULE_COPY);
 // - a symbol's or a frame object's address plus a constant (a member's, or a constant index's: TIER1_RULE_ADDRESS without
 //   an index), one lea at that displacement, a symbol's its reference's addend; a GOT slot's address takes no constant.
+//   Selection's lea from rip of a direct symbol it folded (#2573, TIER1_RULE_ADDRESS with `rip`) is one too.
 // A frame object's displacement is the frame's layout's: until tier1_emit_cfg_frame fills it, the recipe's value is the
 // object's slot, and its addend the constant added to it.
 static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, uint8_t* operations, uint8_t* flags, uint64_t* values, int64_t* addends)
@@ -443,8 +444,11 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
         // a mask nor a chain through one takes them.
         const bool mask = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_MASK || tier1_emit_class(&emitted->prepared, root) == BUSTER_TIER1_ALLOCATE_MASK;
         const uint8_t rule = plan->covered[root] || mask ? TIER1_RULE_NONE : pattern->rule;
-        const uint32_t symbol = (uint32_t)pattern->immediate;
-        const uint8_t access = rule == TIER1_RULE_SYMBOL_ADDRESS && symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
+        // A folded symbol's lea (#2573): the symbol, at its own displacement past the chain's.
+        const bool folded = rule == TIER1_RULE_ADDRESS && pattern->rip && pattern->stack_object != BUSTER_IR_NONE && pattern->values[1] == BUSTER_IR_NONE;
+        const uint32_t symbol = folded ? pattern->stack_object : (uint32_t)pattern->immediate;
+        const uint8_t access = (rule == TIER1_RULE_SYMBOL_ADDRESS || folded) && symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
+        displacement += folded ? pattern->displacement : 0;
         const bool displaced = displacement != 0;
         const bool fits = displacement >= INT32_MIN && displacement <= INT32_MAX;
         uint64_t past = 0;
@@ -453,7 +457,7 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
             operations[node] = BUSTER_TIER1_REMAT_INTEGER;
             values[node] = pattern->immediate;
         }
-        else if (rule == TIER1_RULE_SYMBOL_ADDRESS && fits && (access == BUSTER_TIER1_ACCESS_DIRECT || (access == BUSTER_TIER1_ACCESS_GOT && !displaced)))
+        else if ((rule == TIER1_RULE_SYMBOL_ADDRESS || folded) && fits && (access == BUSTER_TIER1_ACCESS_DIRECT || (access == BUSTER_TIER1_ACCESS_GOT && !displaced && !folded)))
         {
             operations[node] = BUSTER_TIER1_REMAT_SYMBOL;
             values[node] = symbol;
@@ -539,7 +543,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         phi_count += function->op[node] == IR_PHI && !x87;
         operand_count += function->op[node] == IR_PHI && !x87 ? function->b[node] : 0;
         returns += function->op[node] == IR_RET;
-        symbols += function->op[node] == IR_SYMBOL_ADDR;
+        // A symbol's address's reference, and a memory operand's that folds one (#2573).
+        symbols += function->op[node] == IR_SYMBOL_ADDR || (plan->covered[node] == 0 && plan->patterns[node].rip && plan->patterns[node].stack_object != BUSTER_IR_NONE);
         // A division's rax and rdx, and a shift's rcx, may need call-save rows for the values it doesn't take.
         // An asm body's general registers too (#1839, tier1_select_node_fixed), callee-saved ones among them, which the
         // prologue saves (Tier1EmitPrepared.asm_callee).
@@ -581,7 +586,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     // Only calls that overflow the red zone add storage. The last frame object then holds every call's staged parts,
     // before and after register moves, with a lifetime covering the function so it aliases no spill or local object.
     prepared->staging_slots = prepared->staging_slots > BUSTER_TIER1_SELECT_STAGING_SLOTS ? prepared->staging_slots : 0;
-    // A reference for each call and each symbol's address, and how the symbols are reached.
+    // A reference for each call, each symbol's address and each memory operand's folded symbol, and how the symbols are
+    // reached.
     emitted->reference_capacity = prepared->call_count + symbols;
     emitted->symbol_access = options->symbol_access;
     emitted->symbol_access_count = options->symbol_access != 0 ? options->symbol_count : 0;
@@ -2923,15 +2929,18 @@ static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const 
 
 // A node's own records by its rule, its holes `holes` (#939: the certificate of the code regenerates them so, from the
 // allocation's registers, and compares them with the emitted ones): its expansion, with a frame object's address and
-// offsets patched in, and for a symbol's address the reference of its one record (`reference`, where `referenced`,
-// its instruction the caller's). A return's ret is the last record, and its epilogue the caller's to put before it.
+// offsets patched in, and for a symbol's address, or a memory operand that folds one (#2573), the reference of its one
+// record that names it (`reference`, where `referenced`, its instruction the caller's). A return's ret is the last
+// record, and its epilogue the caller's to put before it.
 static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1SelectHoles* holes, uint32_t node, Tier1SelectRecords* records, LinkReference* reference, bool* referenced)
 {
     const IrFunction* function = plan->function;
     // Resolve a folded frame address before expansion, so comparisons and two-operand arithmetic see the actual
     // base when checking destination aliases. A comparison's memory access precedes its SETcc or branches.
     const Tier1SelectPattern* pattern = &plan->patterns[node];
-    const bool object = pattern->stack_object != BUSTER_IR_NONE;
+    // A folded symbol (#2573) is rip-relative: no base or index register for an alias check to see.
+    const bool symbol = pattern->rip && pattern->stack_object != BUSTER_IR_NONE;
+    const bool object = pattern->stack_object != BUSTER_IR_NONE && !symbol;
     int32_t object_offset = 0;
     int32_t displacement = 0;
     const bool placed = !object || (tier1_emit_cfg_object(function, emitted, pattern->stack_object, &object_offset) &&
@@ -2947,6 +2956,38 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
     Tier1SelectRecords selected_records = tier1_select_expand(holes);
     Tier1EmitError error = !placed ? TIER1_EMIT_FRAME : selected_records.overflowed ? TIER1_EMIT_INVALID : TIER1_EMIT_OK;
     *referenced = false;
+    // A memory operand's folded symbol (#2573): the one rip-relative record its expansion makes, marked for its PC32,
+    // whose addend is the symbol's offset; link_add_code_fixups takes off the distance to the instruction's end, an
+    // immediate's bytes after the field among it (cmp byte ptr [rip + x], 3's). Its displacement is the reference's, as
+    // a recomputed symbol's lea's is (tier1_rematerialize). Only a symbol this function's column reaches directly
+    // folds, as selection's did (tier1_select_direct_symbol).
+    if (symbol && error == TIER1_EMIT_OK)
+    {
+        const uint32_t target = pattern->stack_object;
+        const uint8_t access = target < emitted->symbol_access_count ? emitted->symbol_access[target] : BUSTER_TIER1_ACCESS_DIRECT;
+        uint32_t at = UINT32_MAX;
+        uint32_t found = 0;
+        for (uint32_t r = 0; r < selected_records.count; r += 1)
+        {
+            const bool rip = (selected_records.records[r].mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_RIP)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_RIP);
+            at = rip ? r : at;
+            found += rip;
+        }
+        error = found == 1 && access == BUSTER_TIER1_ACCESS_DIRECT ? error : TIER1_EMIT_INVALID;
+        if (error == TIER1_EMIT_OK)
+        {
+            selected_records.records[at].form |= BUSTER_X86_FORM_FIXUP;
+            selected_records.records[at].displacement = 0;
+            *reference = (LinkReference){
+                .instruction = at,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_PC32,
+                .target = target,
+                .addend = pattern->displacement,
+            };
+            *referenced = true;
+        }
+    }
     // A frame object's address, from the frame's base at the object's offset; an overflow area's from the incoming frame
     // (#789).
     if (plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS)
@@ -3785,15 +3826,25 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 else
                 {
                     // The comparison's records, with any frame object's address resolved as in every other kernel.
-                    // Its last two records are the conditional jump and the jump; it has no symbolic reference.
+                    // Its last two records are the conditional jump and the jump; its one symbolic reference is a
+                    // comparison's folded symbol's (#2573), among the records before them.
                     Tier1SelectRecords selected_records = { 0 };
                     LinkReference reference = { 0 };
                     bool referenced = false;
                     error = tier1_emit_cfg_kernel(plan, emitted, &holes, node, &selected_records, &reference, &referenced);
                     const uint32_t compares = selected_records.count >= 2 ? selected_records.count - 2u : 0;
-                    error = error != TIER1_EMIT_OK || (!referenced && !selected_records.overflowed && selected_records.count >= 2 &&
+                    error = error != TIER1_EMIT_OK || ((!referenced || reference.instruction < compares) && !selected_records.overflowed && selected_records.count >= 2 &&
                                                      (!selected_records.requested || selected_records.request < compares)) ? error : TIER1_EMIT_INVALID;
                     const uint32_t compare_first = buffer.count;
+                    if (error == TIER1_EMIT_OK && referenced)
+                    {
+                        error = emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;
+                        reference.instruction += compare_first;
+                        if (error == TIER1_EMIT_OK)
+                        {
+                            emitted->references[emitted->reference_count++] = reference;
+                        }
+                    }
                     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < compares; r += 1)
                     {
                         error = tier1_emit_append(&buffer, selected_records.records[r]) ? error : TIER1_EMIT_MEMORY;
@@ -3851,7 +3902,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 LinkReference kernel_reference = { 0 };
                 bool referenced = false;
                 error = tier1_emit_cfg_kernel(plan, emitted, &holes, node, &selected_records, &kernel_reference, &referenced);
-                // A symbol's address's reference is one of its records': the kernel's record, by its index there.
+                // A symbol's address's reference is one of its records': the kernel's record, by its index there, and so
+                // is a memory operand's folded symbol's (#2573).
                 if (error == TIER1_EMIT_OK && referenced)
                 {
                     error = emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;

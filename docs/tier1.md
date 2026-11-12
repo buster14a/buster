@@ -266,7 +266,9 @@ where the emission's access column says so; a thread-local's, as Tier 0's,
 the thread pointer `fs:[0]` plus its offset: a TPOFF32 immediate for the
 image's own, or the offset from its GOT slot for one that may be outside it,
 which `test-checker-driver`'s thread-locals' fixture runs on five threads
-against clang -O0's build),
+against clang -O0's build; a direct symbol's accesses take it rip-relative
+instead, its `PC32` on their own records, #2573's: the
+[selection guide](tier1-selection.md)),
 parameters anywhere in the entry block and narrow ones (zero-extended into
 their canonical storage at the entry), variadic calls of integer arguments (`al`
 zero), calls through a pointer (the callee moved into `r10` with the

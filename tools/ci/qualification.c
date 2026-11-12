@@ -9,7 +9,11 @@
 // whether the 9700X job was admitted. A pull request, draft or ready, never is
 // (#2055): the context passes on its hosted correctness alone and says that
 // native correctness and measurements run on its merged state in the nightly
-// window. Every other green run with code ran the 9700X job in full, native
+// window. A merge-queue candidate (#1430) never is either: it passes on the
+// full hosted contract (every row and sanitizer, its fuzz campaigns), whose
+// coverage the workflow's coverage step checked job by job from the run's own
+// jobs (tools/ci/nightly.c's `coverage`), with no documentation exemption.
+// Every other green run with code ran the 9700X job in full, native
 // correctness first.
 // A nightly dispatch (backlog, snapshot) reports through its coverage record,
 // not this context; one that reaches this predicate fails.
@@ -38,6 +42,8 @@ enum Event
     EVENT_PUSH,
     EVENT_SCHEDULE,
     EVENT_DISPATCH,
+    // A merge-queue candidate (#1430).
+    EVENT_MERGE_GROUP,
     EVENT_INVALID,
     EVENT_COUNT
 };
@@ -88,6 +94,8 @@ struct Qualification
     Result tests;
     Result fuzz;
     Result native;
+    // The coverage step's outcome: a merge-queue candidate's alone, skipped elsewhere.
+    Result coverage;
 };
 
 static int qualification_find(const char* value, const char* const* names, size_t count)
@@ -120,7 +128,7 @@ static bool qualification_no_code(const Qualification* input)
     result = result && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS;
     result = result && input->tests == RESULT_SKIPPED && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
     // The evidence job skips the 9700X for every pull request (#2055).
-    result = result && input->hardware == HARDWARE_SKIP;
+    result = result && input->hardware == HARDWARE_SKIP && input->coverage == RESULT_SKIPPED;
     return result;
 }
 
@@ -130,22 +138,28 @@ static bool qualification_pass(const Qualification* input)
     bool valid = event < EVENT_INVALID && (event == EVENT_PR || !input->draft);
     valid = valid && (event == EVENT_DISPATCH ? input->purpose == PURPOSE_FULL : input->purpose == PURPOSE_UNSET);
     valid = valid && input->evidence == RESULT_SUCCESS;
-    bool selected = (event == EVENT_PR || event == EVENT_PUSH) && input->changes == RESULT_SUCCESS && input->code == CODE_YES;
+    bool selected = (event == EVENT_PR || event == EVENT_PUSH || event == EVENT_MERGE_GROUP) && input->changes == RESULT_SUCCESS && input->code == CODE_YES;
     bool periodic = (event == EVENT_SCHEDULE || event == EVENT_DISPATCH) && input->changes == RESULT_SKIPPED && input->code == CODE_UNSET;
     bool hosted = (selected || periodic) && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS && input->tests == RESULT_SUCCESS;
+    // Only a merge-queue candidate runs the coverage step.
+    hosted = hosted && input->coverage == (event == EVENT_MERGE_GROUP ? RESULT_SUCCESS : RESULT_SKIPPED);
     // A pull request, draft or ready, qualifies on its hosted plain rows alone: no fuzzing, no 9700X job (#2055).
     bool pull_request = event == EVENT_PR && hosted && input->hardware == HARDWARE_SKIP;
     pull_request = pull_request && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
+    // A merge-queue candidate (#1430) on the full hosted contract and its fuzz campaigns, which its coverage step
+    // checked job by job; never the 9700X job, which its merged state gets in the nightly window.
+    bool candidate = event == EVENT_MERGE_GROUP && hosted && input->hardware == HARDWARE_SKIP;
+    candidate = candidate && input->fuzz == RESULT_SUCCESS && input->native == RESULT_SKIPPED;
     // Every other run with code passes only through the 9700X job's native correctness and measurements.
-    bool native = event != EVENT_PR && hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS;
+    bool native = event != EVENT_PR && event != EVENT_MERGE_GROUP && hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS;
     native = native && input->fuzz == RESULT_SUCCESS;
-    return valid && (qualification_no_code(input) || pull_request || native);
+    return valid && (qualification_no_code(input) || pull_request || candidate || native);
 }
 
 // Each input's place in a mixed-radix index over every combination, for the self-test's table of allowed tuples.
 static uint32_t qualification_index(const Qualification* input)
 {
-    const Result results[7] = { input->changes, input->size, input->hooks, input->evidence, input->tests, input->fuzz, input->native };
+    const Result results[8] = { input->changes, input->size, input->hooks, input->evidence, input->tests, input->fuzz, input->native, input->coverage };
     uint32_t index = (uint32_t)input->event;
     index = index * CODE_COUNT + (uint32_t)input->code;
     index = index * 2 + (input->draft ? 1u : 0u);
@@ -162,20 +176,23 @@ static int qualification_test(void)
 {
     // These are all allowed tuples, independently of the predicate's branches.
     // A pull request, draft or ready, is green on its hosted rows with the 9700X
-    // job and fuzzing skipped (#2055); no other green tuple with code skipped
-    // the 9700X job.
+    // job and fuzzing skipped (#2055); a merge-queue candidate on its hosted
+    // rows, its fuzz campaigns and its coverage step, with the 9700X job
+    // skipped (#1430); no other green tuple with code skipped the 9700X job.
+    // Only a candidate's coverage step runs.
     const Qualification allowed[] = {
-        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED },
-        { EVENT_PR, CODE_YES, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED },
-        { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_SCHEDULE, CODE_UNSET, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_DISPATCH, CODE_UNSET, false, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
-        { EVENT_PR, CODE_NO, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_YES, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED },
+        { EVENT_SCHEDULE, CODE_UNSET, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED },
+        { EVENT_DISPATCH, CODE_UNSET, false, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED },
+        { EVENT_MERGE_GROUP, CODE_YES, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SUCCESS },
+        { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_NO, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
     };
-    // Seven job results, five values each (including missing/unknown), and every event, selector output, draft
-    // state, dispatch purpose and hardware decision.
-    const uint32_t results = 78125;
+    // Eight job and step results, five values each (including missing/unknown), and every event, selector output,
+    // draft state, dispatch purpose and hardware decision.
+    const uint32_t results = 390625;
     const uint32_t total = EVENT_COUNT * CODE_COUNT * 2 * PURPOSE_COUNT * HARDWARE_COUNT * results;
     uint8_t* expected = calloc((total + 7) / 8, 1);
     uint32_t checks = 0;
@@ -188,10 +205,10 @@ static int qualification_test(void)
     for (uint32_t encoded = 0; expected != NULL && encoded < total; encoded += 1)
     {
         uint32_t remaining = encoded;
-        Result values[7];
+        Result values[8];
         for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i += 1)
         {
-            values[6 - i] = (Result)(remaining % RESULT_COUNT);
+            values[7 - i] = (Result)(remaining % RESULT_COUNT);
             remaining /= RESULT_COUNT;
         }
         const Hardware hardware = (Hardware)(remaining % HARDWARE_COUNT);
@@ -215,6 +232,7 @@ static int qualification_test(void)
             .tests = values[4],
             .fuzz = values[5],
             .native = values[6],
+            .coverage = values[7],
         };
         const bool want = (expected[encoded / 8] >> (encoded % 8)) & 1u;
         checks += 1;
@@ -248,7 +266,7 @@ int main(int argc, char** argv)
     }
     else if (argc == 1)
     {
-        static const char* const events[] = { "pull_request", "push", "schedule", "workflow_dispatch" };
+        static const char* const events[] = { "pull_request", "push", "schedule", "workflow_dispatch", "merge_group" };
         static const char* const codes[] = { "true", "false", "" };
         static const char* const drafts[] = { "false", "true" };
         static const char* const purposes[] = { "", "full", "nightly" };
@@ -271,12 +289,17 @@ int main(int argc, char** argv)
             .tests = qualification_result("TEST_RESULT"),
             .fuzz = qualification_result("FUZZ_RESULT"),
             .native = qualification_result("BENCHMARK_RESULT"),
+            .coverage = qualification_result("COVERAGE_RESULT"),
         };
         bool passed = draft < 2 && qualification_pass(&input);
         status = passed ? 0 : 1;
         if (passed && qualification_no_code(&input))
         {
             puts("Documentation-only change; explicit no-code exemption, not native qualification.");
+        }
+        else if (passed && input.event == EVENT_MERGE_GROUP)
+        {
+            puts("The merge-queue candidate passed the full hosted contract: every row and sanitizer, the vector pool and the fuzz campaigns, checked job by job. The 9700X wasn't used (#1430): native correctness and measurements run on its first-parent state in the nightly window.");
         }
         else if (passed && input.event == EVENT_PR)
         {
