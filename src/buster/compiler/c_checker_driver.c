@@ -5368,6 +5368,29 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             arena_pop_to(scratch, type_mark);
                         }
+                        else if (phase == 0 && (kind == CHECK_INPUT_JUMP_INDIRECT || kind == CHECK_INPUT_JUMP_ASM) &&
+                                 input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count &&
+                                 input->reports[index].subject != 0 && input->reports[index].subject <= count)
+                        {
+                            // A computed goto's or an asm goto's (#1942): the label it may go to, then the declaration whose
+                            // scope that enters, as clang's jump scope checker notes them.
+                            const uint32_t detail = input->reports[index].detail;
+                            const bool asm_goto = kind == CHECK_INPUT_JUMP_ASM;
+                            const PPOutputDiagnosticNote notes[2] = {
+                                {
+                                    .token = parser->tokens.sources[input->reports[index].subject - 1],
+                                    .message = asm_goto ? "possible target of asm goto statement" : "possible target of indirect goto statement",
+                                },
+                                {
+                                    .token = parser->tokens.sources[input->reports[index].note_token],
+                                    .message = detail == 3 ? "jump bypasses initialization of VLA typedef" :
+                                               detail == 2 ? "jump bypasses initialization of variable with __attribute__((cleanup))" :
+                                                             "jump bypasses initialization of variable length array",
+                                },
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, 2, "cannot jump from this %s statement to one of its possible targets",
+                                                       asm_goto ? "asm goto" : "indirect goto");
+                        }
                         else if (phase == 0 && (kind == CHECK_INPUT_JUMP_GOTO || kind == CHECK_INPUT_JUMP_SWITCH) &&
                                  input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count)
                         {

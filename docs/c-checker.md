@@ -7900,12 +7900,18 @@ __attribute__((cleanup))", "… of VLA typedef"). Clang checks jumps in
 `ActOnFinishFunctionBody`, once the body's scopes have closed. So these errors
 complete past the body's `}`, after its unused variables' warnings, and count
 in no scope (`check_driver_error_scoped`). A computed goto's and an asm goto's
-errors don't take their notes yet ("possible target of indirect goto
-statement"). The errors clang gives in the body after such a jump are given
-where the rounds' edited reading finds them in a statement it keeps whole
-(#2120, `check_driver_rejected_trusted`). Clang's `void` value of a
-statement expression whose last statement is a `case` (`x = ({ case 1: 2;
-})`'s "assigning to 'int' from incompatible type 'void'") isn't given yet.
+error that enters such a scope takes clang's two notes: "possible target of
+indirect goto statement" (or "… asm goto statement") at the first label whose
+scope it enters, then the bypassed declaration's (`check_input_report_indirect_jump`).
+One that only leaves a cleanup's scope has no note yet. Every jump's report stops
+nothing: it is recovered (`check_input_recover_reports`), as clang checks the
+body whole before it reports its jumps, and a case the switch may not jump to is
+still the switch's case, whose value is checked. So the errors in the body
+after such a jump stay (as the rounds' edited reading also finds them in a
+statement it keeps whole, #2120, `check_driver_rejected_trusted`), and a statement expression whose last statement is a
+`case` is `void` (`x = ({ case 1: 2; })`'s "assigning to 'int' from
+incompatible type 'void'"). Left: clang drops a switch's jump errors once
+the switch has a duplicate case value, and buster still gives them (#2498).
 
 `test-checker` compares both walks for every pair of tokens in nested and sibling
 regions, including boundaries and absent tokens, on scalar/vector normal and
