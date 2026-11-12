@@ -143,7 +143,7 @@ __attribute__((noinline)) long symbols_indexed(int i, long x)
 // sqlite3LogEstAdd's shape (SQLite's autoindex5.test, #2601): a block adds `a` to an element its index `a - b` reads,
 // and the lowering extends `a` to int for each use. Those two extensions to I32 keep `a` differently above its 32 bits
 // (the addition's zero-extended, the index's sign-extended), so they must not share a register; the table's indexed
-// accesses keep one lea in each of their two blocks.
+// accesses keep its address in a register, one lea that both blocks share (#2574's hoist) or one in each.
 __attribute__((noinline)) short symbols_log_add(short a, short b)
 {
     static const unsigned char x[] = { 10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2 };
@@ -521,7 +521,7 @@ static const char* const symbols_sequences[] = {
 
 // objdump -dr's text: every function but symbols_address, the indexed tables', symbols_got and symbols_tls without a lea
 // from rip, and symbols_address and each indexed table's with exactly one (#2601: symbols_indexed's three accesses
-// share it), symbols_log_add with one in each of its two indexed blocks; every PC32 naming a symbol the unit defines and not a thread-local; each direct function with at least
+// share it), symbols_log_add with one or one in each of its two indexed blocks; every PC32 naming a symbol the unit defines and not a thread-local; each direct function with at least
 // one PC32 on a memory operand; and the GOT's and thread-locals' sequences present.
 static bool symbols_shape(const char* path)
 {
@@ -550,7 +550,7 @@ static bool symbols_shape(const char* path)
             const bool table = strcmp(function, "symbols_table_sum") == 0 || strcmp(function, "symbols_indexed") == 0;
             const bool log_add = strcmp(function, "symbols_log_add") == 0;
             const bool branch = strncmp(function, "symbols_branch_", strlen("symbols_branch_")) == 0;
-            const bool leas_valid = indirect || function_leas == (log_add ? 2u : address || table ? 1u : 0u);
+            const bool leas_valid = indirect || (log_add ? function_leas == 1 || function_leas == 2 : function_leas == (address || table ? 1u : 0u));
             // symbols_indexed and symbols_log_add reach their tables through an index alone: no rip-relative operand.
             const bool references_valid = indirect || address || log_add || strcmp(function, "symbols_indexed") == 0 || function_references != 0;
             // A branch's comparison of its symbol's memory with the constant feeds a conditional jump: no setcc or cmov.
