@@ -802,6 +802,25 @@ sweeps' IPC. The levers, in order:
 
 Coverage comes after: calls first.
 
+### One file a sweep
+
+So that those levers and the new codes can proceed in parallel pull requests,
+the machine is split: `c_check_node_machine.c` keeps its state and the record
+accessors (`node_machine_record_*`), and T, C and X have a file each. C and X
+read every record field through the accessors, which a 28-byte record layout
+implements in place of today's columns (the
+[guide](commands/lowering.md#the-shadow-step-1) lists them). The split changes no
+behavior. On the 9700X at `34748d68`, on main `0af27a30`
+([the record](https://github.com/buster14a/buster-performance/tree/bc6af1371b99cedc4e9293eda00aa76c793fbe4d/docs/measurements/node-machine-split-2524-2026-11-12)):
+
+- **The comparison:** `--verify` on `sqlite3.c`, Lua and musl, with and without
+  `-g`, has no difference, and main's counts.
+- **T:** the same code, 368.1 instructions a node on `sqlite3.c`.
+- **T and C together:** 557.1, as before.
+- **All three:** 659.9 against 669.9. Main's X formed and spilled each record's
+  value address before its template's branch; the accessors form it only where
+  a value field is read.
+
 ## Expected gains
 
 On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):
