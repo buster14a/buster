@@ -776,6 +776,29 @@ are #2573's, and the losses above remain. Counting only the takes inside the
 typed stream's loops (backward jumps' ranges) left those losers hoisted and
 cost Lua 7.5 M.
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/pull/476)),
+by #1217's method, against both bases, the instructions fall but the time
+doesn't move measurably:
+- **Lua.** Its instructions fall 0.6% at each of six link orders. Its time is
+  0.9992 (95% interval 0.9875 to 1.0110) against `5f75ea52` and 1.0061
+  (0.9926 to 1.0198) against `9750b3f0`. The `lea` taken out of each dispatch
+  is a one-cycle operation that the dispatch's load and indirect jump don't
+  wait on once it has issued.
+- **speedtest1.** Its time is 1.8% higher at the layout the driver's link
+  gives against `9750b3f0`, with 0.08% more instructions. Six layouts (pads of
+  0 to 3,088 bytes before the unit's code) give 0.9881 to 1.0169 in cycles,
+  with a mean of 1.0020 (0.9918 to 1.0121): that +1.8% is layout, not the
+  change's code.
+- **Compile time.** `sqlite3.c`'s `--tier1 -c` takes 1.0% longer, from 50 M
+  more instructions. By callgrind on a baseline build, they go to:
+  - the hot-recipe test's loop analysis (`dominators_analyze`, 12.5 M) and its
+    walks (8.6 M);
+  - the allocator's longer intervals and clobbered scans (12.5 M);
+  - the hoist's plan (3.3 M).
+
+  The emitter doesn't receive the selector's dominator tree. Passing it
+  would remove the first of these.
+
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's
 `luac.c:PrintCode` and its runs of `printf`, stays in a caller-saved register.
