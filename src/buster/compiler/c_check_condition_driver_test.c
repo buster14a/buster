@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original diagnose_if and enable_if sources (#1447, c_check_condition.c). Clang supplies the external diagnostic oracle.
 // Include after c_check_warning_driver_test.c, whose fixture runner compares complete no-caret diagnostics through both
-// kernels and lane requests, under the default, -Werror and -w policies, with -fsyntax-only and -c. Each source has at
-// most one error the reader finds before its calls are checked: the driver gives a unit's first such error alone.
+// kernels and lane requests, under the default, -Werror and -w policies, with -fsyntax-only and -c. A condition's own
+// error drops its attribute and the reader goes on (#2383), as clang's does.
 
 static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] =
 {
@@ -52,6 +52,52 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .source = "int g; void f(int x) __attribute__((enable_if(g, \"a\")));\n",
         .errors = 1,
         .notes = 1,
+    },
+    // A volatile parameter's read is never a constant (#2383); each declaration's error drops its attribute, and the unit
+    // goes on to the next one's and to its calls.
+    {
+        .name = "enable_if and diagnose_if reading a volatile parameter",
+        .source = "int b7(volatile int a) __attribute__((enable_if(a > 0, \"\")));\n"
+                  "int b8(volatile int a) __attribute__((diagnose_if(a > 0, \"x\", \"warning\")));\n"
+                  "int g; int c(int x) __attribute__((enable_if(g, \"\")));\n"
+                  "int d(int x) __attribute__((enable_if(x, \"\")));\n"
+                  "void h(void) { b7(1); c(1); d(0); }\n",
+        .errors = 4,
+        .notes = 4,
+    },
+    {
+        .name = "a volatile parameter's read that some arguments skip",
+        .source = "int c1(int x, volatile int a) __attribute__((enable_if(x && a, \"\")));\n"
+                  "int c2(int x, volatile int a) __attribute__((enable_if(x || a, \"\")));\n"
+                  "int c3(int x, volatile int a) __attribute__((enable_if(x ? a : 1, \"\")));\n"
+                  "int c4(volatile int a) __attribute__((enable_if(sizeof(a) == 4, \"\")));\n"
+                  "int c5(volatile int *a) __attribute__((enable_if(a != 0, \"\")));\n"
+                  "void g(int* p) { c1(1, 2); c1(0, 2); c2(0, 3); c2(1, 3); c3(0, 1); c4(1); c5(p); }\n",
+        .errors = 4,
+        .notes = 4,
+    },
+    // Casts clang's constant evaluation refuses (#2253): to void, its note "non-literal type 'void'", and between an integer
+    // and a pointer but a null pointer constant's, "this conversion is not allowed"; where no arguments skip them, in a
+    // parameter's condition or not. A void condition isn't one; a call reads past a void left operand.
+    {
+        .name = "casts to void and between integers and pointers in a condition",
+        .source = "void c(int x) __attribute__((diagnose_if(((void)x, x), \"m\", \"warning\")));\n"
+                  "void l(long x) __attribute__((diagnose_if(((void*)x, x), \"m\", \"warning\")));\n"
+                  "void a1(int x) __attribute__((diagnose_if(((void)0, x), \"m\", \"warning\")));\n"
+                  "void a2(int x) __attribute__((diagnose_if((void)x, \"m\", \"warning\")));\n"
+                  "void a3(int x) __attribute__((diagnose_if(x && ((void)x, 1), \"m\", \"warning\")));\n"
+                  "void a4(int x) __attribute__((diagnose_if(((void*)0, x), \"m\", \"warning\")));\n"
+                  "void a8(int x) __attribute__((enable_if(((void)x, x), \"m\")));\n"
+                  "void a9(int *x) __attribute__((diagnose_if(((void*)x, 1), \"m\", \"warning\")));\n"
+                  "void b1(int x) __attribute__((diagnose_if(((void)0, 1), \"m\", \"warning\")));\n"
+                  "void b5(int x) __attribute__((diagnose_if(((void)x, 1) && x, \"m\", \"warning\")));\n"
+                  "void b6(int x) __attribute__((diagnose_if(sizeof((void)x, 1) == 4 && x, \"m\", \"warning\")));\n"
+                  "void b7(int x) __attribute__((diagnose_if((long)(char*)0 == 0 && x, \"m\", \"warning\")));\n"
+                  "void b8(int x) __attribute__((diagnose_if(x ? 1 : ((void)x, 0), \"m\", \"warning\")));\n"
+                  "void h(void) { a3(1); a9(0); b6(1); b8(1); b8(0); }\n",
+        .warnings = 7,
+        .errors = 8,
+        .notes = 11,
     },
     {
         .name = "enable_if with an argument that is no constant",

@@ -92,16 +92,24 @@ static uint32_t check_condition_variable(const CheckInputReader* reader, uint32_
     return result;
 }
 
-// clang's "'X' attribute expression never produces a constant expression" at the attribute, with its note at `note`.
-static void check_condition_never_constant(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t note)
+// clang's "'X' attribute expression never produces a constant expression" at the attribute, with its note at `note`, of
+// kind `note_kind`.
+static void check_condition_never_constant_note(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t note,
+                                                CheckInputNoteKind note_kind)
 {
     const uint32_t before = reader->output->report_count;
     check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_NEVER_CONSTANT, 0);
     if (reader->output->report_count > before)
     {
         reader->output->reports[before].note_token = note;
-        reader->output->reports[before].note_kind = note != BUSTER_CHECK_NONE ? CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION : CHECK_INPUT_NOTE_NONE;
+        reader->output->reports[before].note_kind = note != BUSTER_CHECK_NONE ? note_kind : CHECK_INPUT_NOTE_NONE;
     }
+}
+
+// The same, its note "subexpression not valid in a constant expression".
+static void check_condition_never_constant(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t note)
+{
+    check_condition_never_constant_note(reader, attributes, attribute, note, CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION);
 }
 
 // The first string token of an attribute argument [first, end), through the parentheses glibc writes around messages.
@@ -161,6 +169,98 @@ static CheckOp check_condition_op(uint8_t kind, uint32_t operands)
         }
     }
     return op;
+}
+
+// Whether some arguments skip the read at `token` of a condition [first, end): a `&&`'s or `||`'s right operand, or a
+// conditional's second or third, holds it. A conditional's first operand comes before its `?`, a child of its `:`.
+static bool check_condition_avoidable(const Parser* parser, uint32_t first, uint32_t end, uint32_t token)
+{
+    bool avoidable = false;
+    for (uint32_t at = token; !avoidable && parser->tree.parents[at] >= first && parser->tree.parents[at] < end && parser->tree.parents[at] != at;
+         at = parser->tree.parents[at])
+    {
+        const uint32_t above = parser->tree.parents[at];
+        const uint8_t above_kind = parser->tokens.kinds[above];
+        bool condition = false;
+        for (uint32_t q = at + 1; above_kind == PARSE_KIND_COLON && !condition && q < above; q += 1)
+        {
+            condition = parser->tokens.kinds[q] == PARSE_KIND_QUESTION && parser->tree.parents[q] == above;
+        }
+        avoidable = ((above_kind == PARSE_KIND_AMPAMP || above_kind == PARSE_KIND_PIPEPIPE) && at > above) || (above_kind == PARSE_KIND_COLON && !condition);
+    }
+    return avoidable;
+}
+
+// Whether an operand of an unevaluated operator holds `token` of a condition [first, end): a sizeof's, an alignof's or a
+// typeof's keyword is its node's child, or the child before a `)`'s opener.
+static bool check_condition_unevaluated_operand(const Parser* parser, uint32_t first, uint32_t end, uint32_t token)
+{
+    bool unevaluated = false;
+    for (uint32_t at = token; !unevaluated && parser->tree.parents[at] >= first && parser->tree.parents[at] < end && parser->tree.parents[at] != at;
+         at = parser->tree.parents[at])
+    {
+        const uint32_t above = parser->tree.parents[at];
+        unevaluated = check_condition_unevaluated_keyword(parser, above);
+        for (uint32_t k = first; !unevaluated && k < above; k += 1)
+        {
+            unevaluated = parser->tree.parents[k] == above && check_condition_unevaluated_keyword(parser, k);
+        }
+    }
+    return unevaluated;
+}
+
+// The first cast of a condition [first, end), by its `(`, that clang's constant evaluation refuses where no arguments skip
+// it (#2253), or BUSTER_CHECK_NONE: a cast to void, its note "non-literal type 'void' cannot be used in a constant
+// expression" (CHECK_INPUT_NOTE_CONSTANT_VOID), and one from an integer to a pointer but a null pointer constant's, or from
+// a pointer to an integer but bool, "this conversion is not allowed in a constant expression"
+// (CHECK_INPUT_NOTE_CONSTANT_CONVERSION), in `*note_kind`. Unevaluated operands' casts aren't read.
+static uint32_t check_condition_cast(CheckInputReader* reader, uint32_t first, uint32_t end, CheckInputNoteKind* note_kind)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; result == BUSTER_CHECK_NONE && t < end; t += 1)
+    {
+        uint32_t opener = BUSTER_CHECK_NONE;
+        const bool cast = parser->tokens.kinds[t] == PARSE_KIND_R_PAREN && parser->tree.roles[t] == PARSE_ROLE_CLOSE_CAST;
+        for (uint32_t k = first; cast && opener == BUSTER_CHECK_NONE && k < t; k += 1)
+        {
+            opener = parser->tokens.kinds[k] == PARSE_KIND_L_PAREN && parser->tree.parents[k] == t ? k : BUSTER_CHECK_NONE;
+        }
+        const bool read = opener != BUSTER_CHECK_NONE && !check_condition_avoidable(parser, first, end, t) &&
+                          !check_condition_unevaluated_operand(parser, first, end, t);
+        const TypeId target = read ? type_strip_aligned(reader->types, check_input_constant_type(reader, opener + 1, t)) : 0;
+        const uint8_t target_kind = target != 0 ? type_kind(reader->types, target) : BUSTER_TYPE_KIND_NONE;
+        // The operand: the run of tokens past the `)` that the cast's node holds.
+        uint32_t operand_end = t + 1;
+        bool under = target_kind != BUSTER_TYPE_KIND_NONE && target_kind != BUSTER_TYPE_KIND_VOID;
+        while (under && operand_end < end)
+        {
+            uint32_t at = operand_end;
+            for (uint32_t steps = 0; at != t && at >= first && at < end && parser->tree.parents[at] != at && steps < end - first; steps += 1)
+            {
+                at = parser->tree.parents[at];
+            }
+            under = at == t;
+            operand_end += under ? 1u : 0u;
+        }
+        CheckValue value = { 0 };
+        TypeId unused = 0;
+        const bool convert = (target_kind == BUSTER_TYPE_KIND_POINTER || ((target_kind == BUSTER_TYPE_KIND_INTEGER || target_kind == BUSTER_TYPE_KIND_BIT_INT ||
+                             target_kind == BUSTER_TYPE_KIND_ENUM) && type_unqualified(target) != BUSTER_TYPE_BOOL)) && operand_end > t + 1 &&
+                             check_input_constant_read(reader, t + 1, operand_end, false, false, true, &value, &unused, NULL, NULL);
+        const uint8_t operand_kind = convert ? type_kind(reader->types, type_strip_aligned(reader->types, value.type)) : BUSTER_TYPE_KIND_NONE;
+        const bool integer = operand_kind == BUSTER_TYPE_KIND_INTEGER || operand_kind == BUSTER_TYPE_KIND_BIT_INT || operand_kind == BUSTER_TYPE_KIND_ENUM;
+        const bool pointer = operand_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(operand_kind) || operand_kind == BUSTER_TYPE_KIND_FUNCTION;
+        const bool null = integer && value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == 0;
+        const bool refused = target_kind == BUSTER_TYPE_KIND_VOID || (target_kind == BUSTER_TYPE_KIND_POINTER && integer && !null) ||
+                             (target_kind != BUSTER_TYPE_KIND_POINTER && pointer);
+        if (refused)
+        {
+            result = opener;
+            *note_kind = target_kind == BUSTER_TYPE_KIND_VOID ? CHECK_INPUT_NOTE_CONSTANT_VOID : CHECK_INPUT_NOTE_CONSTANT_CONVERSION;
+        }
+    }
+    return result;
 }
 
 typedef enum CheckConditionBuild
@@ -339,15 +439,7 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
             // call's evaluation needs only where it reads it. Any other part the evaluator doesn't take alone (a call's
             // callee) isn't supported.
             const uint32_t variable = evaluated ? BUSTER_CHECK_NONE : check_condition_variable(reader, parameters, list, first + low[v], first + high[v] + 1);
-            bool avoidable = false;
-            for (uint32_t at = token; read && !evaluated && !avoidable && parser->tree.parents[at] >= first && parser->tree.parents[at] < end &&
-                 parser->tree.parents[at] != at; at = parser->tree.parents[at])
-            {
-                const uint32_t above = parser->tree.parents[at];
-                const uint8_t above_kind = parser->tokens.kinds[above];
-                avoidable = ((above_kind == PARSE_KIND_AMPAMP || above_kind == PARSE_KIND_PIPEPIPE) && at > above) ||
-                            (above_kind == PARSE_KIND_COLON && first_child[above - first] != at - first);
-            }
+            const bool avoidable = read && !evaluated && check_condition_avoidable(parser, first, end, token);
             // Or a call, an assignment or an increment in it, which no constant evaluation gets past: the first, the note's.
             uint32_t written = BUSTER_CHECK_NONE;
             for (uint32_t t = low[v]; !evaluated && written == BUSTER_CHECK_NONE && t <= high[v]; t += 1)
@@ -377,15 +469,7 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
         {
             // A call naming a parameter is unknown, as its arguments are; an assignment or an increment that can't be skipped
             // never gives a constant, at its operator, and one that can is unknown.
-            bool avoidable = opaque[v] == CHECK_CONDITION_OPAQUE_CALL;
-            for (uint32_t at = token; !avoidable && parser->tree.parents[at] >= first && parser->tree.parents[at] < end && parser->tree.parents[at] != at;
-                 at = parser->tree.parents[at])
-            {
-                const uint32_t above = parser->tree.parents[at];
-                const uint8_t above_kind = parser->tokens.kinds[above];
-                avoidable = ((above_kind == PARSE_KIND_AMPAMP || above_kind == PARSE_KIND_PIPEPIPE) && at > above) ||
-                            (above_kind == PARSE_KIND_COLON && first_child[above - first] != at - first);
-            }
+            const bool avoidable = opaque[v] == CHECK_CONDITION_OPAQUE_CALL || check_condition_avoidable(parser, first, end, token);
             if (!avoidable)
             {
                 check_condition_never_constant(reader, attributes, attribute, token);
@@ -401,15 +485,50 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
         }
         else if (!skipped[v] && kind == PARSE_KIND_COMMA && operand_count == 2 && opener == BUSTER_CHECK_NONE)
         {
-            // A comma operator's value is its right operand's, where its left one's is known.
-            steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_COMMA, .operands = { step_of[operands[0]], step_of[operands[1]], 0 } };
-            step_of[v] = step_count++;
+            // A comma operator's value is its right operand's, where its left one's is known. A left operand cast to void,
+            // which only a call's evaluation reaches (#2253: check_condition_cast refuses one no arguments skip), is
+            // discarded.
+            const uint32_t left = first + operands[0];
+            uint32_t left_opener = BUSTER_CHECK_NONE;
+            const bool left_cast = parser->tokens.kinds[left] == PARSE_KIND_R_PAREN && parser->tree.roles[left] == PARSE_ROLE_CLOSE_CAST;
+            for (uint32_t c = left_cast ? first_child[operands[0]] : BUSTER_CHECK_NONE; c != BUSTER_CHECK_NONE && left_opener == BUSTER_CHECK_NONE; c = next_sibling[c])
+            {
+                left_opener = parser->tokens.kinds[first + c] == PARSE_KIND_L_PAREN ? first + c : BUSTER_CHECK_NONE;
+            }
+            const TypeId left_type = left_opener != BUSTER_CHECK_NONE ? check_input_constant_type(reader, left_opener + 1, left) : 0;
+            if (left_type != 0 && type_kind(reader->types, type_strip_aligned(reader->types, left_type)) == BUSTER_TYPE_KIND_VOID)
+            {
+                step_of[v] = step_of[operands[1]];
+            }
+            else
+            {
+                steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_COMMA, .operands = { step_of[operands[0]], step_of[operands[1]], 0 } };
+                step_of[v] = step_count++;
+            }
         }
         else if (!skipped[v] && kind == PARSE_KIND_IDENTIFIER && first_child[v] == BUSTER_CHECK_NONE)
         {
             const uint32_t place = check_condition_parameter(reader, parameters, list, token);
             result = place < parameter_count ? result : CHECK_CONDITION_UNSUPPORTED;
-            if (result == CHECK_CONDITION_BUILT)
+            // A volatile parameter's read is never a constant (#2383): one that can't be skipped never gives a constant
+            // expression, with clang's note at the name, and one that can is an unknown value that each call's evaluation
+            // needs only where it reads it.
+            const uint32_t declaration = reader->output->declarations[token];
+            const bool qualified = declaration < parser->tokens.count && (type_qualifiers(reader->declared_types[declaration]) & BUSTER_TYPE_VOLATILE) != 0;
+            const bool avoidable = qualified && check_condition_avoidable(parser, first, end, token);
+            if (result == CHECK_CONDITION_BUILT && qualified && !avoidable)
+            {
+                check_condition_never_constant(reader, attributes, attribute, token);
+                result = CHECK_CONDITION_FAILED;
+            }
+            else if (result == CHECK_CONDITION_BUILT && qualified)
+            {
+                constants[constant_count] = (CheckValue){ .type = type_unqualified(parameter_types[place]), .category = CHECK_RVALUE };
+                steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_CONSTANT, .index = constant_count, .operands = { 0, 0, 0 } };
+                constant_count += 1;
+                step_of[v] = step_count++;
+            }
+            else if (result == CHECK_CONDITION_BUILT)
             {
                 steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_PARAMETER, .index = place, .type = parameter_types[place] };
                 step_of[v] = step_count++;
@@ -523,7 +642,27 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
     bool call_failure = false;
     valid = valid && check_input_attribute_expression(reader, attributes, attribute, first, end, true, &value, &call_failure);
     CheckConditionBuild result = valid ? CHECK_CONDITION_BUILT : CHECK_CONDITION_FAILED;
-    if (valid && !dependent)
+    // A condition of type void isn't one (#2253), and a cast clang's constant evaluation refuses where no arguments skip it
+    // never gives a constant (check_condition_cast).
+    CheckInputNoteKind cast_kind = CHECK_INPUT_NOTE_NONE;
+    const bool void_condition = valid && type_kind(reader->types, type_strip_aligned(reader->types, value.type)) == BUSTER_TYPE_KIND_VOID;
+    const uint32_t cast = valid && !void_condition ? check_condition_cast(reader, first, end, &cast_kind) : BUSTER_CHECK_NONE;
+    if (void_condition)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_NOT_BOOL, 0);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].type = value.type;
+        }
+        result = CHECK_CONDITION_FAILED;
+    }
+    else if (cast != BUSTER_CHECK_NONE)
+    {
+        check_condition_never_constant_note(reader, attributes, attribute, cast, cast_kind);
+        result = CHECK_CONDITION_FAILED;
+    }
+    else if (valid && !dependent)
     {
         bool truth = false;
         const bool known = value.constant_kind != CHECK_CONSTANT_NONE && check_input_const_rvalue(reader, end, &value) && check_action_truth(reader->types, &value, &truth);
@@ -723,6 +862,7 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
         if ((attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) && !attribute->ignored && !attribute->subject_ignored)
         {
             CheckCondition condition;
+            const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, attribute);
             // (A user's object-size wrapper keeps a shape the steps don't take, a `__builtin_object_size` of its parameter, as
             // a system header's condition is kept: it decides nothing.)
             const CheckConditionBuild built = check_condition_build(reader, attributes, attribute, parameters, list, function, name, system || object_sized,
@@ -732,10 +872,15 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
             {
                 check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             }
-            valid = built == CHECK_CONDITION_BUILT;
-            const uint32_t index = valid ? check_condition_append(reader, &condition) : BUSTER_CHECK_NONE;
-            valid &= index != BUSTER_CHECK_NONE;
-            if (valid)
+            // A condition with an error of its own is dropped, as clang drops the attribute, and the unit goes on (#2383):
+            // its error is recovered (phase 1 of semantic error recovery), completing at the declarator's end, after the
+            // warnings its expression gave.
+            const bool dropped = built == CHECK_CONDITION_FAILED && check_input_attribute_errors_recover(reader, attributes, &recovery, reader->attribute_completion);
+            attribute->ignored |= dropped;
+            valid = built == CHECK_CONDITION_BUILT || dropped;
+            const uint32_t index = valid && !dropped ? check_condition_append(reader, &condition) : BUSTER_CHECK_NONE;
+            valid &= dropped || index != BUSTER_CHECK_NONE;
+            if (valid && !dropped)
             {
                 check_condition_profile(reader, index);
                 if (overloadable && condition.kind == CHECK_CONDITION_ENABLE)

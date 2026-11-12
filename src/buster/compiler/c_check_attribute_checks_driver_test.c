@@ -860,6 +860,12 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "union V4 [[clang::annotate_type(\"x\")]];\nstruct V6 [[clang::neon_vector_type]];\nint y = undeclared;\n",
         "struct V8 [[foo]];\nunion V9 [[gnu::aligned(8)]] [[clang::btf_type_tag(\"b\")]];\nenum E1 [[clang::neon_vector_type(2)]];\n"
         "struct V10 __attribute__((aligned(8))) [[clang::neon_vector_type(2)]];\nstruct V11 [[clang::neon_vector_type(2, 3)]];\n",
+        // A struct's or a union's definition's C23 lists between its name and its body (#2268): clang's parser's error at the
+        // first, then the lists read on as the tag's own, with their Sema's errors; the layout takes them.
+        "struct D1 [[clang::neon_vector_type(4)]] { int a; };\nstruct D2 [[gnu::aligned(16)]] [[gnu::packed]] { char c; int i; } d2;\n"
+        "union D3 [[clang::btf_type_tag(\"a\"), deprecated]] { int a; };\nstruct D4 [[foo]] { int a; };\n"
+        "struct D5 [[clang::neon_vector_type(2, 3)]] { int a; };\n_Static_assert(sizeof d2 == 16, \"\");\nunion D3 d3;\n"
+        "void f(void) { struct L [[gnu::packed]] { char c; int a; } l; _Static_assert(sizeof l == 5, \"\"); }\nint y = undeclared;\n",
         // A type name that starts with a GNU attribute (#1447): typeof's and sizeof's, whose attributes are clang's type
         // warnings, not an expression's names.
         "typeof(__attribute__((aligned(8))) int) c;\ntypeof(__attribute__((vector_size(8))) int) v;\n_Static_assert(sizeof(v) == 8, \"\");\n"

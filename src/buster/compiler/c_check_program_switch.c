@@ -276,7 +276,7 @@ static bool check_control_switch_prune(CheckControlWriter* writer, uint32_t keyw
         else
         {
             unsigned __int128 integer = 0;
-            const bool matches = check_program_case_value(program, expression, item->type, &integer) && integer == item->lower;
+            const bool matches = check_program_case_value(program, expression, item->type, &integer, NULL) && integer == item->lower;
             selected = matches && (selected == BUSTER_CHECK_NONE || item->token > selected) ? item->token : selected;
         }
     }
@@ -348,9 +348,7 @@ static bool check_control_switch_prune(CheckControlWriter* writer, uint32_t keyw
 static void check_control_switch(CheckControlWriter* writer, uint32_t keyword, uint32_t token, uint32_t body, uint32_t condition, uint32_t end, uint32_t repeat)
 {
     writer->stops[token] = end;
-    uint32_t width = 0;
-    bool sign = false;
-    if (!check_action_integer_type(writer->program->types, check_stream_type(writer->program->stream, condition), &width, &sign))
+    if (!check_program_switch_type(writer->program->types, check_stream_type(writer->program->stream, condition)))
     {
         check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
     }
