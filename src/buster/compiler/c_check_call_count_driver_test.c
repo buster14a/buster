@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Call argument counts and calls without a prototype (#1860, #1921, #1994): original fixtures whose whole diagnostic
+// Call argument counts and calls without a prototype (#1860, #1921, #1994), and a call's failed argument conversions (#2413): original fixtures whose whole diagnostic
 // output is compared with clang's on both paths, at each warning policy, with -fsyntax-only and -c, on one and three
 // lanes. Include after c_check_warning_driver_test.c (check_test_driver_warning_fixtures).
 
@@ -212,6 +212,27 @@ static const CheckDriverDefaultWarningFixture check_driver_call_count_fixtures[]
         .warnings = 0,
         .errors = 1,
         .notes = 1,
+    },
+    {
+        // A call's later arguments that don't convert either (#2413, check_graph_report_arguments): each its own error at its
+        // argument, with its parameter's note, after an error-by-default conversion (incompatible pointers, an integer and a
+        // pointer); a hard error (incompatible types, another address space) is the call's last.
+        .name = "two failed argument conversions",
+        .source = "void g(int *p, int (*fp)(int));\n"
+                  "void f(long *l) { g(l, l); }\n",
+        .errors = 2,
+        .notes = 2,
+    },
+    {
+        .name = "failed argument conversions until a hard error",
+        .source = "struct S { int a; };\n"
+                  "void g(int *p, int (*fp)(int), int x, struct S s, char *c);\n"
+                  "void f(long *l, struct S s, unsigned char *u) { g(l, l, 1, s, (char*)u); g(0, 0, s, 1, 0); g(l, 0, 0, s, (char*)0); }\n"
+                  "void h(void (*fp)(int *, int *), long *l) { fp(l, l); (*fp)(l, 0); }\n"
+                  "void k(int __seg_gs *a, int *b);\n"
+                  "void m(int *p, int __seg_fs *q) { k(p, q); k(q, q); }\n",
+        .errors = 9,
+        .notes = 6,
     },
 };
 
