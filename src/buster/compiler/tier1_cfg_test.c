@@ -1407,6 +1407,118 @@ static void tier1_cfg_test_undefined(Tier1CfgTestTally* tally, Arena* output, Ar
     }
 }
 
+// The moves of edge `from` -> `to` in an allocation of `input`, or UINT32_MAX where there is no such edge.
+static uint32_t tier1_cfg_test_edge_moves(const Tier1CfgInput* input, const Tier1CfgAllocation* result, uint32_t from, uint32_t to)
+{
+    uint32_t moves = UINT32_MAX;
+    for (uint32_t e = input->successor_offsets[from]; e < input->successor_offsets[from + 1]; e += 1)
+    {
+        moves = input->successors[e] == to ? result->edge_move_offsets[e + 1] - result->edge_move_offsets[e] : moves;
+    }
+    return moves;
+}
+
+// #2553's fixtures, each allocated by both paths and checked by the checker, then as a case (tier1_cfg_test_case):
+// - A join's phi takes its operand's register at the exit of its immediate dominator, a predecessor: 0 -> 1, 0 -> 2,
+//   1 -> 2, c and t defined in 0, z = phi(t, r) at 2, r defined in 1 while u holds t's former register. The critical edge
+//   0 -> 2 then moves nothing, where z took r's register, its nearest predecessor's in layout, and the edge moved t.
+// - A phi web carried around a loop whose latch's join is laid out before its header keeps one slot: no general registers,
+//   0 -> 3, 3 -> 1, 3 -> 2, 1 -> 2, 2 -> 3, 3 -> 4; p2 = phi(q, p1) at 2, p1 = phi(e, p2) at 3, q defined in 1 while p1 is
+//   live. Joining p2's operands in order put q in its slot first, which then kept out p1, live at q's definition; the
+//   phi-to-phi pairs join first, so that the loop's edges 2 -> 3 and 3 -> 2 move nothing.
+static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builders[2];
+    Tier1CfgTestBuilder* join = &builders[0];
+    memset(join, 0, sizeof(*join));
+    join->block_count = 3;
+    join->instructions[0] = 2;
+    join->instructions[1] = 3;
+    join->instructions[2] = 2;
+    tier1_cfg_test_edge(join, 0, 1);
+    tier1_cfg_test_edge(join, 0, 2);
+    tier1_cfg_test_edge(join, 1, 2);
+    join->registers[0] = 0x000f;
+    join->scratch[0] = 11;
+    const uint32_t c = tier1_cfg_test_value(join, 0, 0, 0, 0x000f);
+    const uint32_t t = tier1_cfg_test_value(join, 0, 1, 0, 0x000f);
+    const uint32_t u = tier1_cfg_test_value(join, 1, 0, 0, 0x000f);
+    const uint32_t r = tier1_cfg_test_value(join, 1, 1, 0, 0x000f);
+    tier1_cfg_test_definition_use(join, c);
+    tier1_cfg_test_definition_use(join, t);
+    tier1_cfg_test_definition_use(join, u);
+    tier1_cfg_test_definition_use(join, r);
+    tier1_cfg_test_use(join, u, 1, 2, true);
+    const uint32_t join_operands[] = {
+        t,
+        r,
+    };
+    const uint32_t z = tier1_cfg_test_phi(join, 2, 0, join_operands);
+    tier1_cfg_test_use(join, z, 2, 0, true);
+    tier1_cfg_test_use(join, c, 2, 1, true);
+    Tier1CfgTestBuilder* web = &builders[1];
+    memset(web, 0, sizeof(*web));
+    web->block_count = 5;
+    web->instructions[0] = 1;
+    web->instructions[1] = 2;
+    web->instructions[2] = 1;
+    web->instructions[3] = 1;
+    web->instructions[4] = 1;
+    web->share_slots = true;
+    web->scratch[0] = 11;
+    tier1_cfg_test_edge(web, 0, 3);
+    tier1_cfg_test_edge(web, 3, 1);
+    tier1_cfg_test_edge(web, 1, 2);
+    tier1_cfg_test_edge(web, 3, 2);
+    tier1_cfg_test_edge(web, 2, 3);
+    tier1_cfg_test_edge(web, 3, 4);
+    const uint32_t e = tier1_cfg_test_value(web, 0, 0, 0, 0);
+    const uint32_t q = tier1_cfg_test_value(web, 1, 0, 0, 0);
+    // Block 2's predecessors are 1 and 3, block 3's 0 and 2, in the edges' order. p1 is made first, as p2's operand.
+    const uint32_t p1 = web->value_count + 1;
+    const uint32_t p2_operands[] = {
+        q,
+        p1,
+    };
+    const uint32_t p2 = tier1_cfg_test_phi(web, 2, 0, p2_operands);
+    const uint32_t p1_operands[] = {
+        e,
+        p2,
+    };
+    const uint32_t made = tier1_cfg_test_phi(web, 3, 0, p1_operands);
+    tier1_cfg_test_use(web, p1, 1, 1, false);
+    tier1_cfg_test_use(web, p1, 4, 0, false);
+    tier1_cfg_test_expect(tally, made == p1, "the loop's phis are made in their operands' order");
+    const char* names[] = {
+        "a join's phi takes its dominating predecessor's operand's register",
+        "a phi web around a loop keeps one slot",
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(builders); f += 1)
+    {
+        const uint64_t saved = output->length;
+        Tier1CfgInput input;
+        const bool built = tier1_cfg_test_build(&builders[f], output, &input);
+        tier1_cfg_test_expect(tally, built, names[f]);
+        for (uint32_t path = 0; built && path < 2; path += 1)
+        {
+            const uint64_t mark = output->length;
+            Tier1CfgAllocation result = { 0 };
+            const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+            Tier1CfgCheck check;
+            const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+            tier1_cfg_test_expect(tally, allocated, names[f]);
+            const bool quiet = f == 0 ? tier1_cfg_test_edge_moves(&input, &result, 0, 2) == 0 : tier1_cfg_test_edge_moves(&input, &result, 2, 3) == 0 && tier1_cfg_test_edge_moves(&input, &result, 3, 2) == 0;
+            tier1_cfg_test_expect(tally, allocated && quiet, f == 0 ? "the dominating predecessor's critical edge moves nothing" : "the loop's edges move nothing for its phi web");
+            arena_pop_to(output, mark);
+        }
+        if (built)
+        {
+            tier1_cfg_test_case(tally, &input, output, scratch, names[f], true, 0, 0, true);
+        }
+        arena_pop_to(output, saved);
+    }
+}
+
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[11];
@@ -1862,6 +1974,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tally.oracle_mutants = true;
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             tier1_cfg_test_undefined(&tally, &output, &scratch);
+            tier1_cfg_test_dominance(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
             tier1_cfg_test_wide_edges(&tally, &output, &scratch);

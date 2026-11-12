@@ -559,8 +559,10 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
     }
     else if (shape == 15)
     {
-        // A critical edge into a join: x = a; if (b & 1) x ^= c; return x + (b >> 1). The entry's edge to the join
-        // leaves a block of two successors for one of two predecessors, where the phi's moves need a stub.
+        // A critical edge into a join: x = a; if (b & 1) x ^= c; return x + (b >> 1) + a. The entry's edge to the join
+        // leaves a block of two successors for one of two predecessors, where the phi's moves need a stub: a, live past
+        // the join in its register, keeps the phi out of it (#2553 gives a phi its operand's register along the edge from
+        // its dominator, which without that use moved nothing).
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 3);
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
@@ -576,6 +578,8 @@ static void tier1_pipeline_fixture(Tier1PipelineFixture* fixture, uint32_t shape
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
         tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
         tier0_emit(program, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
     }
     else if (shape == 8)
@@ -1569,7 +1573,7 @@ static const char* const tier1_pipeline_formulas[BUSTER_TIER1_PIPELINE_CASES] = 
     "uint64_t i = c & 15, x = a, y = b; while (i != 0) { uint64_t t = x; x = y ^ (t << 1); y = t; i -= 1; } result = x + y;",
     "uint64_t v[8]; for (unsigned k = 0; k < 8; ++k) v[k] = a ^ constant(k); for (uint64_t i = c & 7; i != 0; i -= 1) for (unsigned k = 0; k < 8; ++k) v[k] = (v[k] + v[(k + 1) % 8]) ^ b; result = v[0]; for (unsigned k = 1; k < 8; ++k) result ^= v[k];",
     "uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b;",
-    "uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1);",
+    "uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1) + a;",
     "result = (uint64_t)((double)a * 0.75 + 1.0);",
     "result = a;",
 };
