@@ -220,9 +220,12 @@ enum
     // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
     // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
     CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 149,
+    // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
+    // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
+    CHECK_WARNING_ID_PSABI = 150,
     // A struct or union without named members (#2409, clang's ext_empty_struct_union and ext_no_named_members_in_struct_union):
     // -Wgnu-empty-struct, off by default, -pedantic's.
-    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 150,
+    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 151,
     CHECK_WARNING_ID_COUNT,
 };
 

@@ -198,6 +198,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_ELABORATED_ENUM_BASE] = { "-Welaborated-enum-base", NULL,
                                                 "non-defining declaration of enumeration with a fixed underlying type is only permitted as a standalone "
                                                 "declaration; missing list of enumerators?" },
+    [CHECK_WARNING_ID_PSABI] = { "-Wpsabi", NULL, "AVX vector argument of type T without 'avx' enabled changes the ABI" },
     [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = { "-Wgnu-empty-struct", "-Wgnu", "empty struct is a GNU extension" },
 };
 
