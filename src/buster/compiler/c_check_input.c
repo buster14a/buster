@@ -937,6 +937,13 @@ struct CheckInput
     // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
     uint32_t* corrected_tokens;
     uint32_t corrected_count;
+    // The parameters' unknown type names whose typo's search suggested a type (#1447, check_input_parameter_typo), in
+    // source order: each one's token, its suggestion's detail (CHECK_TYPO_PARAMETER with a keyword's index + 1) and its
+    // typedef's declaration token + 1 (or 0), for the driver to read the unit again with (check_driver_typo_edits).
+    uint32_t* parameter_typo_tokens;
+    uint32_t* parameter_typo_details;
+    uint32_t* parameter_typo_types;
+    uint32_t parameter_typo_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
     uint8_t implicit_builtin_diagnostic;
@@ -5339,6 +5346,25 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
 // although the parser's ordinary postorder puts their nodes after those declarators.
 static void check_input_constant_failure_report(CheckInputReader* reader, const CheckConstantFailure* failure, uint32_t first, uint32_t fallback);
 
+static void check_typo_parameter(CheckInputReader* reader, uint32_t token, uint32_t name);
+
+// A parameter's `int` at `token` that a recovery view put in for an unknown type name (check_prefix_make), whose source
+// spelling is still the name (#1447): where the typo's search suggests a type, clang's parser reads the parameter with
+// it, so the input lists it (CheckInput.parameter_typo_tokens) for the driver to read the unit again with the type in its
+// tokens (check_driver_typo_edits). It reports nothing itself. Not on a lane or by a deferred reader, which read no
+// recovery view.
+static void check_input_parameter_typo(CheckInputReader* reader, uint32_t token)
+{
+    const PPTokens* output = reader->pp != NULL ? &reader->pp->output : NULL;
+    const uint32_t source = reader->parser->tokens.sources[token];
+    const bool spelled = output != NULL && source < output->count && output->kinds[source] == C_TOKEN_RAW_IDENTIFIER;
+    const uint32_t name = spelled ? output->values[source] : 0;
+    if (spelled && !reader->lane && reader->deferred == NULL && !reader->output->resource)
+    {
+        check_typo_parameter(reader, token, name);
+    }
+}
+
 static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline,
                                     bool parameter)
 {
@@ -5382,6 +5408,14 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     CheckInputAttributes* attributes = 0;
     *is_typedef = false;
     *is_inline = false;
+    for (uint32_t t = first; __builtin_expect(parameter && parser->recovered_parameter_types, 0) && t < end && parser->tree.roles[t] == PARSE_ROLE_SPECIFIER; t += 1)
+    {
+        // (Before a job's specifiers, which may have read past the `int`.)
+        if (parser->tokens.kinds[t] == PARSE_KIND_TYPE && parser->tokens.names[t] == C_NAME_INT)
+        {
+            check_input_parameter_typo(reader, t);
+        }
+    }
     if (job != 0 && job->ready)
     {
         i = job->keyword;

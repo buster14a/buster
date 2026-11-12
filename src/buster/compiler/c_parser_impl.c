@@ -2957,9 +2957,10 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // (#147). A parameter's does.
         parse_scalar_close_expected(parser, i, PARSE_KIND_L_PAREN, true);
     }
-    else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && definition_scope && !kr))
+    else if (kind == PARSE_KIND_ATTRIBUTE || (kind == PARSE_KIND_ASM && (definition_scope || group == PARSE_ROLE_OPEN_FOR) && !kr))
     {
-        // An attribute after the declarator, or an asm label, which renames the declared symbol.
+        // An attribute after the declarator, or an asm label, which renames the declared symbol: a block's or a for
+        // statement's declaration's too (#2419).
         step->role = PARSE_ROLE_LEAF_RIGHT;
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE;

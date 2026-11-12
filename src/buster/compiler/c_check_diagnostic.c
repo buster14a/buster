@@ -193,6 +193,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_ASM_LABEL_ON_AUTO] = { NULL, NULL, "ignored asm label on automatic variable" },
     [CHECK_WARNING_ID_ALIGNMENT_NO_OP] = { "-Wtautological-compare", NULL, "aligning a value to 1 byte is a no-op" },
     [CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE] = { "-Wtautological-compare", NULL, "the result of checking whether a value is aligned to 1 byte is always true" },
+    [CHECK_WARNING_ID_NONSCALAR_SAME_CAST] = { "-Wpedantic", NULL, "C99 forbids casting nonscalar type to the same type" },
     [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = { "-Wgnu-empty-struct", "-Wgnu", "empty struct is a GNU extension" },
 };
 

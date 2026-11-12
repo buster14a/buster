@@ -10,7 +10,7 @@
 static bool check_warning_pedantic(uint32_t id)
 {
     return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE ||
-           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE || id == CHECK_WARNING_ID_GNU_EMPTY_STRUCT;
+           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_NONSCALAR_SAME_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE || id == CHECK_WARNING_ID_GNU_EMPTY_STRUCT;
 }
 
 static bool check_warning_extension(uint32_t id)
