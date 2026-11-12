@@ -6,9 +6,10 @@ Status: step 0, the census, is built and its gate holds
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (202 since it takes calls), and it codes only part of the set
 (calls since [below](#calls); not yet `&&`, `||`, `?:`, the increments and the
-compound assignments). No compile takes it. Its gains are estimates that its first two steps exist to confirm or
-refute; a prototype of its three sweeps has been run over the compile's real
-nodes ([below](#what-a-prototype-of-the-sweeps-measured)). It is
+compound assignments). No compile takes it. Its gains are estimates that its
+first two steps exist to confirm or refute; a prototype of its three sweeps has
+been run over the compile's real nodes
+([below](#what-a-prototype-of-the-sweeps-measured)). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design: the change that the measurements below rank first for one core. The
 issue is [#2524](https://github.com/buster14a/buster/issues/2524). The names of
