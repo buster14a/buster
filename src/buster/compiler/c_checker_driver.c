@@ -10176,6 +10176,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             pp->fatal = false;
             ready = true;
         }
+        if (ready && pp->output.count == 0)
+        {
+            pp_diagnose_empty_unit(pp);
+        }
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         check_clock_tokens(stage_clock, pp->output.count);
