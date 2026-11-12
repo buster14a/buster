@@ -234,6 +234,22 @@ static const CheckDriverDefaultWarningFixture check_driver_call_count_fixtures[]
         .errors = 9,
         .notes = 6,
     },
+    {
+        // A call's conversion warnings and errors in argument order (#2481): an earlier argument's error before a later
+        // one's -Wpointer-sign, both after the warnings of an inner call its arguments build.
+        .name = "argument conversions in order",
+        .source = "struct S { int a; };\n"
+                  "void g(int *p, int (*fp)(int), int x, struct S s, char *c);\n"
+                  "void f(long *l, struct S s, unsigned char *u) { g(l, 0, 1, s, u); }\n"
+                  "void h(int a, char *c);\n"
+                  "void f2(unsigned char *u) { h(u, u); }\n"
+                  "void k(int *p, char *c, struct S s);\n"
+                  "int m(char *c);\n"
+                  "void f3(long *l, unsigned char *u, struct S s) { k(l, u, 1); k(l, (char *)l, s); m(l); int x = m(u) + m(l); (void)x; }\n",
+        .warnings = 4,
+        .errors = 7,
+        .notes = 11,
+    },
 };
 
 static void check_test_driver_call_counts(CheckTest* test, const char* clang, const char* executable, const char* directory)

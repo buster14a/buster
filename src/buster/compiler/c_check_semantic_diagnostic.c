@@ -423,6 +423,12 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                                  "non-thread-local declaration of '%.*s' follows thread-local declaration";
             result = check_warning_text(scratch, format, (int)name.length, name.pointer);
         }
+        else if (report->detail == CHECK_REDECLARATION_EXTERN || report->detail == CHECK_REDECLARATION_NON_EXTERN)
+        {
+            const char* format = report->detail == CHECK_REDECLARATION_EXTERN ? "extern declaration of '%.*s' follows non-extern declaration" :
+                                 "non-extern declaration of '%.*s' follows extern declaration";
+            result = check_warning_text(scratch, format, (int)name.length, name.pointer);
+        }
         else if (report->detail > CHECK_REDECLARATION_GENERIC && report->detail <= CHECK_REDECLARATION_NON_STATIC)
         {
             const char* format = report->detail == CHECK_REDECLARATION_FUNCTION_TYPE ? "conflicting types for '%.*s'" :
@@ -2513,7 +2519,24 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
                  (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)))
         {
-            result = "expression is not assignable";
+            // GCC's cast as an lvalue (#2264, clang's IsModifiable, CM_LValueCast): a cast, through parentheses, whose
+            // operand is an lvalue through its implicit conversions, "assignment to cast is illegal, lvalue casts are not
+            // supported" at the cast's `(`, for assignments, compound assignments, increments and decrements alike.
+            uint32_t inner = operand < count && graph->ops[operand] == CHECK_OP_CAST ? graph->operand0[operand] : BUSTER_CHECK_NONE;
+            for (uint32_t steps = 0; inner < count && graph->ops[inner] == CHECK_OP_CONVERT && steps < count; steps += 1)
+            {
+                inner = graph->operand0[inner];
+            }
+            const bool cast = inner < stream->count && check_stream_value(stream, inner).category == CHECK_LVALUE;
+            const uint32_t close = cast ? graph->tokens[operand] : BUSTER_CHECK_NONE;
+            uint32_t open = close;
+            while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+            {
+                open -= 1;
+            }
+            const bool found = open < parser->tokens.count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close;
+            result = found ? "assignment to cast is illegal, lvalue casts are not supported" : "expression is not assignable";
+            *location = found ? open : token;
         }
         else if (report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED && operand_type != 0)
         {
