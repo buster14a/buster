@@ -1005,6 +1005,9 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "__attribute__((unused)) _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", 0 },
     { "__attribute__((unused)) __extension__ __extension__ _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", 0 },
     { "[[gnu::unused]] _Static_assert(1, \"\");\n", "1:1: an attribute list cannot appear here", "c23" },
+    // A GNU list between a tag's name and its body ends the declaration, as clang's does (a C23 list there is read on,
+    // #2268, which the checker's fixtures cover: clang's parser reports it).
+    { "struct S __attribute__((packed)) { int a; };\n", "1:34: expected identifier or '('", 0 },
     // `__extension__`s before a static assertion, at file scope and in a block, which clang takes (#1447).
     { "__extension__ _Static_assert(1, \"\");\nvoid f(void) { __extension__ __extension__ _Static_assert(1, \"\"); }\n", "", 0 },
     // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
