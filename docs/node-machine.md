@@ -1267,6 +1267,26 @@ against main `5f75ea52`:
   for an update's destination, which one test of a state past `EVALUATED`
   would fold.
 
+**X now makes that one test** after each record's row
+(`node_machine_after_row`), for its consumer's segment, an update's first row
+and an update's destination read by name. It also adds 1 to its record every
+time, in place of the refusal's bool. The tape and the refusals are the same:
+`--verify` reports main's lines on all three corpora, with `-g` too. On the
+9700X, against main `f006224e`
+([record](https://github.com/buster14a/buster-performance/tree/755230610b031fdbfc782943836ae32ed02802bc/docs/measurements/node-machine-x-state-test-2524-2026-11-12)):
+
+| a taken node | `sqlite3.c` | Lua 5.4.8 |
+| --- | ---: | ---: |
+| X's instructions, main → one test → and the increment | 117.3 → 115.6 → **110.6** | 115.1 → 113.5 → **108.2** |
+| X's cycles, main → one test and the increment | 40.3 → **37.9** | 28.6 → **25.7** |
+
+- **The one test alone saves 1.7 instructions.** Clang spends most of it on
+  register copies and stack accesses elsewhere in X, a count on a baseline
+  build shows.
+- **The increment saves 5.0 more.** The record's end is one test of the
+  refusal, and the loop steps two of the records' column pointers with the
+  record.
+
 ### The baked tables, measured
 
 The second lever was built and measured on today's records, a whole 96-byte
