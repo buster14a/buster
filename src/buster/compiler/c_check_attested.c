@@ -149,6 +149,15 @@ static const char* const check_attested_outcome_names[CHECK_ATTESTED_OUTCOMES] =
     "asm-statement",
 };
 
+// The passes' counters.
+typedef enum CheckAttestedCounter
+{
+    CHECK_ATTESTED_CYCLES,
+    CHECK_ATTESTED_BRANCH_MISSES,
+    CHECK_ATTESTED_DATA_MISSES,
+    CHECK_ATTESTED_COUNTERS,
+} CheckAttestedCounter;
+
 typedef struct CheckAttestedHash CheckAttestedHash;
 struct CheckAttestedHash
 {
@@ -278,10 +287,11 @@ struct CheckAttested
     uint8_t* spelling;
     uint64_t spelling_capacity;
     bool any_definition;
-    // The thread's user-mode cycle counter, its page (read with rdpmc where the kernel allows, so that no system call
-    // comes between two passes), and the thread it counts.
-    int cycles;
-    volatile struct perf_event_mmap_page* cycles_page;
+    // The thread's user-mode counters (cycles, branch misses, first-level data cache misses: CHECK_ATTESTED_COUNTERS),
+    // each one's page (read with rdpmc where the kernel allows, so that no system call comes between two passes), and
+    // the thread they count.
+    int counters[CHECK_ATTESTED_COUNTERS];
+    volatile struct perf_event_mmap_page* pages[CHECK_ATTESTED_COUNTERS];
     pid_t cycles_thread;
     bool counted;
     // The counts.
@@ -307,6 +317,9 @@ struct CheckAttested
     uint64_t declare_events;
     uint64_t use_events;
     uint64_t pass_tokens;
+    // Each pass's branch misses and first-level data cache misses: the first run's, and the run of least cycles'.
+    uint64_t first_events[CHECK_ATTESTED_PASSES][CHECK_ATTESTED_COUNTERS];
+    uint64_t least_events[CHECK_ATTESTED_PASSES][CHECK_ATTESTED_COUNTERS];
     // The own hashes' literals (counted on every run of the passes): all, those spelled (not an integer's value), and
     // the searches of the ranges their spellings took.
     uint64_t literal_count;
@@ -1314,10 +1327,10 @@ static __attribute__((noinline)) void check_attested_marks(CheckAttested* census
 
 // The counter's value: with rdpmc from its page under the page's sequence lock, as linux/perf_event.h describes (the
 // parser benchmark's reader), or with read() where the kernel doesn't allow rdpmc.
-static uint64_t check_attested_cycles(const CheckAttested* census)
+static uint64_t check_attested_count(const CheckAttested* census, uint32_t c)
 {
     uint64_t value = 0;
-    volatile struct perf_event_mmap_page* page = census->cycles_page;
+    volatile struct perf_event_mmap_page* page = census->pages[c];
     if (page != NULL && page->cap_user_rdpmc)
     {
         bool stable = false;
@@ -1337,49 +1350,77 @@ static uint64_t check_attested_cycles(const CheckAttested* census)
             value = (uint64_t)count;
         }
     }
-    else if (census->cycles >= 0 && read(census->cycles, &value, sizeof(value)) != (ssize_t)sizeof(value))
+    else if (census->counters[c] >= 0 && read(census->counters[c], &value, sizeof(value)) != (ssize_t)sizeof(value))
     {
         value = 0;
     }
     return value;
 }
 
-// This thread's user-mode cycle counter, opened again where the unit runs on another thread than the last.
+// The counters' values into `values`.
+static void check_attested_counts(const CheckAttested* census, uint64_t* values)
+{
+    for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
+    {
+        values[c] = check_attested_count(census, c);
+    }
+}
+
+// Closes the counters.
+static void check_attested_counters_close(CheckAttested* census)
+{
+    for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
+    {
+        if (census->pages[c] != NULL)
+        {
+            munmap((void*)census->pages[c], (size_t)sysconf(_SC_PAGESIZE));
+            census->pages[c] = NULL;
+        }
+        if (census->counters[c] >= 0)
+        {
+            close(census->counters[c]);
+            census->counters[c] = -1;
+        }
+    }
+}
+
+// This thread's user-mode counters, opened again where the unit runs on another thread than the last.
 static void check_attested_counter(CheckAttested* census)
 {
     const pid_t thread = (pid_t)syscall(SYS_gettid);
-    if (census->cycles < 0 || census->cycles_thread != thread)
+    if (census->counters[CHECK_ATTESTED_CYCLES] < 0 || census->cycles_thread != thread)
     {
-        if (census->cycles_page != NULL)
+        check_attested_counters_close(census);
+        const uint32_t types[CHECK_ATTESTED_COUNTERS] = { PERF_TYPE_HARDWARE, PERF_TYPE_HARDWARE, PERF_TYPE_HW_CACHE };
+        const uint64_t configs[CHECK_ATTESTED_COUNTERS] = {
+            PERF_COUNT_HW_CPU_CYCLES,
+            PERF_COUNT_HW_BRANCH_MISSES,
+            PERF_COUNT_HW_CACHE_L1D | (uint64_t)PERF_COUNT_HW_CACHE_OP_READ << 8 | (uint64_t)PERF_COUNT_HW_CACHE_RESULT_MISS << 16,
+        };
+        for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
         {
-            munmap((void*)census->cycles_page, (size_t)sysconf(_SC_PAGESIZE));
-            census->cycles_page = NULL;
+            struct perf_event_attr attribute;
+            memset(&attribute, 0, sizeof(attribute));
+            attribute.type = types[c];
+            attribute.size = sizeof(attribute);
+            attribute.config = configs[c];
+            attribute.exclude_kernel = 1;
+            attribute.exclude_hv = 1;
+            census->counters[c] = (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+            void* page = census->counters[c] >= 0 ? mmap(0, (size_t)sysconf(_SC_PAGESIZE), PROT_READ, MAP_SHARED, census->counters[c], 0) : MAP_FAILED;
+            census->pages[c] = page != MAP_FAILED ? (volatile struct perf_event_mmap_page*)page : NULL;
         }
-        if (census->cycles >= 0)
-        {
-            close(census->cycles);
-        }
-        struct perf_event_attr attribute;
-        memset(&attribute, 0, sizeof(attribute));
-        attribute.type = PERF_TYPE_HARDWARE;
-        attribute.size = sizeof(attribute);
-        attribute.config = PERF_COUNT_HW_CPU_CYCLES;
-        attribute.exclude_kernel = 1;
-        attribute.exclude_hv = 1;
-        census->cycles = (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
-        void* page = census->cycles >= 0 ? mmap(0, (size_t)sysconf(_SC_PAGESIZE), PROT_READ, MAP_SHARED, census->cycles, 0) : MAP_FAILED;
-        census->cycles_page = page != MAP_FAILED ? (volatile struct perf_event_mmap_page*)page : NULL;
         census->cycles_thread = thread;
-        census->counted = census->cycles >= 0;
+        census->counted = census->counters[CHECK_ATTESTED_CYCLES] >= 0;
         // A read's own cycles, from a pair of reads with nothing between them, the least of a few.
         uint64_t least = UINT64_MAX;
-        for (uint32_t i = 0; census->cycles >= 0 && i < 16; i += 1)
+        for (uint32_t i = 0; census->counted && i < 16; i += 1)
         {
-            const uint64_t before = check_attested_cycles(census);
-            const uint64_t after = check_attested_cycles(census);
+            const uint64_t before = check_attested_count(census, CHECK_ATTESTED_CYCLES);
+            const uint64_t after = check_attested_count(census, CHECK_ATTESTED_CYCLES);
             least = after - before < least ? after - before : least;
         }
-        census->read_overhead = census->cycles >= 0 ? least : 0;
+        census->read_overhead = census->counted ? least : 0;
     }
 }
 
@@ -1462,52 +1503,57 @@ static void check_attested_levels(CheckAttested* census, const Parser* parser, P
 
 // One run of the passes, each one's user-mode cycles into `cycles` and TSC ticks into `ticks`: whether the lists could
 // be made (room, and every pragma's end).
-static bool check_attested_passes(CheckAttested* census, const Parser* parser, Preprocessor* pp, uint64_t* cycles, uint64_t* ticks)
+static bool check_attested_passes(CheckAttested* census, const Parser* parser, Preprocessor* pp, uint64_t* cycles, uint64_t* ticks,
+                                  uint64_t events[CHECK_ATTESTED_PASSES][CHECK_ATTESTED_COUNTERS])
 {
     const uint64_t overhead = census->read_overhead;
     census->stamp += 1;
-    uint64_t laps[CHECK_ATTESTED_PASSES + 1];
+    uint64_t laps[CHECK_ATTESTED_PASSES + 1][CHECK_ATTESTED_COUNTERS];
     uint64_t times[CHECK_ATTESTED_PASSES + 1];
-    laps[0] = check_attested_cycles(census);
+    check_attested_counts(census, laps[0]);
     times[0] = __rdtsc();
     const bool listed = check_attested_lists(census, parser) && check_attested_pragmas(census, parser, pp);
     times[1] = __rdtsc();
-    laps[1] = check_attested_cycles(census);
+    check_attested_counts(census, laps[1]);
     if (listed)
     {
         check_attested_hashes(census, parser);
     }
     times[2] = __rdtsc();
-    laps[2] = check_attested_cycles(census);
+    check_attested_counts(census, laps[2]);
     if (listed)
     {
         check_attested_literals(census, parser, pp);
     }
     times[3] = __rdtsc();
-    laps[3] = check_attested_cycles(census);
+    check_attested_counts(census, laps[3]);
     if (listed)
     {
         check_attested_chain(census);
     }
     times[4] = __rdtsc();
-    laps[4] = check_attested_cycles(census);
+    check_attested_counts(census, laps[4]);
     if (listed)
     {
         check_attested_reach(census, parser, pp, census->reached, true);
     }
     times[5] = __rdtsc();
-    laps[5] = check_attested_cycles(census);
+    check_attested_counts(census, laps[5]);
     if (listed)
     {
         check_attested_marks(census);
     }
     times[6] = __rdtsc();
-    laps[6] = check_attested_cycles(census);
+    check_attested_counts(census, laps[6]);
     for (uint32_t p = 0; p < CHECK_ATTESTED_PASSES; p += 1)
     {
-        const uint64_t lap = laps[p + 1] - laps[p];
+        const uint64_t lap = laps[p + 1][CHECK_ATTESTED_CYCLES] - laps[p][CHECK_ATTESTED_CYCLES];
         cycles[p] = lap > overhead ? lap - overhead : 0;
         ticks[p] = times[p + 1] - times[p];
+        for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
+        {
+            events[p][c] = laps[p + 1][c] - laps[p][c];
+        }
     }
     return listed;
 }
@@ -1530,20 +1576,31 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
         check_attested_counter(census);
         uint64_t least[CHECK_ATTESTED_PASSES];
         uint64_t least_ticks[CHECK_ATTESTED_PASSES];
-        bool listed = check_attested_passes(census, parser, pp, least, least_ticks);
+        uint64_t events[CHECK_ATTESTED_PASSES][CHECK_ATTESTED_COUNTERS];
+        uint64_t least_events[CHECK_ATTESTED_PASSES][CHECK_ATTESTED_COUNTERS];
+        bool listed = check_attested_passes(census, parser, pp, least, least_ticks, events);
+        memcpy(least_events, events, sizeof(events));
         for (uint32_t p = 0; p < CHECK_ATTESTED_PASSES; p += 1)
         {
             census->first_cycles[p] += least[p];
+            for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
+            {
+                census->first_events[p][c] += events[p][c];
+            }
         }
-        // The same passes again, their results the same, each one's least cycles and ticks kept.
+        // The same passes again, their results the same, each one's least cycles (with that run's events) and ticks kept.
         for (uint32_t run = 1; run < census->passes; run += 1)
         {
             uint64_t again[CHECK_ATTESTED_PASSES];
             uint64_t again_ticks[CHECK_ATTESTED_PASSES];
-            listed &= check_attested_passes(census, parser, pp, again, again_ticks);
+            listed &= check_attested_passes(census, parser, pp, again, again_ticks, events);
             for (uint32_t p = 0; p < CHECK_ATTESTED_PASSES; p += 1)
             {
-                least[p] = again[p] < least[p] ? again[p] : least[p];
+                if (again[p] < least[p])
+                {
+                    least[p] = again[p];
+                    memcpy(least_events[p], events[p], sizeof(events[p]));
+                }
                 least_ticks[p] = again_ticks[p] < least_ticks[p] ? again_ticks[p] : least_ticks[p];
             }
         }
@@ -1551,6 +1608,10 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
         {
             census->pass_cycles[p] += least[p];
             census->pass_ticks[p] += least_ticks[p];
+            for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
+            {
+                census->least_events[p][c] += least_events[p][c];
+            }
         }
         census->pass_tokens += count;
         // Untimed: the reach without the runtime functions' names, for what that rule alone reaches.
@@ -1844,8 +1905,12 @@ static void check_attested_report(const CheckAttested* census)
     const double tokens = census->pass_tokens != 0 ? (double)census->pass_tokens : 1.0;
     for (uint32_t p = 0; p < CHECK_ATTESTED_PASSES; p += 1)
     {
-        printf("attested: pass=%s cycles=%" PRIu64 " per-token=%.2f first-run=%.2f ticks-per-token=%.2f\n", check_attested_pass_names[p], census->pass_cycles[p],
-               (double)census->pass_cycles[p] / tokens, (double)census->first_cycles[p] / tokens, (double)census->pass_ticks[p] / tokens);
+        printf("attested: pass=%s cycles=%" PRIu64 " per-token=%.2f first-run=%.2f ticks-per-token=%.2f branch-misses-per-token=%.3f first-run=%.3f "
+               "l1d-misses-per-token=%.3f first-run=%.3f\n",
+               check_attested_pass_names[p], census->pass_cycles[p], (double)census->pass_cycles[p] / tokens, (double)census->first_cycles[p] / tokens,
+               (double)census->pass_ticks[p] / tokens, (double)census->least_events[p][CHECK_ATTESTED_BRANCH_MISSES] / tokens,
+               (double)census->first_events[p][CHECK_ATTESTED_BRANCH_MISSES] / tokens, (double)census->least_events[p][CHECK_ATTESTED_DATA_MISSES] / tokens,
+               (double)census->first_events[p][CHECK_ATTESTED_DATA_MISSES] / tokens);
         all += census->pass_cycles[p];
         first_all += census->first_cycles[p];
         ticks += census->pass_ticks[p];
@@ -1869,7 +1934,10 @@ static bool check_attested_number(const char* text, uint32_t* result)
 
 static bool check_attested_open(CheckAttested* census)
 {
-    census->cycles = -1;
+    for (uint32_t c = 0; c < CHECK_ATTESTED_COUNTERS; c += 1)
+    {
+        census->counters[c] = -1;
+    }
     const uint64_t keys = 2 * (uint64_t)BUSTER_ATTESTED_MAX_IDS;
     const uint32_t runtimes = check_attested_runtime_count();
     // Room for every size the memo takes, each table after the last: twice its most slots.
@@ -1895,14 +1963,7 @@ static bool check_attested_open(CheckAttested* census)
 
 static void check_attested_close(CheckAttested* census)
 {
-    if (census->cycles_page != NULL)
-    {
-        munmap((void*)census->cycles_page, (size_t)sysconf(_SC_PAGESIZE));
-    }
-    if (census->cycles >= 0)
-    {
-        close(census->cycles);
-    }
+    check_attested_counters_close(census);
     arena_release(&census->unit_arena);
     arena_release(&census->key_arena);
     arena_release(&census->memo_arena);
@@ -1925,7 +1986,7 @@ static int check_attested_run(CheckAttested* census, int count, char** arguments
         forwarded[i] = arguments[i];
     }
     int result = 1;
-    // (Closed only where it was opened: a census's counter is -1 from its opening on, and 0 before, stdin's.)
+    // (Closed only where it was opened: a census's counters are -1 from its opening on, and 0 before, stdin's.)
     const bool opened = valid && check_attested_open(census);
     if (opened)
     {
