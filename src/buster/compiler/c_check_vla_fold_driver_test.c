@@ -239,6 +239,18 @@ static const char check_driver_vla_fold_commas_source[] =
     "    return s[0] + L + u;\n"
     "}\n";
 
+// The comma operators of variable bounds only the constant reader reads (#2252): a file-scope cast's and _Alignof's type
+// names, a file-scope array's and member's folded bounds and an enumerator's beside them, and a body's cast's and
+// sizeof's variable type names.
+static const char check_driver_vla_variable_commas_source[] =
+    "void *g = (int(*)[(5, 2)])0;\n"
+    "unsigned long al = _Alignof(int[(4, 2)]);\n"
+    "int a[(1, 2)];\n"
+    "enum { A = (3, 4) };\n"
+    "struct S { int m[(6, 3)]; };\n"
+    "void f(void) { void *p = (int(*)[(7, 2)])0; (void)p; }\n"
+    "void k(int n) { unsigned long s = sizeof(int[(8, n)]); (void)s; }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -265,6 +277,11 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "a block's variable-length array with an initializer",
         .source = check_driver_vla_initializer_source,
         .errors = 11,
+    },
+    {
+        .name = "variable bounds' comma operators the constant reader alone reads",
+        .source = check_driver_vla_variable_commas_source,
+        .warnings = 9,
     },
     {
         .name = "constant bounds' comma operators' discarded left operands",
