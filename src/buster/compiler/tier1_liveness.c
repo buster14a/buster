@@ -134,16 +134,23 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         }
         else if (tier1_select_body_call(function, node))
         {
-            // A body call's (#1839) asm body, its index, and no effective use: its block's address is no register's.
+            // A body call's (#1839) asm body, its index, and its register operands' effective uses alone (#2144): its
+            // block's address is no register's.
             const IrCall call = function->calls[function->b[node]];
             const Tier1SelectPattern* pattern = &plan->patterns[node];
-            if (plan->covered[node] || pattern->rule != TIER1_RULE_ASM || pattern->immediate != call.body - 1u || pattern->fold_count != 0 || end != first)
+            const uint32_t passed = call.body <= function->asm_body_count ? function->asm_bodies[call.body - 1u].passed : UINT32_MAX;
+            if (plan->covered[node] || pattern->rule != TIER1_RULE_ASM || pattern->immediate != call.body - 1u || pattern->fold_count != 0 || end - first != passed)
             {
                 error = TIER1_LIVENESS_INVALID;
             }
             for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
             {
                 error = pattern->values[operand] == BUSTER_IR_NONE ? error : TIER1_LIVENESS_INVALID;
+            }
+            const uint32_t skipped = error == TIER1_LIVENESS_OK ? call.argument_count - passed : 0;
+            for (uint32_t k = 0; error == TIER1_LIVENESS_OK && k < passed; k += 1)
+            {
+                error = plan->effective_use_values[first + k] == function->extra[call.argument_first + skipped + k] ? error : TIER1_LIVENESS_INVALID;
             }
         }
         else if (op == IR_CALL && !tier1_select_function_call(function, node))
