@@ -832,6 +832,39 @@ computation's row of the transition table, a pointer's by
 `long double`, a 128-bit integer, a vector, an atomic, a register variable or
 an object in a segment's space; the census refuses a bit-field's.
 
+On the 9700X at `6196395c`, on main `0af27a30` (CPU 2, under the lock;
+[the record](https://github.com/buster14a/buster-performance/tree/1a80f724cd2da8d5c0578a43071fb1f8c817df80/docs/measurements/node-machine-updates-2524-2026-11-12)):
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main | 130,559 (50.2%) | 25,073 (41.0%) | 56,144 (46.7%) |
+| machine-taken evaluated nodes, with the updates | 145,386 (55.9%) | 27,971 (45.7%) | 65,409 (54.4%) |
+| machine-taken expressions, main and with the updates | 63.5%, 70.2% | 51.8%, 58.6% | 58.6%, 68.5% |
+| entries compared | 199,540 | 34,955 | 87,335 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **What the machine refuses by code** is now calls, `&&`, `||` and `?:`. On
+  `sqlite3.c` the first such operator is a call in 12,856 of 15,214
+  expressions. At main, `x++` came second.
+- **T's rules type all but 2 of `sqlite3.c`'s updates,** and all of Lua's.
+- **The sweeps run 690.4 instructions a taken node on `sqlite3.c`** against
+  main's 669.9, at 173.4 to 178.9 cycles against main's 169.8 (Lua: 861.0
+  against 838.6).
+  - X's instructions an entry are main's: the new expressions write 1.37
+    entries a node against 1.28.
+  - On main's own expressions the code costs nothing. A build with the update
+    codes refused runs 669.2 instructions a node.
+- **Two things that cost every node.** They were found on the way, and the
+  record has the series:
+  - `node_machine_convert` as a call of its own in X, once the updates' rows
+    called it too: 11 instructions a node;
+  - C's and X's tests for the updates ahead of the common cases: 9.8.
+
+  Both are fixed. **A machine code that adds a caller of a function X or C
+  inlines should check the symbols** (`nm build/compiler | grep node_machine_`).
+- **Cycles move without the instructions,** by up to about 4% between
+  processes running one binary. Compare instructions.
+
 ## Expected gains
 
 On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):
