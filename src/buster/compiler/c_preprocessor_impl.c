@@ -11139,6 +11139,11 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_PRAGMA:
         case PP_DIRECTIVE_IDENT:
         {
+            if (kind == PP_DIRECTIVE_IDENT)
+            {
+                // #ident and #sccs, clang's extension under -pedantic (#2222), at the directive's name, before its string.
+                pp_diagnose_group(pp, PP_WARNING_PEDANTIC, pp_token_location(pp, context, data, hash + 1), "#ident is a language extension");
+            }
             // The line stays on the stack while a capture expands it (pp_pragma).
             const uint32_t line = pp->arguments.count;
             const bool started = pp_copy_line(pp, context, hash + 2, end) && pp_pragma(pp, line, pp->arguments.count, location, false, kind == PP_DIRECTIVE_IDENT, line);

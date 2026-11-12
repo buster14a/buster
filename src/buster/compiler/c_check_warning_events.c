@@ -207,6 +207,14 @@ enum
     CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
     // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
     CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
+    // An alignment builtin's alignment of 1 (#2221, clang's SemaBuiltinAlignment): align_up's and align_down's "aligning a
+    // value to 1 byte is a no-op", is_aligned's "the result of checking whether a value is aligned to 1 byte is always
+    // true", -Wtautological-compare's, on by default.
+    CHECK_WARNING_ID_ALIGNMENT_NO_OP = 145,
+    CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE = 146,
+    // A cast of a struct or a union to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar):
+    // -Wpedantic's own, off by default.
+    CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 147,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -534,6 +542,11 @@ typedef enum CheckWarningEventKind
     // A division or remainder by a constant zero in a counted_by family's argument (#1842, check_input_counted_division),
     // at its operator: payload.data 0 for "division by zero is undefined", 1 for "remainder by zero is undefined".
     CHECK_WARNING_EVENT_DIVISION_BY_ZERO,
+    // An alignment builtin's alignment of 1 (#2221, check_input_alignment_one), at the alignment: its description's words.
+    CHECK_WARNING_EVENT_ALIGNMENT_ONE,
+    // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
+    // cast's type, payload.name its spelling.
+    CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
