@@ -2418,15 +2418,20 @@ static void check_develop(void)
     char benchmark_log[PATH_MAX];
     snprintf(benchmark_log, sizeof(benchmark_log), "%s/develop-benchmark.log", work);
     char* benchmark[] = { develop, "benchmark-parser", 0 };
-    if (run(benchmark_log, 0, benchmark) != 1 || occurrences(benchmark_log, "Develop's leaves c_parser_benchmark.c out") != 1 ||
-        occurrences(benchmark_log, "build Release") != 1)
+    const int benchmark_status = run(benchmark_log, 0, benchmark);
+    // A scalar host's executable refuses every benchmark command before it dispatches one (main.c), so there the
+    // stand-in is checked by its symbol instead of its message.
+    const bool scalar = occurrences(benchmark_log, "benchmarks require an AVX-512 host build") == 1;
+    const bool named = occurrences(benchmark_log, "Develop's leaves c_parser_benchmark.c out") == 1 && occurrences(benchmark_log, "build Release") == 1;
+    if (benchmark_status != 1 || (scalar ? !has_symbol(develop, " T run_parser_benchmark") : !named))
     {
         fail("Develop's benchmark-parser didn't fail naming the Release configuration: %s", read_file(benchmark_log).data);
     }
     char* baked[] = { develop, "test-baked-tables", 0 };
     Text log = capture(baked);
     free(log.data);
-    pass("Develop builds in parts beside Release, which it leaves as it was, and its benchmark commands name Release");
+    pass("Develop builds in parts beside Release, which it leaves as it was, and its benchmark commands name Release%s",
+         scalar ? " (a scalar host refuses them first; the stand-in is linked)" : "");
 
     static Snapshot before;
     char names[8192];

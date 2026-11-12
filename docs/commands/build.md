@@ -841,7 +841,8 @@ whole with Develop's flags; a `BUSTER_PGO` tree has Release alone.
 **Checks.** `build-regression --develop-only` (and the full regression, in the
 Build workflow) builds Develop beside Release, checks that Release's executable
 doesn't change and that switching builds nothing, that a benchmark command names
-Release, that both executables write the same objects at both tiers, that a
+Release (a scalar host's executable refuses every benchmark command first, so
+there the stand-in's symbol is checked), that both executables write the same objects at both tiers, that a
 function appended to `c_check_input.c` optimizes one part of the checker's unit
 and one before its first line a few, that a header's time alone optimizes none,
 and that the executable after those edits is a clean build's, byte for byte.
