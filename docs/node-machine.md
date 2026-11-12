@@ -6,7 +6,7 @@ Status: step 0, the census, is built and its gate holds
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
 on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cost
-more a node; T's per-unit answers for calls then take 15 off the three,
+more a node; T's per-unit answers for calls then take 13 to 15 off the three,
 [below](#calls-cost-in-t-two-per-unit-answers)), and it now codes every operator
 the census takes (calls, `&&`, `||` and `?:` [below](#calls), the increments and
 the compound assignments [below](#increments-and-compound-assignments)). No
@@ -1017,7 +1017,7 @@ instructions.
 ### Calls' cost in T: two per-unit answers
 
 The two costs of T's own that calls brought are now answered from per-unit state
-([the record](https://github.com/buster14a/buster-performance/tree/3b080ff3f00a671fa8ce95bb6f3847ea3017be3d/docs/measurements/node-machine-call-cost-2524-2026-11-12)):
+([the record](https://github.com/buster14a/buster-performance/tree/1e57bdc259d8b9ddcb6b791440d719e7f722eed4/docs/measurements/node-machine-call-cost-2524-2026-11-12)):
 
 - **The callee's pointer type.** `NodeMachine.function_pointers` holds a
   function type's pointer type by type index, filled at the type's first
@@ -1045,29 +1045,29 @@ The two costs of T's own that calls brought are now answered from per-unit state
 The shadow forgets both before each timed sweep set, so each pass pays their
 fills as one compile of the unit would.
 
-On the 9700X, against main `afcb185e` (medians of ten alternating runs, `--passes
-11`; the comparison has 0 differences on `sqlite3.c`, Lua and musl, `-g` too,
-with main's counts):
+On the 9700X, against main `f006224e`, with the updates (medians of ten
+alternating runs, `--passes 11`; the comparison has 0 differences on
+`sqlite3.c`, Lua and musl, `-g` too, with main's counts):
 
 | T a taken node | main | with the answers |
 | --- | ---: | ---: |
-| `sqlite3.c`: cycles, instructions | 121.1, 446.7 | 109.8, 401.3 |
-| `sqlite3.c`, warm (`--repeat 2`, both runs) | 219.5, 891.1 | 199.6, 795.7 |
-| Lua: cycles, instructions | 126.8, 595.2 | 117.0, 542.8 |
+| `sqlite3.c`: cycles, instructions | 121.8, 453.3 | 109.5, 410.4 |
+| `sqlite3.c`, warm (`--repeat 2`, both runs) | 220.9, 904.2 | 198.4, 814.3 |
+| Lua: cycles, instructions | 126.2, 601.0 | 117.8, 551.5 |
 
-- **All three sweeps on `sqlite3.c`:** 215.1 cycles a node become 200.0. C and X
-  run the same instructions as before: the change is T's, and their 4 cycles
-  fewer are the caches' or the placement's.
+- **All three sweeps on `sqlite3.c`:** 220.0 cycles a node become 206.7. C and X
+  run the same instructions as before, so the change is T's. Against main
+  `afcb185e`, before the updates, it was 215.1 to 200.0.
 - **The profiles:** the interning falls from 2.4% to 1.1% of the run.
-  `check_action_convert_plain` falls from 3.5% to 2.6%; what remains of it is
+  `check_action_convert_plain` falls from 3.2% to 2.6%; what remains of it is
   mostly the stores' conversions, whose converted values are their records'.
-- **The memo on `sqlite3.c`:** 1,898 entries filled and 690 arguments left to
-  the rule, against the 33,320 arguments of its taken calls.
+- **The memo on `sqlite3.c`:** 1,900 entries filled and 690 arguments left to
+  the rule, against the 33,565 arguments of its taken calls.
 
 Integer constants were most of what the first version left to the rule. Sharing
 their type's entry ran fewer instructions but more cycles on Lua; as keys of
 their own, a hit tests one key and one bit, and that version is the one kept.
-`-c sqlite3.c` is unchanged: 123.7 ms against 123.8 ms, with the same
+`-c sqlite3.c` is unchanged: 124.1 ms against 123.8 ms, with the same
 instructions.
 
 ### Increments and compound assignments
