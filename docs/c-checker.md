@@ -6524,15 +6524,13 @@ only the subtrees that hold its walk's bit; every warning keeps its order. The d
 where the command line or a source pragma may enable them: the comparison bit
 for `-Wsign-compare` (and, while `-Wtautological-constant-out-of-range-compare`
 is on and `-Wsign-compare` off, only for a comparison whose constant is out of
-the other operand's range, `check_common_range_out`: the reach scan leaves the
-comparisons out of its operator set, and `check_common_range_candidates` finds
-them in a pass of their own, 16 nodes at a time, gathering both operands'
-value flags, types and operators, and testing only the lanes of a comparison
-one of whose operands is an integer constant expression, where the other one,
-if only one is, isn't an `int` or `long` class builtin that covers the
-constant's type and isn't a boolean operator's; its scalar twin tests every
-comparison;
-#2451), a plain `x = y` for `-Wself-assign`, and the
+the other operand's range, `check_common_range_out`: the reach scan's 16-node
+operator blocks (`check_common_next_reach_op`) gather a block's comparisons'
+operands' value flags, types and operators, and test only the lanes of a
+comparison one of whose operands is an integer constant expression, where the
+other one, if only one is, isn't an `int` or `long` class builtin that covers
+the constant's type and isn't a boolean operator's (`check_common_range_lanes`);
+the scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
 an analysis whose diagnostics are ignored. The token passes find their roles
 and kinds 64 tokens at a time, the node passes their operators 16 nodes at a

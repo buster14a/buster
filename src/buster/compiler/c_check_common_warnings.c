@@ -2306,71 +2306,63 @@ static bool check_common_range_out(const CheckGraph* graph, const CheckStream* s
     return wide || out;
 }
 
-// The comparisons that may give -Wtautological-constant-out-of-range-compare (check_common_range_out), a bit each in
-// `candidates`, for the comparison walk's reach where -Wsign-compare doesn't take every comparison. The vector path
-// tests 16 nodes at a time: a comparison operator, both operands' nodes, one of their value flags an integer constant
-// expression's (gathered from the stream's flag column), which every candidate has, and, where only one is, the other
-// operand no int or long class builtin that covers the constant's type (the TypeIds' builtin codes, gathered too), which
-// no candidate's is; only the lanes left take the scalar test. The scalar path, its twin and oracle, tests every
-// comparison.
-static void check_common_range_candidates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint64_t* candidates, bool vector)
+// Of the 16 nodes from `first` whose operators are `ops` (`lanes` live), the comparisons that may give
+// -Wtautological-constant-out-of-range-compare (check_common_range_out), a bit each, for the comparison walk's reach where
+// -Wsign-compare doesn't take every comparison. The comparisons' lanes gather both operands' value flags from the stream's
+// flag column: one of them an integer constant expression's, which every candidate has, and, where only one is, the other
+// operand no int or long class builtin that covers the constant's type (the TypeIds' builtin codes, gathered too) and no
+// boolean operator's, which no candidate's is; only the lanes left take the scalar test. A stream without the columns tests
+// every comparison, as the scalar path, the twin and oracle, does through check_common_own_reach.
+static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t first, __m512i ops,
+                                         __mmask16 lanes)
 {
     const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
-    const bool columns = vector && stream->dense_values == NULL && stream->value_flags != NULL;
-    for (uint32_t first = 0; first < count; first += 16)
+    const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                             _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
+    uint32_t selected = compares;
+    if (compares != 0 && stream->dense_values == NULL && stream->value_flags != NULL && stream->value_types != NULL)
     {
-        const uint32_t live = count - first < 16 ? count - first : 16;
-        const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
-        uint32_t selected = lanes;
-        if (columns)
-        {
-            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-            const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
-                                                                     _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
-            const __m512i limit = _mm512_set1_epi32((int)count);
-            const __m512i left = _mm512_maskz_loadu_epi32(compares, graph->operand0 + first);
-            const __m512i right = _mm512_maskz_loadu_epi32(compares, graph->operand1 + first);
-            const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(_mm512_mask_cmplt_epu32_mask(compares, left, limit), right, limit);
-            const __m512i ice = _mm512_set1_epi32(BUSTER_CHECK_ICE);
-            const __m512i left_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, left, stream->value_flags, 4);
-            const __m512i right_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, right, stream->value_flags, 4);
-            const __mmask16 left_ice = _mm512_mask_test_epi32_mask(inside, left_flags, ice);
-            const __mmask16 right_ice = _mm512_mask_test_epi32_mask(inside, right_flags, ice);
-            // Where one operand alone is an integer constant expression, it is the constant: the other one is no candidate's
-            // when it is an int or a long class builtin at least as wide as the constant's type promoted, and no boolean
-            // operator's (check_common_range_candidate's own_width test, its types' codes read from their TypeIds).
-            const __mmask16 one = (__mmask16)(left_ice ^ right_ice);
-            const __m512i left_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, stream->value_types, 4);
-            const __m512i right_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, stream->value_types, 4);
-            const __m512i left_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, graph->ops, 4);
-            const __m512i right_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, graph->ops, 4);
-            const __m512i other_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, left_types, right_types), BUSTER_TYPE_INDEX_SHIFT);
-            const __m512i constant_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, right_types, left_types), BUSTER_TYPE_INDEX_SHIFT);
-            const __m512i other_op = _mm512_mask_blend_epi32(left_ice, left_ops, right_ops);
-            const __m512i bool_code = _mm512_set1_epi32(BUSTER_TYPE_CODE_BOOL);
-            const __mmask16 boolean = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_op, _mm512_set1_epi32(CHECK_OP_LESS)),
-                                                                    _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS)) |
-                                      _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_NOT)) |
-                                      _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
-                                      _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR));
-            const __m512i constant_offset = _mm512_sub_epi32(constant_code, bool_code);
-            const __mmask16 int_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_INT)), _mm512_set1_epi32(1)) &
-                                       _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT - BUSTER_TYPE_CODE_BOOL));
-            const __mmask16 long_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG)), _mm512_set1_epi32(3)) &
-                                        _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_ULLONG - BUSTER_TYPE_CODE_BOOL));
-            const __mmask16 covered = (__mmask16)(one & ~boolean & (int_wide | long_wide));
-            selected = (uint32_t)(left_ice | right_ice) & ~(uint32_t)covered;
-        }
-        for (uint32_t bits = selected; bits != 0; bits &= bits - 1)
-        {
-            const uint32_t node = first + (uint32_t)__builtin_ctz(bits);
-            const CheckOp op = graph->ops[node];
-            if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL && check_common_range_out(graph, stream, types, node))
-            {
-                candidates[node >> 6] |= UINT64_C(1) << (node & 63);
-            }
-        }
+        const __m512i limit = _mm512_set1_epi32((int)count);
+        const __m512i left = _mm512_maskz_loadu_epi32(compares, graph->operand0 + first);
+        const __m512i right = _mm512_maskz_loadu_epi32(compares, graph->operand1 + first);
+        const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(_mm512_mask_cmplt_epu32_mask(compares, left, limit), right, limit);
+        const __m512i ice = _mm512_set1_epi32(BUSTER_CHECK_ICE);
+        const __m512i left_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, left, stream->value_flags, 4);
+        const __m512i right_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, right, stream->value_flags, 4);
+        const __mmask16 left_ice = _mm512_mask_test_epi32_mask(inside, left_flags, ice);
+        const __mmask16 right_ice = _mm512_mask_test_epi32_mask(inside, right_flags, ice);
+        // Where one operand alone is an integer constant expression, it is the constant: the other one is no candidate's
+        // when it is an int or a long class builtin at least as wide as the constant's type promoted, and no boolean
+        // operator's (check_common_range_candidate's own_width test, its types' codes read from their TypeIds).
+        const __mmask16 one = (__mmask16)(left_ice ^ right_ice);
+        const __m512i left_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, stream->value_types, 4);
+        const __m512i right_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, stream->value_types, 4);
+        const __m512i left_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, graph->ops, 4);
+        const __m512i right_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, graph->ops, 4);
+        const __m512i other_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, left_types, right_types), BUSTER_TYPE_INDEX_SHIFT);
+        const __m512i constant_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, right_types, left_types), BUSTER_TYPE_INDEX_SHIFT);
+        const __m512i other_op = _mm512_mask_blend_epi32(left_ice, left_ops, right_ops);
+        const __m512i bool_code = _mm512_set1_epi32(BUSTER_TYPE_CODE_BOOL);
+        const __mmask16 boolean = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_op, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                                _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS)) |
+                                  _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_NOT)) |
+                                  _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
+                                  _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR));
+        const __m512i constant_offset = _mm512_sub_epi32(constant_code, bool_code);
+        const __mmask16 int_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_INT)), _mm512_set1_epi32(1)) &
+                                   _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT - BUSTER_TYPE_CODE_BOOL));
+        const __mmask16 long_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG)), _mm512_set1_epi32(3)) &
+                                    _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_ULLONG - BUSTER_TYPE_CODE_BOOL));
+        const __mmask16 covered = (__mmask16)(one & ~boolean & (int_wide | long_wide));
+        selected = (uint32_t)(left_ice | right_ice) & ~(uint32_t)covered;
     }
+    uint32_t result = 0;
+    for (uint32_t bits = selected; bits != 0; bits &= bits - 1)
+    {
+        const uint32_t node = first + (uint32_t)__builtin_ctz(bits);
+        result |= node < count && check_common_range_out(graph, stream, types, node) ? 1u << (node - first) : 0u;
+    }
+    return result;
 }
 
 // clang's -Wtautological-constant-out-of-range-compare (#2218, CheckTautologicalComparison): an integer constant
@@ -4305,6 +4297,27 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
         const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
         const uint32_t selected = vector ? check_common_op_lanes(set, _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first), (__mmask16)lanes) :
                                            lanes;
+        scan->base = first;
+        scan->next = first + live;
+        scan->pending = selected;
+    }
+    const uint32_t result = check_common_scan_take(scan, graph->count);
+    return result;
+}
+
+// check_common_next_op for the reach scan: with `range`, a block's comparisons that may give
+// -Wtautological-constant-out-of-range-compare join its nodes in `set` (check_common_range_lanes, from the same operator
+// load), so that the comparisons need no pass of their own and the rest of them no scalar test.
+static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckCommonOps* set, bool range,
+                                           CheckCommonScan* scan)
+{
+    while (scan->pending == 0 && scan->next < graph->count)
+    {
+        const uint32_t first = scan->next;
+        const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+        const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        const uint32_t selected = check_common_op_lanes(set, ops, lanes) | (range ? check_common_range_lanes(graph, stream, types, first, ops, lanes) : 0u);
         scan->base = first;
         scan->next = first + live;
         scan->pending = selected;
@@ -9750,10 +9763,12 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     {
         memset(reach, 0, count);
         // The comparisons, last in the list, only where -Wsign-compare may warn: it takes every one. Otherwise only those
-        // -Wtautological-constant-out-of-range-compare may warn of reach their roots, below.
+        // -Wtautological-constant-out-of-range-compare may warn of join them (check_common_next_reach_op).
         const CheckCommonOps own = check_common_ops(check_common_reach_ops, BUSTER_ARRAY_LENGTH(check_common_reach_ops) - (enabled->sign_compare ? 0u : 6u));
         CheckCommonScan owners = { 0 };
-        for (uint32_t node = check_common_next_op(graph, &own, &owners, true); node < count; node = check_common_next_op(graph, &own, &owners, true))
+        const bool range = enabled->out_of_range && !enabled->sign_compare;
+        for (uint32_t node = check_common_next_reach_op(graph, stream, types, &own, range, &owners); node < count;
+             node = check_common_next_reach_op(graph, stream, types, &own, range, &owners))
         {
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
             if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
@@ -9766,30 +9781,8 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
-        // (A reach's bits are a union up the parents, so the comparisons' order after the others' changes nothing.)
-        const uint64_t words = ((uint64_t)count + 63) / 64;
-        uint64_t* candidates = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words) : NULL;
-        if (candidates != NULL)
-        {
-            memset(candidates, 0, words * sizeof(uint64_t));
-            check_common_range_candidates(graph, stream, types, candidates, vector);
-        }
-        for (uint64_t word = 0; candidates != NULL && word < words; word += 1)
-        {
-            for (uint64_t bits = candidates[word]; bits != 0; bits &= bits - 1)
-            {
-                uint8_t reached = BUSTER_CHECK_REACH_SIGN;
-                for (uint32_t at = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits)); reached != 0 && at < count; at = parents[at])
-                {
-                    reached &= (uint8_t)~reach[at];
-                    reach[at] |= reached;
-                }
-            }
-        }
         check_common_assertion_reach(graph, stream, reach);
-        // (Short of scratch for the candidates, the facts fail as a whole rather than leave comparisons out.)
-        const bool short_of = enabled->out_of_range && !enabled->sign_compare && candidates == NULL;
-        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
+        evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
     }
     else if (allocated)
     {
