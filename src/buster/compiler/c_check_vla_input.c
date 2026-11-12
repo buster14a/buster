@@ -344,10 +344,11 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
-            if (!walked && reader->function_body == BUSTER_CHECK_NONE)
+            if (!walked && !parameter && reader->function_body == BUSTER_CHECK_NONE)
             {
                 // A variable bound at file scope (#2252: a sizeof's, an _Alignof's or a cast's type, or the declaration
-                // clang refuses), which no graph walk reads either: its commas' -Wunused-value, as clang builds them.
+                // clang refuses), which no graph walk reads either: its commas' -Wunused-value, as clang builds them. (Not a
+                // parameter's, which its definition's walk reads.)
                 check_input_attribute_unused(reader, first, end, true);
             }
         }
