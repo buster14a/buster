@@ -281,6 +281,9 @@ Paths below are relative to the repository root. "Default" means
 | `tools/generate_x86_cpu_dispatch.c` | Original generator of `c_check_cpu_dispatch.inc` (#1447); Default. It reads LLVM's sources at run time, evaluates their feature-set expressions and copies no LLVM code. |
 | `src/buster/compiler/c_check_target_versions.inc` | Derived LLVM data, not first-party: the features GNU function multiversioning's versions may name, with their priorities and CPU-model bits, the microarchitecture levels, and the processors' key features' priorities, generated from LLVM `llvmorg-23.1.4`'s `X86TargetParser.def` and `X86TargetParser.cpp`; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "GNU multiversioning's target table (#1838)" below has its inputs and procedure. |
 | `tools/generate_x86_multiversion.c` | Original generator of `c_check_target_versions.inc` (#1838); Default. It reads LLVM's sources at run time and copies no LLVM code. |
+| `src/buster/compiler/c_check_feature_map.inc` | Derived LLVM data, not first-party: each X86 feature in `FeatureInfos` order with its direct implications, and each processor's features, generated from the `X86TargetParser.def` and `X86TargetParser.cpp` of llvm-project `c47d7823685a` (clang 23.1.6); Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's feature-map order (#2093)" below has its inputs and procedure. |
+| `tools/generate_x86_feature_map.c`, `src/buster/compiler/c_check_feature_map.c` | Original generator of `c_check_feature_map.inc` and original emulation of the map's order (#2093); Default. The generator reads LLVM's sources at run time and copies no LLVM code. |
+| `src/buster/compiler/xxh3_short.c` | A C translation of xxHash's XXH3 64-bit hash for inputs of up to 128 bytes, from LLVM's `llvm/lib/Support/xxhash.cpp`; BSD-2-Clause, Copyright (C) 2012-2023 Yann Collet ([LICENSES/xxHash.txt](LICENSES/xxHash.txt)), as its header says, local changes included. "Clang's feature-map order (#2093)" below. |
 | `src/buster/compiler/c_check_target_versions.c`, `src/buster/compiler/c_check_program_target_versions.c`, `src/buster/compiler/c_check_target_versions_driver_test.c` | Original checks and code generation of GNU function multiversioning by target strings (`target_clones`, several `target` attributes), and their tests (#1838); Default. The rules follow LLVM `llvmorg-23.1.4`'s `SemaX86::checkTargetClonesAttr` in `clang/lib/Sema/SemaX86.cpp` (sha256 `004b0e8d94649b5a6a10c4ed78a592167341ab89b00ba17dae658da9007c8cb4`), `CheckMultiVersionFunction` and its helpers in `clang/lib/Sema/SemaDecl.cpp` (sha256 `9b2119593e60f6bda8aaa020f6ed77fbcd13325f30a904210a3624aa07fc7bdd`), `TargetInfo::parseTargetAttr` in `clang/lib/Basic/TargetInfo.cpp` (sha256 `eb94ce776fdda0340867b211d90997c0de3d0e8297f67faca8f688546f7329eb`) and `X86TargetInfo::getFMVPriority`, `validateCpuSupports` and `validateCpuIs` in `clang/lib/Basic/Targets/X86.cpp` (sha256 `4f0fdd41b3990b79a721f9839ff7e1a35524642b645df0d030bf5619dee6fbf0`), `emitMultiVersionFunctions`, `GetOrCreateMultiVersionResolver` and `getMangledNameImpl`'s `AppendTargetMangling` and `AppendTargetClonesMangling` in `clang/lib/CodeGen/CodeGenModule.cpp` (sha256 `047ac9ad37cfafb2e930cec0fd089dafed8d8aaaf2575532649526c4287bee8e`), `EmitX86MultiVersionResolver` and `FormX86ResolverCondition` in `clang/lib/CodeGen/CodeGenFunction.cpp` (sha256 `419ddade7e8d0119bbf6aba786bf06095bcd3fe78bf05d4fba859dbbf9b6e465`) and `EmitX86CpuIs` and `EmitX86CpuSupports` in `clang/lib/CodeGen/TargetBuiltins/X86.cpp` (sha256 `3f76a3d9cbc959070addd4b49e1dd2548cc07502c8f9668621fc6d081cf9f0fb`), read for their rules and written again in C; the diagnostics' texts are clang's, from `clang/include/clang/Basic/DiagnosticSemaKinds.td` at the same tag (sha256 `72ffb52ee210258c53fcbbe0b22ae8a07bff37096ad5524d92a6bfbf9891285c`). The resolver's instructions are original. No LLVM code is copied. clang runs externally as the tests' oracle. |
 | `src/buster/compiler/c_check_cpu_dispatch.c`, `src/buster/compiler/c_check_program_cpu_dispatch.c`, `src/buster/compiler/c_check_cpu_dispatch_driver_test.c` | Original checks and code generation of clang's `cpu_specific` and `cpu_dispatch` multiversioning, and their tests (#1447); Default. The rules follow LLVM `llvmorg-23.1.4`'s `handleCPUSpecificAttr` in `clang/lib/Sema/SemaDeclAttr.cpp` (sha256 `6b0452504d5520bd6eff41e3b68f23fa57ab69c704f266d8da82b54a79bf8839`), `CheckMultiVersionFunction` and its helpers and `ActOnFinishFunctionBody`'s dispatcher warning in `clang/lib/Sema/SemaDecl.cpp` (sha256 `9b2119593e60f6bda8aaa020f6ed77fbcd13325f30a904210a3624aa07fc7bdd`), `CheckFallThroughForBody` in `clang/lib/Sema/AnalysisBasedWarnings.cpp` (sha256 `9ad92316fb41ab7dd6a68abecc0f0d2b39959d849331843bb21f0d7da2ab13af`), `emitCPUDispatchDefinition` in `clang/lib/CodeGen/CodeGenModule.cpp` (sha256 `047ac9ad37cfafb2e930cec0fd089dafed8d8aaaf2575532649526c4287bee8e`), `EmitX86MultiVersionResolver` and `FormX86ResolverCondition` in `clang/lib/CodeGen/CodeGenFunction.cpp` (sha256 `419ddade7e8d0119bbf6aba786bf06095bcd3fe78bf05d4fba859dbbf9b6e465`) and `EmitX86CpuSupports` in `clang/lib/CodeGen/TargetBuiltins/X86.cpp` (sha256 `3f76a3d9cbc959070addd4b49e1dd2548cc07502c8f9668621fc6d081cf9f0fb`), read for their rules and written again in C; the diagnostics' texts are clang's, from `clang/include/clang/Basic/DiagnosticSemaKinds.td` at the same tag (sha256 `72ffb52ee210258c53fcbbe0b22ae8a07bff37096ad5524d92a6bfbf9891285c`). The resolver's instructions are original. No LLVM code is copied. clang runs externally as the tests' oracle. |
 | `src/buster/compiler/c_check_os_log_input.c` | Original os_log format reader and buffer layout (#148); Default. The rules follow LLVM `llvmorg-23.1.5`'s `clang/lib/AST/PrintfFormatString.cpp` (sha256 `8878ffdfa8a657010bdbfd1db1a225f99b4b125cd6c3d91c4074377cf3036323`), `clang/lib/AST/FormatString.cpp` (sha256 `ee0b5d7fb398cd015be4f0e56f4d365a21bd78edc35459fc36da385c3adcb248`), `clang/lib/AST/OSLog.cpp` (sha256 `f864111811074e880806e80aeab1fb1dafdaf9751620b2ea599ea184c13584f9`), `clang/include/clang/AST/OSLog.h` (sha256 `fc4208d7c46463d44d637c11c95715306927588c394cf2c68cd2ff57689caadd`), and `BuiltinOSLogFormat` in `clang/lib/Sema/SemaChecking.cpp` and `emitBuiltinOSLogFormat` in `clang/lib/CodeGen/CGBuiltin.cpp` at the same tag, read for their rules and written again in C; no LLVM code is copied. clang runs externally as the tests' oracle. |
@@ -874,6 +877,59 @@ LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
 - **Oracle:** clang runs externally in `test-checker-driver`
   (`c_check_target_versions_driver_test.c`). Its use as an oracle copies none
   of its code.
+
+### Clang's feature-map order (#2093)
+
+`src/buster/compiler/c_check_feature_map.inc` is derived LLVM data, not
+first-party material: each feature of `X86TargetParser.def`'s `X86_FEATURE`
+and `X86_FEATURE_COMPAT` rows in their order (`FeatureInfos`' index order),
+with its name and its `ImpliedFeatures` set, and each processor of
+`X86TargetParser.cpp`'s `ProcessorDefs` (the first row of each name) with its
+`Features` set, both as feature indices. It keeps the LLVM Project's
+`Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Inputs:** llvm-project commit `c47d7823685a`, the revision of the
+  `clang 23.1.6` package (`clang --version`: `++20261108033755+c47d7823685a`):
+  `llvm/include/llvm/TargetParser/X86TargetParser.def`, sha256 `cc59e275156d08b658cf23bc950237ee288a54477b16c08b4cbb00242fa60f50`, and
+  `llvm/lib/TargetParser/X86TargetParser.cpp`, sha256 `4ee870468b01b104e04dd08375285f790888f3428d41f3994236e49330c8b721`, as
+  `raw.githubusercontent.com` serves them at that commit.
+- **Rows taken:** each feature's string and its `ImpliedFeatures` expression,
+  evaluated; each processor's name and its feature-set expression, evaluated.
+  Nothing else of either file is copied.
+- **Generator:** `tools/generate_x86_feature_map.c`, which is original project
+  code under the default terms. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_feature_map.c -o build/generate_x86_feature_map
+  build/generate_x86_feature_map --self-test
+  build/generate_x86_feature_map X86TargetParser.def X86TargetParser.cpp "llvm-project commit c47d7823685a (clang 23.1.6)" "$(sha256sum X86TargetParser.def | cut -d' ' -f1)" "$(sha256sum X86TargetParser.cpp | cut -d' ' -f1)" > c_check_feature_map.inc.new
+  ```
+
+  It succeeds only when it has read both inputs whole, evaluated every set it
+  takes and written and flushed the whole table; `--self-test` checks this
+  against synthetic inputs, a write to `/dev/full`, an unreadable input and an
+  undefined name. The output's sha256 is `ab57edb2eedfe21c068c357f08b65d69e856d81c41fbe298798efe2a02ef355a`, 263 rows.
+- **The emulation:** `c_check_feature_map.c` is original code under the default
+  terms that follows the rules of `X86TargetInfo::initFeatureMap` and
+  `setFeatureEnabled` (`clang/lib/Basic/Targets/X86.cpp`),
+  `llvm::X86::updateImpliedFeatures` and `getFeaturesForCPU`, `StringMapImpl`'s
+  bucket placement and growth (`llvm/lib/Support/StringMap.cpp`),
+  `ASTContext::getFunctionFeatureMap`, `TargetInfo::parseTargetAttr`,
+  `CodeGenFunction::checkTargetFeatures` and the driver's
+  `x86::getX86TargetFeatures`, all read at the same commit; no implementation
+  was copied from them.
+- **xxHash:** `src/buster/compiler/xxh3_short.c` translates into C the paths of
+  `llvm::xxh3_64bits` for inputs of up to 128 bytes, from
+  `llvm/lib/Support/xxhash.cpp` at the same commit (sha256 `699389b388a56d0caf330bb872739b2e23d51a22b7e2f758f2c11fac9936752d`), which LLVM
+  bases on xxHash commit `d5891596637d21366b9b1dcf2c0007a3edb26a9e` and keeps
+  under xxHash's BSD 2-Clause License. The translation keeps that license, its
+  copyright notice and its text ([LICENSES/xxHash.txt](LICENSES/xxHash.txt));
+  its local changes (C, seed 0 alone, no longer inputs, `memcpy` loads, one
+  return per function) are under the same terms. It was checked against
+  `libLLVM-23`'s own `xxh3_64bits` on 2,000 random inputs of 0 to 128 bytes.
+- **Oracle:** clang 23.1.6 runs externally in the driver tests; its use as an
+  oracle copies none of its code.
 
 ### Clang's attribute subjects (#147)
 

@@ -30,6 +30,10 @@ typedef enum CheckRedeclarationKind
     // "redefinition", or with extern "redeclaration", "with a different type".
     CHECK_REDECLARATION_AUTO_TYPE,
     CHECK_REDECLARATION_AUTO_TYPE_EXTERN,
+    // A block's object whose earlier declaration in it has no linkage and itself extern, or the other way around (#2441):
+    // clang's MergeVarDecl, "extern declaration of 'x' follows non-extern declaration" and its reverse.
+    CHECK_REDECLARATION_EXTERN,
+    CHECK_REDECLARATION_NON_EXTERN,
 } CheckRedeclarationKind;
 
 // Whether the declaration of `token`, a declarator's name, says extern or __private_extern__: a storage-class specifier
@@ -41,7 +45,15 @@ typedef enum CheckRedeclarationKind
 // (diagnoseVarDeclTypeMismatch's isThisDeclarationADefinition), so an extern one is a "redeclaration" even with an
 // initializer, and any other one (a tentative definition too) a "redefinition" (#1447, review on #1453). A storage class
 // is its declaration's specifier alone: a tag's member or a prototype's parameter can't say extern.
+static bool check_input_redeclaration_storage(const Parser* parser, uint32_t token, uint32_t storage, uint32_t other);
+
 static bool check_input_redeclaration_extern(const Parser* parser, uint32_t token)
+{
+    return check_input_redeclaration_storage(parser, token, C_NAME_EXTERN, C_NAME_PRIVATE_EXTERN);
+}
+
+// Whether the declaration of `token` says the storage class `storage` or `other` (check_input_redeclaration_extern's scan).
+static bool check_input_redeclaration_storage(const Parser* parser, uint32_t token, uint32_t storage, uint32_t other)
 {
     const uint8_t* roles = parser->tree.roles;
     const uint8_t* kinds = parser->tokens.kinds;
@@ -59,7 +71,7 @@ static bool check_input_redeclaration_extern(const Parser* parser, uint32_t toke
         parentheses += kinds[at] == PARSE_KIND_R_PAREN;
         parentheses -= kinds[at] == PARSE_KIND_L_PAREN && parentheses != 0;
         const bool outside = depth == 0 && parentheses == 0;
-        result = outside && role == PARSE_ROLE_SPECIFIER && (name == C_NAME_EXTERN || name == C_NAME_PRIVATE_EXTERN);
+        result = outside && role == PARSE_ROLE_SPECIFIER && (name == storage || name == other);
         const bool boundary = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_CLOSE_BLOCK ||
                               role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BODY;
         scanning = !result && (!outside || !boundary);
@@ -131,6 +143,16 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
                     detail = CHECK_REDECLARATION_DEFINITION;
                     noted = definition != 0 ? definition - 1 : previous;
                 }
+            }
+            // A block's object of no linkage beside one with it, of a type that merges (#2441, clang's MergeVarDecl, after
+            // its static checks): a static one follows a non-static one, an extern one a block's static one; else the
+            // extern and non-extern errors.
+            if (object && detail == CHECK_REDECLARATION_GENERIC && reader->scope_count != 0 && compatible != TYPE_ANSWER_NO && (linkage == 0) != (earlier_linkage == 0))
+            {
+                const bool earlier_static = earlier_linkage == 0 && check_input_redeclaration_storage(reader->parser, previous, C_NAME_STATIC, C_NAME_STATIC);
+                const bool current_static = linkage == 0 && check_input_redeclaration_storage(reader->parser, token, C_NAME_STATIC, C_NAME_STATIC);
+                detail = current_static ? CHECK_REDECLARATION_STATIC : earlier_static ? CHECK_REDECLARATION_NON_STATIC :
+                         linkage != 0 ? CHECK_REDECLARATION_EXTERN : CHECK_REDECLARATION_NON_EXTERN;
             }
             const bool defined = (definition != 0 && (noted != previous || definition == previous + 1)) ||
                                  (object && check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE)) ||
