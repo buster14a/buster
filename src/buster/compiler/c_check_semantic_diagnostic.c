@@ -1831,8 +1831,6 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     return result;
 }
 
-// A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
-// (check_semantic_note_count counts them): const assignment's are several (#1447).
 // The first token of call `node`'s argument `argument`, its parentheses included: clang's getBeginLoc of it.
 static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument)
 {
@@ -1846,6 +1844,51 @@ static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckG
     }
     return first;
 }
+
+// __builtin_clear_padding's argument refused (#2414, clang's BuiltinClearPadding), at its first token, its parentheses
+// included: no pointer, "passing 'T' to parameter of incompatible type pointer: type mismatch at 1st parameter ('T' vs
+// pointer)", the argument's type as written (an array isn't decayed); a function pointer, "argument to
+// __builtin_clear_padding must be a pointer to a trivially-copyable type ('T' invalid)"; an incomplete pointee, "variable
+// has incomplete type 'T'" with a tag's "forward declaration" note; a const one, "read-only variable is not assignable".
+// NULL for another report.
+static const char* check_semantic_clear_padding(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
+                                                Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = report->node;
+    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node]];
+    const uint32_t first = check_semantic_argument_begin(parser, graph, node, 0);
+    const TypeId written = argument < stream->count ? check_stream_type(stream, argument) : 0;
+    const TypeId bare = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId pointee = pointer ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : 0;
+    const char* result = NULL;
+    if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && written != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, written, check_semantic_operand_spelling(parser, input, stream, types, argument));
+        result = type.length == 0 ? NULL :
+                 pointer ? check_warning_text(scratch, "argument to __builtin_clear_padding must be a pointer to a trivially-copyable type (%.*s invalid)",
+                                              (int)type.length, type.pointer) :
+                           check_warning_text(scratch, "passing %.*s to parameter of incompatible type pointer: type mismatch at 1st parameter (%.*s vs pointer)",
+                                              (int)type.length, type.pointer, (int)type.length, type.pointer);
+    }
+    else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && pointee != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0);
+        result = type.length != 0 ? check_warning_text(scratch, "variable has incomplete type %.*s", (int)type.length, type.pointer) : NULL;
+        *note = result != NULL ? check_semantic_forward_note(parser, pp, input, types, spell, pointee, scratch) : *note;
+    }
+    else if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && pointer)
+    {
+        result = "read-only variable is not assignable";
+    }
+    *location = result != NULL ? first : report->token;
+    return result;
+}
+
+// A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
+// (check_semantic_note_count counts them): const assignment's are several (#1447).
 
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
@@ -1884,6 +1927,13 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = "CFString literal is not a string constant";
             *location = check_semantic_argument_begin(parser, graph, node, 0);
         }
+    }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CLEAR_PADDING &&
+             graph->argument_counts[node] == 1 &&
+             (report->diagnostic == CHECK_DIAG_INCOMPATIBLE || report->diagnostic == CHECK_DIAG_INCOMPLETE || report->diagnostic == CHECK_DIAG_INVALID_TYPE))
+    {
+        const char* refused = check_semantic_clear_padding(parser, pp, input, stream, types, report, spell, location, note, scratch);
+        result = refused != NULL ? refused : result;
     }
     else if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
