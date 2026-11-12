@@ -1162,7 +1162,8 @@ static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_
 static uint32_t check_input_asm_goto_label(const CheckInput* input, uint32_t keyword, uint32_t index)
 {
     const uint32_t id = check_input_asm_id(input, keyword);
-    const CheckInputAsm* assembly = id != 0 ? input->asm_statements + id - 1 : NULL;
+    // (A synthetic walk's input marks asm statements' tokens without their records.)
+    const CheckInputAsm* assembly = id != 0 && id <= input->asm_count && input->asm_statements != NULL ? input->asm_statements + id - 1 : NULL;
     return assembly != NULL && index < assembly->label_count ? assembly->labels[index].token : BUSTER_CHECK_NONE;
 }
 
