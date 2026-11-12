@@ -207,6 +207,9 @@ enum
     CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
     // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
     CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
+    // An integer constant converted to an enumeration that none of its enumerators equals (#2264, clang's
+    // DiagnoseAssignmentEnum): -Wassign-enum, off by default.
+    CHECK_WARNING_ID_ASSIGN_ENUM = 145,
     CHECK_WARNING_ID_COUNT,
 };
 

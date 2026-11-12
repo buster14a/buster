@@ -191,6 +191,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY] = { "-Wsizeof-array-decay", NULL, "sizeof on pointer operation will return size of a pointer" },
     [CHECK_WARNING_ID_CHAINED_COMPARISON] = { "-Wparentheses", NULL, "chained comparison does not behave the same as a mathematical expression" },
     [CHECK_WARNING_ID_ASM_LABEL_ON_AUTO] = { NULL, NULL, "ignored asm label on automatic variable" },
+    [CHECK_WARNING_ID_ASSIGN_ENUM] = { "-Wassign-enum", NULL, "integer constant not in range of enumerated type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
