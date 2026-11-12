@@ -2094,10 +2094,33 @@ static uint64_t check_driver_first_error(const Parser* original, const Preproces
 // its AnalysisBasedWarnings::IssueWarnings, at the body's end, where -Wreturn-type's place is, then finds an uncompilable
 // error, builds no CFG and gives no analysis warning (-Wreturn-type, -Wuninitialized), but every runtime-behavior one the
 // body queued (#1447's semantic recovery, phase 3, check_common_flush).
-static bool check_driver_body_flushed(const Parser* original, Preprocessor* pp, uint32_t close, uint64_t first_error)
+// A repaired view's CheckCommonView: its closers that are the original's own (the same kind at the same place) run to
+// `closed`.
+static CheckCommonView check_driver_common_view(const CheckRepair* repair, const Parser* original)
 {
+    const Parser* view = &repair->parser;
+    uint32_t closed = repair->original_end;
+    while (closed < view->tokens.count && closed < original->tokens.count && view->tokens.kinds[closed] == original->tokens.kinds[closed] &&
+           (view->tokens.kinds[closed] == PARSE_KIND_R_BRACE || view->tokens.kinds[closed] == PARSE_KIND_SEMI))
+    {
+        closed += 1;
+    }
+    const CheckCommonView result = {
+        .complete = repair->warning_complete,
+        .original = original,
+        .count = view->tokens.count,
+        .end = repair->original_end,
+        .closed = closed,
+    };
+    return result;
+}
+
+static bool check_driver_body_flushed(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t close, uint64_t first_error)
+{
+    // (A repaired view's synthetic closer ends a body the parse error ended: CheckCommonView.)
+    const bool synthetic = check_common_view_synthetic(parser, close);
     const uint32_t publication = check_driver_publication_position(original, pp, close + 1u, pp->output.count);
-    return (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN >= first_error;
+    return synthetic || (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN >= first_error;
 }
 
 // The tokens of the program's bodies clang ends after the unit's first error (check_driver_body_flushed), from each one's
@@ -2112,7 +2135,7 @@ static const uint8_t* check_driver_flushed_bodies(const Parser* parser, const Pa
     {
         const uint32_t opening = program->bodies[b].opening;
         const uint32_t close = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
-        if (close < parser->tokens.count && close > opening && check_driver_body_flushed(original, pp, close, first_error))
+        if (close < parser->tokens.count && close > opening && check_driver_body_flushed(parser, original, pp, close, first_error))
         {
             if (flushed == NULL)
             {
@@ -2138,8 +2161,10 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
     {
         const CheckProgramBody* body = program->bodies + b;
         const uint32_t token = parser->tree.parents[body->opening];
+        // (Not a repaired view's synthetic closer's: its body is the one the parse error ended, CheckCommonView.)
+        const bool synthetic = check_common_view_synthetic(parser, token);
         // A cpu_dispatch function's body may fall off its end (#1447: clang's CheckFallThroughForBody permits it).
-        if (body->return_warning != 0 && token < parser->tokens.count &&
+        if (body->return_warning != 0 && token < parser->tokens.count && !synthetic &&
             (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)) &&
             check_cpu_dispatch_kind(check_input_attributes_at(program->input, body->declaration)) != CHECK_CPU_DISPATCH_DISPATCH)
         {
@@ -6911,6 +6936,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     // The view, where an error's part is left out; its mask is the bodies', each brace with the token before it.
     CheckDriverRejectedView view = { 0 };
     const bool viewed = edited && check_driver_rejected_view(&view, unit, edits, casts, arena, scratch);
+    // A repaired view's reading (CheckCommonView): its tokens are the view's through the edits.
+    const CheckCommonView unit_view = check_common_view;
+    check_common_view.to_unit = viewed && unit_view.complete != NULL ? view.to_original : NULL;
     uint8_t* view_mask = viewed ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)view.parser.tokens.count + 1) : NULL;
     bool valid = !edited || view_mask != NULL;
     // What the reading leaves out, in the unit's tokens: the bodies it masks and the parts its view drops.
@@ -7071,7 +7099,8 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
             const bool literal = phase == 0 && at < count && at >= unit_stop &&
                                  (input.reports[index].message == CHECK_INPUT_LITERAL || input.reports[index].message == CHECK_INPUT_WIDE_LITERAL);
-            const bool fresh = at < count && !literal && !check_driver_rejected_known(errors, error_count, at) &&
+            // (Not a repaired view's error at its synthetic or incomplete statements', which may be the view's: CheckCommonView.)
+            const bool fresh = at < count && !literal && check_common_view_keeps(parser, token) && !check_driver_rejected_known(errors, error_count, at) &&
                                !check_driver_rejected_known(found, *found_count, at) && (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
             valid = !fresh || *found_count < found_capacity;
             if (fresh && valid)
@@ -7215,8 +7244,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                 }
                 arena_pop_to(scratch, scopes_mark);
             }
-            // (Past `stop` the first reading published none of its events.)
-            if (!errored && (!known_event || events->events[i].token >= stop))
+            // (Past `stop` the first reading published none of its events.) Not at a repaired view's synthetic or incomplete
+            // statements' tokens (CheckCommonView).
+            if (!errored && (!known_event || events->events[i].token >= stop) && check_common_view_keeps(parser, event_token))
             {
                 missing[selected.count++] = events->events[i];
             }
@@ -7229,8 +7259,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     }
     arena_pop_to(scratch, events_mark);
     // Where a reader's error stopped the first reading's walk (`stop`), the second's reports and warnings from there on,
-    // which are its warnings alone: it has no error.
-    if (valid && stop < view_count)
+    // which are its warnings alone: it has no error. (Not a repaired view's, whose reports' whitelist is the view's own
+    // tokens': check_repair_input_report.)
+    if (valid && stop < view_count && unit_view.complete == NULL)
     {
         check_driver_reports_from(parser, original, pp, publication_end, &input, &stream, &types, NULL, NULL, NULL, 0, NULL, 0, false, NULL, stop, scratch);
     }
@@ -7256,6 +7287,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         arena_pop_to(scratch, flushed_mark);
         round = CHECK_DRIVER_ROUND_DONE;
     }
+    check_common_view = unit_view;
     arena_release(&type_arena);
     arena_release(&index_arena);
     return round;
@@ -10514,8 +10546,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // The identifiers, the target and the predefines are the unit's preprocessor's, as every client's
                     // program takes them (check_request_program_options, #1057).
                     const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
-                        .initializers = &initializers,
-                        .asms = &asms,
+                        .initializers = repairing ? NULL : &initializers,
+                        .asms = repairing ? NULL : &asms,
                         .prepared_data = result == 0 && (emit_object || link) && !prefix_only ? &data : NULL,
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
@@ -10535,8 +10567,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
                     // parser, where a prefix's or a repair's is a view of its own).
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && !repairing && (!prefix_only || checking == recovered) &&
-                         (pp->errors != 0 || publication_errors || input.recovered_valid) && !pp->diagnostic_collection_failed && !pp->history_failed);
+                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing) &&
+                         (pp->errors != 0 || publication_errors || input.recovered_valid || repairing) && !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
                     if (program_diagnostics && result != 0 && input.visibility_error)
@@ -10551,7 +10583,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // gives them (#1447), among the unit's errors, which the reports below publish, so that the unit's warnings
                     // leave out what clang's do after them (check_driver_rejected_warnings).
                     CheckProgramDiagnostic control = { 0 };
-                    if (program_diagnostics && !program_checked)
+                    // (Not a repaired view's: its program's failure may be its synthetic closers', and its own diagnosis found
+                    // none of the view's original statements' above.)
+                    if (program_diagnostics && !program_checked && !repairing)
                     {
                         const bool listed = program.status == CHECK_PROGRAM_INVALID &&
                                             check_program_diagnose_all(&control, program_input, &stream, checking, &types, BUSTER_CHECK_NONE, output_arena, scratch) &&
@@ -10619,6 +10653,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     if (program_checked)
                     {
+                        // A repaired view's warnings, at its complete original statements alone (CheckCommonView, #2406).
+                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
@@ -10635,13 +10671,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             // -w spares the common checks that are errors by default (#2264): a chained comparison's.
                             check_common_chained_comparisons(checking, pp, &input, scratch);
                         }
+                        check_common_view = (CheckCommonView){ 0 };
                     }
-                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered) && !repairing && !pp->fatal &&
+                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered || repairing) && !pp->fatal &&
                              !pp->diagnostic_collection_failed && !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
                     {
                         // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
                         // graph's and its other errors' tokens, and its program's. A parse a resume read whole (#147) is
                         // one too: its checking is the recovered parser, where a prefix's or a repair's is a view of its own.
+                        // A repair's is read too, at its complete original statements alone (CheckCommonView, #2431).
                         // Under -w too (#2162): its rounds' readings find the errors past a reader's error that ended its walk,
                         // which clang gives, where -w's policy leaves out every warning they publish.
                         const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;
@@ -10718,12 +10756,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
+                            // A repaired view's, at its complete original statements alone (CheckCommonView, #2431).
+                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
                             check_driver_rejected_common(checking, recovered, pp, &input, &types, error_tokens, error_count, sites, site_count, nonconstant, scalar,
                                                          return_warning, baseline,
                                                          &shift_warnings,
                                                          &input.warning_events, &stream.warning_events,
                                                          input.walk_end != 0 && input.diagnostic_limits == NULL ? input.walk_end : tokens, publication_end, arena,
                                                          scratch);
+                            check_common_view = (CheckCommonView){ 0 };
                         }
                     }
                     // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs

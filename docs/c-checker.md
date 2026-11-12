@@ -5143,6 +5143,25 @@ a label, a goto, a label's address or a local tag's definition) with clang 23 un
 -Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
 with errors mid-body among warnings before and after them.
 
+A unit whose parse error the driver reads through a repaired view
+(`check_repair_make`: its original tokens through the last complete statement,
+then synthetic closers) gets the common warnings of the view's complete
+original statements too (#2406, #2431): `check_program` runs on the view
+where it has no other error (without its initializers' and asms' runs, which
+the repair leaves out), and `check_driver_rejected_common`'s readings where it
+has. `CheckCommonView`, which the driver sets around those passes, selects
+their reports by `CheckRepair.warning_complete`, as the view's other warnings
+are, and places them by the original's tokens: a body whose `}` the repair
+writes again where the original has it publishes its deferred warnings before
+the parse error, and one the error left open after it, without its flow
+analysis (`check_driver_flushed_bodies`) or `-Wreturn-type`. A reading's
+fresh error at a synthetic or incomplete statement isn't taken, and nor is a
+program failure there. `c_check_repaired_view_driver_test.c` compares
+fixtures with clang 23 as the structural ones are. Differences left: an
+unused variable of a scope the parse error leaves open is still given
+(clang's isn't), and one of a body the repair closes again publishes after
+the parse error; both predate the repaired view's common warnings.
+
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
 first alone. `check_initializers_diagnose_warnings` already visited every
