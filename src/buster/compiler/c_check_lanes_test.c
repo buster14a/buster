@@ -2619,6 +2619,10 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
 // The exit helper's checks (#1444, lane_exit_helper_start): how long a run's helpers may take to end once the driver
 // has, and how much of each stream a run keeps.
 #define BUSTER_CHECK_LANES_EXIT_SECONDS 10
+// How long a driver must still run after its streams end for them to have ended first, in milliseconds: well inside a
+// held driver's BUSTER_TEST_EXIT_HELPER_PAUSE (2000), and far longer than an exiting process's files close before its
+// exit can be waited for.
+#define BUSTER_CHECK_LANES_EXIT_GRACE 500
 #define BUSTER_CHECK_LANES_EXIT_STREAM (UINT64_C(1) << 20)
 
 // One run of the driver for the exit helper's checks: its status, its standard output and error, the threads its lanes
@@ -2745,7 +2749,15 @@ static void check_lanes_test_exit_run(CheckLanesExitRun* run, char* const* argum
                 nanosleep(&pause_step, 0);
             }
         }
+        // A process's files close as it exits, a moment before its exit can be waited for, longer for a threaded one on a
+        // loaded runner: the streams ended first only if the driver still runs a grace period after they end (#1430's
+        // drill caught an exiting TSan driver in that moment).
         waited = waitpid(child, &status, WNOHANG);
+        for (uint32_t grace = 0; waited == 0 && !output_open && !errors_open && grace < BUSTER_CHECK_LANES_EXIT_GRACE; grace += 1)
+        {
+            nanosleep(&pause_step, 0);
+            waited = waitpid(child, &status, WNOHANG);
+        }
         run->streams_ended_first = !output_open && !errors_open && waited == 0;
         if (waited == 0)
         {
