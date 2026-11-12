@@ -389,6 +389,10 @@ typedef enum CheckInputMessage
     // "conflicting asm label" at its name, its note "previous declaration is here" at the earlier label's string
     // (`note_token`).
     CHECK_INPUT_ASM_LABEL_CONFLICT,
+    // A block's thread-local object without static or extern (#2420, clang's err_thread_non_global): "'_Thread_local'
+    // variables must have global storage" at the keyword, '__thread' for GNU's (`detail` 1); recovered, the declaration
+    // read on.
+    CHECK_INPUT_THREAD_NON_GLOBAL,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -558,6 +562,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
     [CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION] = "expected identifier or '('",
     [CHECK_INPUT_ASM_LABEL_CONFLICT] = "conflicting asm label",
+    [CHECK_INPUT_THREAD_NON_GLOBAL] = "'_Thread_local' variables must have global storage",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -11502,7 +11507,31 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_report(reader, specifier != BUSTER_CHECK_NONE ? specifier : name, CHECK_INPUT_DECLARATION);
                 valid = false;
             }
-            valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
+            // A block's thread-local object without static or extern (#2420): clang's error at the keyword, which it reads
+            // on from (C23's thread_local is spelled '_Thread_local' there, as clang names the specifier).
+            uint32_t thread_keyword = BUSTER_CHECK_NONE;
+            for (uint32_t t = first; valid && thread_local && !function && !file && !is_static && storage != C_NAME_EXTERN && storage != C_NAME_PRIVATE_EXTERN &&
+                                     t < name && thread_keyword == BUSTER_CHECK_NONE; t += 1)
+            {
+                const uint32_t spelled = parser->tokens.names[t];
+                const bool keyword = parser->tokens.kinds[t] == PARSE_KIND_STORAGE &&
+                                     (spelled == C_NAME_THREAD_LOCAL || spelled == C_NAME_THREAD_LOCAL_C11 || spelled == C_NAME_GNU_THREAD);
+                thread_keyword = keyword ? t : BUSTER_CHECK_NONE;
+            }
+            if (thread_keyword != BUSTER_CHECK_NONE)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, thread_keyword, CHECK_INPUT_THREAD_NON_GLOBAL);
+                if (reader->output->report_count == before + 1)
+                {
+                    reader->output->reports[before].detail = parser->tokens.names[thread_keyword] == C_NAME_GNU_THREAD ? 1u : 0u;
+                }
+                valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+            }
+            else
+            {
+                valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
+            }
             // Explicit register variables' labels, and global register variables (#1846, the owner's decision on #1447), as
             // clang's Sema::ActOnVariableDeclarator checks them: a local's label must name a register clang knows; a
             // global's must too, one clang's backend keeps one in (rsp and rbp of 8 bytes, esp and ebp of 4), of the
