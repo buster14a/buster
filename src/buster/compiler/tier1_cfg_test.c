@@ -1426,9 +1426,29 @@ static uint32_t tier1_cfg_test_edge_moves(const Tier1CfgInput* input, const Tier
 //   0 -> 3, 3 -> 1, 3 -> 2, 1 -> 2, 2 -> 3, 3 -> 4; p2 = phi(q, p1) at 2, p1 = phi(e, p2) at 3, q defined in 1 while p1 is
 //   live. Joining p2's operands in order put q in its slot first, which then kept out p1, live at q's definition; the
 //   phi-to-phi pairs join first, so that the loop's edges 2 -> 3 and 3 -> 2 move nothing.
+// And tier1_cfg_anchors on those two CFGs and a third, whose dispatch handlers precede their join: the first join's anchor
+// and chosen predecessor are its dominator, the web's header's and the dispatch join's their latch laid out before them,
+// the handlers have none, and neither has the entry.
+static void tier1_cfg_test_anchors(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const uint32_t* anchors_expected, const uint32_t* chosen_expected, const char* name)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    uint32_t* anchors = arena_push_array(scratch, (uint64_t)input->block_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* chosen = arena_push_array(scratch, (uint64_t)input->block_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    bool same = anchors != 0 && chosen != 0 && tier1_cfg_anchors(input, output, scratch, anchors, chosen) && output->length == output_mark;
+    for (uint32_t b = 0; same && b < input->block_count; b += 1)
+    {
+        // The chosen predecessor as a block, to compare it with the expected one.
+        const uint32_t predecessor = chosen[b] != BUSTER_TIER1_CFG_NONE ? input->predecessors[input->predecessor_offsets[b] + chosen[b]] : BUSTER_TIER1_CFG_NONE;
+        same = anchors[b] == anchors_expected[b] && predecessor == chosen_expected[b];
+    }
+    tier1_cfg_test_expect(tally, same, name);
+    arena_pop_to(scratch, scratch_mark);
+}
+
 static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
-    static Tier1CfgTestBuilder builders[2];
+    static Tier1CfgTestBuilder builders[3];
     Tier1CfgTestBuilder* join = &builders[0];
     memset(join, 0, sizeof(*join));
     join->block_count = 3;
@@ -1489,9 +1509,40 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
     tier1_cfg_test_use(web, p1, 1, 1, false);
     tier1_cfg_test_use(web, p1, 4, 0, false);
     tier1_cfg_test_expect(tally, made == p1, "the loop's phis are made in their operands' order");
+    // 0 -> 5, 5 -> 1, 5 -> 2, 1 -> 5, 2 -> 3, 3 -> 4, 4 -> 3, 4 -> 5, 5 -> 6: 5 is a join laid out after the handlers 1
+    // and 2, whose dominator it is (they have no anchor), and after 1 and 4, which it dominates: its latches, of which
+    // it takes the nearer, 4. The loop 3 -> 4 -> 3 has its header first: 3's anchor is its dominator 2, 4's is 3.
+    Tier1CfgTestBuilder* shapes = &builders[2];
+    memset(shapes, 0, sizeof(*shapes));
+    shapes->block_count = 7;
+    for (uint32_t b = 0; b < shapes->block_count; b += 1)
+    {
+        shapes->instructions[b] = 1;
+    }
+    shapes->registers[0] = 0x000f;
+    shapes->scratch[0] = 11;
+    tier1_cfg_test_edge(shapes, 0, 5);
+    tier1_cfg_test_edge(shapes, 5, 1);
+    tier1_cfg_test_edge(shapes, 5, 2);
+    tier1_cfg_test_edge(shapes, 1, 5);
+    tier1_cfg_test_edge(shapes, 2, 3);
+    tier1_cfg_test_edge(shapes, 3, 4);
+    tier1_cfg_test_edge(shapes, 4, 3);
+    tier1_cfg_test_edge(shapes, 4, 5);
+    tier1_cfg_test_edge(shapes, 5, 6);
+    const uint32_t none = BUSTER_TIER1_CFG_NONE;
+    const uint32_t join_anchors[] = { none, 0, 0 };
+    const uint32_t join_chosen[] = { none, 0, 0 };
+    const uint32_t web_anchors[] = { none, none, none, 2, 3 };
+    const uint32_t web_chosen[] = { none, none, 1, 2, 3 };
+    const uint32_t shape_anchors[] = { none, none, none, 2, 3, 4, 5 };
+    const uint32_t shape_chosen[] = { none, none, none, 2, 3, 4, 5 };
+    const uint32_t* anchors_expected[] = { join_anchors, web_anchors, shape_anchors };
+    const uint32_t* chosen_expected[] = { join_chosen, web_chosen, shape_chosen };
     const char* names[] = {
         "a join's phi takes its dominating predecessor's operand's register",
         "a phi web around a loop keeps one slot",
+        "anchors and chosen predecessors follow dominators and latches",
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(builders); f += 1)
     {
@@ -1499,7 +1550,11 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
         Tier1CfgInput input;
         const bool built = tier1_cfg_test_build(&builders[f], output, &input);
         tier1_cfg_test_expect(tally, built, names[f]);
-        for (uint32_t path = 0; built && path < 2; path += 1)
+        if (built)
+        {
+            tier1_cfg_test_anchors(tally, &input, output, scratch, anchors_expected[f], chosen_expected[f], names[f]);
+        }
+        for (uint32_t path = 0; built && f < 2 && path < 2; path += 1)
         {
             const uint64_t mark = output->length;
             Tier1CfgAllocation result = { 0 };
@@ -1511,7 +1566,7 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
             tier1_cfg_test_expect(tally, allocated && quiet, f == 0 ? "the dominating predecessor's critical edge moves nothing" : "the loop's edges move nothing for its phi web");
             arena_pop_to(output, mark);
         }
-        if (built)
+        if (built && f < 2)
         {
             tier1_cfg_test_case(tally, &input, output, scratch, names[f], true, 0, 0, true);
         }
