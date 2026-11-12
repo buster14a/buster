@@ -7737,7 +7737,7 @@ still the switch's case, whose value is checked. So the errors in the body
 after such a jump stay, and a statement expression whose last statement is a
 `case` is `void` (`x = ({ case 1: 2; })`'s "assigning to 'int' from
 incompatible type 'void'"). Left: clang drops a switch's jump errors once
-the switch has a duplicate case value, and buster still gives them.
+the switch has a duplicate case value, and buster still gives them (#2498).
 
 `test-checker` compares both walks for every pair of tokens in nested and sibling
 regions, including boundaries and absent tokens, on scalar/vector normal and
