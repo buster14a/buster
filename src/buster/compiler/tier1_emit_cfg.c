@@ -4045,8 +4045,9 @@ static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t c
 // parameter's incoming one, its definition's), and every other value the caller-saved ones. A value whose interval covers
 // an asm body's definition phase (#2144, TIER1_RULE_ASM) is kept out of the general registers the body touches, which it
 // would otherwise save and restore around itself (tier1_emit_cfg_asm), and may take the callee-saved ones too where it
-// crosses no call: a phi's web as one, as for calls. The preferred problem's allowed sets, on the output arena, and how
-// many general values it moves (`crossing`, none: nothing to prefer). False where an arena is short.
+// crosses no call: a phi's web as one, as for calls. The preferred problem's sets, on the output arena, which
+// tier1_cfg_preferred joins to each definition's registers while it is bound, and how many general values it moves
+// (`crossing`, none: nothing to prefer). False where an arena is short.
 //
 // An interval crosses a call where the first call at or past its start is before its end and isn't its value's own
 // definition. With `counted` (#2538's step 4) that is two loads of the calls before each position
@@ -4178,10 +4179,10 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
                 avoid |= touched[b];
             }
         }
-        // A parameter keeps its incoming register over its definition's interval, as in the plain allocation: free there
-        // too, in a callee-saved register from the entry on, it would hold one for the whole entry block, which spilled
-        // more than its saves around the calls there cost (on speedtest1, a slower run). A parameter the plain allocation
-        // already freed (tier1_emit_cfg_one_call) stays free, the entry's moves bringing it.
+        // A parameter keeps its incoming register over its definition's interval, as in the plain allocation
+        // (tier1_cfg_preferred adds it): free there too, in a callee-saved register from the entry on, it would hold one
+        // for the whole entry block, which spilled more than its saves around the calls there cost (on speedtest1, a slower
+        // run). A parameter the plain allocation already freed stays free, the entry's moves bringing it.
         uint32_t root = v;
         while (parents[root] != root)
         {
@@ -4191,8 +4192,7 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
         crosses = crossed[root] != 0;
         avoided[root] |= pass == 0 ? avoid : 0;
         avoid = avoided[root];
-        const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
-        allowed[v] = general ? ((crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid) | defined : input->allowed_registers[v];
+        allowed[v] = general ? (crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
         count += pass == 1 && general && (crosses || avoid != 0);
     }
     *preferred = allowed;
@@ -4248,13 +4248,20 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
     {
         error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, vector, output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
+    Tier1CfgInput problem = *input;
+    const Tier1CfgPreference preference = {
+        .sets = allowed,
+        .registers = {
+            input->registers[0] | emitted->callee_registers,
+            input->registers[1],
+            input->registers[2],
+        },
+    };
+    error = error == TIER1_EMIT_OK && moved != 0 && !tier1_cfg_preferred(input, &preference, output, &problem) ? TIER1_EMIT_MEMORY : error;
     if (error == TIER1_EMIT_OK && moved != 0)
     {
-        const Tier1CfgInput first_input = *input;
-        input->allowed_registers = allowed;
-        input->registers[0] = first_input.registers[0] | emitted->callee_registers;
         Tier1CfgAllocation second;
-        const Tier1CfgError preferred = vector ? tier1_cfg_allocate(input, output, scratch, &second) : tier1_cfg_allocate_scalar(input, output, scratch, &second);
+        const Tier1CfgError preferred = vector ? tier1_cfg_allocate(&problem, output, scratch, &second) : tier1_cfg_allocate_scalar(&problem, output, scratch, &second);
         // The preferred problem only tries to keep values in callee-saved registers. A constraint or exhausted arena
         // discards the preference and keeps the plain allocation; a corrupt input is the allocator's own failure to report,
         // not a capability or capacity result.
@@ -4266,46 +4273,50 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
         if (tier1_cfg_taken(preferred, &second))
         {
             *cfg = second;
+            *input = problem;
             *crossing = moved;
-        }
-        else
-        {
-            *input = first_input;
         }
     }
     return error;
 }
 
-// The CFG consumer's allocation (#2538): one preparation of the intervals for both problems, which have the same ones
-// without fixed ranges, and the plain problem's assignment for its verdict (tier1_cfg_order_plain, which frees every
-// parameter where one meets a constraint); then the preference from those intervals, and the preferred problem's column
-// and assignment (tier1_cfg_order_finish). Lookup columns, slot sharing and edge moves are made once, for the allocation
-// that stands: the preferred one where it is taken, as tier1_emit_cfg_two_calls takes it, else the plain one. The same
-// problem and allocation as tier1_emit_cfg_two_calls's, which --verify checks (tier1_emit_cfg_order_check).
+// The CFG consumer's allocation (#2538): the intervals prepared once for both problems, which have the same ones without
+// fixed ranges (tier1_cfg_order_prepare); the preference from those intervals; then the preferred problem assigned with
+// the plain one's verdict inside its call, the plain problem assigned whole only where the preferred allocation isn't
+// taken, and lookup columns, slot sharing and edge moves made once, for the allocation that stands
+// (tier1_cfg_order_run). The same problem and allocation as tier1_emit_cfg_two_calls's, which --verify checks
+// (tier1_emit_cfg_order_check).
 static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg, uint32_t* crossing)
 {
     Tier1CfgOrder order;
     *crossing = 0;
-    Tier1CfgError allocated = tier1_cfg_order_plain(input, output, scratch, BUSTER_VECTOR_PATH(options->vector), &order);
+    Tier1CfgError allocated = tier1_cfg_order_prepare(input, output, scratch, BUSTER_VECTOR_PATH(options->vector), &order);
     tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
-    Tier1EmitError error = tier1_emit_cfg_allocated(allocated, &order.plain);
-    uint32_t* allowed = 0;
+    Tier1EmitError error = tier1_emit_cfg_allocated(allocated, &order.prepared.candidate);
+    uint32_t* sets = 0;
     uint32_t moved = 0;
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &sets, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     if (error == TIER1_EMIT_OK)
     {
-        Tier1CfgInput preferred = *input;
-        preferred.allowed_registers = allowed;
-        preferred.registers[0] = input->registers[0] | emitted->callee_registers;
+        const Tier1CfgPreference preference = {
+            .sets = sets,
+            .registers = {
+                input->registers[0] | emitted->callee_registers,
+                input->registers[1],
+                input->registers[2],
+            },
+            .verdict = true,
+        };
+        const uint32_t* preferred = 0;
         Tier1CfgError second = TIER1_CFG_OK;
         bool taken = false;
-        allocated = tier1_cfg_order_finish(input, moved != 0 ? &preferred : 0, output, scratch, &order, cfg, &second, &taken);
+        allocated = tier1_cfg_order_run(input, moved != 0 ? &preference : 0, output, scratch, &order, cfg, &preferred, &second, &taken);
         // The preferred problem only tries to keep values in callee-saved registers. A constraint or exhausted arena
         // discards the preference and keeps the plain allocation; a corrupt input is the allocator's own failure to report.
-        if (tier1_emit_cfg_preference_fatal(second))
+        if (allocated == TIER1_CFG_OK && tier1_emit_cfg_preference_fatal(second))
         {
             tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, second);
             error = TIER1_EMIT_INVALID;
@@ -4317,7 +4328,8 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
         }
         if (taken)
         {
-            *input = preferred;
+            input->allowed_registers = preferred;
+            input->registers[0] = preference.registers[0];
             *crossing = moved;
         }
     }

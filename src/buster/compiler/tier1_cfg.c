@@ -2068,8 +2068,64 @@ static __attribute__((unused)) bool tier1_cfg_taken(Tier1CfgError error, const T
     return error == TIER1_CFG_OK && allocation->split_count == 0 && (allocation->temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0;
 }
 
+// tier1_cfg_assign, and another problem's verdict inside the same call (#2538's step 3, tier1_allocate_verdict): `other`
+// is the prepared input but for its registers, allowed and definition registers, `other_column` its column (null for the
+// prepared one). `*taken` says whether the verdict was taken, `*constraint` what it is.
+static Tier1CfgError tier1_cfg_assign_verdict(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, const uint32_t* column, const Tier1CfgInput* other, const uint32_t* other_column, Arena* output, Tier1CfgAllocation* result, bool* taken, bool* constraint)
+{
+    Tier1CfgAllocation candidate = prepared->candidate;
+    Tier1AllocationVerdict verdict = {
+        .allowed_registers = other_column != 0 ? other_column : candidate.intervals.allowed_registers,
+    };
+    candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
+    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        candidate.intervals.registers[c] = input->registers[c];
+        verdict.registers[c] = other->registers[c];
+    }
+    const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, prepared->vector, &verdict, &candidate.allocation);
+    const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
+    if (error == TIER1_CFG_OK)
+    {
+        *result = candidate;
+    }
+    *taken = verdict.taken;
+    *constraint = verdict.constraint;
+    return error;
+}
+
+// A preferred problem for the one-call order (#2538): its classes' registers, and each value's registers but those of its
+// definition, which the order adds while the definition is bound (tier1_cfg_preferred). `verdict` takes the plain
+// problem's verdict inside the preferred problem's assignment (step 3); without it the plain problem is assigned whole
+// first (step 2), the form the tests compare it with.
+typedef struct Tier1CfgPreference Tier1CfgPreference;
+struct Tier1CfgPreference
+{
+    const uint32_t* sets;
+    uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    bool verdict;
+};
+
+// The preferred problem over `input`'s values: the preference's registers, and each value's set with its definition's
+// registers, input's while bound, on `output`. False where the arena is short.
+static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* input, const Tier1CfgPreference* preference, Arena* output, Tier1CfgInput* preferred)
+{
+    uint32_t* allowed = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    for (uint32_t v = 0; allowed != 0 && v < input->value_count; v += 1)
+    {
+        allowed[v] = preference->sets[v] | (input->definition_registers != 0 ? input->definition_registers[v] : 0);
+    }
+    *preferred = *input;
+    preferred->allowed_registers = allowed;
+    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        preferred->registers[c] = preference->registers[c];
+    }
+    return allowed != 0;
+}
+
 // The one-call order's state between its halves (#2538): the intervals, prepared once, and the plain problem's
-// assignment, which nothing has finished yet.
+// assignment where one was made.
 typedef struct Tier1CfgOrder Tier1CfgOrder;
 struct Tier1CfgOrder
 {
@@ -2077,67 +2133,114 @@ struct Tier1CfgOrder
     Tier1CfgAllocation plain;
 };
 
-// The one-call order's first half: the intervals (tier1_cfg_prepare) and the plain problem's assignment, its verdict.
-// Where a definition bound to its registers (definition_registers, a parameter's incoming one) leaves a use no register,
-// every definition is freed, `input->definition_registers` made null, and the plain problem is assigned again, over the
-// same intervals. The preference reads `order->prepared.candidate`'s intervals; tier1_cfg_order_finish or
-// tier1_cfg_release ends what this holds. Failure restores both arenas.
-static __attribute__((unused)) Tier1CfgError tier1_cfg_order_plain(Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgOrder* order)
+// The one-call order's first half: the intervals (tier1_cfg_prepare), whose columns the preference reads in
+// `order->prepared.candidate`. tier1_cfg_order_run or tier1_cfg_release ends what this holds.
+static __attribute__((unused)) Tier1CfgError tier1_cfg_order_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgOrder* order)
 {
     *order = (Tier1CfgOrder){ 0 };
-    Tier1CfgError error = tier1_cfg_prepare(input, output, scratch, vector, &order->prepared);
-    const bool held = error == TIER1_CFG_OK;
-    error = held ? tier1_cfg_assign(input, &order->prepared, 0, output, &order->plain) : error;
-    if (error == TIER1_CFG_CONSTRAINT)
+    return tier1_cfg_prepare(input, output, scratch, vector, &order->prepared);
+}
+
+// The plain problem assigned whole over the prepared intervals: with `freed`, its definitions already free, over the free
+// problem's column. Where a definition bound to its registers (a parameter's incoming one) leaves a use no register,
+// every definition is freed (`input->definition_registers` made null) and the problem assigned again.
+static Tier1CfgError tier1_cfg_order_plain(Tier1CfgInput* input, Arena* output, Tier1CfgOrder* order, bool freed)
+{
+    uint32_t* column = 0;
+    Tier1CfgError error = freed ? tier1_cfg_column(input, &order->prepared, output, &column) : TIER1_CFG_OK;
+    error = error == TIER1_CFG_OK ? tier1_cfg_assign(input, &order->prepared, column, output, &order->plain) : error;
+    if (error == TIER1_CFG_CONSTRAINT && !freed)
     {
         input->definition_registers = 0;
-        uint32_t* column = 0;
         error = tier1_cfg_column(input, &order->prepared, output, &column);
         error = error == TIER1_CFG_OK ? tier1_cfg_assign(input, &order->prepared, column, output, &order->plain) : error;
-    }
-    if (held && error != TIER1_CFG_OK)
-    {
-        arena_pop_to(output, order->prepared.output_saved);
-        tier1_cfg_release(&order->prepared, scratch);
     }
     return error;
 }
 
-// The one-call order's second half: with `preferred` (the plain problem `input` but for its registers and allowed sets),
-// its column, assignment and finish, its allocation the result where tier1_cfg_taken takes it, with `*taken` set and its
-// outcome in `*preferred_error`; else, or without `preferred`, the plain assignment finished. Returns the outcome of the
-// allocation that stands, and gives back the scratch arena the order held. Failure restores both arenas.
-static __attribute__((unused)) Tier1CfgError tier1_cfg_order_finish(const Tier1CfgInput* input, const Tier1CfgInput* preferred, Arena* output, Arena* scratch, Tier1CfgOrder* order, Tier1CfgAllocation* result, Tier1CfgError* preferred_error, bool* taken)
+// The preferred problem assigned, with the plain problem's verdict inside its call (step 3): its column, and with
+// `freed` the free plain problem's. Returns the preferred assignment's outcome; `*verdict` says whether the plain
+// problem's verdict was taken, `*constraint` what it is.
+static Tier1CfgError tier1_cfg_order_verdict(const Tier1CfgInput* input, const Tier1CfgPreference* preference, Arena* output, Tier1CfgOrder* order, bool freed, Tier1CfgInput* preferred, Tier1CfgAllocation* second, bool* verdict, bool* constraint)
+{
+    uint32_t* column = 0;
+    uint32_t* plain_column = 0;
+    *verdict = false;
+    *constraint = false;
+    Tier1CfgError error = tier1_cfg_preferred(input, preference, output, preferred) ? TIER1_CFG_OK : TIER1_CFG_CAPACITY;
+    error = error == TIER1_CFG_OK ? tier1_cfg_column(preferred, &order->prepared, output, &column) : error;
+    error = error == TIER1_CFG_OK && freed ? tier1_cfg_column(input, &order->prepared, output, &plain_column) : error;
+    error = error == TIER1_CFG_OK ? tier1_cfg_assign_verdict(preferred, &order->prepared, column, input, plain_column, output, second, verdict, constraint) : error;
+    return error;
+}
+
+// The one-call order's second half. With a preference that takes the verdict (step 3): the preferred problem assigned
+// with the plain one's verdict inside its call; where that is a constraint, every definition freed and the preferred
+// problem assigned again with the free plain one's verdict, a second constraint the plain problem's outcome. Without, or
+// where no verdict was taken (step 2): the plain problem assigned whole first (tier1_cfg_order_plain), then the preferred
+// one over the definitions the plain one left. The preferred allocation is finished and stands where tier1_cfg_taken takes
+// it, with `*taken` set and its allowed sets in `*preferred_allowed`; else the plain problem, assigned whole now if only
+// its verdict was taken, is finished. `*preferred_error` is the preferred problem's outcome. Returns the outcome of the
+// allocation that stands, and gives back the scratch arena the order held; failure restores both arenas.
+static __attribute__((unused)) Tier1CfgError tier1_cfg_order_run(Tier1CfgInput* input, const Tier1CfgPreference* preference, Arena* output, Arena* scratch, Tier1CfgOrder* order, Tier1CfgAllocation* result, const uint32_t** preferred_allowed, Tier1CfgError* preferred_error, bool* taken)
 {
     Tier1CfgError error = TIER1_CFG_OK;
     Tier1CfgError second_error = TIER1_CFG_OK;
     Tier1CfgAllocation second = { 0 };
-    uint32_t* column = 0;
-    if (preferred != 0)
+    Tier1CfgInput preferred = *input;
+    // Whether the plain problem's verdict is known, its definitions were freed, and it was assigned whole.
+    bool known = false;
+    bool freed = false;
+    bool assigned = false;
+    if (preference != 0 && preference->verdict)
     {
-        second_error = tier1_cfg_column(preferred, &order->prepared, output, &column);
-        second_error = second_error == TIER1_CFG_OK ? tier1_cfg_assign(preferred, &order->prepared, column, output, &second) : second_error;
-        second_error = second_error == TIER1_CFG_OK ? tier1_cfg_finish(preferred, &order->prepared, output, scratch, &second) : second_error;
+        bool verdict = false;
+        bool constraint = false;
+        second_error = tier1_cfg_order_verdict(input, preference, output, order, false, &preferred, &second, &verdict, &constraint);
+        known = verdict && !constraint;
+        if (verdict && constraint)
+        {
+            input->definition_registers = 0;
+            freed = true;
+            second_error = tier1_cfg_order_verdict(input, preference, output, order, true, &preferred, &second, &verdict, &constraint);
+            known = verdict;
+            error = verdict && constraint ? TIER1_CFG_CONSTRAINT : TIER1_CFG_OK;
+        }
     }
-    const bool replaced = preferred != 0 && tier1_cfg_taken(second_error, &second);
+    if (!known)
+    {
+        error = tier1_cfg_order_plain(input, output, order, freed);
+        assigned = true;
+        uint32_t* column = 0;
+        const bool prefer = error == TIER1_CFG_OK && preference != 0;
+        second_error = prefer ? (tier1_cfg_preferred(input, preference, output, &preferred) ? TIER1_CFG_OK : TIER1_CFG_CAPACITY) : TIER1_CFG_OK;
+        second_error = prefer && second_error == TIER1_CFG_OK ? tier1_cfg_column(&preferred, &order->prepared, output, &column) : second_error;
+        second_error = prefer && second_error == TIER1_CFG_OK ? tier1_cfg_assign(&preferred, &order->prepared, column, output, &second) : second_error;
+    }
+    const bool prefer = error == TIER1_CFG_OK && preference != 0;
+    second_error = prefer && second_error == TIER1_CFG_OK ? tier1_cfg_finish(&preferred, &order->prepared, output, scratch, &second) : second_error;
+    const bool replaced = prefer && tier1_cfg_taken(second_error, &second);
     if (replaced)
     {
         *result = second;
+        *preferred_allowed = preferred.allowed_registers;
     }
-    else
+    else if (error == TIER1_CFG_OK)
     {
-        error = tier1_cfg_finish(input, &order->prepared, output, scratch, &order->plain);
+        // The plain problem stands: assigned whole now where only its verdict was taken.
+        error = assigned ? TIER1_CFG_OK : tier1_cfg_order_plain(input, output, order, freed);
+        error = error == TIER1_CFG_OK ? tier1_cfg_finish(input, &order->prepared, output, scratch, &order->plain) : error;
         if (error == TIER1_CFG_OK)
         {
             *result = order->plain;
         }
-        else
-        {
-            arena_pop_to(output, order->prepared.output_saved);
-        }
+    }
+    if (error != TIER1_CFG_OK)
+    {
+        arena_pop_to(output, order->prepared.output_saved);
     }
     tier1_cfg_release(&order->prepared, scratch);
-    *preferred_error = second_error;
+    *preferred_error = preference != 0 ? second_error : TIER1_CFG_OK;
     *taken = replaced;
     return error;
 }

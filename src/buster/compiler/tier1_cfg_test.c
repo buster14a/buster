@@ -524,11 +524,12 @@ struct Tier1CfgTwoOrders
     bool freed;
 };
 
-// A plain problem and a preferred one over the same values, allocated in one call (tier1_cfg_order_plain and
-// tier1_cfg_order_finish, as the CFG consumer does) and in two (tier1_cfg_allocate on each, the order before), on one
-// path. The preferred problem gives each value `chosen[v]` and its definition's registers, and the general class the
-// plain one's registers and `extra`. `allowed` is a column of the values' room.
-static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, bool vector, Arena* output, Arena* scratch, uint32_t* allowed)
+// A plain problem and a preferred one over the same values, allocated in one call (tier1_cfg_order_prepare and
+// tier1_cfg_order_run, as the CFG consumer does, with the plain problem's verdict inside the preferred assignment's call
+// or with `verdict` false the plain problem assigned whole first) and in two (tier1_cfg_allocate on each, the order
+// before), on one path. The preferred problem gives each value `chosen[v]` and its definition's registers while bound,
+// and the general class the plain one's registers and `extra`. `allowed` is a column of the values' room.
+static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, bool vector, bool verdict, Arena* output, Arena* scratch, uint32_t* allowed)
 {
     const uint64_t mark = output->length;
     Tier1CfgTwoOrders outcome = { 0 };
@@ -555,29 +556,38 @@ static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, c
     // One call.
     Tier1CfgInput one = *plain;
     Tier1CfgOrder order;
-    const Tier1CfgError plain_error = tier1_cfg_order_plain(&one, output, scratch, vector && BUSTER_HOST_VECTOR, &order);
-    outcome.agreed = plain_error == first_error && (one.definition_registers == 0) == (two.definition_registers == 0);
+    const Tier1CfgPreference preference = {
+        .sets = chosen,
+        .registers = {
+            general | extra,
+            plain->registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+            plain->registers[BUSTER_TIER1_ALLOCATE_MASK],
+        },
+        .verdict = verdict,
+    };
+    Tier1CfgAllocation result = { 0 };
+    const uint32_t* preferred_allowed = 0;
+    Tier1CfgError preferred_error = TIER1_CFG_OK;
+    bool taken = false;
+    Tier1CfgError stands = tier1_cfg_order_prepare(&one, output, scratch, vector && BUSTER_HOST_VECTOR, &order);
+    stands = stands == TIER1_CFG_OK ? tier1_cfg_order_run(&one, &preference, output, scratch, &order, &result, &preferred_allowed, &preferred_error, &taken) : stands;
+    outcome.agreed = stands == first_error && (one.definition_registers == 0) == (two.definition_registers == 0);
     outcome.verified = true;
-    if (plain_error == TIER1_CFG_OK && first_error == TIER1_CFG_OK)
+    if (stands == TIER1_CFG_OK && first_error == TIER1_CFG_OK)
     {
-        Tier1CfgInput preferred_one = one;
-        preferred_one.allowed_registers = allowed;
-        preferred_one.registers[BUSTER_TIER1_ALLOCATE_GPR] = general | extra;
-        Tier1CfgAllocation result = { 0 };
-        Tier1CfgError preferred_error = TIER1_CFG_OK;
-        bool taken = false;
-        const Tier1CfgError stands = tier1_cfg_order_finish(&one, &preferred_one, output, scratch, &order, &result, &preferred_error, &taken);
-        outcome.differs = stands == TIER1_CFG_OK ? tier1_cfg_differs(plain, &result, taken_two ? &second : &first) : 0;
-        outcome.agreed = outcome.agreed && stands == TIER1_CFG_OK && taken == taken_two && preferred_error == second_error && outcome.differs == 0;
+        outcome.differs = tier1_cfg_differs(plain, &result, taken_two ? &second : &first);
+        bool same = !taken || preferred_allowed != 0;
+        for (uint32_t v = 0; same && taken && v < plain->value_count; v += 1)
+        {
+            same = preferred_allowed[v] == allowed[v];
+        }
+        outcome.agreed = outcome.agreed && same && taken == taken_two && preferred_error == second_error && outcome.differs == 0;
+        Tier1CfgInput standing = taken ? preferred_two : one;
         Tier1CfgCheck check;
-        outcome.verified = stands != TIER1_CFG_OK || tier1_cfg_verify(taken ? &preferred_one : &one, &result, scratch, &check);
+        outcome.verified = tier1_cfg_verify(&standing, &result, scratch, &check);
         outcome.allocated = true;
         outcome.taken = taken;
         outcome.freed = plain->definition_registers != 0 && one.definition_registers == 0;
-    }
-    else if (plain_error == TIER1_CFG_OK)
-    {
-        tier1_cfg_release(&order.prepared, scratch);
     }
     arena_pop_to(output, mark);
     return outcome;
@@ -751,19 +761,22 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
         tally->two_fixed += 1;
         plain.fixed = (Tier1FixedIntervals){ 0 };
     }
-    for (uint32_t path = 0; ready && path < 2; path += 1)
+    // Each path, with the plain problem's verdict inside the preferred assignment's call and with it assigned whole first.
+    for (uint32_t run = 0; ready && run < 4; run += 1)
     {
-        const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, path == 0, output, scratch, allowed);
+        const bool vector = run % 2 == 0;
+        const bool verdict = run < 2;
+        const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, vector, verdict, output, scratch, allowed);
         if (!outcome.agreed && tally->failures < 20)
         {
-            printf("test-tier1-cfg: two problems, %s path, bound=%u: the orders disagree (fields %u)\n", path == 0 ? "vector" : "scalar", bind, outcome.differs);
+            printf("test-tier1-cfg: two problems, %s path, %s, bound=%u: the orders disagree (fields %u)\n", vector ? "vector" : "scalar", verdict ? "verdict inside" : "plain first", bind, outcome.differs);
         }
         tier1_cfg_test_expect(tally, outcome.agreed, "one call's verdict, problem and allocation are two calls'");
         tier1_cfg_test_expect(tally, outcome.verified, "the CFG checker accepts the allocation that stands");
-        tally->two_cases += path == 0 && outcome.allocated;
-        tally->two_taken += path == 0 && outcome.taken;
-        tally->two_refused += path == 0 && outcome.allocated && !outcome.taken;
-        tally->two_freed += path == 0 && outcome.freed;
+        tally->two_cases += run == 0 && outcome.allocated;
+        tally->two_taken += run == 0 && outcome.taken;
+        tally->two_refused += run == 0 && outcome.allocated && !outcome.taken;
+        tally->two_freed += run == 0 && outcome.freed;
     }
     arena_pop_to(output, mark);
 }

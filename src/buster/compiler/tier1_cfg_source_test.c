@@ -287,7 +287,7 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
                 plain.fixed = (Tier1FixedIntervals){ 0 };
                 for (uint32_t p = 0; p < 2; p += 1)
                 {
-                    const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, p == 0, output, scratch, allowed);
+                    const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, p == 0, true, output, scratch, allowed);
                     if (!outcome.agreed || !outcome.verified)
                     {
                         printf("tier1-cfg-source: file=%s function=%s path=%s bound=%u two_orders=%s fields=%u\n", name, source->name, p == 0 ? "vector" : "scalar", bind, outcome.agreed ? "rejected" : "disagree", outcome.differs);
