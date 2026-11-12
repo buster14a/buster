@@ -17120,7 +17120,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             // (A whole view of a failed parse, every error of which its recovery read past, recovers as a complete unit does:
             // its missing names don't end its checking, #2255.)
-            const bool resolved = (complete_translation_unit || parser->whole_view) && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
+            const bool resolved = (complete_translation_unit || parser->whole_view || parser->prefix_view) && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             input->walk_end = reader.position;
             if (complete_translation_unit)
             {

@@ -2702,6 +2702,10 @@ struct Parser
     // A checker's view of a failed parse that covers the whole unit, every error of which its recovery read past
     // (check_prefix_resume): its reader recovers from missing names as a complete unit's does (#2255).
     bool whole_view;
+    // A checker's view of the complete declarations before a failed parse's error (check_prefix_make, #1799): its reader
+    // recovers from missing names as a whole unit's does. C declares a name before its uses, so a name the prefix doesn't
+    // declare where it is used the whole unit doesn't either, and the declarations past the prefix are no part of it.
+    bool prefix_view;
     // A checked diagnostic prefix may include one complete declaration with already diagnosed parameter types.
     // Only its parameter specifiers may recover as int; ordinary parses and emission never enable this.
     bool recovered_parameter_types;

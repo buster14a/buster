@@ -10512,6 +10512,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // Only complete earlier declarations survive this view. Its checking suppresses obligations
                     // that belong to the full translation-unit end; the original parser rejection stays final.
                     checking = &prefix.parser;
+                    prefix.parser.prefix_view = true;
                     prefix_only = true;
                     ready = true;
                 }
@@ -10636,6 +10637,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     else if (check_prefix_make(&prefix, recovered, arena, scratch) == CHECK_PREFIX_READY)
                     {
                         checking = &prefix.parser;
+                        prefix.parser.prefix_view = true;
                     }
                     else
                     {
