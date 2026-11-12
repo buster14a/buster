@@ -189,6 +189,8 @@ typedef enum PPWarning
     PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE,
     PP_WARNING_IMPLICITLY_UNSIGNED_LITERAL,
     PP_WARNING_INVALID_SOURCE_ENCODING,
+    // A parsed unit without a declaration (#2222), an extension off by default.
+    PP_WARNING_EMPTY_TRANSLATION_UNIT,
     // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
     // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
     // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
@@ -238,6 +240,7 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "unknown-escape-sequence", NULL, NULL, true, true, false, false },
     { "implicitly-unsigned-literal", NULL, NULL, true, true, false, false },
     { "invalid-source-encoding", NULL, NULL, true, true, false, false },
+    { "empty-translation-unit", NULL, NULL, true, false, false, false },
     { NULL, NULL, NULL, false, true, false, false },
     { NULL, NULL, NULL, true, true, false, false },
 };
@@ -419,6 +422,28 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(
     const uint32_t range = pp_find_range(pp, location);
     const bool result = range != BUSTER_PP_NONE && pp->ranges[range].file == pp->main_file;
     return result;
+}
+
+// A parsed unit without a token (#2222): clang's parser's -Wempty-translation-unit extension, "ISO C requires a translation
+// unit to contain at least one declaration", at the main file's end of file, which clang's lexer puts at a final newline.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Preprocessor* pp)
+{
+    // The main file's own range: its bytes, not the scratch space's; its length past the bytes' terminator.
+    const PPFileData* data = pp->main_file < pp->file_count ? pp->datas + pp->files[pp->main_file].data : NULL;
+    const uint8_t* bytes = data != NULL ? data->bytes : NULL;
+    uint32_t range = BUSTER_PP_NONE;
+    for (uint32_t r = 0; bytes != NULL && range == BUSTER_PP_NONE && r < pp->range_count; r += 1)
+    {
+        range = pp->ranges[r].file == pp->main_file && pp->ranges[r].bytes == bytes ? r : BUSTER_PP_NONE;
+    }
+    if (range != BUSTER_PP_NONE)
+    {
+        const PPRange* main = pp->ranges + range;
+        const uint32_t length = data->length < main->length ? data->length : main->length;
+        const bool newline = length != 0 && main->bytes != NULL && (main->bytes[length - 1] == '\n' || main->bytes[length - 1] == '\r');
+        pp_diagnose_group(pp, PP_WARNING_EMPTY_TRANSLATION_UNIT, main->base + length - (newline ? 1u : 0u),
+                          "ISO C requires a translation unit to contain at least one declaration");
+    }
 }
 
 // Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error). A zero byte follows

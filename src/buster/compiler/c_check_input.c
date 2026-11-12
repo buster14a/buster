@@ -393,6 +393,10 @@ typedef enum CheckInputMessage
     // 'default') at its keyword.
     CHECK_INPUT_CASE_OUTSIDE_SWITCH,
     CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH,
+    // A block's thread-local object without static or extern (#2420, clang's err_thread_non_global): "'_Thread_local'
+    // variables must have global storage" at the keyword, '__thread' for GNU's (`detail` 1); recovered, the declaration
+    // read on.
+    CHECK_INPUT_THREAD_NON_GLOBAL,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -562,6 +566,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
     [CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION] = "expected identifier or '('",
     [CHECK_INPUT_ASM_LABEL_CONFLICT] = "conflicting asm label",
+    [CHECK_INPUT_THREAD_NON_GLOBAL] = "'_Thread_local' variables must have global storage",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -686,6 +691,9 @@ struct CheckInputReport
     bool recovered;
     // A recovered error that waits for its declarator's completion (CheckInputReader.recovered_pending).
     bool pending;
+    // An undeclared name in an attribute's argument, whose attribute clang's parser drops and whose declaration stays
+    // valid (#2251, #2468): a rejected unit's readings keep that declaration (check_driver_report_keeps_valid).
+    bool attribute_name;
     // CHECK_INPUT_TAG_INCOMPATIBLE's bit-fields' widths, each plus one (0 for no bit-field), the second definition's in
     // the high half; else 0.
     uint32_t bit_widths;
@@ -2702,6 +2710,24 @@ static __attribute__((noinline, cold)) void check_input_duplicate_specifier(Chec
 // brace, group close or a type's keyword cannot. `declaration` is the declaration's name token; 0 says its base was spelled
 // directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
 // then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
+// The `__attribute__` keyword of the GNU attribute list whose last `)` is `close`, or BUSTER_CHECK_NONE where `close` closes
+// no such list: its matching `(` follows the keyword.
+static uint32_t check_input_attribute_list_open(const Parser* parser, uint32_t close)
+{
+    uint32_t depth = 0;
+    uint32_t open = close;
+    for (bool scanning = true; scanning && open > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[open];
+        depth += kind == PARSE_KIND_R_PAREN ? 1 : 0;
+        depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1 : 0;
+        scanning = depth != 0;
+        open -= scanning ? 1 : 0;
+    }
+    const bool list = open > 0 && depth == 0 && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tokens.kinds[open - 1] == PARSE_KIND_ATTRIBUTE;
+    return list ? open - 1 : BUSTER_CHECK_NONE;
+}
+
 static uint32_t check_input_typedef_use(const CheckInput* input, const Parser* parser, uint32_t declaration, uint32_t* use)
 {
     uint32_t result = 0;
@@ -2729,6 +2755,10 @@ static uint32_t check_input_typedef_use(const CheckInput* input, const Parser* p
             found = kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE &&
                     kind != PARSE_KIND_COLON && kind != PARSE_KIND_TYPE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM &&
                     role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL;
+            // A GNU attribute list is crossed whole (#2417): its arguments' names (a counted_by's count, which a member
+            // declares) are no specifier, and a member's declaration has the typedef's binding kind.
+            const uint32_t open = found && kind == PARSE_KIND_R_PAREN ? check_input_attribute_list_open(parser, token) : BUSTER_CHECK_NONE;
+            token = open != BUSTER_CHECK_NONE ? open : token;
         }
     }
     return result;
@@ -4944,11 +4974,24 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool same_scope = previous != 0 && reader->bindings.depth[previous - 1] == depth;
         valid &= name != 0 || body;
         valid &= !body || definition;
-        if (valid && fixed && !body && !forward)
+        // `enum E : T x;` (#2213): clang's ParseEnumSpecifier gives -Welaborated-enum-base, an error by default, at the `:`,
+        // and goes on with an elaborated reference: a visible tag of the name is that tag, the base ignored, and a new one is
+        // declared with the base, as `enum E : T;` would declare it.
+        const bool elaborated = valid && fixed && !body && !forward;
+        if (elaborated)
         {
-            // `enum E : T x;`, which clang reports at the `:`.
-            check_input_report(reader, colon, CHECK_INPUT_DECLARATION);
-            valid = false;
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_ELABORATED_ENUM_BASE,
+                .kind = CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
+                .token = colon,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_ERROR,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = colon,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
         }
         const TypeId underlying = valid && fixed ? check_input_enum_underlying(reader, colon, i) : 0;
         valid &= !fixed || underlying != 0;
@@ -5048,10 +5091,12 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             type = reader->declared_types[old];
             const uint32_t tag = type_kind(reader->types, type) == kind ? reader->types->types.index[type_index(type)] : 0;
             const uint8_t state = tag != 0 && kind == BUSTER_TYPE_KIND_ENUM ? reader->enum_fixed[tag] : BUSTER_CHECK_ENUM_NONE;
+            // (An elaborated reference's base is ignored: #2213.)
+            const bool based = fixed && !elaborated;
             valid = type_kind(reader->types, type) == kind &&
-                    (state == BUSTER_CHECK_ENUM_NONE ? !fixed && (!body || !type_is_complete(reader->types, type)) :
-                                                       (fixed || (!body && !forward)) && (!body || state == BUSTER_CHECK_ENUM_FIXED) &&
-                                                       (!fixed || reader->types->types.base[type_index(type)] == underlying));
+                    (state == BUSTER_CHECK_ENUM_NONE ? !based && (!body || !type_is_complete(reader->types, type)) :
+                                                       (based || (!body && !forward)) && (!body || state == BUSTER_CHECK_ENUM_FIXED) &&
+                                                       (!based || reader->types->types.base[type_index(type)] == underlying));
             if (!valid && type_kind(reader->types, type) == kind && kind == BUSTER_TYPE_KIND_ENUM)
             {
                 // A base that differs from the enum's, or that it hadn't or had (#1447): clang's CheckEnumRedeclaration at
@@ -6899,6 +6944,10 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
             {
                 undeclared = reader->output->reports[r].message == CHECK_INPUT_UNDECLARED;
+            }
+            for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
+            {
+                reader->output->reports[r].attribute_name = true;
             }
             if (undeclared && check_input_recover_reports(reader, reported))
             {
@@ -11567,7 +11616,31 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_report(reader, specifier != BUSTER_CHECK_NONE ? specifier : name, CHECK_INPUT_DECLARATION);
                 valid = false;
             }
-            valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
+            // A block's thread-local object without static or extern (#2420): clang's error at the keyword, which it reads
+            // on from (C23's thread_local is spelled '_Thread_local' there, as clang names the specifier).
+            uint32_t thread_keyword = BUSTER_CHECK_NONE;
+            for (uint32_t t = first; valid && thread_local && !function && !file && !is_static && storage != C_NAME_EXTERN && storage != C_NAME_PRIVATE_EXTERN &&
+                                     t < name && thread_keyword == BUSTER_CHECK_NONE; t += 1)
+            {
+                const uint32_t spelled = parser->tokens.names[t];
+                const bool keyword = parser->tokens.kinds[t] == PARSE_KIND_STORAGE &&
+                                     (spelled == C_NAME_THREAD_LOCAL || spelled == C_NAME_THREAD_LOCAL_C11 || spelled == C_NAME_GNU_THREAD);
+                thread_keyword = keyword ? t : BUSTER_CHECK_NONE;
+            }
+            if (thread_keyword != BUSTER_CHECK_NONE)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, thread_keyword, CHECK_INPUT_THREAD_NON_GLOBAL);
+                if (reader->output->report_count == before + 1)
+                {
+                    reader->output->reports[before].detail = parser->tokens.names[thread_keyword] == C_NAME_GNU_THREAD ? 1u : 0u;
+                }
+                valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+            }
+            else
+            {
+                valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
+            }
             // Explicit register variables' labels, and global register variables (#1846, the owner's decision on #1447), as
             // clang's Sema::ActOnVariableDeclarator checks them: a local's label must name a register clang knows; a
             // global's must too, one clang's backend keeps one in (rsp and rbp of 8 bytes, esp and ebp of 4), of the

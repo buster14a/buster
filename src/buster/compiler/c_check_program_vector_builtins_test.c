@@ -954,18 +954,11 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
           "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
-        { "x86-64-v3", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
-          "vector carry-less multiplication without AVX and PCLMUL", 3 },
-        { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
-          "vector carry-less multiplication without AVX and PCLMUL", 3 },
-        // The integer elementwise builtins of scalars (#2410): clmul's without PCLMUL and pdep's and pext's without BMI2,
-        // which clang's code expands bit by bit (check_lower_scalar_lanes takes them with those instructions), and those of
-        // integers wider than 128 bits, and pdep's, pext's and clmul's of integers wider than 64.
-        { "x86-64-v3", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "carry-less multiplication without PCLMUL", 0 },
+        // The integer elementwise builtins of scalars (#2410): those of integers wider than 128 bits. pdep's, pext's and
+        // clmul's without BMI2 or PCLMUL, or of integers of 65 to 128 bits, are expanded (check_lower_sequence_deposit,
+        // check_lower_sequence_clmul).
         { "znver5", "_BitInt(129) tested(_BitInt(129) n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
-        { "znver5", "__int128 tested(__int128 n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars of more than 64 bits", 0 },
-        { "x86-64-v2", "unsigned tested(unsigned n){return __builtin_elementwise_pdep(n,n);}", "bit deposits and extractions without BMI2", 0 },
-        { "x86-64-v2", "unsigned long tested(unsigned long n){return __builtin_elementwise_pext(n,n);}", "bit deposits and extractions without BMI2", 0 },
+        { "znver5", "_BitInt(129) tested(_BitInt(129) n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars of more than 128 bits", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_floor(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sin(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8hf* p,v8hf* q){*p=__builtin_elementwise_maximum(*p,*q);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
