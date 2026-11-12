@@ -823,12 +823,13 @@ jobs:
   # Tier 0 and --tier1 from this row's shared compiler (test-sqlite-testfixture; docs/commands/c-testsuite.md). Every
   # row, pull requests' too, runs the inventory's pinned subset; this job runs on the nightly and dispatched runs alone,
   # beside the plain portable row's shards, with its runner's 4 CPUs to itself. Main's pushes skip it (#2334): it took
-  # 27 to 41 of a push run's 96 to 112 runner-minutes, at 25 to 37 pushes an hour. Its name must not end like a shard's
-  # (tools/ci/nightly.c).
+  # 27 to 41 of a push run's 96 to 112 runner-minutes, at 25 to 37 pushes an hour. Merge-queue candidates (#1430), which
+  # replace those pushes' runs, skip it for the same reason; the nightly snapshot's daily run keeps it. Its name must not
+  # end like a shard's (tools/ci/nightly.c).
   sqlite-full:
     name: SQLite's full Tcl suite by both tiers against clang's (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }})
     needs: compiler
-    if: ${{ !cancelled() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' }}
+    if: ${{ !cancelled() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-26.04
     # About 9 minutes a build on a 4-CPU runner, three builds.
     timeout-minutes: 120

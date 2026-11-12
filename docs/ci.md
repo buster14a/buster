@@ -29,6 +29,10 @@ Both selector push modes force correctness for every file class. The
 qualification self-test rejects a main push with an all-skipped suite: only
 pre-merge PRs can use the no-code exemption.
 
+A merge-queue candidate (`merge_group`) runs the complete suite already; see
+"The merge queue". Until a ruleset requires the queue, nothing starts one, and
+pushes keep the rows above.
+
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
 with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`; on a pull request,
@@ -654,6 +658,87 @@ bash tests/ci/timings.sh
 cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o /tmp/qualification && /tmp/qualification --self-test
 ```
 
+## The merge queue
+
+GitHub's merge queue (#1430) tests each queued pull request on a temporary
+`gh-readonly-queue/main/...` branch: main and the entries ahead of it,
+merged with the pull request. It merges only what passed. `9700x.yml` runs
+on that branch's `merge_group` event (type `checks_requested`, main, no path
+filter), so a candidate reports both required contexts. Nothing starts one
+until a ruleset turns the queue on. Until then this path is inert, and pushes
+to main keep their own hosted rows.
+
+Once the queue is required, a candidate's run is the only per-merge
+correctness run (the owner's decision on 2026-11-10). It works like this:
+
+- **Scope.** The full hosted contract runs on the candidate's exact commit:
+  - both host architectures, each with its plain, ASan, TSan and MSan O3
+    builds and every row's shards;
+  - the vector pool's 16 items;
+  - the three fuzz campaigns.
+
+  A documentation-only candidate runs all of it too. SQLite's full Tcl suite
+  stays on the nightly and dispatched runs, as for pushes (#2334).
+- **Selector.** `changes --event merge_group` sets `code`, every plain
+  benchmark and the performance readers' gate, whatever the candidate changes.
+  The 9700X job's other gates stay off. The `changes` job runs its self-tests
+  and the `evidence` job its fixtures, as on a pull request, so a candidate
+  whose merge breaks the CI tools fails.
+- **Evidence.** `scope=full`, `hosted=run`, `hardware=skip`, reason
+  `merge-group`. A candidate never uses the 9700X. Its merged first-parent
+  state gets native correctness and measurements in the nightly window.
+- **Concurrency.** Each candidate has its own run-id group, because the queue
+  builds several at once: none cancels or replaces another. Rows don't fail
+  fast, so every row reports.
+- **Aggregate.** `Build and execute on Ryzen 7 9700X` runs for a candidate.
+  It passes only when the hosted rows, the fuzz campaigns, the policy job and
+  the coverage step all succeeded and the 9700X was skipped. There is no
+  documentation exemption.
+  - The coverage step (`nightly.sh coverage`, `nightly coverage`) reads the
+    run's own jobs, because a test job's result alone stays green when a shard
+    or a row is skipped.
+  - It requires every shard 1..N of every row and sanitizer (one N per row),
+    the vector pool's verdict and each fuzz campaign to have completed
+    successfully.
+  - A missing, skipped, cancelled, failed or timed-out job fails it, and so do
+    shard counts that disagree.
+  - It reads the jobs up to three times, 15 s apart, since the API may not
+    show the last needs' completion yet.
+
+  `qualification.c` reads the step's outcome. Its self-test enumerates the
+  candidate's one green tuple.
+- **Record.** A candidate's coverage record has purpose `queue` and coverage
+  `none`. It holds the candidate's commit and tree, its base (the first
+  parent: main, or the entry ahead) and its pull request's head (the second
+  parent, `pr_head`). Its outcome is:
+  - `deferred` when the aggregate passed it: its hardware is the window's;
+  - `blocked-hosted` when a hosted job failed;
+  - `interrupted` otherwise.
+- **Nightly credit.** GitHub doesn't document whether main is fast-forwarded
+  to the commit the queue tested. When it is, that run is the state's own:
+  - the harvest credits its row to the state;
+  - its plain rows qualify the state for the window, with no hosted
+    preparation;
+  - a backlog dispatch reuses them.
+
+  When main's commit differs, nothing credits the run, and the nightly runs
+  the state's hosted rows itself. Once any candidate's run has been credited,
+  the report lists every later state without a passing candidate run of its
+  own commit as a coverage gap, and the coordinator raises an alert for it.
+
+Still to come, each tracked in #1430:
+
+- The ruleset that requires the queue, and removing the `push` triggers in the
+  same change. Both wait for the capacity gate (#2030, #2031, #2034) and the
+  owner. AGENTS.md's main-push sentence changes with them.
+- A drill on a disposable branch. It checks that main keeps the candidate's
+  SHA, the queue branch's name format, and recovery from a failure.
+- Cancelling invalidated candidates. GitHub doesn't cancel their runs.
+- Integrating `build.yml`, `build-pgo.yml`, `selfhost.yml` and
+  `tier1-problem.yml` under applicability rules.
+- Reporting queue latency and rebuild waste (#2034), and seeding the hosted
+  input caches once pushes stop (#2275).
+
 ## Nightly main measurements
 
 Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
@@ -690,6 +775,10 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   #2055 no 9700X job, so a push reuses nothing from it; records from
   before then that say a push reused its pull request's run
   (`native-reused`, outcome `pending`) are still read by the harvest.
+- **Merge-queue candidate** (#1430): never admitted (`hardware=skip`, reason
+  `merge-group`). It runs the full hosted contract, its own. When main is
+  fast-forwarded to its commit, its plain rows are that state's, as a push's
+  are (see "The merge queue").
 
   Every 9700X job records its host identity in the coverage record: the
   kernel, the microcode, GCC's version and glibc, and a digest of the software
@@ -699,16 +788,18 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   placeholder.
 - **Nightly dispatch:** the commit must be a first-parent state of main at or
   before the pinned snapshot, or the job fails and nothing runs. The newest
-  conclusive push or dispatch run of that commit decides its hosted rows: a
-  pass is reused and a later failure isn't hidden. The window must also admit
-  the run.
+  conclusive push, dispatch or merge-queue run of that commit decides its
+  hosted rows: a pass is reused and a later failure isn't hidden. The window
+  must also admit the run.
 
 Every run's `record` job writes `coverage-record-ATTEMPT`, kept 90 days. It
 holds the commit, tree, first parent and first-parent tree; the blobs of the
 workflow, selector, inventory, toolchain and corpus scripts; the selection; what
 the run ran, reused, admitted and deferred; the 9700X job's window, native
-correctness and host identity; and the outcome. Outcomes are `complete`,
-`not-required`, `deferred` (no hardware admitted), `pending` (before #1272: a push
+correctness and host identity; and the outcome. A merge-queue candidate's
+record also holds its pull request's head (`pr_head`). Outcomes are `complete`,
+`not-required`, `deferred` (no hardware admitted; for a merge-queue candidate,
+the aggregate's pass), `pending` (before #1272: a push
 qualified by reuse whose measurements weren't reusable), `blocked-hosted`,
 `blocked-native`, `failed` (a measurement after native correctness),
 `interrupted` (cancelled or timed out) and `rejected`. Only the 9700X job's
@@ -730,9 +821,11 @@ They create and delete `nightly/SHA` branches, and dispatch and cancel
 that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
 [REQUEST]`, correlates it with the ledger.
 
-1. **Harvest.** Each step reads a fortnight's runs (later steps a day's) and
-   harvests the records of completed runs the ledger lacks. A record that
-   disagrees with the API's job conclusions counts as nothing.
+1. **Harvest.** Each step reads a fortnight's runs (later steps a day's):
+   pushes, the daily run, dispatches and merge-queue candidates. It harvests
+   the records of completed runs of a state that the ledger lacks. A record
+   that disagrees with the API's job conclusions counts as nothing, and so
+   does a candidate's pass that its aggregate job didn't make.
 2. **Pin.** The cycle (the night ahead, from noon) pins main's head as its
    snapshot once, from 22:00 Europe/Madrid the evening before the window, in
    local time whatever the clocks do that night. A step

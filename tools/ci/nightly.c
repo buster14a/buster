@@ -8,6 +8,7 @@
 //   nightly window-times --now EPOCH                                  the cycle's date, window start and deadline
 //   nightly worker-window < SOURCE                                   immutable worker's declared window, or unknown
 //   nightly hosted --commit SHA [--exclude RUN] < FACTS               reusable plain-row hosted qualification
+//   nightly coverage --run RUN < FACTS                                a merge-queue candidate's full coverage, job by job
 //   nightly record --output FILE                                      a run's coverage record, from the environment
 //   nightly harvest --ledger FILE --facts FILE --states FILE (--records DIR | --list)
 //                                                                     completed runs' rows the ledger lacks (or which)
@@ -73,6 +74,8 @@
 #define BUSTER_NIGHTLY_REPOSITORY 1421805693u
 #define BUSTER_NIGHTLY_WORKFLOW ".github/workflows/9700x.yml"
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
+// The required aggregate (9700x.yml's `qualification`), which passes a merge-queue candidate after its coverage check.
+#define BUSTER_NIGHTLY_AGGREGATE_JOB "Build and execute on Ryzen 7 9700X"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"
 // The window, in Europe/Madrid local time: hardware work starts at or after 02:00 and ends by 08:00 (the owner's choice
@@ -97,10 +100,13 @@ enum NightlyEvent
     NIGHTLY_EVENT_PUSH,
     NIGHTLY_EVENT_DISPATCH,
     NIGHTLY_EVENT_SCHEDULE,
+    // A merge-queue candidate (#1430): GitHub's temporary merge commit, which main is fast-forwarded to when the queue
+    // merges it. Its run is that commit's own, as a push's is.
+    NIGHTLY_EVENT_MERGE_GROUP,
     NIGHTLY_EVENT_OTHER,
     NIGHTLY_EVENT_COUNT
 };
-static const char* const nightly_event_names[] = { "pull_request", "push", "workflow_dispatch", "schedule", "other" };
+static const char* const nightly_event_names[] = { "pull_request", "push", "workflow_dispatch", "schedule", "merge_group", "other" };
 
 typedef enum NightlyConclusion NightlyConclusion;
 enum NightlyConclusion
@@ -125,9 +131,12 @@ enum NightlyPurpose
     NIGHTLY_PURPOSE_FULL,
     NIGHTLY_PURPOSE_BACKLOG,
     NIGHTLY_PURPOSE_SNAPSHOT,
+    // A merge-queue candidate's run (#1430): the full hosted contract, no hardware. It measures nothing; it qualifies
+    // the state's hosted rows, and its passing record is the state's per-merge correctness.
+    NIGHTLY_PURPOSE_QUEUE,
     NIGHTLY_PURPOSE_COUNT
 };
-static const char* const nightly_purpose_names[] = { "pr", "push", "schedule", "full", "backlog", "snapshot" };
+static const char* const nightly_purpose_names[] = { "pr", "push", "schedule", "full", "backlog", "snapshot", "queue" };
 
 typedef enum NightlyHardware NightlyHardware;
 enum NightlyHardware
@@ -829,10 +838,17 @@ static const char* nightly_job_own_name(const char* name)
     return own;
 }
 
+// The hosted rows' sanitizers, in 9700x.yml's matrix order; a row's index is its architecture's times their count plus
+// its sanitizer's.
+static const char* const nightly_sanitizer_names[] = { "none", "address", "thread", "memory" };
+#define BUSTER_NIGHTLY_SANITIZERS 4u
+
 // A hosted test row's job name, `Tests on ... (Clang V, ARCH, SANITIZER, OLEVEL[, shard K of N])`, its own name whatever
-// its caller's: its architecture (0 x86-64, 1 native), shard and shard count, and whether it is a plain row (no
-// sanitizer, -O3). False for other jobs, such as the job that builds a row's compiler once for its shards.
-static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t* shard, uint32_t* shards, bool* plain)
+// its caller's: its architecture (0 x86-64, 1 native), its row (the architecture's and the sanitizer's index, or
+// BUSTER_NIGHTLY_SANITIZERS twice over for another sanitizer or an optimization other than -O3), shard and shard count,
+// and whether it is a plain row (no sanitizer, -O3). False for other jobs, such as the job that builds a row's compiler
+// once for its shards.
+static bool nightly_test_row(const char* full, uint32_t* architecture, uint32_t* row, uint32_t* shard, uint32_t* shards, bool* plain)
 {
     const char* name = nightly_job_own_name(full);
     const size_t length = strlen(name);
@@ -879,8 +895,16 @@ static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t*
         *shard = (uint32_t)k;
         *shards = (uint32_t)n;
         *plain = strcmp(parts[2], "none") == 0 && strcmp(parts[3], "O3") == 0;
+        const size_t sanitizer = strcmp(parts[3], "O3") == 0 ? nightly_find(parts[2], nightly_sanitizer_names, BUSTER_NIGHTLY_SANITIZERS) : BUSTER_NIGHTLY_SANITIZERS;
+        *row = sanitizer < BUSTER_NIGHTLY_SANITIZERS ? *architecture * BUSTER_NIGHTLY_SANITIZERS + (uint32_t)sanitizer : 2 * BUSTER_NIGHTLY_SANITIZERS;
     }
     return valid;
+}
+
+static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t* shard, uint32_t* shards, bool* plain)
+{
+    uint32_t row = 0;
+    return nightly_test_row(full, architecture, &row, shard, shards, plain);
 }
 
 // The run's plain hosted rows: ok when every shard 1..N of both architectures succeeded (one N throughout), failed
@@ -923,16 +947,18 @@ struct NightlyHosted
     uint64_t run;
 };
 
-// The commit's hosted qualification from its own completed push or dispatch runs of the workflow, whose definition is
-// the commit's own (a pull request's run tests a merge commit instead, so none counts): the newest conclusive one
-// decides, so that a later genuine failure isn't hidden by an earlier pass. `exclude` is the asking run itself.
+// The commit's hosted qualification from its own completed push, dispatch or merge-queue runs of the workflow, whose
+// definition is the commit's own (a pull request's run tests a merge commit instead, so none counts; a merge-queue
+// candidate's run tests the very commit main is fast-forwarded to, #1430): the newest conclusive one decides, so that a
+// later genuine failure isn't hidden by an earlier pass. `exclude` is the asking run itself.
 static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commit, uint64_t exclude)
 {
     NightlyHosted hosted = { 0 };
     for (uint32_t i = 0; i < facts->run_count; i += 1)
     {
         const NightlyRun* run = &facts->runs[i];
-        const bool eligible = run->workflow && run->completed && run->id != exclude && strcmp(run->head, commit) == 0 && (run->event == NIGHTLY_EVENT_PUSH || run->event == NIGHTLY_EVENT_DISPATCH);
+        const bool own = run->event == NIGHTLY_EVENT_PUSH || run->event == NIGHTLY_EVENT_DISPATCH || run->event == NIGHTLY_EVENT_MERGE_GROUP;
+        const bool eligible = run->workflow && run->completed && run->id != exclude && strcmp(run->head, commit) == 0 && own;
         const NightlyPlain verdict = eligible ? nightly_plain_verdict(facts, run->id) : NIGHTLY_PLAIN_NONE;
         if (verdict != NIGHTLY_PLAIN_NONE && run->id > hosted.run)
         {
@@ -941,6 +967,82 @@ static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commi
         }
     }
     return hosted;
+}
+
+// --- A merge-queue candidate's coverage, job by job (#1430) ---
+
+// The fuzz campaigns (9700x.yml's fuzz matrix) and the vector pool's configurations (the test job's one call of the
+// row workflow for the vector row, where the sanitizer rows run).
+static const char* const nightly_fuzz_entries[] = { "frontend", "elf-override", "crash-replay-proof" };
+#define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
+#define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
+
+// The run's full hosted contract from its own jobs, which a test job's result alone can't show (a skipped shard or row
+// leaves it green): every shard 1..N of each row (x86-64 and native, each sanitizer, -O3; one N per row), the vector
+// pool's verdict and each fuzz campaign, every one completed and successful, and no shard of a row that didn't succeed
+// (one beyond N, say, or a second attempt's). Writes a line per row, the vector verdict and each campaign, then
+// `coverage complete` or `coverage incomplete`. Job names are their own, whatever their callers' (each row is a call
+// of the row workflow); a skipped job's name keeps its unexpanded expressions, which no row's pattern matches.
+static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, FILE* output)
+{
+    uint64_t succeeded[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
+    uint32_t counts[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
+    bool inconsistent[BUSTER_NIGHTLY_ROWS_FULL] = { false };
+    bool unsuccessful[BUSTER_NIGHTLY_ROWS_FULL] = { false };
+    uint32_t verdicts = 0;
+    bool verdict = false;
+    bool fuzz[BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries)] = { false };
+    for (uint32_t i = 0; i < facts->job_count; i += 1)
+    {
+        const NightlyJob* job = &facts->jobs[i];
+        const char* own = nightly_job_own_name(job->name);
+        const bool success = job->run == run && job->completed && job->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
+        uint32_t architecture = 0;
+        uint32_t row = 0;
+        uint32_t shard = 0;
+        uint32_t count = 0;
+        bool plain = false;
+        if (job->run == run && nightly_test_row(job->name, &architecture, &row, &shard, &count, &plain) && row < BUSTER_NIGHTLY_ROWS_FULL)
+        {
+            inconsistent[row] = inconsistent[row] || (counts[row] != 0 && counts[row] != count);
+            counts[row] = count;
+            unsuccessful[row] = unsuccessful[row] || !success;
+            succeeded[row] |= success ? (uint64_t)1 << (shard - 1) : 0;
+        }
+        const size_t own_length = strlen(own);
+        const char suffix[] = ", " BUSTER_NIGHTLY_VECTOR_POOL ", O3)";
+        if (job->run == run && strncmp(own, "Vector row verdict (Clang ", 26) == 0 && own_length > sizeof(suffix) - 1 && strcmp(own + own_length - (sizeof(suffix) - 1), suffix) == 0)
+        {
+            verdicts += 1;
+            verdict = success;
+        }
+        for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+        {
+            char name[BUSTER_NIGHTLY_NAME];
+            snprintf(name, sizeof(name), "libFuzzer (ASan + UBSan + leaks, %s)", nightly_fuzz_entries[j]);
+            fuzz[j] = fuzz[j] || (success && strcmp(own, name) == 0);
+        }
+    }
+    bool complete = true;
+    for (uint32_t row = 0; row < BUSTER_NIGHTLY_ROWS_FULL; row += 1)
+    {
+        const uint32_t count = counts[row];
+        const uint64_t every = count == 64 ? UINT64_MAX : ((uint64_t)1 << count) - 1;
+        const bool whole = count != 0 && !inconsistent[row] && !unsuccessful[row] && succeeded[row] == every;
+        complete = complete && whole;
+        const char* why = count == 0 ? "missing" : inconsistent[row] ? "shard counts disagree" : unsuccessful[row] ? "a shard did not succeed" : succeeded[row] != every ? "a shard is missing" : "ok";
+        fprintf(output, "row\t%s %s\t%s\t%u\n", row < BUSTER_NIGHTLY_SANITIZERS ? "x86-64" : "native", nightly_sanitizer_names[row % BUSTER_NIGHTLY_SANITIZERS], why, count);
+    }
+    const bool vector = verdicts == 1 && verdict;
+    complete = complete && vector;
+    fprintf(output, "vector\t%s\t%s\n", BUSTER_NIGHTLY_VECTOR_POOL, verdicts == 0 ? "missing" : verdicts != 1 ? "more than one verdict" : verdict ? "ok" : "did not succeed");
+    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+    {
+        complete = complete && fuzz[j];
+        fprintf(output, "fuzz\t%s\t%s\n", nightly_fuzz_entries[j], fuzz[j] ? "ok" : "missing or did not succeed");
+    }
+    fprintf(output, "coverage\t%s\n", complete ? "complete" : "incomplete");
+    return complete;
 }
 
 // --- Records: one run's coverage, which its `record` job writes ---
@@ -1028,8 +1130,8 @@ static const NightlyKey nightly_record_keys[NIGHTLY_FIELD_COUNT] = {
     { "repository", NIGHTLY_KIND_REPOSITORY, NULL },
     { "run", NIGHTLY_KIND_ID, NULL },
     { "attempt", NIGHTLY_KIND_ID, NULL },
-    { "event", NIGHTLY_KIND_ENUM, "pull_request push workflow_dispatch schedule" },
-    { "purpose", NIGHTLY_KIND_ENUM, "pr push schedule full backlog snapshot" },
+    { "event", NIGHTLY_KIND_ENUM, "pull_request push workflow_dispatch schedule merge_group" },
+    { "purpose", NIGHTLY_KIND_ENUM, "pr push schedule full backlog snapshot queue" },
     { "request", NIGHTLY_KIND_TOKEN_OR_DASH, NULL },
     { "commit", NIGHTLY_KIND_SHA, NULL },
     { "tree", NIGHTLY_KIND_SHA, NULL },
@@ -1246,15 +1348,24 @@ static NightlyCoverage nightly_record_coverage(const NightlyRecord* record)
         // With the nightly mode, a push measures what its first-parent change selects; before it, every plain run.
         coverage = nightly_is(record, NIGHTLY_FIELD_MODE, "on") ? NIGHTLY_COVERAGE_TARGETED : NIGHTLY_COVERAGE_PLAIN;
     }
+    else if (strcmp(purpose, "queue") == 0)
+    {
+        // A merge-queue candidate measures nothing: its state's measurements are the nightly window's.
+        coverage = NIGHTLY_COVERAGE_NONE;
+    }
     return coverage;
 }
 
 // What the run achieved, from its jobs' results and outputs alone. Completion needs the 9700X job's success after its
 // own native correctness (or, for a push, its pull request's measurements reused by evidence); a failure is a
-// correctness block only where correctness failed, hosted or native, and the window's refusal is a deferral.
+// correctness block only where correctness failed, hosted or native, and the window's refusal is a deferral. A
+// merge-queue candidate (#1430) is never admitted and has no exemption: it is deferred (its hosted contract passed,
+// its native correctness and measurements the window's) only through the required aggregate's success, which checked
+// its coverage job by job; without it, it is interrupted.
 static NightlyOutcome nightly_record_outcome(const NightlyRecord* record)
 {
-    const bool no_code = nightly_is(record, NIGHTLY_FIELD_CHANGES_RESULT, "success") && nightly_is(record, NIGHTLY_FIELD_CODE, "false");
+    const bool queue = nightly_is(record, NIGHTLY_FIELD_PURPOSE, "queue");
+    const bool no_code = !queue && nightly_is(record, NIGHTLY_FIELD_CHANGES_RESULT, "success") && nightly_is(record, NIGHTLY_FIELD_CODE, "false");
     const bool hosted_ran = nightly_is(record, NIGHTLY_FIELD_HOSTED, "run");
     const bool fuzz_required = nightly_is(record, NIGHTLY_FIELD_SCOPE, "full");
     const bool hosted_failed = hosted_ran && (nightly_is(record, NIGHTLY_FIELD_TEST_RESULT, "failure") || (fuzz_required && nightly_is(record, NIGHTLY_FIELD_FUZZ_RESULT, "failure")));
@@ -1266,7 +1377,7 @@ static NightlyOutcome nightly_record_outcome(const NightlyRecord* record)
     {
         outcome = NIGHTLY_OUTCOME_NOT_REQUIRED;
     }
-    else if (!nightly_is(record, NIGHTLY_FIELD_EVIDENCE_RESULT, "success"))
+    else if (!nightly_is(record, NIGHTLY_FIELD_EVIDENCE_RESULT, "success") || (queue && admitted))
     {
         outcome = NIGHTLY_OUTCOME_REJECTED;
     }
@@ -1274,7 +1385,7 @@ static NightlyOutcome nightly_record_outcome(const NightlyRecord* record)
     {
         outcome = NIGHTLY_OUTCOME_BLOCKED_HOSTED;
     }
-    else if (hosted_cancelled)
+    else if (hosted_cancelled || (queue && !nightly_is(record, NIGHTLY_FIELD_QUALIFICATION_RESULT, "success")))
     {
         outcome = NIGHTLY_OUTCOME_INTERRUPTED;
     }
@@ -1303,7 +1414,7 @@ static void nightly_record_from_environment(NightlyRecord* record)
 {
     const char* event = getenv("RECORD_EVENT");
     const char* dispatched = getenv("RECORD_DISPATCH_PURPOSE");
-    const char* purpose = event == NULL ? "" : strcmp(event, "pull_request") == 0 ? "pr" : strcmp(event, "push") == 0 ? "push" : strcmp(event, "schedule") == 0 ? "schedule" : dispatched != NULL ? dispatched : "";
+    const char* purpose = event == NULL ? "" : strcmp(event, "pull_request") == 0 ? "pr" : strcmp(event, "push") == 0 ? "push" : strcmp(event, "schedule") == 0 ? "schedule" : strcmp(event, "merge_group") == 0 ? "queue" : dispatched != NULL ? dispatched : "";
     for (uint32_t i = 0; i < NIGHTLY_FIELD_COUNT; i += 1)
     {
         const NightlyKey* key = &nightly_record_keys[i];
@@ -1524,9 +1635,10 @@ static bool nightly_ledger_parse(NightlyLedger* ledger, NightlyText text)
 
 // The row of a completed run from its facts and, where its record is valid and agrees with them, its record. Without
 // a record (runs before the records, or a record job that failed), the 9700X job's conclusion decides, as each event's
-// coverage then was: a push's every plain run, a scheduled or full run's everything. A record that disagrees with
-// the facts on its run, commit or event, or claims a completion the 9700X job's conclusion doesn't support, makes the
-// row invalid, which counts as nothing.
+// coverage then was: a push's every plain run, a scheduled or full run's everything; a merge-queue candidate's
+// (#1430) measures nothing, and only the required aggregate's success passes it. A record that disagrees with the
+// facts on its run, commit or event, or claims a completion the 9700X job's conclusion doesn't support, or a
+// candidate's pass the aggregate's doesn't, makes the row invalid, which counts as nothing.
 static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRun* run, const NightlyRecord* record)
 {
     NightlyRow row = {
@@ -1541,8 +1653,11 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
     const NightlyJob* hardware = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_HARDWARE_JOB);
     const bool hardware_ran = hardware != NULL && hardware->completed && hardware->conclusion != NIGHTLY_CONCLUSION_SKIPPED;
     const bool hardware_success = hardware != NULL && hardware->completed && hardware->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
+    const NightlyJob* aggregate = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB);
+    const bool aggregate_success = aggregate != NULL && aggregate->completed && aggregate->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
+    const bool queue = run->event == NIGHTLY_EVENT_MERGE_GROUP;
     row.hardware = hardware_ran ? NIGHTLY_HARDWARE_ADMIT : NIGHTLY_HARDWARE_SKIP;
-    row.purpose = run->event == NIGHTLY_EVENT_PUSH ? NIGHTLY_PURPOSE_PUSH : run->event == NIGHTLY_EVENT_SCHEDULE ? NIGHTLY_PURPOSE_SCHEDULE : run->nightly ? run->purpose : NIGHTLY_PURPOSE_FULL;
+    row.purpose = run->event == NIGHTLY_EVENT_PUSH ? NIGHTLY_PURPOSE_PUSH : run->event == NIGHTLY_EVENT_SCHEDULE ? NIGHTLY_PURPOSE_SCHEDULE : queue ? NIGHTLY_PURPOSE_QUEUE : run->nightly ? run->purpose : NIGHTLY_PURPOSE_FULL;
     nightly_copy(row.request, sizeof(row.request), run->nightly ? run->request : "");
     if (record != NULL)
     {
@@ -1559,6 +1674,9 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
         bool agrees = nightly_is(record, NIGHTLY_FIELD_RUN, run_text) && nightly_is(record, NIGHTLY_FIELD_ATTEMPT, attempt_text) && nightly_is(record, NIGHTLY_FIELD_COMMIT, run->head);
         agrees = agrees && nightly_is(record, NIGHTLY_FIELD_EVENT, nightly_event_names[run->event]) && purpose < NIGHTLY_PURPOSE_COUNT && coverage < NIGHTLY_COVERAGE_COUNT && outcome < NIGHTLY_OUTCOME_COUNT;
         agrees = agrees && (!run->nightly || ((NightlyPurpose)purpose == run->purpose && nightly_is(record, NIGHTLY_FIELD_REQUEST, run->request)));
+        // A merge-queue candidate's record is a queue record, and only a candidate's is; its pass is the aggregate's.
+        agrees = agrees && ((NightlyPurpose)purpose == NIGHTLY_PURPOSE_QUEUE) == queue;
+        agrees = agrees && (!queue || (NightlyOutcome)outcome != NIGHTLY_OUTCOME_DEFERRED || aggregate_success);
         // A completion: the 9700X job succeeded, or a push reused its pull request's measurement by evidence.
         agrees = agrees && ((NightlyOutcome)outcome != NIGHTLY_OUTCOME_COMPLETE || (admitted && hardware_success) || reused);
         agrees = agrees && (admitted == hardware_ran || !hardware_ran);
@@ -1571,7 +1689,7 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
     }
     else
     {
-        row.coverage = run->event == NIGHTLY_EVENT_PUSH ? NIGHTLY_COVERAGE_PLAIN : run->nightly && run->purpose == NIGHTLY_PURPOSE_BACKLOG ? NIGHTLY_COVERAGE_TARGETED : NIGHTLY_COVERAGE_FULL;
+        row.coverage = run->event == NIGHTLY_EVENT_PUSH ? NIGHTLY_COVERAGE_PLAIN : queue ? NIGHTLY_COVERAGE_NONE : run->nightly && run->purpose == NIGHTLY_PURPOSE_BACKLOG ? NIGHTLY_COVERAGE_TARGETED : NIGHTLY_COVERAGE_FULL;
         // Without a record, a nightly run's success can't be told from a deferral, nor a failure's cause: nothing of
         // it completes. A run whose 9700X job never ran was cancelled (interrupted) or stopped by a failed hosted job
         // (the run's own gate, as its record would say), or else deferred; the state's plain rows decide its status.
@@ -1583,14 +1701,18 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
             const bool hosted = strncmp(job->name, "Tests on ", 9) == 0 || strncmp(own, "Tests on ", 9) == 0 || strncmp(job->name, "libFuzzer ", 10) == 0;
             hosted_failed |= job->run == run->id && hosted && job->completed && (job->conclusion == NIGHTLY_CONCLUSION_FAILURE || job->conclusion == NIGHTLY_CONCLUSION_TIMED_OUT);
         }
-        const bool trusted = !run->nightly && hardware_success;
-        row.outcome = trusted ? NIGHTLY_OUTCOME_COMPLETE : hardware_ran ? NIGHTLY_OUTCOME_FAILED : run->conclusion == NIGHTLY_CONCLUSION_CANCELLED ? NIGHTLY_OUTCOME_INTERRUPTED : hosted_failed ? NIGHTLY_OUTCOME_BLOCKED_HOSTED : NIGHTLY_OUTCOME_DEFERRED;
+        const bool trusted = !run->nightly && !queue && hardware_success;
+        // A candidate passes by the aggregate's success alone, which checked its coverage job by job (a vector draw's
+        // candidate may fail where its item passed elsewhere); one the aggregate didn't pass is no pass.
+        const NightlyOutcome otherwise = queue && !aggregate_success ? NIGHTLY_OUTCOME_INTERRUPTED : NIGHTLY_OUTCOME_DEFERRED;
+        row.outcome = trusted ? NIGHTLY_OUTCOME_COMPLETE : queue && aggregate_success ? NIGHTLY_OUTCOME_DEFERRED : hardware_ran ? NIGHTLY_OUTCOME_FAILED : run->conclusion == NIGHTLY_CONCLUSION_CANCELLED ? NIGHTLY_OUTCOME_INTERRUPTED : hosted_failed ? NIGHTLY_OUTCOME_BLOCKED_HOSTED : otherwise;
     }
     return row;
 }
 
-// Every completed workflow run of a state (a push, a scheduled run or a dispatch: a pull request's run tests a merge
-// commit, not a state) that the ledger doesn't have, as rows. The record of run R is DIRECTORY/R.tsv where the glue
+// Every completed workflow run of a state (a push, a scheduled run, a dispatch or a merge-queue candidate whose commit
+// main was fast-forwarded to: a pull request's run tests a merge commit, not a state) that the ledger doesn't have, as
+// rows. A candidate whose commit main doesn't have is no state's, so nothing credits it. The record of run R is DIRECTORY/R.tsv where the glue
 // found the run's coverage-record artifact for its attempt; an unreadable or invalid one counts as none.
 static uint32_t nightly_harvest(const NightlyLedger* ledger, const NightlyFacts* facts, const char* directory, const char* const* states, uint32_t state_count, bool list, FILE* output)
 {
@@ -1679,6 +1801,10 @@ struct NightlyState
     bool full_this_cycle;
     uint64_t complete_run;
     uint64_t source;
+    // A merge-queue candidate's run of this very commit (#1430), and whether one passed: the queue's per-merge
+    // correctness, which the report checks once the queue has run.
+    bool queue_record;
+    bool queue_passed;
     // The latest verdicts by run and then attempt: a rerun keeps its run's ID and takes the next attempt.
     NightlyPlain plain;
     uint64_t plain_run;
@@ -2008,6 +2134,9 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
             state->full_this_cycle |= complete && row->coverage == NIGHTLY_COVERAGE_FULL && this_cycle && admit && row->purpose == NIGHTLY_PURPOSE_SNAPSHOT;
             state->source = complete && row->source != 0 ? row->source : state->source;
             state->complete_run = complete && row->run > state->complete_run ? row->run : state->complete_run;
+            // A candidate's pass is its deferral: its hosted contract passed, its hardware is the window's.
+            state->queue_record |= row->purpose == NIGHTLY_PURPOSE_QUEUE;
+            state->queue_passed |= row->purpose == NIGHTLY_PURPOSE_QUEUE && row->outcome == NIGHTLY_OUTCOME_DEFERRED;
             if (row->plain != NIGHTLY_PLAIN_NONE && nightly_later(row->run, row->attempt, state->plain_run, state->plain_attempt))
             {
                 state->plain = row->plain;
@@ -2269,6 +2398,38 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
         }
         fprintf(report, ".\n");
         fprintf(output, "alert\t%u states skipped: their nightly branch could not be created or used\n", cycle->refused);
+    }
+    // The merge queue's per-merge correctness (#1430): from the first state a candidate's run tested, every state needs a
+    // passing candidate's run of its own commit. A state without one reached main some other way (a direct push, an
+    // admin merge or a bypass, or a fast-forward to a commit the queue didn't test), or its candidate's run failed; its
+    // correctness is then the nightly's alone. Before any candidate's run, nothing is reported.
+    int64_t queue_start = -1;
+    for (int64_t i = 0; i <= scope && queue_start < 0; i += 1)
+    {
+        queue_start = states->items[i].queue_record ? i : queue_start;
+    }
+    uint32_t queue_gaps = 0;
+    for (int64_t i = queue_start; queue_start >= 0 && i <= scope; i += 1)
+    {
+        queue_gaps += !states->items[i].queue_passed;
+    }
+    if (queue_start >= 0)
+    {
+        fprintf(report, "\nMerge queue: %lld states since `%.12s`, the first a candidate's run tested; %u without a passing candidate's run of their own commit%s", (long long)(scope - queue_start + 1), states->items[queue_start].sha, queue_gaps, queue_gaps != 0 ? " (coverage gaps: their correctness is the nightly's alone):" : ".");
+        uint32_t listed_gaps = 0;
+        for (int64_t i = queue_start; i <= scope && listed_gaps < 30; i += 1)
+        {
+            if (!states->items[i].queue_passed)
+            {
+                fprintf(report, " `%.12s`", states->items[i].sha);
+                listed_gaps += 1;
+            }
+        }
+        fprintf(report, "%s", queue_gaps == 0 ? "\n" : queue_gaps > listed_gaps ? " ...\n" : "\n");
+    }
+    if (queue_gaps != 0)
+    {
+        fprintf(output, "alert\t%u states have no passing merge-queue run of their own commit\n", queue_gaps);
     }
     if (alert)
     {
@@ -3371,7 +3532,7 @@ static void nightly_scenario_row(NightlyScenario* scenario, uint64_t run, uint32
     *row = (NightlyRow){
         .run = run,
         .attempt = 1,
-        .event = purpose == NIGHTLY_PURPOSE_PUSH ? NIGHTLY_EVENT_PUSH : NIGHTLY_EVENT_DISPATCH,
+        .event = purpose == NIGHTLY_PURPOSE_PUSH ? NIGHTLY_EVENT_PUSH : purpose == NIGHTLY_PURPOSE_QUEUE ? NIGHTLY_EVENT_MERGE_GROUP : NIGHTLY_EVENT_DISPATCH,
         .purpose = purpose,
         .plain = plain,
         .hardware = hardware,
@@ -3985,6 +4146,200 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
     free(text.data);
 }
 
+// A merge-queue candidate's run (#1430): its jobs as the API names them (each row's shards under its caller's name, the
+// vector pool's verdict, the fuzz campaigns, a skipped job's unexpanded name), every one successful but where `odd`
+// (ROW SHARD, `vector` or `fuzz ENTRY`) names a job to leave out or, with `conclusion`, to conclude otherwise.
+static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const char* odd, const char* conclusion)
+{
+    static const char* const architectures[] = { "x86-64", "native" };
+    for (uint32_t row = 0; row < BUSTER_NIGHTLY_ROWS_FULL; row += 1)
+    {
+        const char* architecture = architectures[row / BUSTER_NIGHTLY_SANITIZERS];
+        const char* sanitizer = nightly_sanitizer_names[row % BUSTER_NIGHTLY_SANITIZERS];
+        const uint32_t shards = row == 2 || row == 3 ? 6 : row == 7 ? 5 : 4;
+        nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tTests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})\n", (unsigned long long)run, architecture, sanitizer);
+        for (uint32_t k = 1; k <= shards; k += 1)
+        {
+            char name[64];
+            snprintf(name, sizeof(name), "%s %s %u", architecture, sanitizer, k);
+            const bool is_odd = strcmp(name, odd) == 0;
+            if (!is_odd || conclusion != NULL)
+            {
+                nightly_append(buffer, "job\t%llu\t%s\t%s\tTests on Ubuntu 26.04 (%s, %s, O3) / Tests on Ubuntu 26.04 (Clang 23, %s, %s, O3, shard %u of %u)\n", (unsigned long long)run, is_odd && strcmp(conclusion, "-") == 0 ? "in_progress" : "completed", is_odd ? conclusion : "success", architecture, sanitizer, architecture, sanitizer, k, shards);
+            }
+        }
+    }
+    static const char vector[] = "Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / ";
+    nightly_append(buffer, "job\t%llu\tcompleted\tskipped\t%sTests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})\n", (unsigned long long)run, vector);
+    nightly_append(buffer, "job\t%llu\tcompleted\tfailure\t%sVector draw 1, candidate 3 (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
+    if (strcmp(odd, "vector") != 0 || conclusion != NULL)
+    {
+        nightly_append(buffer, "job\t%llu\tcompleted\t%s\t%sVector row verdict (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, strcmp(odd, "vector") == 0 ? conclusion : "success", vector);
+    }
+    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "fuzz %s", nightly_fuzz_entries[j]);
+        const bool is_odd = strcmp(name, odd) == 0;
+        if (!is_odd || conclusion != NULL)
+        {
+            nightly_append(buffer, "job\t%llu\tcompleted\t%s\tlibFuzzer (ASan + UBSan + leaks, %s)\n", (unsigned long long)run, is_odd ? conclusion : "success", nightly_fuzz_entries[j]);
+        }
+    }
+    nightly_append(buffer, "job\t%llu\tcompleted\tskipped\t%s\n", (unsigned long long)run, BUSTER_NIGHTLY_HARDWARE_JOB);
+}
+
+static bool nightly_test_coverage(const char* odd, const char* conclusion, const char* extra)
+{
+    NightlyBuffer* buffer = nightly_allocate(1, sizeof(NightlyBuffer));
+    nightly_test_candidate(buffer, 60, odd, conclusion);
+    if (extra != NULL)
+    {
+        nightly_append(buffer, "%s\n", extra);
+    }
+    NightlyFacts facts = nightly_facts_new();
+    FILE* sink = fopen("/dev/null", "w");
+    const bool complete = nightly_facts_parse(&facts, nightly_buffer_text(buffer)) && nightly_coverage(&facts, 60, sink);
+    fclose(sink);
+    nightly_facts_free(&facts);
+    free(buffer);
+    return complete;
+}
+
+// The merge queue (#1430): a candidate's coverage, job by job; its runs' hosted reuse, records, rows and ledger lines;
+// and the report's coverage gaps once the queue has run.
+static void nightly_test_queue(NightlyTest* test)
+{
+    nightly_expect(test, nightly_test_coverage("", NULL, NULL), "a full candidate's coverage is complete");
+    static const struct
+    {
+        const char* odd;
+        const char* conclusion;
+        const char* what;
+    } short_of[] = {
+        { "x86-64 none 1", NULL, "a plain shard missing" },
+        { "native memory 5", NULL, "a sanitizer row's last shard missing" },
+        { "x86-64 address 2", "failure", "a failed shard" },
+        { "x86-64 thread 6", "cancelled", "a cancelled shard" },
+        { "native thread 3", "skipped", "a skipped shard" },
+        { "native none 4", "timed_out", "a timed-out shard" },
+        { "x86-64 memory 1", "-", "a shard still in progress" },
+        { "vector", NULL, "the vector verdict missing" },
+        { "vector", "failure", "the vector verdict failed" },
+        { "vector", "skipped", "the vector verdict skipped" },
+        { "fuzz frontend", NULL, "a fuzz campaign missing" },
+        { "fuzz crash-replay-proof", "cancelled", "a fuzz campaign cancelled" },
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(short_of); i += 1)
+    {
+        nightly_expect(test, !nightly_test_coverage(short_of[i].odd, short_of[i].conclusion, NULL), short_of[i].what);
+    }
+    nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)"), "a row whose shards disagree");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, address, O1) / Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)"), "a row at another optimization isn't the contract's, and doesn't count");
+    nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 24, none address thread memory, O3)"), "two vector verdicts");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\tlibFuzzer (ASan + UBSan + leaks, frontend)"), "another run's jobs don't count");
+
+    char a[41];
+    char b[41];
+    char tree[41];
+    nightly_test_sha(1, a);
+    nightly_test_sha(2, b);
+    nightly_test_sha(3, tree);
+    NightlyBuffer* buffer = nightly_allocate(1, sizeof(NightlyBuffer));
+    // A backlog run reuses the plain rows of its commit's candidate run: main was fast-forwarded to that commit.
+    nightly_test_run(buffer, 60, "merge_group", "completed", "success", a, 1, 2, "x");
+    nightly_test_candidate(buffer, 60, "", NULL);
+    nightly_append(buffer, "job\t60\tcompleted\tsuccess\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB);
+    nightly_test_run(buffer, 61, "merge_group", "completed", "failure", b, 1, 2, "x");
+    nightly_test_candidate(buffer, 61, "x86-64 address 1", "failure");
+    nightly_append(buffer, "job\t61\tcompleted\tfailure\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB);
+    nightly_test_run(buffer, 62, "merge_group", "completed", "failure", b, 3, 4, "x");
+    nightly_test_candidate(buffer, 62, "", NULL);
+    nightly_append(buffer, "job\t62\tcompleted\tfailure\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB);
+    NightlyFacts facts = nightly_facts_new();
+    nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)) && facts.runs[0].event == NIGHTLY_EVENT_MERGE_GROUP, "a merge-queue run's facts parse");
+    const NightlyHosted hosted = nightly_hosted(&facts, a, 0);
+    nightly_expect(test, hosted.verdict == NIGHTLY_PLAIN_OK && hosted.run == 60, "a candidate's plain rows are its commit's hosted qualification");
+
+    // Its row: a queue row that measured nothing, a pass only through the aggregate.
+    NightlyRecord* record = nightly_allocate(1, sizeof(NightlyRecord));
+    nightly_test_record(record, 60, "merge_group", "queue", a, tree, tree, b);
+    nightly_copy(record->values[NIGHTLY_FIELD_SCOPE], BUSTER_NIGHTLY_VALUE, "full");
+    nightly_copy(record->values[NIGHTLY_FIELD_HARDWARE], BUSTER_NIGHTLY_VALUE, "skip");
+    nightly_copy(record->values[NIGHTLY_FIELD_HARDWARE_REASON], BUSTER_NIGHTLY_VALUE, "merge-group");
+    nightly_copy(record->values[NIGHTLY_FIELD_FUZZ_RESULT], BUSTER_NIGHTLY_VALUE, "success");
+    nightly_copy(record->values[NIGHTLY_FIELD_BENCHMARK_RESULT], BUSTER_NIGHTLY_VALUE, "skipped");
+    nightly_copy(record->values[NIGHTLY_FIELD_QUALIFICATION_RESULT], BUSTER_NIGHTLY_VALUE, "success");
+    nightly_expect(test, nightly_record_outcome(record) == NIGHTLY_OUTCOME_DEFERRED && nightly_record_coverage(record) == NIGHTLY_COVERAGE_NONE, "a candidate the aggregate passed is deferred to the window, measuring nothing");
+    nightly_copy(record->values[NIGHTLY_FIELD_COVERAGE], BUSTER_NIGHTLY_VALUE, "none");
+    nightly_copy(record->values[NIGHTLY_FIELD_OUTCOME], BUSTER_NIGHTLY_VALUE, "deferred");
+    NightlyRow row = nightly_harvest_row(&facts, &facts.runs[0], record);
+    nightly_expect(test, row.purpose == NIGHTLY_PURPOSE_QUEUE && row.event == NIGHTLY_EVENT_MERGE_GROUP && row.outcome == NIGHTLY_OUTCOME_DEFERRED && row.coverage == NIGHTLY_COVERAGE_NONE && row.plain == NIGHTLY_PLAIN_OK, "an agreeing queue record is the row");
+    nightly_copy(record->values[NIGHTLY_FIELD_CODE], BUSTER_NIGHTLY_VALUE, "false");
+    nightly_expect(test, nightly_record_outcome(record) == NIGHTLY_OUTCOME_DEFERRED, "a candidate has no documentation exemption");
+    nightly_copy(record->values[NIGHTLY_FIELD_CODE], BUSTER_NIGHTLY_VALUE, "true");
+    nightly_copy(record->values[NIGHTLY_FIELD_QUALIFICATION_RESULT], BUSTER_NIGHTLY_VALUE, "failure");
+    nightly_expect(test, nightly_record_outcome(record) == NIGHTLY_OUTCOME_INTERRUPTED, "a candidate the aggregate failed is no pass, its tests green or not");
+    nightly_copy(record->values[NIGHTLY_FIELD_QUALIFICATION_RESULT], BUSTER_NIGHTLY_VALUE, "success");
+    nightly_copy(record->values[NIGHTLY_FIELD_TEST_RESULT], BUSTER_NIGHTLY_VALUE, "failure");
+    nightly_expect(test, nightly_record_outcome(record) == NIGHTLY_OUTCOME_BLOCKED_HOSTED, "a candidate whose tests failed is blocked");
+    nightly_copy(record->values[NIGHTLY_FIELD_TEST_RESULT], BUSTER_NIGHTLY_VALUE, "success");
+    nightly_copy(record->values[NIGHTLY_FIELD_HARDWARE], BUSTER_NIGHTLY_VALUE, "admit");
+    nightly_expect(test, nightly_record_outcome(record) == NIGHTLY_OUTCOME_REJECTED, "a candidate admitted to the 9700X is rejected");
+    nightly_copy(record->values[NIGHTLY_FIELD_HARDWARE], BUSTER_NIGHTLY_VALUE, "skip");
+    nightly_copy(record->values[NIGHTLY_FIELD_PURPOSE], BUSTER_NIGHTLY_VALUE, "push");
+    row = nightly_harvest_row(&facts, &facts.runs[0], record);
+    nightly_expect(test, row.outcome == NIGHTLY_OUTCOME_INVALID, "a candidate's record must be a queue record");
+    nightly_test_record(record, 62, "merge_group", "queue", b, tree, tree, a);
+    nightly_copy(record->values[NIGHTLY_FIELD_COVERAGE], BUSTER_NIGHTLY_VALUE, "none");
+    nightly_copy(record->values[NIGHTLY_FIELD_OUTCOME], BUSTER_NIGHTLY_VALUE, "deferred");
+    row = nightly_harvest_row(&facts, &facts.runs[2], record);
+    nightly_expect(test, row.outcome == NIGHTLY_OUTCOME_INVALID, "a queue record can't claim a pass its failed aggregate didn't make");
+    row = nightly_harvest_row(&facts, &facts.runs[0], NULL);
+    nightly_expect(test, row.purpose == NIGHTLY_PURPOSE_QUEUE && row.outcome == NIGHTLY_OUTCOME_DEFERRED && row.coverage == NIGHTLY_COVERAGE_NONE, "without a record, the aggregate's success passes a candidate");
+    row = nightly_harvest_row(&facts, &facts.runs[2], NULL);
+    nightly_expect(test, row.outcome != NIGHTLY_OUTCOME_DEFERRED, "without a record, a failed aggregate is no pass");
+    row = nightly_harvest_row(&facts, &facts.runs[1], NULL);
+    nightly_expect(test, row.outcome == NIGHTLY_OUTCOME_BLOCKED_HOSTED, "without a record, a failed shard blocks it");
+    // Its ledger line reads back as written.
+    row = nightly_harvest_row(&facts, &facts.runs[0], NULL);
+    char* data = NULL;
+    size_t size = 0;
+    FILE* stream = open_memstream(&data, &size);
+    fprintf(stream, "%s\n", BUSTER_NIGHTLY_LEDGER_FORMAT);
+    nightly_row_write(stream, &row);
+    fclose(stream);
+    NightlyLedger ledger = nightly_ledger_new();
+    nightly_expect(test, nightly_ledger_parse(&ledger, (NightlyText){ .data = data, .length = size }) && ledger.row_count == 1 && ledger.rows[0].purpose == NIGHTLY_PURPOSE_QUEUE && ledger.rows[0].event == NIGHTLY_EVENT_MERGE_GROUP, "a queue row reads back from the ledger");
+    nightly_ledger_free(&ledger);
+    free(data);
+    nightly_facts_free(&facts);
+    free(record);
+    free(buffer);
+
+    // The report: before any candidate's run, nothing; after one, every later state without a passing candidate's run of
+    // its own commit is a gap. A candidate's plain rows make its state ready with no hosted preparation.
+    const int64_t evening = nightly_test_madrid(2026, 11, 3, 22, 7);
+    NightlyScenario* scenario = nightly_scenario(5, nightly_test_madrid(2026, 11, 1, 9, 0));
+    nightly_scenario_plan(scenario, evening);
+    nightly_expect(test, strstr(scenario->report, "Merge queue") == NULL && nightly_count(scenario, "alert\t") == 0, "before the queue's first run, no queue report");
+    nightly_scenario_row(scenario, 70, 1, NIGHTLY_PURPOSE_QUEUE, "", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_NONE, NIGHTLY_OUTCOME_DEFERRED);
+    nightly_scenario_row(scenario, 71, 2, NIGHTLY_PURPOSE_QUEUE, "", NIGHTLY_PLAIN_FAILED, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_NONE, NIGHTLY_OUTCOME_BLOCKED_HOSTED);
+    nightly_scenario_row(scenario, 72, 4, NIGHTLY_PURPOSE_QUEUE, "", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_NONE, NIGHTLY_OUTCOME_DEFERRED);
+    nightly_scenario_plan(scenario, evening);
+    char line[256];
+    snprintf(line, sizeof(line), "Merge queue: 4 states since `%.12s`, the first a candidate's run tested; 2 without a passing candidate's run of their own commit", scenario->states.items[1].sha);
+    nightly_expect(test, strstr(scenario->report, line) != NULL, "the report counts the states since the queue's first run without a pass");
+    snprintf(line, sizeof(line), " `%.12s` `%.12s`", scenario->states.items[2].sha, scenario->states.items[3].sha);
+    nightly_expect(test, strstr(scenario->report, line) != NULL, "and names them");
+    nightly_expect(test, nightly_has(scenario, "alert\t2 states have no passing merge-queue run of their own commit\n"), "and alerts");
+    nightly_expect(test, scenario->states.items[1].status == NIGHTLY_STATUS_READY && scenario->states.items[4].status == NIGHTLY_STATUS_READY, "a candidate's plain rows make its state ready for the window");
+    nightly_expect(test, scenario->states.items[2].status == NIGHTLY_STATUS_BLOCKED_HOSTED, "a candidate's failed plain row blocks its state");
+    snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[1].sha);
+    nightly_expect(test, !nightly_has(scenario, line), "a state a candidate qualified needs no hosted preparation");
+    nightly_scenario_free(scenario);
+}
+
 static int nightly_self_test(const char* root)
 {
     NightlyTest test = { 0 };
@@ -3993,6 +4348,7 @@ static int nightly_self_test(const char* root)
     nightly_test_facts(&test);
     nightly_test_records(&test);
     nightly_test_ledger(&test);
+    nightly_test_queue(&test);
     nightly_test_states(&test);
     nightly_test_plan(&test);
     nightly_test_worker_plan(&test);
@@ -4253,6 +4609,17 @@ int main(int argc, char** argv)
         nightly_facts_free(&facts);
         status = 0;
     }
+    else if (strcmp(command, "coverage") == 0)
+    {
+        uint64_t run = 0;
+        if (!nightly_id(nightly_required(argc, argv, "--run"), &run))
+        {
+            nightly_fatal("coverage needs --run ID", NULL);
+        }
+        NightlyFacts facts = nightly_load_facts("-");
+        status = nightly_coverage(&facts, run, stdout) ? 0 : 1;
+        nightly_facts_free(&facts);
+    }
     else if (strcmp(command, "record") == 0)
     {
         NightlyRecord* record = nightly_allocate(1, sizeof(NightlyRecord));
@@ -4297,7 +4664,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | hosted | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
+        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | hosted | coverage | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
     }
     return status;
 }
