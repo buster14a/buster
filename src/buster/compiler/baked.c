@@ -4,10 +4,11 @@
 // The baked tables (#590, baked.h). `bake-tables OUTPUT` writes this executable with its buster_baked section as the
 // initializers leave it, so that a compile starts with x86_encode's templates, the x86 semantics' tables, Tier 0's, the
 // Zen 5 cost model's, the unwind templates, Tier 1's selection state tables, the parser's tables (#652), the
-// lowering's runtime functions' names' hashes (#442) and the node machine's transition table (#2524) built.
+// lowering's runtime functions' names' hashes (#442), the node machine's transition table (#2524) and the asm matcher's
+// index (#2532) built.
 // build.sh runs it on each executable it links. It runs in the checker's unit, whose Tier 0, unwind, Zen 5, Tier 1 and
 // lowering copies the C driver uses (main.c), and builds the parser's in the frontend's unit, their home, through
-// parse_tables_initialize: it zeroes the section, runs the nine initializers, checks that they wrote nothing in the image's writable memory outside the
+// parse_tables_initialize: it zeroes the section, runs the ten initializers, checks that they wrote nothing in the image's writable memory outside the
 // section (but the GOT, which the loader may fill as functions are first called), and copies the section's bytes over
 // its place in /proc/self/exe's. The file's GNU build ID is then recomputed over the baked bytes, since the linker's
 // note is over the pre-bake file. A PIE, whose section would hold its load address's pointers if any table had one, and
@@ -31,7 +32,7 @@ static bool tier1_select_initialized(void);
 #include <sys/stat.h>
 #include <unistd.h>
 
-// The node machine's transition table (#2524, c_check_node_machine.c), the checker unit's alone; another unit's bake
+// The node machine's transition table (#2524, c_check_node_machine_type.c), the checker unit's alone; another unit's bake
 // has none to build.
 static bool bake_node_machine_initialize(void)
 {
@@ -278,7 +279,7 @@ static int bake_read_image(BakeImage* image)
     return result;
 }
 
-// Zeroes the section and runs the seven initializers, which must succeed and write nothing in the image's writable
+// Zeroes the section and runs the ten initializers, which must succeed and write nothing in the image's writable
 // memory outside it (but the GOT). Returns whether they did. A TSan or MSan build checks the first part alone
 // (BUSTER_BAKE_RUNTIME_STATE).
 static bool bake_build(const BakeImage* image)
@@ -295,7 +296,8 @@ static bool bake_build(const BakeImage* image)
         }
         memset(__start_buster_baked, 0, bake_section_size());
         const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize() &&
-                           tier1_select_initialize() && parse_tables_initialize() && check_lower_runtime_names_initialize() && bake_node_machine_initialize();
+                           tier1_select_initialize() && parse_tables_initialize() && check_lower_runtime_names_initialize() && bake_node_machine_initialize() &&
+                           check_asm_index_initialize();
         const uint64_t changed = outside_checked ? bake_hashes(image, NULL, before) : 0;
         valid = built && changed == 0;
         if (!valid)
@@ -480,9 +482,10 @@ static int run_baked_tables_test(int argc, char** argv)
     const bool parser_ready = parse_tables_initialized();
     const bool machine_ready = bake_node_machine_ready();
     const bool initialized = result == 0 && (x86_encoder_initialized || x86_semantics_initialized || x86_zen5_initialized || tier0_initialized ||
-                                             unwind_ready || tier1_ready || parser_ready || check_lower_runtime_names_ready || machine_ready);
+                                             unwind_ready || tier1_ready || parser_ready || check_lower_runtime_names_ready || machine_ready ||
+                                             check_asm_index_ready);
     const bool complete = initialized && x86_encoder_initialized && x86_semantics_initialized && x86_zen5_initialized && tier0_initialized &&
-                          unwind_ready && tier1_ready && parser_ready && check_lower_runtime_names_ready && machine_ready;
+                          unwind_ready && tier1_ready && parser_ready && check_lower_runtime_names_ready && machine_ready && check_asm_index_ready;
     uint8_t* first = result == 0 ? malloc(bake_section_size()) : NULL;
     if (argc != 1)
     {

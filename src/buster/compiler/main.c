@@ -697,10 +697,14 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 // #2531's measure-attested: attested declarations' census, beside a command's units (check_driver_attested).
 #include "buster/compiler/c_check_attested.c"
 #pragma clang section text = ""
-// #2524's node machine: a full expression's typed entries in one visit a node. Its transition table is baked below; its
+// #2524's node machine: a full expression's typed entries in one visit a node. Its state and its records' accessors, then
+// one file a sweep: T (types), C (contexts and templates) and X (the entries). T's transition table is baked below; its
 // shadow (measure-node-machine --shadow) is c_check_node_census.c's.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_node_machine.c"
+#include "buster/compiler/c_check_node_machine_type.c"
+#include "buster/compiler/c_check_node_machine_contexts.c"
+#include "buster/compiler/c_check_node_machine_expand.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).

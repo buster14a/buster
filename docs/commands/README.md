@@ -35,6 +35,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `correctness.tests, costs / CI selection` | `tools/ci/correctness.tests`, `tools/ci/costs.c` | [ci](ci.md) |
 | `rerun / setup failures re-run once` | `tools/ci/rerun.c`, `tools/ci/rerun.sh` | [ci](ci.md#setup-failures-re-run-once) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
+| `allcore counted, sampled, table, compare` (the all-core gauge) | `tools/allcore/allcore.c` | [all-core](all-core.md) |
 | `test-c-testsuite, test-sqlite, test-sqlite-testfixture` | `c_testsuite.c`, `sqlite_test.c`, `sqlite_testfixture.c` | [c-testsuite](c-testsuite.md) |
 | `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
 | `test-dataflow, benchmark-dataflow` | `dataflow.c` | [dataflow](dataflow.md) |
@@ -70,7 +71,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-lowering, benchmark-lowering-source` | `c_lowering.c` | [lowering](lowering.md) |
 | `measure-lowering-templates` | `c_check_lower_inventory.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
-| `measure-node-machine [--shadow]` | `c_check_node_census.c`, `c_check_node_machine.c` | [lowering](lowering.md#node-machine-census-2524) |
+| `measure-node-machine [--shadow]` | `c_check_node_census.c`, `c_check_node_machine*.c` | [lowering](lowering.md#node-machine-census-2524) |
 | micro-architecture campaign (`run.sh`, `uarch test`) | `tools/microarch/run.sh`, `tools/microarch/uarch.c` | [microarch](microarch.md) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
@@ -145,6 +146,7 @@ The original section titles are retained in their owning guides.
 - [Foreign benchmark](foreign.md#foreign-benchmark).
 - [Foreign corpus test](foreign-corpus.md#foreign-corpus-test).
 - [DCO sign-off tooling](dco.md#dco-sign-off-tooling).
+- [all-core gauge](all-core.md#all-core-gauge).
 - [Micro-architecture campaign](microarch.md#micro-architecture-campaign).
 - [Dataflow tests](dataflow.md#dataflow-tests).
 - [Dataflow benchmark](dataflow.md#dataflow-benchmark).

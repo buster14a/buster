@@ -201,9 +201,50 @@ written first. [The design](../node-machine.md)'s
 ### The shadow (step 1)
 
 `./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
-is step 1: the machine itself (`c_check_node_machine.c`), run after the
-pipeline on every full expression the census takes, compared with what the
-pipeline made and timed. No compile takes its entries.
+is step 1: the machine itself, run after the pipeline on every full expression
+the census takes, compared with what the pipeline made and timed. No compile
+takes its entries.
+
+- **Its files:** `c_check_node_machine.c` is its state, its records'
+  accessors, `node_machine_begin` and `node_machine_run`; then one file a
+  sweep, T `c_check_node_machine_type.c`, C `c_check_node_machine_contexts.c`
+  and X `c_check_node_machine_expand.c`, which `main.c` includes after it in
+  the checker unit, before `baked.c`. C, X and the shadow's comparison read a
+  record only through the accessors (`node_machine_record_*`, below), so that
+  a new record layout changes the machine's file and T alone.
+- **The record accessors,** each `(machine, r)`, and all but `_third` and
+  `_truth` one load or store today:
+  - what T wrote: `_op`, `_left`, `_right`, `_third` (operand records,
+    `UINT32_MAX` for none; `_third` is a conditional's second arm, from the
+    graph), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
+    low 64 bits), `_floating`, `_object`, `_offset`, `_truth(machine, r,
+    &truth)` (whether `check_action_truth` knows the value's truth),
+    `_fault`, `_overloaded`, `_facts`, `_class`, `_converted(machine, r, k)`,
+    `_conversion_flags(machine, r, k)`, `_member_offset`, `_lowest` (its
+    subtree's least record, a call's arguments included), and a call's
+    `_argument_count`, `_argument(machine, r, i)` (a record),
+    `_argument_converted(machine, r, i)` and
+    `_argument_conversion_flags(machine, r, i)`;
+  - C's own: `_evaluated`, `_state` (with `BUSTER_NODE_MACHINE_AFTER_CONDITION`
+    and `_AFTER_ARM`, a consumer's segment after the record's row), `_context`,
+    `_target`, `_template`, `_hook` (that consumer), `_label_base` and
+    `_call_depth` (the evaluated calls among its ancestors), written by
+    `node_machine_records_set_unevaluated(machine, count)` and
+    `node_machine_record_set_evaluated`, `_set_context`, `_set_target`,
+    `_set_template`, `_set_hook(machine, r, consumer, hook)`,
+    `_set_label_base` and `_set_call_depth`;
+  - a call's, beside them: `node_machine_callee_function` and
+    `node_machine_direct_callee` of its callee record, and
+    `node_machine_call_target` and `node_machine_call_variadic`, its row's;
+  - the shadow's: `node_machine_record_value(machine, r, &value)`, the whole
+    value, which its comparison with the stream reads with `_converted`,
+    `_conversion_flags` and `_member_offset`.
+
+  They cost nothing on the 9700X: T's code is the same, C runs the same
+  instructions a node and X ten fewer ([the design](../node-machine.md#step-1-the-shadow)).
+  C reads the comma's and a store's type before it evaluates their operands:
+  after `node_machine_evaluate`, a call, an accessor would load its column's
+  pointer again.
 
 - **Its records** are the expression's graph nodes: one range of them and the
   root, which the reader may make later (a condition's wrapper follows the
@@ -215,14 +256,46 @@ pipeline made and timed. No compile takes its entries.
   (`node_machine_rows`), the lookups by direct rules that are their actions'
   own steps for the common case, and the rest by the action itself on the
   machine's records. **C** and **X** are the node templates' rules
-  (`c_check_program_templates.c`) read from the records. The machine's set is
-  the census's within the templates': calls, `&&`, `||`, `?:`, the increments
-  and the compound assignments are refused by code.
+  (`c_check_program_templates.c`) read from the records, and
+  `check_lower_logical`'s for `&&`, `||` and `?:`, whose test, branch and jump
+  X writes as a segment after an operand's row. Their labels are numbered from
+  the expression's first, in the order the tasks number them, with each
+  label's place in the tape. For the increments and the compound assignments
+  they are the lowering's own (`check_lower_update`): an update's first row
+  (the old value read, by name or through its destination's kept address, and
+  converted) follows its destination's entries, and its second (the operation,
+  the conversion back and the store) follows its value's. T types an update of
+  an arithmetic destination by its computation's row and of a pointer by
+  `check_action_pointer_arithmetic`'s steps, the action taking the rest. The
+  machine's set is the census's within those rules: `a ?: b` and an update of
+  a `long double`, a 128-bit integer or a vector are refused by template (the
+  census refuses a bit-field's and an atomic's).
+- **A call** is typed by its callee's prototype (`node_machine_call_rule`):
+  each argument converted as an assignment converts it, a variadic one by the
+  default promotions, the action taking the rest. A callee with semantics of
+  its own (a library builtin's call the catalogue folds, a unit with overload
+  sets, no prototype, another convention than System V's, a callee that
+  returns twice) is refused as `callee`; a call the lowering doesn't make
+  plainly (`check_lower_call_body`'s plain call: a struct's, a union's, a long
+  double's, a 128-bit or a half-precision argument, parameter or result) as
+  `template`. X writes the arguments, each converted, and a `CALL` whose value
+  is the call's row numbered in the tasks' preorder, as the lowering allocates
+  its rows, relative to the expression's first call.
 - **The comparison**, for every expression the machine takes: each record's
-  value (every field), its operands' conversions and a member's offset against
-  the stream's, and its tape against the lowering's entries that the
-  expression's tasks own (the inventory's log), a local's numbered by a map of
-  the body's that must stay one to one.
+  value (every field), its operands' conversions, a call's arguments'
+  conversions and a member's offset against the stream's, and its tape against
+  the lowering's entries that the expression's tasks own (the inventory's
+  log), a local's numbered by a map of the body's that must stay one to one
+  and a call's row by one base, the stream's row for the tape's 0, each row's
+  contents (its callee's symbol, its arguments' count, classes and sizes,
+  whether it is variadic, no result object) the machine's. A branch's target,
+  an entry after `check_lower_resolve_labels`, is compared by label: the log
+  keeps each pop's next label and each body's labels' entries, so each of the
+  expression's labels must be the lowering's of the same number counted from
+  the expression's first, at the same entry. A temporary (a postfix update's
+  through an address keeps the address and the old value in two) is numbered
+  on the tape in the order the tape first names it, and must be a local the
+  body hasn't met, the same one every time the expression names it.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps
@@ -235,10 +308,11 @@ pipeline made and timed. No compile takes its entries.
   thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X
   only, under its lock, as `taskset -c 2`.
 
-The report gives the expressions and evaluated nodes taken, each refusal's
-(shape, code, leaf, context, diagnostic, template, row, root), the operators
-the code and template refusals stopped at, the differences (values, entries,
-twin), T's nodes by row or rule and by the action, by operator, and the times.
+The report gives the expressions, evaluated nodes and calls taken, each
+refusal's (shape, code, leaf, context, diagnostic, template, row, root,
+callee), the operators the code and template refusals stopped at, the
+differences (values, entries, twin), the labels compared, T's nodes by row or
+rule and by the action, by operator, and the times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`
