@@ -4263,11 +4263,15 @@ What the lowering covers past scalars (#145's programs):
   data's too) exists, so neither `-c`'s object nor the direct path's
   executable has an undefined symbol of the name, as clang's hasn't.
   `test-checker-driver --target-versions-only` compares such a unit's object
-  with clang's and runs its direct path's executable. Left: a label naming a
+  with clang's and runs its direct path's executable. A label naming a
   block-scope static's made name (`extern int fn __asm__("f.n")`) is the
-  static when clang emits the static's function before the label's first use,
-  and the static is renamed `f.n.1` otherwise; here the static is always
-  renamed, so the first order's link fails where clang's doesn't (#2439).
+  static in clang's module when clang emits the static's function before the
+  label's first use, and the static is renamed `f.n.1` otherwise (a definition
+  so labelled is one GLOBAL of the static's storage). The emission doesn't
+  model clang's emission order, so it refuses any such label by name, the
+  second order's too, whose link fails in clang (#2439):
+  `test-checker-driver` checks the three shapes on both paths
+  (`check_test_driver_static_label`).
 - **GNU's `retain` attribute** (#147). A definition with one before it (the
   reader drops one after it) that the unit emits keeps its section: its named
   section's (a section attribute's), or a section of its own, its class's
