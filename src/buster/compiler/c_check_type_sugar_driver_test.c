@@ -1381,6 +1381,30 @@ static const CheckDriverDefaultWarningFixture check_driver_counted_sugar_fixture
         .errors = 8,
         .notes = 2,
     },
+    {
+        // A member's specifiers' typedef past a GNU attribute list, whose arguments' names are no specifier (#2417: an
+        // invalid counted_by's count printed as the member's typedef), and kept in the counted sugar (`'const T *
+        // __counted_by(n)'`).
+        .name = "counted_by sugar with typedefs",
+        .source = "typedef int T;\n"
+                  "struct B { int n; const int *__attribute__((counted_by(n + 1))) e; T __attribute__((aligned(8))) *t; __attribute__((aligned(8))) T *u; const T *__attribute__((counted_by(n))) v; };\n"
+                  "void f(struct B *b, long *l)\n"
+                  "{\n"
+                  "    l = b->e;\n"
+                  "    l = b->t;\n"
+                  "    l = b->u;\n"
+                  "    l = b->v;\n"
+                  "}\n",
+        .errors = 5,
+    },
+    {
+        .name = "counted_by sugar of qualified typedefs",
+        .source = "typedef const int CI;\n"
+                  "typedef int *IP;\n"
+                  "struct B { int n; CI *__attribute__((counted_by(n))) p; volatile CI *__attribute__((counted_by(n))) q; };\n"
+                  "void f(struct B *b, long *l) { l = b->p; l = b->q; l = &b->p; }\n",
+        .errors = 3,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
