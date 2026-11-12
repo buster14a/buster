@@ -659,10 +659,9 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "element access through volatile vectors" },
         // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
         // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
-        // which take another plan, are refused.
+        // which take another plan, are refused. (A generic exchange whose result pointer is in another space than the
+        // object's is clang's error, #2233: c_check_address_space_driver_test.c.)
         { "segment-atomic-generic-load", "int tested(int __seg_fs*p,int*r){__atomic_load(p,r,5);return *r;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-generic-exchange", "int tested(int __seg_gs*p,int*v,int*o){__atomic_exchange(p,v,o,5);return *o;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-sync-lock-release", "void tested(int __seg_gs*p){__sync_lock_release(p);}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -1450,6 +1449,47 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "{ux3 a={~0ull,1ull<<63,(unsigned long long)n},b={1,1ull<<63,7};ux3 s=__builtin_elementwise_add_sat(a,b),d=__builtin_elementwise_sub_sat(b,a);"
           "unsigned long long o[]={s[0],s[1],s[2],d[0],d[1],d[2]};FOLD(o);}\n"
           "A(signed char,1)S(unsigned char,2)A(short,3)S(unsigned short,4)A(int,5)S(unsigned,6)A(long long,7)S(unsigned long,8)S(char,9)return (int)h;}\n"
+        },
+        // The integer elementwise builtins of _BitInt scalars of up to 64 bits, of each signedness and widths no power of
+        // two among them (#2410): the sequences of check_lower_integer_elements of their bits zero-extended, fshl's and fshr's
+        // count modulo a width no power of two; and pdep and pext of a _BitInt and a long (check_lower_scalar_lanes) where the
+        // target has BMI2, each alone in a function of its own ("vector-integer-bits" has more).
+        { "scalar-bitint-elements",
+          "#define S(T,k) {T a=(T)((unsigned long long)n*0x9e3779b97f4a7c15ull>>k),b=(T)((unsigned long long)n*0x2545f4914f6cdd1dull>>(k+3)),c=(T)-1;"
+          "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_add_sat(c,a),__builtin_elementwise_sub_sat(a,b),__builtin_elementwise_sub_sat(b,c),"
+          "__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,c),__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),"
+          "__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg((T)(a&~a),c),__builtin_elementwise_ctzg(b,c),__builtin_elementwise_clzg(c),"
+          "__builtin_elementwise_fshl(a,b,(T)(k*7)),__builtin_elementwise_fshr(a,b,(T)(n+k))};FOLD(q_);}\n"
+          "#define A(T,k) S(T,k) {T a=(T)((unsigned long long)n*0x9e37ull>>k),m=(T)((unsigned long long)1<<(sizeof(T)*8-1));"
+          "T q_[]={__builtin_elementwise_abs(a),__builtin_elementwise_abs((T)-a),__builtin_elementwise_abs((T)(m<<1))};FOLD(q_);}\n"
+          "#if defined(__BMI2__)\n"
+          "static unsigned _BitInt(37) deposit(unsigned _BitInt(37) a,unsigned _BitInt(37) b){return __builtin_elementwise_pdep(a,b);}\n"
+          "static long extract(long a,long b){return __builtin_elementwise_pext(a,b);}\n"
+          "#else\n"
+          "#define deposit(a,b) 0\n#define extract(a,b) 0\n"
+          "#endif\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "S(unsigned _BitInt(1),1)A(_BitInt(2),2)S(unsigned _BitInt(5),3)A(_BitInt(5),4)A(_BitInt(13),5)S(unsigned _BitInt(33),6)A(_BitInt(37),7)"
+          "S(unsigned _BitInt(37),8)A(_BitInt(63),9)A(_BitInt(64),10)S(unsigned _BitInt(64),11)\n"
+          "unsigned long long e[]={(unsigned long long)deposit((unsigned _BitInt(37))(n*0x12345),(unsigned _BitInt(37))0x1f0f0f0f0full),"
+          "(unsigned long long)extract(n*0x9e3779b97f4a7c15,0x0ff00ff00ff00ff0)};FOLD(e);return (int)h;}\n"
+        },
+        // The integer elementwise builtins of 128-bit scalars (#2410): __int128, unsigned __int128 and _BitInts of 65 to 128
+        // bits, the sequences in Tier 0's 128-bit classes, their constants built of halves, a _BitInt's operands masked by
+        // shifts and a funnel count of a width no power of two reduced modulo it by its halves'; zero, all ones and the
+        // most negative value among the operands.
+        { "scalar-wide-elements",
+          "#define S(T) {T q_[]={__builtin_elementwise_add_sat((T)a,(T)b),__builtin_elementwise_add_sat((T)c,(T)a),__builtin_elementwise_sub_sat((T)a,(T)b),"
+          "__builtin_elementwise_sub_sat((T)b,(T)c),__builtin_elementwise_max((T)a,(T)b),__builtin_elementwise_min((T)a,(T)c),__builtin_elementwise_popcount((T)a),"
+          "__builtin_elementwise_bitreverse((T)a),__builtin_elementwise_clzg((T)a,(T)b),__builtin_elementwise_ctzg((T)z,(T)c),__builtin_elementwise_ctzg((T)b,(T)c),"
+          "__builtin_elementwise_clzg((T)(c|1)),__builtin_elementwise_fshl((T)a,(T)b,(T)c),__builtin_elementwise_fshr((T)a,(T)b,(T)(c>>3))};FOLD(q_);}\n"
+          "#define A(T) S(T) {T m=(T)((unsigned __int128)1<<(sizeof(T)*8-1));T q_[]={__builtin_elementwise_abs((T)a),__builtin_elementwise_abs((T)(0-(unsigned __int128)a)),"
+          "__builtin_elementwise_abs((T)(m<<1))};FOLD(q_);}\n"
+          "int tested(int n){unsigned h=2166136261u;unsigned long long x=(unsigned long long)n*0x9e3779b97f4a7c15ull,y=x*0x2545f4914f6cdd1dull;\n"
+          "for(int i=0;i<4;i++){unsigned __int128 a=((unsigned __int128)x<<64)|(y*3),b=((unsigned __int128)(y^x)<<64)|x,"
+          "c=(unsigned __int128)(x*0x9e3779b97f4a7c15ull)*y,z=0;if(i==1)a=0;if(i==2)b=~(unsigned __int128)0>>(x&7);if(i==3)a=(unsigned __int128)1<<127;\n"
+          "S(unsigned __int128)A(__int128)S(unsigned _BitInt(100))A(_BitInt(100))A(_BitInt(65))S(unsigned _BitInt(128))A(_BitInt(127))S(unsigned _BitInt(65))"
+          "x=x*31+y;y^=x>>7;}return (int)h;}\n"
         },
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and

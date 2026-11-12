@@ -720,7 +720,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     const uint32_t vector_registers = options->vector_register_mask != 0 ? options->vector_register_mask & BUSTER_TIER1_EMIT_VECTOR_REGISTERS : BUSTER_TIER1_EMIT_VECTOR_REGISTERS;
     // The callee-saved registers values live across a call may take, but those the frame reserves (tier1_emit_cfg_callee):
     // rbp where it is the frame pointer, r15 where it is a realigned dynamic frame's base.
-    emitted->callee_registers = prepared->call_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE & ~prepared->reserved_registers : 0;
+    // And values live across an asm body (#2144), which may take them to keep out of the registers it touches.
+    emitted->callee_registers = prepared->call_count != 0 || prepared->asm_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE & ~prepared->reserved_registers : 0;
     ok = error == TIER1_EMIT_OK;
     uint32_t* block_starts = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* successor_offsets = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
@@ -2995,6 +2996,56 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
     return error;
 }
 
+// An asm body's register operands into their registers (#2144, tier1_emit_cfg_asm): from `sources` (a general register's
+// number, or BUSTER_TIER1_EMIT_VECTOR_LOCATION + n for xmm n), one parallel move per class, as tier1_emit_call moves a
+// call's arguments.
+static Tier1EmitError tier1_emit_cfg_asm_operands(const IrAsmBody* body, const uint32_t* sources, Tier1EmitBuffer* buffer, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t general_sources[BUSTER_TIER1_SELECT_MAX_ARGUMENTS];
+    uint32_t general_destinations[BUSTER_TIER1_SELECT_MAX_ARGUMENTS];
+    uint32_t vector_sources[BUSTER_TIER1_SELECT_MAX_ARGUMENTS];
+    uint32_t vector_destinations[BUSTER_TIER1_SELECT_MAX_ARGUMENTS];
+    uint32_t general = 0;
+    uint32_t vectors = 0;
+    Tier1EmitError error = body->passed <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
+    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < body->passed; k += 1)
+    {
+        const uint8_t reg = body->locations[k].registers[0];
+        const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const bool placed = vector ? sources[k] >= BUSTER_TIER1_EMIT_VECTOR_LOCATION && sources[k] < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 16 : sources[k] < BUSTER_TIER1_EMIT_GENERAL_REGISTERS;
+        error = placed ? error : TIER1_EMIT_ALLOCATION;
+        if (vector)
+        {
+            vector_sources[vectors] = sources[k] - BUSTER_TIER1_EMIT_VECTOR_LOCATION;
+            vector_destinations[vectors++] = reg & 0x1fu;
+        }
+        else
+        {
+            general_sources[general] = sources[k];
+            general_destinations[general++] = reg;
+        }
+    }
+    const Tier1ParallelMoves moves[2] = {
+        { .sources = general_sources, .destinations = general_destinations, .count = general, .scratch = BUSTER_TIER1_SELECT_SCRATCH },
+        { .sources = vector_sources, .destinations = vector_destinations, .count = vectors, .scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH },
+    };
+    for (uint32_t c = 0; error == TIER1_EMIT_OK && c < 2; c += 1)
+    {
+        Tier1ResolvedMoves resolved = { 0 };
+        const Tier1AllocationError moved = moves[c].count != 0 ? tier1_resolve_moves(&moves[c], scratch, &resolved) : TIER1_ALLOCATION_OK;
+        error = moved == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : moved == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
+        for (uint32_t m = 0; error == TIER1_EMIT_OK && m < resolved.count; m += 1)
+        {
+            const X86Instruction record = c == 0 ? tier1_emit_move(resolved.sources[m], resolved.destinations[m], 8) :
+                                                   tier1_select_float_move((uint8_t)resolved.destinations[m], (uint8_t)resolved.sources[m]);
+            error = tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return error;
+}
+
 // An asm body's records (#1839, TIER1_RULE_ASM) in its node's place, at its definition phase: the values that live past
 // the node in the general registers it touches (its fixed registers, tier1_select_node_fixed), a callee-saved one's
 // among them, stored into their call-save rows and loaded after, as a fixed rule's sequence has them (tier1_emit_fixed),
@@ -3003,17 +3054,21 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
 // that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's frame object from the frame's base
 // register, and its own branches, each to its target's record in the function's code (the restores' first record for one
 // to its end), sized with the function's. The consumer gave those registers rows (tier1_emit_cfg_saves); one missing is
-// TIER1_EMIT_ALLOCATION. Its records are one ORIGINAL of the node, the saves' and the restores' moves. Into `range`, the
-// body's first record and the one past its last: the template's own, which the target's forms don't bound (as the
-// assembler takes any instruction whatever -march says, so does clang's object).
-static Tier1EmitError tier1_emit_cfg_asm(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, Tier1EmitBuffer* buffer,
-                                         uint32_t* range)
+// TIER1_EMIT_ALLOCATION. Its register operands (#2144, IrAsmBody.locations), its effective uses, each in the register of its
+// class `sources` names at its use phase, are moved into their own registers after the saves, as a call's arguments are
+// (tier1_emit_call): one parallel move through the scratch register for the general ones and another through the
+// floating one's for the xmm ones, full-width, as an I32 operand's upper half is the template's to ignore. Its records
+// are one ORIGINAL of the node, the saves', the operands' and the restores' moves. Into `range`, the body's first record
+// and the one past its last: the template's own, which the target's forms don't bound (as the assembler takes any
+// instruction whatever -march says, so does clang's object).
+static Tier1EmitError tier1_emit_cfg_asm(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, const uint32_t* sources, uint32_t node, uint32_t use,
+                                         Tier1EmitBuffer* buffer, uint32_t* range, Arena* scratch)
 {
     const IrFunction* function = plan->function;
     const IrCall* call = &function->calls[function->b[node]];
     const uint32_t index = (uint32_t)plan->patterns[node].immediate;
     const IrAsmBody* body = index < function->asm_body_count ? &function->asm_bodies[index] : 0;
-    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    const uint32_t block = body != 0 ? ir_asm_body_block(function, call, body) : BUSTER_IR_NONE;
     int32_t offset = 0;
     const bool placed = block == BUSTER_IR_NONE || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[block], &offset));
     Tier1EmitError error = body == 0 ? TIER1_EMIT_INVALID : placed ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
@@ -3090,6 +3145,7 @@ static Tier1EmitError tier1_emit_cfg_asm(const Tier1SelectPlan* plan, Tier1EmitR
                 emitted->call_loads += pass == 1;
             }
         }
+        error = error == TIER1_EMIT_OK && pass == 0 && body->passed != 0 ? tier1_emit_cfg_asm_operands(body, sources, buffer, scratch) : error;
         tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, use + 1), BUSTER_IR_NONE);
         // The body's records, between the saves and the restores.
         const uint32_t first = buffer->count;
@@ -3136,6 +3192,8 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool 
         // An asm body's records and its saves and restores (#1839, tier1_emit_cfg_asm): of the general registers, of
         // xmm0 to xmm14 and of k1 to k7.
         records += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? function->asm_bodies[call->body - 1].count + 2u * (BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 15u + 7u) : 0;
+        // And its register operands' moves (#2144, tier1_emit_cfg_asm_operands), a cycle's through the scratch register.
+        records += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? 2u * (uint64_t)function->asm_bodies[call->body - 1].passed + 2u : 0;
         // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's
         // loop and final touch (tier1_emit_cfg_adjust: up to eight records replacing its one subtraction).
         records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
@@ -3597,6 +3655,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 {
                     row_sources[u - plan->effective_use_offsets[node]] = transitions.registers[plan->effective_use_values[u]];
                 }
+                // An asm body's register operands' (#2144), each in a register of its class (tier1_emit_cfg_asm moves it
+                // into its own).
+                for (uint32_t u = plan->effective_use_offsets[node]; pattern->rule == TIER1_RULE_ASM && u < plan->effective_use_offsets[node + 1] && u - plan->effective_use_offsets[node] < BUSTER_TIER1_SELECT_MAX_ARGUMENTS; u += 1)
+                {
+                    const uint32_t value = plan->effective_use_values[u];
+                    argument_registers[u - plan->effective_use_offsets[node]] = transitions.registers[value];
+                    error = tier1_emit_cfg_holds(emitted, value, transitions.registers[value]) ? error : TIER1_EMIT_ALLOCATION;
+                }
             }
             if (error == TIER1_EMIT_OK)
             {
@@ -3751,7 +3817,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 // An asm body (#1839): the saves of its fixed registers' rows hold their owners now, which nothing else
                 // stored since; those rows are taken as a fixed rule's are.
-                error = asm_range_count < emitted->prepared.asm_count ? tier1_emit_cfg_asm(plan, emitted, &transitions, node, use, &buffer, asm_ranges + 2 * asm_range_count) : TIER1_EMIT_INVALID;
+                error = asm_range_count < emitted->prepared.asm_count ? tier1_emit_cfg_asm(plan, emitted, &transitions, argument_registers, node, use, &buffer, asm_ranges + 2 * asm_range_count, scratch) : TIER1_EMIT_INVALID;
                 asm_range_count += 1;
                 tier1_emit_fixed_rows(&saves, tier1_select_node_fixed(function, &plan->patterns[node]));
             }
@@ -3935,8 +4001,11 @@ static bool tier1_emit_cfg_preference_fatal(Tier1CfgError error)
 // Values live across a call into callee-saved registers, which the prologue saves once, rather than in caller-saved ones
 // that every call saves and restores around itself: from the first allocation's intervals, each value whose interval
 // covers a call's definition phase, but the call's own result, is allocated again with the callee-saved registers alone
-// (and a parameter's incoming one, its definition's), and every other value with the caller-saved ones. If that
-// allocation fails, the first stands. Then the callee-saved registers the allocation took, which the frame saves.
+// (and a parameter's incoming one, its definition's), and every other value with the caller-saved ones. A value whose
+// interval covers an asm body's definition phase (#2144, TIER1_RULE_ASM) is kept out of the general registers the body
+// touches, which it would otherwise save and restore around itself (tier1_emit_cfg_asm), and may take the callee-saved
+// ones too where it crosses no call: a phi's web as one, as for calls. If that allocation fails, the first stands. Then
+// the callee-saved registers the allocation took, which the frame saves.
 static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
@@ -3954,15 +4023,30 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
             calls[call_count++] = base + 2 * node + 1;
         }
     }
+    // The asm bodies' definition phases, in position order, and the general registers each touches.
+    uint32_t* bodies = ok && emitted->prepared.asm_count != 0 ? ir_allocate(scratch, (uint64_t)emitted->prepared.asm_count + 1, 4, &ok) : 0;
+    uint32_t* touched = ok && emitted->prepared.asm_count != 0 ? ir_allocate(scratch, (uint64_t)emitted->prepared.asm_count + 1, 4, &ok) : 0;
+    uint32_t body_count = 0;
+    for (uint32_t node = 0; ok && bodies != 0 && node < function->instruction_count && body_count < emitted->prepared.asm_count; node += 1)
+    {
+        if (!plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM)
+        {
+            bodies[body_count] = base + 2 * node + 1;
+            touched[body_count++] = tier1_select_node_fixed(function, &plan->patterns[node]);
+        }
+    }
     uint32_t* allowed = ok ? ir_allocate(output, (uint64_t)input->value_count + 1, 4, &ok) : 0;
     // Each phi web's root (a phi and its operands, joined), and whether a member of the root's web crosses a call: the
-    // whole web then takes callee-saved registers, so that a loop's back edge can keep its phi's register.
+    // whole web then takes callee-saved registers, so that a loop's back edge can keep its phi's register. And the general
+    // registers of the asm bodies a member crosses (`avoided`), which the whole web keeps out of.
     uint32_t* parents = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 4, &ok) : 0;
     uint8_t* crossed = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    uint32_t* avoided = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 4, &ok) : 0;
     for (uint32_t v = 0; ok && v < input->value_count; v += 1)
     {
         parents[v] = v;
         crossed[v] = 0;
+        avoided[v] = 0;
     }
     for (uint32_t k = 0; ok && k < input->phi_count; k += 1)
     {
@@ -3995,6 +4079,7 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         // A mask keeps its class's registers (#179): no opmask register survives a call.
         const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
         bool crosses = false;
+        uint32_t avoid = 0;
         for (uint32_t i = emitted->cfg.value_interval_offsets[v]; i < emitted->cfg.value_interval_offsets[v + 1]; i += 1)
         {
             const uint32_t start = emitted->cfg.intervals.starts[i];
@@ -4009,6 +4094,19 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
                 high = calls[middle] < start ? high : middle;
             }
             crosses |= low < call_count && calls[low] < end && calls[low] != base + 2 * node + 1;
+            // The bodies the interval covers (a body defines no value), each's registers.
+            uint32_t first = 0;
+            uint32_t past = body_count;
+            while (first < past)
+            {
+                const uint32_t middle = first + (past - first) / 2;
+                first = bodies[middle] < start ? middle + 1 : first;
+                past = bodies[middle] < start ? past : middle;
+            }
+            for (uint32_t b = first; general && b < body_count && bodies[b] < end; b += 1)
+            {
+                avoid |= touched[b];
+            }
         }
         // A parameter keeps its incoming register over its definition's interval, as in the first allocation: free there
         // too, in a callee-saved register from the entry on, it would hold one for the whole entry block, which spilled
@@ -4021,9 +4119,11 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         }
         crossed[root] |= pass == 0 && crosses;
         crosses = crossed[root] != 0;
+        avoided[root] |= pass == 0 ? avoid : 0;
+        avoid = avoided[root];
         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
-        allowed[v] = general ? (crosses ? callee : caller) | defined : input->allowed_registers[v];
-        crossing += pass == 1 && general && crosses;
+        allowed[v] = general ? ((crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid) | defined : input->allowed_registers[v];
+        crossing += pass == 1 && general && (crosses || avoid != 0);
     }
     Tier1EmitError error = ok || callee == 0 ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK && crossing != 0)

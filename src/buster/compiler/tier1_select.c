@@ -19,7 +19,8 @@
 #define BUSTER_TIER1_SELECT_NO_REGISTER UINT8_MAX
 #define BUSTER_TIER1_SELECT_LANES 16
 #define BUSTER_TIER1_SELECT_SCRATCH X86_REGISTER_R11
-#define BUSTER_TIER1_SELECT_RECORDS_PER_NODE 6
+// A node's room for its records: a doubleword reduction of 64 bytes (#1840, tier1_select_reduce) has 8.
+#define BUSTER_TIER1_SELECT_RECORDS_PER_NODE 8
 // The most records a rule that takes x86's fixed registers writes (tier1_select_fixed), before its consumer's saves: a
 // remainder by a constant's reciprocal whose multiplier takes the add sequence, whose divisor is past an imm32 and whose
 // dividend is in rax or rdx has 13.
@@ -325,12 +326,17 @@ typedef enum Tier1SelectRule
 #define BUSTER_TIER1_VECTOR_LANE_EXTRACT 21
 #define BUSTER_TIER1_VECTOR_LANE_INSERT 22
 #define BUSTER_TIER1_VECTOR_MOVEMASK 23
+// A reduction of values[0]'s doublewords or quadwords into each lane of a 16-byte destination (#1840,
+// tier1_select_reduce): `immediate` the IR's flags, `source_width` values[0]'s bytes. Clang's halvings: the high half
+// into the vector class's scratch register (vextracti64x4, vextracti32x4, then vpshufd 0x4e and, of doublewords, 0xb1),
+// then the operation of both halves into the destination.
+#define BUSTER_TIER1_VECTOR_REDUCE 24
 // A select of an operation where its mask is set (#1840, tier1_select_masked_binary): `vselect m, op(a, b), w` of an
 // operation whose only use the select is, at the select's lanes, as one EVEX instruction under the mask. `condition` 0
 // for a BINARY (`operation` its BUSTER_TIER1_VECTOR_*) and 1 for a LANE_OP (`operation` the IR's flags), values[0] and
 // values[1] its operands, values[2] the mask and values[3] the passthrough w, which the destination takes first unless
 // it holds it; none where w is a zero vector, the zeroing form.
-#define BUSTER_TIER1_VECTOR_MASKED_BINARY 24
+#define BUSTER_TIER1_VECTOR_MASKED_BINARY 25
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1633,6 +1639,29 @@ static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles
     }
 }
 
+// A reduction (#1840, BUSTER_TIER1_VECTOR_REDUCE): each halving reads the source, then the destination, whose 16 bytes
+// end with the result in every lane, as ir_simd_typed_reduce decodes them.
+static void tier1_select_reduce(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t flags = (uint32_t)holes->immediate;
+    const uint32_t size = flags & 3;
+    const uint32_t operation = flags >> 2;
+    const uint8_t x = destination & 15;
+    const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    uint8_t from = holes->left & 15;
+    for (uint32_t span = holes->source_width / 2u; span >= (1u << size); span /= 2)
+    {
+        const X86Instruction halve = span >= 16 ? (X86Instruction){ .form = span == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8,
+                                                                    .reg = from, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 1 }
+                                                : (X86Instruction){ .form = X86_FORM_VPSHUFD_X_XM128_IMM8_EVEX, .reg = scratch, .rm = from, .mode = BUSTER_X86_REGISTER_DIRECT,
+                                                                    .immediate = span == 8 ? 0x4e : 0xb1 };
+        const X86Instruction combine = { .form = ir_simd_reduce_form(operation, size, span == 32 ? 1 : 0), .reg = x, .vvvv = from, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, halve);
+        tier1_select_append(result, combine);
+        from = x;
+    }
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -2285,6 +2314,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
         {
             tier1_select_lane(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_REDUCE)
+        {
+            tier1_select_reduce(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_AES)
         {
@@ -3943,15 +3976,36 @@ static bool tier1_select_body_call(const IrFunction* function, uint32_t node)
 
 // Whether the CFG consumer writes a body call's asm body (#1839, TIER1_RULE_ASM): its block, where it has one, an
 // IR_STACK_ADDR of a frame object, whose place in the frame its records' block base becomes, and none of the registers
-// that hold the frame (rsp, rbp, r15) among those it touches, as the producer has them (tier0_asm_bodies_check).
+// that hold the frame (rsp, rbp, r15) among those it touches, as the producer has them (tier0_asm_bodies_check); and each
+// register operand (#2144, IrAsmBody.locations), which the consumer moves into its register: an I32's, an I64's or a
+// ptr's in a general register but the scratch one, which the moves take, or a float's or a double's in xmm0 to xmm14
+// (xmm15 is the floating moves' scratch).
 static bool tier1_select_asm_supported(const IrFunction* function, uint32_t node)
 {
     const IrCall* call = tier1_select_body_call(function, node) ? &function->calls[function->b[node]] : 0;
     const IrAsmBody* body = call != 0 && call->body <= function->asm_body_count ? &function->asm_bodies[call->body - 1] : 0;
-    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    const uint32_t block = body != 0 ? ir_asm_body_block(function, call, body) : BUSTER_IR_NONE;
     const uint32_t frame = (1u << X86_REGISTER_RSP) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R15);
-    return body != 0 && call->argument_count <= 1 && (call->argument_count == 0 || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR)) &&
-           (body->touched & frame) == 0;
+    bool supported = body != 0 && call->argument_count >= body->passed && call->argument_count - body->passed <= 1 &&
+                     (block == BUSTER_IR_NONE || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR)) && (body->touched & frame) == 0;
+    const uint32_t skipped = supported ? call->argument_count - body->passed : 0;
+    // Each register taken once (their moves are one parallel move), and no more of them than a call's arguments.
+    uint64_t taken = 0;
+    supported = supported && body->passed <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
+    for (uint32_t k = 0; supported && k < body->passed; k += 1)
+    {
+        const uint32_t value = function->extra[call->argument_first + skipped + k];
+        const uint8_t reg = body->locations[k].registers[0];
+        const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const uint32_t n = reg & 0x1fu;
+        const uint8_t type = value < function->instruction_count ? function->type[value] : IR_VOID;
+        supported = vector ? (type == IR_F32 || type == IR_F64) && n < BUSTER_TIER1_SELECT_FLOAT_SCRATCH :
+                             (type == IR_I32 || type == IR_I64 || type == IR_PTR) && (reg & 0xe0) == 0 && n < 16 && n != BUSTER_TIER1_SELECT_SCRATCH && ((frame >> n) & 1) == 0;
+        const uint64_t bit = 1ull << (vector ? 32 + n : n);
+        supported = supported && (taken & bit) == 0;
+        taken |= bit;
+    }
+    return supported;
 }
 
 // Which of a machine row's operands its records write (#141, a bit per operand), through a field that names the operand's
@@ -4708,7 +4762,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
-                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4819,6 +4873,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_REDUCE && a < function->instruction_count)
+        {
+            // A reduction (#1840): its source's width, and its lanes and operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_REDUCE;
+            base.source_width = (uint8_t)tier1_select_vector_width(function->type[a]);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
@@ -6309,16 +6375,24 @@ static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, 
     return pending_count + (fresh && passed);
 }
 
+// The arguments of a node's call that are no effective use: a body call's block (#2144, TIER1_RULE_ASM), its first where it
+// has one, whose address no register holds; none of another call's.
+static uint32_t tier1_select_asm_skipped(const IrFunction* function, const Tier1SelectPattern* pattern, const IrCall* call)
+{
+    const bool body = pattern->rule == TIER1_RULE_ASM && call->body != 0 && call->body <= function->asm_body_count;
+    return body && call->argument_count > function->asm_bodies[call->body - 1].passed ? 1 : 0;
+}
+
 // Marks needed the values a needed `node`'s pattern reads: a call's arguments and an indirect call's callee, or its
 // pattern's values. A value the walk back has passed (`walked`, or one past `node`, a later block's value that an
 // earlier block reads, #789) goes on `pending`.
 static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count)
 {
-    // A row call's (#141) are its arguments too.
-    if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW)
+    // A row call's (#141) are its arguments too, and a body call's its register operands (#2144), past its block.
+    if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW || pattern->rule == TIER1_RULE_ASM)
     {
         const IrCall call = function->calls[function->b[node]];
-        for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
+        for (uint32_t argument = tier1_select_asm_skipped(function, pattern, &call); argument < call.argument_count; argument += 1)
         {
             const uint32_t value = function->extra[call.argument_first + argument];
             pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
@@ -6328,7 +6402,7 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
             pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
         }
     }
-    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
+    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
     {
         const uint32_t value = pattern->values[operand];
         if (value != BUSTER_IR_NONE)
@@ -6684,10 +6758,10 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 const Tier1SelectPattern* pattern = &plan.patterns[node];
                 plan.estimated_cost += pattern->intrinsic_cost;
-                if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW)
+                if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW || pattern->rule == TIER1_RULE_ASM)
                 {
                     const IrCall call = function->calls[function->b[node]];
-                    for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
+                    for (uint32_t argument = tier1_select_asm_skipped(function, pattern, &call); argument < call.argument_count; argument += 1)
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->extra[call.argument_first + argument];
                     }
