@@ -1819,6 +1819,12 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     CheckValue left = check_action_operand(table, action, result, 0);
     CheckValue right = unary ? left : check_action_operand(table, action, result, 1);
+    if (__builtin_expect(check_action_kind(table, left.type) == BUSTER_TYPE_KIND_ATOMIC, 0) && !unary && !shifts && !comparison)
+    {
+        // An atomic rvalue, a cast's (#2230): clang's UsualArithmeticConversions take the left operand's value type, but
+        // not the right's, whose atomic type the operator refuses.
+        check_action_conversion(table, &left, type_conversion_operand(table, left.type), BUSTER_CHECK_CONVERT_ARITHMETIC, &result->conversions[0], action->node);
+    }
     const bool left_ok = bits ? check_action_is_integer(table, left.type) : check_action_is_arithmetic(table, left.type);
     const bool right_ok = bits ? check_action_is_integer(table, right.type) : check_action_is_arithmetic(table, right.type);
     result->warnings |= check_action_kind(table, left.type) == BUSTER_TYPE_KIND_ENUM || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_ENUM ?
@@ -2852,7 +2858,12 @@ static TypeId check_action_union_cast_member(const TypeTable* table, TypeId targ
 static inline __attribute__((always_inline)) void check_action_cast(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     CheckValue source = check_action_operand(table, action, result, 0);
-    const TypeId target = type_unqualified(type_strip_aligned(table, action->type));
+    // A cast to an atomic type (#2230) converts to its value type, and its rvalue keeps the atomic type, as clang's
+    // CheckCStyleCast types it: `(_Atomic int)x` is an `_Atomic(int)` rvalue, which an `_Atomic` object takes, and which
+    // the usual arithmetic conversions take as their left operand alone (check_action_arithmetic).
+    const TypeId cast_type = type_unqualified(type_strip_aligned(table, action->type));
+    const bool atomic_target = __builtin_expect(type_kind(table, cast_type) == BUSTER_TYPE_KIND_ATOMIC, 0);
+    const TypeId target = atomic_target ? type_conversion_operand(table, cast_type) : cast_type;
     const uint8_t target_kind = type_kind(table, target);
     const uint8_t input_kind = check_action_kind(table, source.type);
     const bool target_pointer = target_kind == BUSTER_TYPE_KIND_POINTER;
@@ -2904,6 +2915,13 @@ static inline __attribute__((always_inline)) void check_action_cast(TypeTable* t
         check_action_conversion(table, &source, target, BUSTER_CHECK_CONVERT_CAST, &result->conversions[0], action->node);
         result->value = source;
         check_action_cast_provenance(&result->value, ice, gnu_ice, null, target_kind == BUSTER_TYPE_KIND_VOID, discarded);
+        if (atomic_target)
+        {
+            // A constant, as clang's evaluator folds CK_NonAtomicToAtomic, but no integer constant expression, which
+            // needs an integer type.
+            result->value.type = cast_type;
+            result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER);
+        }
     }
 }
 
@@ -3074,6 +3092,12 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 CheckValue value = check_action_operand_value(table, action, &action->arguments[i], &converted, 0);
                 const TypeId original = type_unqualified(type_strip_aligned(table, value.type));
                 const bool parameter = (prototype || kr) && i < count;
+                if (__builtin_expect(prototype && !parameter && type_kind(table, original) == BUSTER_TYPE_KIND_ATOMIC, 0))
+                {
+                    // An atomic rvalue, a cast's (#2230), as a variadic argument: clang's -Wnon-pod-varargs error, refused
+                    // by name. (An unprototyped call's is promoted, as clang's is.)
+                    check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, i + 1);
+                }
                 if (!parameter)
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);

@@ -1510,6 +1510,8 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
         if (output->action.diagnostic == CHECK_DIAG_NONE && (!ordinary || result == 0))
         {
             check_action_diagnose(&output->action, result == 0 && ordinary ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE, 0);
+            // (Clang's "CFString literal is not a string constant", #2189: check_semantic_cfstring.)
+            output->constraint = result == 0 && ordinary ? output->constraint : CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT;
         }
         else if (output->action.diagnostic == CHECK_DIAG_NONE && literal)
         {

@@ -2003,8 +2003,11 @@ static bool check_lower_integer_elements(const CheckLowerWriter* writer, CBuilti
         const uint64_t size = type_size(types, base);
         uint32_t width = 0;
         bool is_signed = false;
-        result_elements = base != BUSTER_TYPE_BOOL && type_kind(types, base) == BUSTER_TYPE_KIND_INTEGER && check_action_integer_type(types, base, &width, &is_signed) &&
-                          width == size * 8 && (size == 1 || size == 2 || size == 4 || size == 8);
+        // A _BitInt of up to 64 bits (#2410) too, its width any: the sequences take its bits zero-extended.
+        const uint8_t kind = type_kind(types, base);
+        result_elements = base != BUSTER_TYPE_BOOL && (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) &&
+                          check_action_integer_type(types, base, &width, &is_signed) &&
+                          (kind == BUSTER_TYPE_KIND_BIT_INT ? width >= 1 + (is_signed ? 1u : 0u) && width <= 64 : width == size * 8 && (size == 1 || size == 2 || size == 4 || size == 8));
     }
     return result_elements;
 }
@@ -2053,18 +2056,20 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
     const TypeId element = vector ? check_lower_transport_element(types, result) : type_unqualified(type_strip_aligned(types, result));
     uint32_t width = 0;
     bool is_signed = false;
-    const bool integer = check_action_integer_type(types, element, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64);
+    // A scalar _BitInt's width is any up to 64 (check_lower_integer_elements, #2410).
+    const bool integer = check_action_integer_type(types, element, &width, &is_signed) &&
+                         (width == 8 || width == 16 || width == 32 || width == 64 || (!vector && width >= 1 && width <= 64));
     if (count == 0 || count > graph->argument_counts[node] || lanes == 0 || lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES || !integer)
     {
         check_lower_unsupported(writer, "elementwise vector builtins of these operands");
     }
     else
     {
-        const bool wide = width == 64;
+        const bool wide = width > 32;
         const uint32_t bits = wide ? 64 : 32;
         const uint8_t class = wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
         const TypeId computed = wide ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_UINT;
-        const uint64_t kept = wide ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        const uint64_t kept = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
         uint32_t sources[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t values[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         for (uint32_t a = 0; a < count; a += 1)
@@ -2165,10 +2170,10 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
             }
             else
             {
-                // s = c & (width - 1) into t, then the funnel.
+                // s = c & (width - 1), or a _BitInt's c % width where its width is no power of two, into t, then the funnel.
                 const bool left = builtin == CBUILTIN_ELEMENTWISE_FSHL;
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, values[2]);
-                check_lower_sequence_constant(q, class, BUSTER_TYPED_AND, width - 1);
+                check_lower_sequence_constant(q, class, (width & (width - 1)) == 0 ? BUSTER_TYPED_AND : BUSTER_TYPED_MOD, (width & (width - 1)) == 0 ? width - 1 : width);
                 check_lower_sequence_add(q, BUSTER_TYPED_SET_LOCAL, class, t);
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, left ? values[0] : values[1]);
                 check_lower_sequence_add(q, BUSTER_TYPED_LOCAL, class, t);
