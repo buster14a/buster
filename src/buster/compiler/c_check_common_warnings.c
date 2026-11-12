@@ -4310,6 +4310,25 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
     return result;
 }
 
+// A batch of `live` (up to 16) listed comparison nodes (check_common_next_reach_op): those
+// -Wtautological-constant-out-of-range-compare may warn of (check_common_range_lanes) reach their roots, a reach's bits
+// being a union up the parents, so that the comparisons' order among the others' changes nothing.
+static void check_common_range_batch(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint8_t* reach,
+                                     const uint32_t* nodes, uint32_t live)
+{
+    const uint32_t count = graph->count;
+    const __mmask16 lanes = (__mmask16)(live >= 16 ? 0xffffu : (1u << live) - 1);
+    for (uint32_t bits = live != 0 ? check_common_range_lanes(graph, stream, types, nodes, lanes) : 0u; bits != 0; bits &= bits - 1)
+    {
+        uint8_t reached = BUSTER_CHECK_REACH_SIGN;
+        for (uint32_t at = nodes[(uint32_t)__builtin_ctz(bits)]; reached != 0 && at < count; at = parents[at])
+        {
+            reached &= (uint8_t)~reach[at];
+            reach[at] |= reached;
+        }
+    }
+}
+
 // check_common_next_op for the reach scan: with `comparisons`, each block's comparison nodes are appended to it (`*listed`
 // of them so far), compressed from the same operator load, for -Wtautological-constant-out-of-range-compare's batches
 // (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
@@ -9779,9 +9798,16 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         CheckCommonScan owners = { 0 };
         uint32_t* comparisons = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
         uint32_t listed = 0;
+        uint32_t tested = 0;
         for (uint32_t node = check_common_next_reach_op(graph, &own, comparisons, &listed, &owners); node < count;
              node = check_common_next_reach_op(graph, &own, comparisons, &listed, &owners))
         {
+            // A full batch of comparisons is tested as soon as it is listed, while the scan is near their nodes: tested at
+            // the end, a large unit's gathers would find its columns cold.
+            for (; listed - tested >= 16; tested += 16)
+            {
+                check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, 16);
+            }
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
             if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
             {
@@ -9793,21 +9819,10 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
-        // The comparisons, 16 at a time: those -Wtautological-constant-out-of-range-compare may warn of reach their roots.
-        // (A reach's bits are a union up the parents, so the comparisons' order after the others' changes nothing.)
-        for (uint32_t batch = 0; comparisons != NULL && batch < listed; batch += 16)
+        // The rest of the comparisons, fewer than 16.
+        if (comparisons != NULL)
         {
-            const uint32_t live = listed - batch < 16 ? listed - batch : 16;
-            for (uint32_t bits = check_common_range_lanes(graph, stream, types, comparisons + batch, (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1));
-                 bits != 0; bits &= bits - 1)
-            {
-                uint8_t reached = BUSTER_CHECK_REACH_SIGN;
-                for (uint32_t at = comparisons[batch + (uint32_t)__builtin_ctz(bits)]; reached != 0 && at < count; at = parents[at])
-                {
-                    reached &= (uint8_t)~reach[at];
-                    reach[at] |= reached;
-                }
-            }
+            check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, listed - tested);
         }
         // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
         const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
