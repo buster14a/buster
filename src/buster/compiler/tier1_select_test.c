@@ -1329,6 +1329,7 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 {
     tier1_select_test_address_arithmetic(test);
     tier1_select_test_coalesced_addresses(test);
+    tier1_select_test_in_place_sums(test);
     tier1_select_test_masked_forms(test);
     Arena input = arena_reserve(1u << 20);
     Arena output = arena_reserve(1u << 20);

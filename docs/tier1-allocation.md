@@ -842,6 +842,20 @@ left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
 the C front end's address chains define each link right before the allocator
 evicts it, a write nothing read.
 
+The same holds where control enters a block (`tier1_cfg_entry_unread`, #1217):
+a recomputed value whose register fragment at the block's start serves no use
+before its next fragment, the recipe's, takes over, before the block's last
+position, enters as its recipe. Its edges then move nothing for it, where they
+recomputed it into a register the block overwrote before any read: on the
+edges into Lua's `luaV_execute` dispatch tails and `sqlite3VdbeExec`'s, mostly
+a frame object's address (the measurements are #1217's record, linked from
+[the Tier 1 guide](commands/tier1.md)). Only a block's start
+counts: a split's piece starts inside its block, and the verifier checks that
+each piece holds its value whether or not a use reads it. Neither a use nor an
+edge leaving the block can read the register, since the fragment ends inside
+it; the verifier, which simulates every block from these entry locations, and
+the certificate take the same entry location.
+
 Recomputing a value live across a call instead of saving its register around
 it wouldn't pay: in speedtest1's scalar-path build every one of the 9,887
 values the CFG consumer saved around calls had no recipe; those with one live

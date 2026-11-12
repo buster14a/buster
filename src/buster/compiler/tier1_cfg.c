@@ -179,6 +179,9 @@ struct Tier1CfgAllocation
     // Null columns keep it for every value. Emission uses these; the verifier and the certificate do not.
     uint32_t* value_block_base;
     uint32_t* value_block_intervals;
+    // The input's blocks, borrowed as `intervals` borrows its uses (tier1_cfg_entry_unread), or null for none.
+    const uint32_t* block_starts;
+    uint32_t block_count;
 };
 
 typedef enum Tier1CfgError
@@ -445,6 +448,101 @@ static bool tier1_cfg_interval_location(const Tier1CfgAllocation* result, uint32
     return found;
 }
 
+// Whether a recomputed value's (#178) register fragment `fragment` of `interval` reads nothing from block entry `entry`
+// on: it serves no use from there to its end, where the interval's next fragment is the recipe's, before the block's
+// last position, so no later fragment takes the register's contents (a transition into a recipe moves nothing; the next
+// register fragment recomputes) and no edge leaving the block reads it (an interval may continue into the layout
+// successor, and edges' reads aren't uses). An edge into the block then needn't recompute the value into that register:
+// control enters with the value's recipe (#1217), as tier1_emit_cfg_dead_definition leaves out a definition's. Without
+// it every edge into a loop's dispatch block recomputed a table's or a frame object's address that the block overwrote
+// before any use. Without use or block columns nothing is proven. Uses are sorted per interval's slice.
+static bool tier1_cfg_entry_unread(const Tier1CfgAllocation* result, uint32_t interval, uint32_t fragment, uint32_t entry)
+{
+    const Tier1Allocation* allocation = &result->allocation;
+    const Tier1AllocationInput* intervals = &result->intervals;
+    bool unread = intervals->rematerializable != 0 && intervals->rematerializable[interval] != 0 && intervals->use_offsets != 0 && intervals->use_positions != 0 &&
+                  result->block_starts != 0 && result->block_count != 0 && allocation->kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER &&
+                  fragment + 1 < allocation->fragment_offsets[interval + 1] && allocation->kinds[fragment + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    if (unread)
+    {
+        // The block that holds `entry`: the last whose start is at or before it.
+        uint32_t low = 0;
+        uint32_t high = result->block_count;
+        while (low + 1 < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            if (result->block_starts[middle] <= entry)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        // Only where control enters a block: a split's piece starts inside one (tier1_cfg_verify refuses one at a block's
+        // start), and the verifier checks each piece holds its value whether or not a use reads it there.
+        unread = result->block_starts[low] == entry && allocation->ends[fragment] < result->block_starts[low + 1];
+    }
+    if (unread)
+    {
+        const uint32_t last = intervals->use_offsets[interval + 1];
+        uint32_t low = intervals->use_offsets[interval];
+        uint32_t high = last;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            if (intervals->use_positions[middle] < entry)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        unread = low == last || intervals->use_positions[low] >= allocation->ends[fragment];
+    }
+    return unread;
+}
+
+// The fragment of `interval` that covers `position`, BUSTER_TIER1_CFG_NONE for none.
+static uint32_t tier1_cfg_interval_fragment(const Tier1CfgAllocation* result, uint32_t interval, uint32_t position)
+{
+    const Tier1Allocation* allocation = &result->allocation;
+    const uint32_t last = allocation->fragment_offsets[interval + 1];
+    uint32_t low = allocation->fragment_offsets[interval];
+    uint32_t high = last;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (allocation->ends[middle] <= position)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < last && allocation->starts[low] <= position ? low : BUSTER_TIER1_CFG_NONE;
+}
+
+// A value's location where control enters its block at `entry`, from `interval`, which covers it: its fragment at
+// `position` (entry, or entry - 1 for an interval that continues from the layout predecessor), or the recipe where that
+// register fragment reads nothing from the entry on (tier1_cfg_entry_unread).
+static bool tier1_cfg_interval_entry(const Tier1CfgAllocation* result, uint32_t value, uint32_t interval, uint32_t position, uint32_t entry, uint32_t* location, uint8_t* kind)
+{
+    const uint32_t fragment = tier1_cfg_interval_fragment(result, interval, position);
+    const bool found = fragment != BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_location(result, value, interval, position, location, kind);
+    if (found && tier1_cfg_entry_unread(result, interval, fragment, entry))
+    {
+        *location = BUSTER_TIER1_CFG_REMATERIALIZE;
+        *kind = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    }
+    return found;
+}
+
 static bool tier1_cfg_location_mode(const Tier1CfgAllocation* result, uint32_t value, uint32_t position, uint32_t* location, uint8_t* kind, bool oracle)
 {
     const uint32_t interval = oracle ? tier1_cfg_interval_oracle(result, value, position) : tier1_cfg_interval_at(result, value, position);
@@ -464,12 +562,13 @@ static bool tier1_cfg_location_oracle(const Tier1CfgAllocation* result, uint32_t
 
 // Where a value must be when control enters its block at `entry`: for an interval that continues from the block's
 // layout predecessor, where it was there, since a fragment transition at `entry` runs inside the block; otherwise its
-// location at `entry`. The interval that covers `entry` also covers `entry - 1` when it continues.
+// location at `entry`. The interval that covers `entry` also covers `entry - 1` when it continues. A recomputed value
+// whose register there reads nothing from the entry on enters as its recipe (tier1_cfg_entry_unread).
 static bool tier1_cfg_entry_location_mode(const Tier1CfgAllocation* result, uint32_t value, uint32_t entry, uint32_t* location, uint8_t* kind, bool oracle)
 {
     const uint32_t interval = oracle ? tier1_cfg_interval_oracle(result, value, entry) : tier1_cfg_interval_at(result, value, entry);
     const uint32_t position = interval != BUSTER_TIER1_CFG_NONE && result->intervals.starts[interval] < entry ? entry - 1 : entry;
-    return interval != BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_location(result, value, interval, position, location, kind);
+    return interval != BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_entry(result, value, interval, position, entry, location, kind);
 }
 
 static bool tier1_cfg_entry_location(const Tier1CfgAllocation* result, uint32_t value, uint32_t entry, uint32_t* location, uint8_t* kind)
@@ -1016,7 +1115,7 @@ static uint32_t tier1_cfg_cursor_entry(const Tier1CfgAllocation* result, uint32_
     {
         const uint32_t position = result->intervals.starts[interval] < entry ? entry - 1 : entry;
         uint8_t kind = 0;
-        if (!tier1_cfg_interval_location(result, value, interval, position, &location, &kind))
+        if (!tier1_cfg_interval_entry(result, value, interval, position, entry, &location, &kind))
         {
             location = BUSTER_TIER1_CFG_NONE;
         }
@@ -1632,6 +1731,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     }
                 }
                 use_offsets[count] = input->use_count;
+                candidate.block_starts = input->block_starts;
+                candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){
                     .starts = pieces.starts,
                     .ends = pieces.ends,
