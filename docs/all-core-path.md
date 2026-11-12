@@ -1,7 +1,10 @@
 # The all-core path: a compile whose working memory is a window of the unit (#2536): design
 
-Status: design only. Nothing below is implemented, and its gains are a model's
-that its first steps exist to confirm or refute. It is
+Status: design. Step 0, the gauge, is built: `tools/allcore/allcore.c`
+([its guide](commands/all-core.md)), measured against its gate in
+[its record](https://github.com/buster14a/buster-performance/tree/359dcadc4a98855be571e0e7b64c50c44d82c9c9/docs/measurements/all-core-gauge-2536-2026-11-12).
+Nothing else below is implemented, and its gains are a model's that its first
+steps exist to confirm or refute. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s all-core target's
 design: what eight workers cost a compile on the 9700X, what the designs
 already in hand remove of that, and the change that removes the rest. The issue
@@ -627,7 +630,11 @@ tests' twin.
 476; this design's step 3 with the machine's step 4, which are one piece of
 work on the reader, 727; step 4, 1,032; step 5, 1,144. Step 0 comes first
 because every later gate is its table, and step 1 early because it is the
-cheapest test of the premise. Attested declarations and
+cheapest test of the premise. Step 0's gauge reproduces this record's whole
+compile and its stage table's times, user cycles, inflation and faults within
+3%, but not the kernel cycles of the stages that have few, which the record's
+own two measurements don't reproduce either ([its guide](commands/all-core.md#the-gate-at-4c8c3c9c)):
+a later gate on one stage's kernel cycles needs a wider band. Attested declarations and
 [#1213](https://github.com/buster14a/buster/issues/1213) are independent of
 all of these and are musl's first two. Attested declarations' step 3 makes
 the reader's unit-wide passes take the unit's read ranges where they take
