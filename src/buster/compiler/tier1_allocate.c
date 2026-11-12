@@ -44,6 +44,8 @@
 #define BUSTER_TIER1_ALLOCATE_NO_REGISTER UINT8_MAX
 // A hinted value's last place, where the scan with required uses left it in memory: no register to follow.
 #define BUSTER_TIER1_ALLOCATE_MEMORY_HINT 0xfeu
+// In a hint_intervals entry: the named interval's register at its end, rather than at its start (#2553).
+#define BUSTER_TIER1_ALLOCATE_HINT_EXIT 0x80000000u
 
 typedef struct Tier1FixedIntervals Tier1FixedIntervals;
 struct Tier1FixedIntervals
@@ -73,7 +75,10 @@ struct Tier1AllocationInput
     const uint32_t* hint_values;
     // Optional, with hint_values: per interval, an interval of its class starting before it, whose register at its
     // start the interval takes first (UINT32_MAX for none): a block's entry can take a sibling block's convention, as
-    // every successor of a dispatch loop's join does from the first, which no value's last register says.
+    // every successor of a dispatch loop's join does from the first, which no value's last register says. With
+    // BUSTER_TIER1_ALLOCATE_HINT_EXIT, the named interval ends at or before this one starts, and its register at its end
+    // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
+    // its operand's at a predecessor's.
     const uint32_t* hint_intervals;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
@@ -233,13 +238,15 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
 // whose it is); ends precede starts at one position, so adjacent half-open intervals still share registers.
 // Fixed clobbers restrict a whole interval; splitting around call sites belongs in the producer's machine ranges.
 // The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values. With hint_intervals, `last`'s
-// value_count + 1 bytes are followed by each interval's opening register (BUSTER_TIER1_ALLOCATE_MEMORY_HINT where it
-// started without one), which the scans and the coloring write as each interval starts.
+// value_count + 1 bytes are followed by each interval's opening register, which the scans and the coloring write as
+// each interval starts, then by each one's closing register, which they write as it ends (#2553); either is
+// BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there.
 static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
-    const uint32_t earlier = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
-    const uint8_t opening = earlier != UINT32_MAX ? last[(uint64_t)columns->value_count + 1 + earlier] : UINT8_MAX;
+    const uint32_t named = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
+    const uint64_t closings = (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0 ? columns->count : 0;
+    const uint8_t opening = named != UINT32_MAX ? last[(uint64_t)columns->value_count + 1 + closings + (named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT)] : UINT8_MAX;
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
@@ -252,6 +259,21 @@ static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, u
     {
         last[(uint64_t)columns->value_count + 1 + interval] = chosen < 32 ? (uint8_t)chosen : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
     }
+}
+
+// An interval's register as it ends, or none (#2553): read by the intervals that name it with BUSTER_TIER1_ALLOCATE_HINT_EXIT.
+static void tier1_allocation_note_closing(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t held)
+{
+    if (last != 0 && columns->hint_intervals != 0)
+    {
+        last[(uint64_t)columns->value_count + 1 + columns->count + interval] = held < 32 ? (uint8_t)held : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+    }
+}
+
+// The hint bytes `last` holds: each value's, then each interval's opening and closing register with hint_intervals.
+static uint64_t tier1_allocation_hint_bytes(const Tier1AllocationInput* columns)
+{
+    return (uint64_t)columns->value_count + 1 + (columns->hint_intervals != 0 ? 2 * (uint64_t)columns->count : 0);
 }
 
 static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
@@ -274,11 +296,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier
             if ((events[e] & 1) == 0)
             {
                 const uint32_t r = regs[interval];
-                if (r < 32 && active[r] == interval)
+                const bool held = r < 32 && active[r] == interval;
+                if (held)
                 {
                     active[r] = UINT32_MAX;
                     occupied &= ~(1u << r);
                 }
+                tier1_allocation_note_closing(&columns, last, interval, held ? r : UINT32_MAX);
             }
             else
             {
@@ -476,11 +500,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         if (end_event && columns.classes[interval] == class)
         {
             const uint32_t r = regs[interval];
-            if (r < 32 && active[r] == interval)
+            const bool held = r < 32 && active[r] == interval;
+            if (held)
             {
                 active[r] = UINT32_MAX;
                 occupied &= ~(1u << r);
             }
+            tier1_allocation_note_closing(&columns, last, interval, held ? r : UINT32_MAX);
         }
         else if (!end_event && columns.classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
         {
@@ -615,6 +641,7 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
             level -= 1;
             ended[level] = regs[interval];
             deposited |= last != 0 ? 1u << regs[interval] : 0;
+            tier1_allocation_note_closing(input, last, interval, regs[interval]);
         }
         else if (last == 0)
         {
@@ -846,7 +873,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         if (error == TIER1_ALLOCATION_OK && hinted)
         {
-            value_last = arena_push_array(arena, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0), sizeof(uint8_t), 1);
+            value_last = arena_push_array(arena, tier1_allocation_hint_bytes(&columns), sizeof(uint8_t), 1);
             if (value_last == 0)
             {
                 error = TIER1_ALLOCATION_CAPACITY;
@@ -959,7 +986,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         if (hinted && value_last != 0)
         {
-            memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0));
+            memset(value_last, UINT8_MAX, tier1_allocation_hint_bytes(&columns));
         }
         if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
@@ -1059,7 +1086,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
             pieces.count = 0;
             if (hinted && value_last != 0)
             {
-                memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0));
+                memset(value_last, UINT8_MAX, tier1_allocation_hint_bytes(&columns));
             }
         }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
@@ -1203,15 +1230,19 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
     return error;
 }
 
-// Each hint a value of the input's, and each hinted interval one of its class that starts before it.
+// Each hint a value of the input's, and each hinted interval one of its class that starts before it; one named by its
+// exit (BUSTER_TIER1_ALLOCATE_HINT_EXIT) ends at or before it starts.
 static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
-        const uint32_t earlier = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
-        valid = valid && (earlier == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i]));
+        const uint32_t named = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
+        const bool exit = named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0;
+        const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+        valid = valid && (named == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i] &&
+                                                  (!exit || (input->ends != 0 && input->ends[earlier] <= input->starts[i]))));
     }
     return valid;
 }
