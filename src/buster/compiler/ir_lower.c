@@ -1019,51 +1019,6 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_machine_row(IrTyp
     return ir_typed_emit(sink, IR_CALL, type, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
-// An asm body's call (#1839, Tier0Function.call_asm): the body into IrFunction.asm_bodies, and a body call (IrCall.body)
-// whose one argument is its operand block's address, the block local's preheader IR_STACK_ADDR (none for a body that
-// reads no block). Every pass takes the call as an unknown callee's of that pointer: the block escapes into it, its stores
-// stay before it, and no access moves across it.
-static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedSink* sink, const Tier0AsmBody* body)
-{
-    const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
-    const uint32_t first = (uint32_t)sink->sizes.extra_count;
-    const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
-    const uint32_t index = (uint32_t)sink->sizes.asm_body_count;
-    const uint32_t count = body->block != BUSTER_TIER0_ASM_NO_BLOCK ? 1 : 0;
-    if (sink->output != 0)
-    {
-        IrFunction* output = sink->output;
-        output->asm_bodies[index] = (IrAsmBody){
-            .records = body->records,
-            .branches = body->branches,
-            .targets = body->targets,
-            .count = body->count,
-            .branch_count = body->branch_count,
-            .touched = body->touched,
-            .masks = body->masks,
-            .stack = body->stack,
-        };
-        output->calls[descriptor] = (IrCall){
-            .argument_first = first,
-            .argument_count = count,
-            .type_first = type_first,
-            .parameter_count = count,
-            .result_type = IR_VOID,
-            .body = index + 1,
-        };
-        if (count != 0)
-        {
-            output->extra[first] = body->block;
-            output->call_types[type_first] = IR_PTR;
-        }
-    }
-    sink->sizes.call_count += 1;
-    sink->sizes.extra_count += count;
-    sink->sizes.call_type_count += count;
-    sink->sizes.asm_body_count += 1;
-    return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
-}
-
 // A mask's bits as an integer of at least 32 bits, which Tier 1's arithmetic takes (an m8's or m16's zero-extended past
 // its bitcast), and back: the mask of `mask`'s width of that integer's low bits.
 static __attribute__((always_inline)) inline uint32_t ir_typed_mask_integer(IrTypedSink* sink, uint32_t value, IrType mask)
@@ -1470,6 +1425,67 @@ static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, b
         general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[1] < 16 ? 1 : 0;
     }
     return aggregate;
+}
+
+// An asm body's call (#1839, Tier0Function.call_asm): the body into IrFunction.asm_bodies, and a body call (IrCall.body)
+// whose first argument is its operand block's address, the block local's preheader IR_STACK_ADDR (none for a body that
+// reads no block), and whose others are its call row's, its register operands' values (#2144), each in its register
+// (IrAsmBody.locations), a narrow integer extended as a call's argument is. Every pass takes the call as an unknown
+// callee's of that pointer: the block escapes into it, its stores stay before it, and no access moves across it.
+static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedSink* sink, const Tier0Function* input, uint32_t call, uint32_t* arguments)
+{
+    const Tier0AsmBody* body = &input->asm_bodies[input->call_asm[call] - 1];
+    const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
+    const uint32_t first = (uint32_t)sink->sizes.extra_count;
+    const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
+    const uint32_t index = (uint32_t)sink->sizes.asm_body_count;
+    const uint32_t block = body->block != BUSTER_TIER0_ASM_NO_BLOCK ? 1 : 0;
+    const uint32_t passed = input->call_argument_counts[call];
+    const uint32_t count = block + passed;
+    for (uint32_t a = 0; a < passed; a += 1)
+    {
+        const uint8_t class = input->argument_classes[input->call_first[call] + a];
+        arguments[a] = ir_typed_convert(sink, arguments[a], class, ir_typed_boundary_class(class));
+    }
+    if (sink->output != 0)
+    {
+        IrFunction* output = sink->output;
+        output->asm_bodies[index] = (IrAsmBody){
+            .records = body->records,
+            .branches = body->branches,
+            .targets = body->targets,
+            .count = body->count,
+            .branch_count = body->branch_count,
+            .touched = body->touched,
+            .masks = body->masks,
+            .stack = body->stack,
+            .locations = passed != 0 ? input->argument_locations + input->call_first[call] : 0,
+            .passed = passed,
+        };
+        output->calls[descriptor] = (IrCall){
+            .argument_first = first,
+            .argument_count = count,
+            .type_first = type_first,
+            .parameter_count = count,
+            .result_type = IR_VOID,
+            .body = index + 1,
+        };
+        if (block != 0)
+        {
+            output->extra[first] = body->block;
+            output->call_types[type_first] = IR_PTR;
+        }
+        for (uint32_t a = 0; a < passed; a += 1)
+        {
+            output->extra[first + block + a] = arguments[a];
+            output->call_types[type_first + block + a] = ir_typed_types[ir_typed_boundary_class(input->argument_classes[input->call_first[call] + a])];
+        }
+    }
+    sink->sizes.call_count += 1;
+    sink->sizes.extra_count += count;
+    sink->sizes.call_type_count += count;
+    sink->sizes.asm_body_count += 1;
+    return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
 // Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not

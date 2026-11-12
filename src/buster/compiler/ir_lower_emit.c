@@ -324,13 +324,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             }
             case BUSTER_TYPED_CALL:
             {
-                // An asm body (#1839, Tier0Function.call_asm) takes no argument from the stack and gives no result.
+                // An asm body (#1839, Tier0Function.call_asm) takes its register operands from the stack (#2144) and gives no
+                // result.
                 const bool body = input->call_asm != 0 && input->call_asm[value] != 0;
                 depth -= input->call_argument_counts[value];
                 // An indirect call's address (U64) was pushed before its arguments, under them.
                 const bool indirect = !body && input->call_targets[value] == 0;
                 const uint32_t callee = indirect ? ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0) : BUSTER_IR_NONE;
-                const uint32_t result = body ? ir_typed_asm_body(&sink, &input->asm_bodies[input->call_asm[value] - 1]) : ir_typed_call(&sink, input, (uint32_t)value, type, stack + depth, callee);
+                const uint32_t result = body ? ir_typed_asm_body(&sink, input, (uint32_t)value, stack + depth) : ir_typed_call(&sink, input, (uint32_t)value, type, stack + depth, callee);
                 depth -= indirect;
                 if (class != BUSTER_TYPED_CLASS_VOID)
                 {
