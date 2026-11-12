@@ -339,10 +339,18 @@ reach doesn't run.
   reach and in it; a typedef that another unit declares otherwise; a
   declaration after a `#pragma pack`; a prototype that differs by a system
   header's flag; an alias, a tentative definition, a `static` declaration, a
-  static assertion; a declaration with an error in the second unit only. And
-  the corpora as many-unit commands (musl, the libc corpus, Lua, `sqlite3.c`
-  with `shell.c`, the compiler's own units), each unit's object against its
-  own alone.
+  static assertion; a declaration with an error in the second unit only. For
+  the reach's two edges from a root: an inline function whose later
+  declaration without `inline` makes its definition external, and a later
+  declaration that gives a called function an attribute (`noreturn`). For
+  the names no token spells: a library function's prototype in a unit that
+  spells only its builtin (`__builtin_memcpy`), and one with an asm label.
+  For the lists: an enumerator a body names, and a tag first mentioned in a
+  prototype's return type. For the memo's silence: a declaration that warns
+  (`int f();` under `-Wstrict-prototypes`), which every unit must report
+  again. And the corpora as many-unit commands (musl, the libc corpus, Lua,
+  `sqlite3.c` with `shell.c`, the compiler's own units), each unit's object
+  against its own alone.
 
 ## Data-parallel first: what is vector and what is ordered
 
