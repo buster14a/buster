@@ -485,9 +485,9 @@ refuses its nodes' expressions, as does a node whose entries its templates
 - **T is mostly lookups.** 42% of `sqlite3.c`'s evaluated nodes are leaves,
   and 36% are casts (37,534 of the 39,998 to void: the discards), member
   accesses, calls, subscripts and dereferences, whose type a declaration or
-  the type table gives. `scalar`'s rows type 22%. So T's cost is the binding
-  answers and the type table's reads, which today's rules make too, more than
-  its transitions.
+  the type table gives. The transitions (`scalar`'s rows and the operators'
+  own) type 22%. So T's cost is the binding answers and the type table's
+  reads, which today's rules make too, more than its transitions.
 - **Five keys' entries aren't the key's to decide** in the two corpora: an
   aggregate's assignment (two keys), an atomic builtin's class and, in musl,
   a complex local's conversion and a local array's value (`LOCAL_ADDRESS` for
