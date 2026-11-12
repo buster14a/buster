@@ -774,21 +774,23 @@ run, which the sweeps are most of):
   hashed tables. C's most sampled instruction is its branch on whether a
   record is evaluated.
 
-Two follow-ups tested what the profiles suggested (the same record's `v7` and
-`v8` at main `a7ca9e8e`):
+Two follow-ups tested what the profiles suggested
+([their record](https://github.com/buster14a/buster-performance/tree/793549b08e9be7a32bb36a16adb930c9a1012ba7/docs/measurements/node-machine-shadow-cost-2524-2026-11-12),
+at `9d81a231` on main `a7ca9e8e`):
 
 - **The type table's lookups aren't the cost.** Each type's first complete
   position was put in a per-unit table, so a member's and a pointer's
   completeness became one load. Leaves took a path without the operand
   machinery. T then ran 368 instructions a node instead of 391, and
-  `check_action_source_complete` left the profile, but T's cycles didn't move
-  (95 to 96).
+  `check_action_source_complete` left the profile, but T's cycles barely moved
+  (96.5 to 95.2), and the three sweeps' read 172.0, within the placement's 3%.
 - **Neither are cold inputs.** `--repeat 2` runs each expression's sweeps twice
   in a row, so the second run finds its inputs in the caches, as the reader
-  leaves them in step 2. The second run costs 152.8 cycles a node (T 79.2)
-  against the first's 171.7: the shadow's cold data is 11% of the cost. The
-  rest is the sweeps' own work, about 670 instructions a node at an IPC of
-  4.4.
+  leaves them in step 2. On `sqlite3.c` the second run costs 152.9 cycles a
+  node (T 78.5) against 172.0 for one run: the shadow's cold data is 11% of
+  the cost. The rest is the sweeps' own work, about 670 instructions a node at
+  an IPC of 4.4. (Lua's small units stay in the caches from one pass to the
+  next, and its difference is within the noise.)
 
 So the gate asks for fewer instructions a node, about a fifth fewer at the
 sweeps' IPC. The levers, in order:
