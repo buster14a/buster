@@ -1,10 +1,13 @@
 # The node machine: one visit per expression node (#2524): design
 
 Status: step 0, the census, is built and its gate holds
-([below](#step-0-the-census)); nothing of the machine itself is. Its gains are
-estimates that its first two steps exist to confirm or refute; a prototype of
-its three sweeps has been run over the compile's real nodes
-([below](#what-a-prototype-of-the-sweeps-measured)). It is
+([below](#step-0-the-census)). Step 1, the shadow, is built
+([below](#step-1-the-shadow)): the machine's entries are the pipeline's on every
+corpus, `-g` included, but its sweeps cost 171 cycles a taken node where the
+gate asks for 120, and it codes only part of the set (no calls yet). No compile
+takes it. Its gains are estimates that its first two steps exist to confirm or
+refute; a prototype of its three sweeps has been run over the compile's real
+nodes ([below](#what-a-prototype-of-the-sweeps-measured)). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design: the change that the measurements below rank first for one core. The
 issue is [#2524](https://github.com/buster14a/buster/issues/2524). The names of
@@ -613,10 +616,9 @@ is not what limits step 2's gain. Step 3's whole bodies are another matter:
 of its nodes, the largest bodies being the ones with a bit-field or a call with
 semantics somewhere.
 
-Step 1 is next: the tables baked, the three sweeps run after the pipeline on
-every root the census takes, compared entry for entry and timed. The census is
-where its silence tests start: each is written here first, against a fixture
-line of the warning it stands for.
+Step 1 ([below](#step-1-the-shadow)) runs the machine on the roots the census
+takes. The census is where its silence tests start: each is written here
+first, against a fixture line of the warning it stands for.
 
 ### The readers of an expression's inside
 
@@ -647,6 +649,135 @@ the graph's operators and operands after the graph run:
   lowering's entry tokens.
 - **Read only for a diagnostic**, which a taken expression has none of:
   `c_check_semantic_diagnostic.c` and the warnings' wording.
+
+## Step 1: the shadow
+
+`measure-node-machine --shadow` ([the guide](commands/lowering.md#the-shadow-step-1))
+is step 1. The machine is `c_check_node_machine.c` and the shadow is
+`c_check_node_census.c`'s. The machine runs after the pipeline on every full
+expression the census takes. Each record it makes is compared with the stream's
+node, its tape with the lowering's entries, and its sweeps are timed. No compile
+takes it.
+
+### What it is
+
+- **The records** are the expression's graph nodes: one range of them, and the
+  root, which the reader can make well after the range (a condition's wrapper
+  comes after the statement it controls). The machine reads of them what the
+  reader answered at their tokens: a leaf's value (its declaration's or its
+  literal's), a cast's and a sizeof's type name, a member's name. It never reads
+  the graph run's output, the stream or the lowering's state. In step 2 it reads
+  the parser's tree in their place. A record holds a whole `CheckValue` (96
+  bytes), not the design's 28.
+- **T** types each record in one of four ways:
+  - a leaf, by the reader's leaf;
+  - an arithmetic or bitwise operator, a comparison or `-` and `~` of builtin
+    arithmetic types, by its row of the transition table;
+  - the lookups (a discard, `->` and `.`, `!` and a condition, `=`, a scalar
+    initialization and a return's conversion, `&x`, `*p`, a subscript and a
+    pointer plus an integer), by direct rules, each its action's own steps for
+    the common case behind a guard;
+  - everything else, by the action itself, `check_action_compute`, called on the
+    machine's records as the graph run calls it on the stream's. That covers
+    constant folds, casts but discards, a global's member and pointer
+    comparisons.
+
+  The action is the rows' and the rules' exact twin. `--scalar` types every node
+  by it, and `--verify` types every row- and rule-typed node by it too and
+  compares the values field by field.
+- **The table** (`node_machine_rows`, 3,766 rows over 18 operators) is made from
+  the actions. For each operator and each pair of builtin arithmetic types it
+  keeps the action's answer for plain rvalues where there is no diagnostic or
+  warning. Each operand is tried as an lvalue, whose conversion then adds
+  `CONVERT_LVALUE`, and as a literal 1 and 0 with the other operand plain. Twelve
+  operand flags are tried alone on every row. A flag that passes to the result on
+  every row, or changes nothing on every row, is in the operator's mask. Any
+  other flag leaves the node to the action, as a bit-field's width and a fault
+  do.
+
+  The bake's initializers build the table on a stack type table of the builtin
+  types alone (`baked.c`), so a compile starts with it and `test-baked-tables`
+  checks it.
+- **C and X** are the node templates' rules (#1048, `c_check_program_templates.c`:
+  the classification, each node's own entries and its conversion's), read from
+  the records instead of the stream's columns. T keeps each record's operator,
+  operands, class and facts for them, and one word per type of the unit holds
+  its class, facts and kind for every other type's lookup.
+
+The machine's set is the census's within the templates'. It refuses by code
+what the templates don't take: calls, `&&`, `||`, `?:`, the increments, the
+compound assignments. They are the next constructs, one a pull request.
+
+### What it measured
+
+On the 9700X at main `2db047f3` (CPU 2, under the lock;
+[the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-shadow-2524-2026-11-12)).
+Every taken expression's records and entries are compared:
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| census-taken expressions, evaluated nodes | 51,448, 260,139 | 10,841, 61,207 | 23,037, 120,332 |
+| machine-taken expressions | 32,676 (63.5%) | 5,612 (51.8%) | 13,488 (58.6%) |
+| machine-taken evaluated nodes, of the census-taken | 130,559 (50.2%) | 25,073 (41.0%) | 56,144 (46.7%) |
+| entries compared | 166,504 | 28,506 | 68,642 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+| T's nodes by a row or a rule, by the action | 75,973, 7,238 | 14,416, 5,098 | 30,299, 4,699 |
+
+c-testsuite's 220 programs (63.7% of their census-taken nodes taken) and
+`main.c` (24.6%) differ in nothing either. What the machine refuses is its
+codes: of `sqlite3.c`'s census-taken nodes, 49.3% are in expressions with an
+operator it has no code for (in 12,836 of those 18,651 expressions the first such
+operator is a call) and 0.5% in ones with a node the templates don't take (a
+pointer difference, an unsigned division by a power of two).
+
+The sweeps' cost on `sqlite3.c`, in cycles and instructions a taken evaluated
+node (the least of 11 passes, each sweep set timed on its own, the user-mode
+counters), as the machine was built, at main `eedbdece`, and last at
+`2db047f3`:
+
+| version | T | C | X | all three | instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the rows, and the action for every other node | 116.0 | 52.3 | 35.4 | 203.7 | 932.7 |
+| a discard by the graph run's own steps | 111.8 | 48.6 | 33.6 | 194.0 | 841.2 |
+| member, truth and store rules; each record's class and facts kept | 100.2 | 47.5 | 34.0 | 181.7 | 746.9 |
+| address, dereference and pointer rules; the records' operators and operands kept | 99.7 | 39.5 | 32.4 | 171.6 | 699.9 |
+| one word a type | 99.4 | 39.6 | 31.1 | 170.1 | 695.7 |
+| each record's value written as two halves | 96.1 | 42.9 | 31.9 | 170.9 | 693.1 |
+| the same, at main `2db047f3` | 95.7 | 43.7 | 31.9 | 171.3 | 693.1 |
+
+Lua's is 182.3 cycles. **The gate's first half holds** (no difference on the
+corpora, with `-g` too). **The second doesn't**: 171 cycles a taken node
+against 120. That is about 80 cycles a body token, against the estimate's 55
+expected and 90 conservative, so the design isn't refuted: its threshold is
+250, and step 2's projected gain is about 1.3 times at this cost and the
+estimate's coverage. The coverage is now half the census's, though, and calls
+are what that lacks.
+
+What the profiles say (`perf record` of 40 passes, the shares of the whole
+run, which the sweeps are most of):
+
+- **T is lookups and copies.** The type table's columns, read at random for
+  each record's type (`type_kind`'s loads), were the largest single line until
+  the per-type word. `check_action_source_complete`, a member's and a pointer's
+  completeness at the node's position, is 7% of the run. The 96-byte values
+  copied between records come next: written field by field, they failed store
+  forwarding at the parents' reads (#1050's lesson). Written as two halves,
+  `node_machine_operand_value` fell from 9.5% to 4.0% of the run, but T only
+  from 99 to 96 cycles. The 7,238 nodes left to the action take its whole path.
+- **C and X are at the prototype's level.** At 75 cycles together, they match
+  the prototype's context, template-choice and expansion steps, 90 with its
+  hashed tables. C's most sampled instruction is its branch on whether a
+  record is evaluated.
+
+The levers for the gate, in order:
+
+1. **The design's 28-byte records** in place of whole values, with the leaf's
+   class and standing read once from its declaration, as step 2 reads them.
+2. **A tag's completion position** answering `check_action_source_complete` by
+   one compare. That also serves the graph run.
+3. **The context and template tables baked** in place of C's and X's branches.
+
+Coverage comes after: calls first.
 
 ## Expected gains
 

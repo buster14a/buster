@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// measure-node-machine's checks (#2524's step 0), on original fixtures. Each fixture's line that ends with
+// measure-node-machine's checks (#2524's steps 0 and 1), on original fixtures. Each fixture's line that ends with
 // `// refuse: TEST` must have an expression the census refuses by that test, and each that ends with `// take` an
 // expression the census takes and none it refuses. The first fixture gives one warning a line, which the compiler reports
 // with -Wall -Wextra (its silence tests must refuse what warns); the second is clean idioms the tests once refused (they
@@ -148,6 +148,119 @@ static const char node_census_test_quiet[] =
     "    return x + e; // take\n"
     "}\n";
 
+// The shadow's fixture (#2524's step 1): each line that ends with `// machine: taken` has expressions the census takes and
+// the machine takes them all, each that ends with `// machine: REFUSAL` one the machine refuses for that reason
+// (node_machine_refusal_names). Its taken expressions' records and entries must be the pipeline's, by T's rows and by
+// the action alike.
+static const char node_shadow_test_text[] =
+    "struct S { long m; long n; int a[4]; unsigned char c; };\n"
+    "int g;\n"
+    "double gd;\n"
+    "int f(int);\n"
+    "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r)\n"
+    "{\n"
+    "    int x = a + b * 2; // machine: taken\n"
+    "    long y = 0; // machine: taken\n"
+    "    unsigned long z = u; // machine: taken\n"
+    "    p->n = a + b * 2; // machine: taken\n"
+    "    s.m = -a; // machine: taken\n"
+    "    x = (int)(~u >> 3); // machine: taken\n"
+    "    x = !a; // machine: taken\n"
+    "    x = c + 1; // machine: taken\n"
+    "    x = p->c >> 1; // machine: taken\n"
+    "    d = d * e + 0.5; // machine: taken\n"
+    "    e = (float)d; // machine: taken\n"
+    "    g = x; // machine: taken\n"
+    "    gd = g; // machine: taken\n"
+    "    *q = q[1] + p->a[2] + *r; // machine: taken\n"
+    "    q = &g; // machine: taken\n"
+    "    q = q + a; // machine: taken\n"
+    "    y = (long)sizeof(*p) + (long)q; // machine: taken\n"
+    "    x = (a < b) == (u >= 3u); // machine: taken\n"
+    "    x = (a % 7) | ((b & 1) ^ c); // machine: taken\n"
+    "    z = z / 3 + (z >> 1) - (unsigned long)y; // machine: taken\n"
+    "    s.n = s.m; // machine: taken\n"
+    "    (void)a; // machine: taken\n"
+    "    if (a > b) // machine: taken\n"
+    "        x = 1; // machine: taken\n"
+    "    while (q != 0) // machine: taken\n"
+    "        q = 0; // machine: taken\n"
+    "    x = f(a); // machine: code\n"
+    "    x = a && b; // machine: code\n"
+    "    x = a ? b : 1; // machine: code\n"
+    "    x++; // machine: code\n"
+    "    x += 2; // machine: code\n"
+    "    y = q - r; // machine: template\n"
+    "    z = z / 4; // machine: template\n"
+    "    return y + x + (long)z; // machine: taken\n"
+    "}\n";
+
+// The refusal whose name `name` (`length` bytes) is, or NODE_MACHINE_REFUSALS.
+static uint32_t node_shadow_test_named(const char* name, uint32_t length)
+{
+    uint32_t found = NODE_MACHINE_REFUSALS;
+    for (uint32_t r = 0; r < NODE_MACHINE_REFUSALS && found == NODE_MACHINE_REFUSALS; r += 1)
+    {
+        found = strlen(node_machine_refusal_names[r]) == length && memcmp(node_machine_refusal_names[r], name, length) == 0 ? r : found;
+    }
+    return found;
+}
+
+// The shadow's fixture written to `directory` and read with `options`, its T by the rows (and verified against the
+// action) or (`scalar`) by the action alone: whether every line held and nothing differed from the pipeline.
+static bool node_shadow_test_fixture(const char* directory, bool scalar, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/shadow.c", directory);
+    const char* text = node_shadow_test_text;
+    bool valid = parse_test_write(path, text, strlen(text));
+    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
+            shadow.record_count < shadow.record_capacity;
+    const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
+                      (scalar || shadow.row_nodes != 0);
+    if (!valid || !same)
+    {
+        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 " differ; %" PRIu64 " expressions taken, %" PRIu64 " row-typed nodes\n",
+                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.taken_expressions,
+                shadow.row_nodes);
+    }
+    uint32_t line = 1;
+    const char* at = text;
+    while (valid && *at != 0)
+    {
+        const char* end = strchr(at, '\n');
+        end = end != NULL ? end : at + strlen(at);
+        const char* expectation = NULL;
+        for (const char* c = at; c + 2 < end && expectation == NULL; c += 1)
+        {
+            expectation = strncmp(c, "// machine: ", 12) == 0 ? c + 12 : NULL;
+        }
+        const uint32_t expected = expectation != NULL ? node_shadow_test_named(expectation, (uint32_t)(end - expectation)) : NODE_MACHINE_REFUSALS;
+        uint32_t found = 0;
+        uint32_t matched = 0;
+        for (uint32_t r = 0; r < shadow.record_count; r += 1)
+        {
+            found += shadow.records_out[r].line == line;
+            matched += shadow.records_out[r].line == line && shadow.records_out[r].refusal == expected;
+        }
+        const bool held = expectation == NULL || (expected != NODE_MACHINE_REFUSALS && (expected == NODE_MACHINE_TAKEN ? found != 0 && matched == found : matched != 0));
+        if (!held)
+        {
+            fprintf(stderr, "test-checker: node-shadow%s: line %u: expected %.*s, found %u expressions, %u as expected\n", scalar ? " --scalar" : "", line,
+                    (int)(expectation != NULL ? end - expectation : 0), expectation != NULL ? expectation : "", found, matched);
+        }
+        valid = valid && held;
+        line += 1;
+        at = *end != 0 ? end + 1 : end;
+    }
+    free(shadow.records_out);
+    unlink(path);
+    return valid && same;
+}
+
 // The test whose name `name` (`length` bytes) is, or NODE_CENSUS_TESTS.
 static uint32_t node_census_test_named(const char* name, uint32_t length)
 {
@@ -247,6 +360,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         unlink(header);
         rmdir(headers);
     }
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-shadow: the machine takes its codes with the pipeline's values and entries, T's rows the action's, and refuses the rest by reason");
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-shadow --scalar: T by the action alone gives the pipeline's values and entries");
     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
     uint32_t unclassified = 0;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)

@@ -197,3 +197,46 @@ apart. A new warning reported inside an expression needs its test here and a
 line in that fixture: the census is where the machine's silence tests are
 written first. [The design](../node-machine.md)'s
 "Step 0: the census" has the results on `sqlite3.c`, Lua and musl.
+
+### The shadow (step 1)
+
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--passes N] [--list N] [preprocessor options] file...`
+is step 1: the machine itself (`c_check_node_machine.c`), run after the
+pipeline on every full expression the census takes, compared with what the
+pipeline made and timed. No compile takes its entries.
+
+- **Its records** are the expression's graph nodes: one range of them and the
+  root, which the reader may make later (a condition's wrapper follows the
+  statement it controls). The machine reads of them what the reader answered at
+  their tokens (a leaf's value, a cast's and a sizeof's type name, a member's
+  name), never the graph run's output, the stream or the lowering's state.
+- **T** types each record: a leaf by the reader's leaf, an arithmetic operator
+  of builtin types by its row of the baked transition table
+  (`node_machine_rows`), the lookups by direct rules that are their actions'
+  own steps for the common case, and the rest by the action itself on the
+  machine's records. **C** and **X** are the node templates' rules
+  (`c_check_program_templates.c`) read from the records. The machine's set is
+  the census's within the templates': calls, `&&`, `||`, `?:`, the increments
+  and the compound assignments are refused by code.
+- **The comparison**, for every expression the machine takes: each record's
+  value (every field), its operands' conversions and a member's offset against
+  the stream's, and its tape against the lowering's entries that the
+  expression's tasks own (the inventory's log), a local's numbered by a map of
+  the body's that must stay one to one.
+- `--verify` types every node a row or a rule types by the action too and
+  compares the two, field by field (the twin); `--scalar` types every node by
+  the action alone. `--passes N` (5 by default; 0 for none) times each file's
+  taken expressions N times a sweep set, T alone, T and C, and all three,
+  interleaved, and keeps each set's least cycles and instructions (this
+  thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X
+  only, under its lock, as `taskset -c 2`.
+
+The report gives the expressions and evaluated nodes taken, each refusal's
+(shape, code, leaf, context, diagnostic, template, row, root), the operators
+the code and template refusals stopped at, the differences (values, entries,
+twin), T's nodes by row or rule and by the action, by operator, and the times.
+`--list N` prints the first N differences by file and line. The command exits 1
+on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
+construct a line, each taken or refused by a named reason), with `--verify`
+and with `--scalar`. [The design](../node-machine.md)'s "Step 1: the shadow"
+has the results.
