@@ -151,7 +151,7 @@ static void check_control_fold_switch(CheckControlFoldWalk* walk, uint32_t token
         else
         {
             unsigned __int128 integer = 0;
-            walk->valid = check_program_case_value(program, condition, item->type, &integer);
+            walk->valid = check_program_case_value(program, condition, item->type, &integer, NULL);
             const CheckProgramCase value =
             {
                 .lower = integer,

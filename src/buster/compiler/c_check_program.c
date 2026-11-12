@@ -35,6 +35,8 @@ struct CheckProgramFailure
     CheckProgramMessage message;
     TypeId type;
     unsigned __int128 value;
+    // A duplicate case's limbs, where its switch is on a _BitInt past 128 bits (#2220), or null.
+    const uint64_t* wide;
 };
 
 // One of the constraint errors check_program_diagnose_all lists (#1447): where clang reports it (`token`), where its
@@ -287,6 +289,10 @@ struct CheckProgramCase
 {
     unsigned __int128 lower;
     unsigned __int128 upper;
+    // A switch on a _BitInt past 128 bits (#2220): its values' limbs (c_check_wide.c's, which live as long as the process),
+    // whose low 128 bits `lower` and `upper` keep; null for every other switch's.
+    const uint64_t* wide_lower;
+    const uint64_t* wide_upper;
     TypeId type;
     uint32_t token;
     uint32_t owner;
@@ -420,6 +426,9 @@ struct CheckProgramTargetGroup
     // entry per option: CheckProgram.body_targets' value) and the copies at their own symbols
     // (CheckProgram.clone_symbols from `clone_first`, 0 for the first option, a repeated one or none).
     uint32_t clone_first;
+    // Its body's labels whose addresses the program takes (CheckProgram.clone_label_tokens), where it has copies.
+    uint32_t label_first;
+    uint32_t label_count;
     bool copies;
     bool internal;
     bool resolved;
@@ -542,6 +551,12 @@ struct CheckProgram
     SymbolId* clone_symbols;
     uint32_t clone_option_count;
     uint32_t* body_options;
+    // The copies' symbols of their body's labels whose addresses the program takes (#2247, check_program_target_number):
+    // by option from clone_first, the first of its labels' symbols, in their tokens' order, or 0 where the option's code
+    // takes the labels' own (the last option with code, as clang's static data reaches the last clone emitted); and the
+    // groups' labels, each group's `label_count` from its `label_first`, by token. Null in a unit without them.
+    SymbolId* clone_label_symbols;
+    uint32_t* clone_label_tokens;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
@@ -1177,20 +1192,49 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
     return values[0] != 2u;
 }
 
-static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
+// A switch's controlling type: an integer type, of up to 128 bits (check_action_integer_type) or a _BitInt past them
+// (#2220, check_wide_type).
+static bool check_program_switch_type(const TypeTable* types, TypeId type)
+{
+    uint32_t width = 0;
+    bool sign = false;
+    return check_action_integer_type(types, type, &width, &sign) || check_wide_type(types, type, &width, &sign);
+}
+
+// A case's value at `node`, converted to the switch's type `target`, into `result`: for a _BitInt past 128 bits (#2220),
+// its low 128 bits, and its limbs into `wide` (which may be null for no other type), converted as clang converts a case's
+// value (check_wide_convert); null there for every other type.
+static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result, const uint64_t** wide)
 {
     uint32_t width = 0;
     uint32_t source_width = 0;
     bool sign = false;
     bool source_sign = false;
-    bool valid = node < program->stream->count && check_action_integer_type(program->types, target, &width, &sign);
+    const bool narrow = node < program->stream->count && check_action_integer_type(program->types, target, &width, &sign);
+    const bool limbs = !narrow && node < program->stream->count && wide != NULL && check_wide_type(program->types, target, &width, &sign);
+    bool valid = narrow || limbs;
+    if (wide != NULL)
+    {
+        *wide = NULL;
+    }
     if (valid)
     {
-        const CheckValue converted = check_graph_context_value(program->types, &program->input->graph, program->stream, node);
+        CheckValue converted = check_graph_context_value(program->types, &program->input->graph, program->stream, node);
         const CheckValue* value = &converted;
-        valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
-                (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_integer_type(program->types, value->type, &source_width, &source_sign);
-        if (valid)
+        valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                (check_action_integer_type(program->types, value->type, &source_width, &source_sign) ||
+                 (limbs && check_wide_type(program->types, value->type, &source_width, &source_sign)));
+        if (valid && limbs)
+        {
+            // The conversion leaves a fault, and no limbs, where it can't make them.
+            check_wide_convert(program->types, &converted, target, node);
+            converted.type = target;
+            const uint64_t* held = check_wide_limbs(&converted, check_wide_count(width));
+            valid = converted.fault == CHECK_FAULT_NONE && held != NULL;
+            *result = converted.integer;
+            *wide = valid ? held : NULL;
+        }
+        else if (valid)
         {
             const unsigned __int128 mask = check_action_mask(source_width);
             unsigned __int128 integer = value->integer & mask;
@@ -1210,7 +1254,39 @@ static unsigned __int128 check_program_case_order(const CheckProgram* program, c
     bool sign = false;
     check_action_integer_type(program->types, item->type, &width, &sign);
     const unsigned __int128 value = upper ? item->upper : item->lower;
-    const unsigned __int128 result = sign ? value ^ ((unsigned __int128)1 << (width - 1)) : value;
+    const unsigned __int128 result = sign && width != 0 ? value ^ ((unsigned __int128)1 << (width - 1)) : value;
+    return result;
+}
+
+// The order of a case's value (its `upper` one for a GNU range's high value) and another's in their switch's type: -1, 0
+// or 1. A _BitInt's past 128 bits (#2220) by its limbs, the top one's sign first for a signed one; any other by its
+// order key (check_program_case_order).
+static int32_t check_program_case_compare(const CheckProgram* program, const CheckProgramCase* a, bool a_upper, const CheckProgramCase* b, bool b_upper)
+{
+    const uint64_t* x = a_upper ? a->wide_upper : a->wide_lower;
+    const uint64_t* y = b_upper ? b->wide_upper : b->wide_lower;
+    int32_t result = 0;
+    if (x != NULL && y != NULL)
+    {
+        uint32_t width = 0;
+        bool sign = false;
+        check_wide_type(program->types, a->type, &width, &sign);
+        const uint32_t count = check_wide_count(width);
+        // The top limb holds the bits up to the width, zeros past it: its sign is bit width - 1.
+        const uint64_t flip = sign ? UINT64_C(1) << ((width - 1) % 64) : 0;
+        for (uint32_t i = count; result == 0 && i != 0; i -= 1)
+        {
+            const uint64_t left = x[i - 1] ^ (i == count ? flip : 0);
+            const uint64_t right = y[i - 1] ^ (i == count ? flip : 0);
+            result = left < right ? -1 : left > right ? 1 : 0;
+        }
+    }
+    else
+    {
+        const unsigned __int128 left = check_program_case_order(program, a, a_upper);
+        const unsigned __int128 right = check_program_case_order(program, b, b_upper);
+        result = left < right ? -1 : left > right ? 1 : 0;
+    }
     return result;
 }
 
@@ -1220,10 +1296,9 @@ static bool check_program_case_before(const CheckProgram* program, uint32_t a, u
     const CheckProgramCase* right = program->cases + b;
     const uint32_t left_kind = left->fallback ? 0 : left->range ? 2 : 1;
     const uint32_t right_kind = right->fallback ? 0 : right->range ? 2 : 1;
-    const unsigned __int128 left_value = left->fallback ? 0 : check_program_case_order(program, left, false);
-    const unsigned __int128 right_value = right->fallback ? 0 : check_program_case_order(program, right, false);
+    const int32_t order = left->fallback || right->fallback ? 0 : check_program_case_compare(program, left, false, right, false);
     const bool before = left->owner != right->owner ? left->owner < right->owner : left_kind != right_kind ? left_kind < right_kind :
-                        left_value != right_value ? left_value < right_value : left->token < right->token;
+                        order != 0 ? order < 0 : left->token < right->token;
     return before;
 }
 
@@ -1249,9 +1324,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
     if (parser->tokens.kinds[token] == PARSE_KIND_SWITCH && owner < tokens && parser->tree.roles[owner] == PARSE_ROLE_CLOSE_CONDITION)
     {
         const uint32_t condition = input->token_nodes[owner];
-        uint32_t width = 0;
-        bool sign = false;
-        if (condition >= program->stream->count || !check_action_integer_type(program->types, check_stream_type(program->stream, condition), &width, &sign))
+        if (condition >= program->stream->count || !check_program_switch_type(program->types, check_stream_type(program->stream, condition)))
         {
             check_program_constraint(program, owner);
         }
@@ -1261,9 +1334,7 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
         const uint32_t owner = check_sparse_get(input->control_owners, token);
         const uint32_t node = input->token_nodes[token];
         const uint32_t condition = owner < tokens ? input->token_nodes[owner] : BUSTER_CHECK_NONE;
-        uint32_t width = 0;
-        bool sign = false;
-        if (condition >= program->stream->count || !check_action_integer_type(program->types, check_stream_type(program->stream, condition), &width, &sign))
+        if (condition >= program->stream->count || !check_program_switch_type(program->types, check_stream_type(program->stream, condition)))
         {
             check_program_constraint(program, owner < tokens ? owner : token);
         }
@@ -1281,8 +1352,8 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
                 .range = check_sparse_get(input->case_ranges, token) != BUSTER_CHECK_NONE,
             };
             const uint32_t high = check_sparse_get(input->case_ranges, token) != BUSTER_CHECK_NONE ? check_sparse_get(input->case_ranges, token) : node;
-            if (!item->fallback && (!check_program_case_value(program, node, item->type, &item->lower) ||
-                                   !check_program_case_value(program, high, item->type, &item->upper)))
+            if (!item->fallback && (!check_program_case_value(program, node, item->type, &item->lower, &item->wide_lower) ||
+                                   !check_program_case_value(program, high, item->type, &item->upper, &item->wide_upper)))
             {
                 check_program_constraint(program, token);
             }
@@ -2842,7 +2913,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         source = graph->operand0[source];
                     }
                     unsigned __int128 value = 0;
-                    const bool known = check_program_case_value(program, entry->node, check_stream_type(program->stream, entry->node), &value);
+                    const bool known = check_program_case_value(program, entry->node, check_stream_type(program->stream, entry->node), &value, NULL);
                     const bool enumeration = source < graph->count &&
                         type_kind(program->types, type_strip_aligned(program->types, check_stream_type(program->stream, source))) == BUSTER_TYPE_KIND_ENUM;
                     warning_safe &= !enumeration || known;
@@ -2852,10 +2923,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     const CheckProgramCase* item = program->cases + entry->target;
                     const uint32_t condition = pass != 0 ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
                     CheckProgramCase selected = { .type = item->type };
-                    const bool known = pass != 0 && check_program_case_value(program, condition, item->type, &selected.lower);
-                    const unsigned __int128 ordered = known ? check_program_case_order(program, &selected, false) : 0;
-                    const bool taken = known && ordered >= check_program_case_order(program, item, false) &&
-                                               ordered <= check_program_case_order(program, item, true);
+                    const bool known = pass != 0 && check_program_case_value(program, condition, item->type, &selected.lower, &selected.wide_lower);
+                    const bool taken = known && check_program_case_compare(program, &selected, false, item, false) >= 0 &&
+                                       check_program_case_compare(program, &selected, false, item, true) <= 0;
                     targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
                     next = !known || !taken;
                 }
