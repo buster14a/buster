@@ -53,6 +53,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "__attribute__((patchable_function_entry(3, 4), patchable_function_entry(1, 9))) void h(void) {}\n"
         "__attribute__((patchable_function_entry(1, 2))) void p(void), q(void);\n"
         "int use(void) { f(); g(); h(); p(); q(); return 0; }\n",
+        // A block's thread-local object without static or extern (#2420): clang's "'_Thread_local' variables must have global
+        // storage" at the keyword ('__thread' for GNU's, '_Thread_local' for C23's thread_local), and the reading goes on.
+        "void c(void) { _Thread_local int z; __thread int w = 1; (void)z; (void)w; int u = undeclared; }\n"
+        "void d(void) { static _Thread_local int s; extern _Thread_local int e; (void)s; (void)e; }\n"
+        "void k(int p) { for (_Thread_local int i = 0; i < 1; i++) {} }\n"
+        "void m(void) { _Thread_local int q __asm__(\"q\"); thread_local int t; }\n",
         // Each of the attribute errors' passes: an item's reading (a string's), its arguments' values, its subject, its
         // function type's and its place on a definition; the declarations stay usable.
         "__attribute__((section(1))) int a1;\n"

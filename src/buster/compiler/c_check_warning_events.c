@@ -215,9 +215,11 @@ enum
     // A cast of a struct or a union to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar):
     // -Wpedantic's own, off by default.
     CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 147,
+    // A C23 attribute list before C23 (#2409): -Wc23-extensions' clang extension, off by default, -pedantic's.
+    CHECK_WARNING_ID_C23_ATTRIBUTES = 148,
     // A struct or union without named members (#2409, clang's ext_empty_struct_union and ext_no_named_members_in_struct_union):
     // -Wgnu-empty-struct, off by default, -pedantic's.
-    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 148,
+    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 149,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -496,6 +498,9 @@ typedef enum CheckWarningEventKind
     // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
     // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
     CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
+    // A C23 attribute list before C23 (#2409, CHECK_WARNING_ID_C23_ATTRIBUTES): -Wc23-extensions' "[[]] attributes are a
+    // C23 extension", at its first `[`, as clang's parser gives it (ext_c_attributes).
+    CHECK_WARNING_EVENT_C23_ATTRIBUTES,
     // A struct's or union's definition without named members (#2409), at its keyword: payload.data's bit 0 a union's, bit 1
     // one with members (unnamed bit-fields), "struct without named members is a GNU extension", else "empty struct is a GNU
     // extension".
