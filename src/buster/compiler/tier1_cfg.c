@@ -455,14 +455,14 @@ static bool tier1_cfg_interval_location(const Tier1CfgAllocation* result, uint32
 // successor, and edges' reads aren't uses). An edge into the block then needn't recompute the value into that register:
 // control enters with the value's recipe (#1217), as tier1_emit_cfg_dead_definition leaves out a definition's. Without
 // it every edge into a loop's dispatch block recomputed a table's or a frame object's address that the block overwrote
-// before any use. Without use or block columns nothing is proven. Uses are sorted per interval's slice.
-static bool tier1_cfg_entry_unread(const Tier1CfgAllocation* result, uint32_t interval, uint32_t fragment, uint32_t entry)
+// before any use. Without use or block columns nothing is proven. Uses are sorted per interval's slice. The caller has
+// checked the cheap part (tier1_cfg_interval_entry): this is the rare proof, out of the hot path, as
+// tier1_cfg_slot_current is (#1217's compile-time measurement: inlined whole, every entry paid for it).
+static __attribute__((noinline)) bool tier1_cfg_entry_unread(const Tier1CfgAllocation* result, uint32_t interval, uint32_t fragment, uint32_t entry)
 {
     const Tier1Allocation* allocation = &result->allocation;
     const Tier1AllocationInput* intervals = &result->intervals;
-    bool unread = intervals->rematerializable != 0 && intervals->rematerializable[interval] != 0 && intervals->use_offsets != 0 && intervals->use_positions != 0 &&
-                  result->block_starts != 0 && result->block_count != 0 && allocation->kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER &&
-                  fragment + 1 < allocation->fragment_offsets[interval + 1] && allocation->kinds[fragment + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    bool unread = intervals->use_offsets != 0 && intervals->use_positions != 0 && result->block_starts != 0 && result->block_count != 0;
     if (unread)
     {
         // The block that holds `entry`: the last whose start is at or before it.
@@ -529,16 +529,25 @@ static uint32_t tier1_cfg_interval_fragment(const Tier1CfgAllocation* result, ui
 }
 
 // A value's location where control enters its block at `entry`, from `interval`, which covers it: its fragment at
-// `position` (entry, or entry - 1 for an interval that continues from the layout predecessor), or the recipe where that
-// register fragment reads nothing from the entry on (tier1_cfg_entry_unread).
-static bool tier1_cfg_interval_entry(const Tier1CfgAllocation* result, uint32_t value, uint32_t interval, uint32_t position, uint32_t entry, uint32_t* location, uint8_t* kind)
+// `position` (entry, or entry - 1 for an interval that continues from the layout predecessor), found once and encoded
+// as tier1_cfg_interval_location encodes it, or the recipe where that register fragment reads nothing from the entry on
+// (tier1_cfg_entry_unread). Only a register fragment of a recomputed value with a recipe's fragment after it can be one.
+static inline __attribute__((always_inline)) bool tier1_cfg_interval_entry(const Tier1CfgAllocation* result, uint32_t value, uint32_t interval, uint32_t position, uint32_t entry, uint32_t* location, uint8_t* kind)
 {
+    const Tier1Allocation* allocation = &result->allocation;
     const uint32_t fragment = tier1_cfg_interval_fragment(result, interval, position);
-    const bool found = fragment != BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_location(result, value, interval, position, location, kind);
-    if (found && tier1_cfg_entry_unread(result, interval, fragment, entry))
+    const bool found = fragment != BUSTER_TIER1_CFG_NONE;
+    if (found)
     {
-        *location = BUSTER_TIER1_CFG_REMATERIALIZE;
-        *kind = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+        const uint8_t fragment_kind = allocation->kinds[fragment];
+        const bool candidate = fragment_kind == BUSTER_TIER1_ALLOCATE_REGISTER && fragment + 1 < allocation->fragment_offsets[interval + 1] &&
+                               allocation->kinds[fragment + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result->intervals.rematerializable != 0 &&
+                               result->intervals.rematerializable[interval] != 0;
+        const bool recipe = candidate && tier1_cfg_entry_unread(result, interval, fragment, entry);
+        *kind = recipe ? (uint8_t)BUSTER_TIER1_ALLOCATE_REMATERIALIZE : fragment_kind;
+        *location = recipe || fragment_kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE ? BUSTER_TIER1_CFG_REMATERIALIZE :
+                    fragment_kind == BUSTER_TIER1_ALLOCATE_REGISTER                  ? (uint32_t)result->intervals.classes[interval] * 32 + allocation->registers[fragment] :
+                                                                                       BUSTER_TIER1_CFG_SPILL + allocation->spill_ids[value];
     }
     return found;
 }

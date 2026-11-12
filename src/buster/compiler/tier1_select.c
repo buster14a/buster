@@ -4591,44 +4591,38 @@ static bool tier1_select_overflow_area(const IrFunction* function, uint32_t slot
     return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
 }
 
-// A pure address node (#1217): an address, a 64-bit addition, or a conversion between a pointer and its 64 bits.
-static bool tier1_select_pure_address(const IrFunction* function, uint32_t node)
+// Which pure address nodes every user takes as an address (#1217), so that a memory operand may fold one from an earlier
+// block (tier1_select_address): the plan's use count ORs, by node, bit 1 for an address, an addition or a conversion
+// between a pointer and an integer, and bit 0 into an operand for each use that isn't an address use
+// (tier1_select_address_operand's) and each phi operand's, so that neither bit depends on the order the nodes come in.
+// A node of exactly bit 1 is sinkable. A node of both bits keeps its operands from being so, from the last node back:
+// their value is still computed for it. A 32-bit addition marked so is never sinkable, since its users take an integer,
+// and the walk takes a node only of the forms it can encode. A user before its operand (a computed goto's dispatch
+// block's) may be missed: the walk then folds a node some user keeps, which costs a lea and computes the same address.
+#define BUSTER_TIER1_SELECT_SINKABLE 2u
+#define BUSTER_TIER1_SELECT_KEPT 1u
+#define BUSTER_TIER1_SELECT_ANY (UINT32_MAX - 1)
+
+// The operand `user` takes as an address: a load's address, a store's (not where it is also the stored value), every
+// operand of a pure address node (BUSTER_TIER1_SELECT_ANY), or none (BUSTER_IR_NONE).
+static uint32_t tier1_select_address_operand(const IrFunction* function, uint32_t user, uint32_t op, bool pure)
 {
-    const uint32_t op = function->op[node];
-    return op == IR_ADDRESS || (op == IR_ADD && function->type[node] == IR_I64) || (op == IR_INTTOPTR && function->type[function->a[node]] == IR_I64) ||
-           (op == IR_PTRTOINT && function->type[node] == IR_I64);
+    const uint32_t a = function->a[user];
+    const bool access = op == IR_LOAD || (op == IR_STORE && function->b[user] != a);
+    return pure ? BUSTER_TIER1_SELECT_ANY : access ? a : BUSTER_IR_NONE;
 }
 
-// Whether `user` takes `value` as an address: a load's or a store's address (not the stored value), or an operand of a
-// pure address node, which tier1_select_sinkable then requires to be sinkable itself.
-static bool tier1_select_address_use(const IrFunction* function, uint32_t user, uint32_t value)
-{
-    const uint32_t op = function->op[user];
-    return (op == IR_LOAD && function->a[user] == value) || (op == IR_STORE && function->a[user] == value && function->b[user] != value) || tier1_select_pure_address(function, user);
-}
-
-// The pure address nodes whose every use is an address use (tier1_select_address_use), from `address_uses` against
-// `uses`; then, from the last node back, a pure node that isn't one keeps its own operands from being one, since their
-// value is then still computed for it. A user before its operand (a computed goto's dispatch block's) may be missed:
-// the walk then folds a node some user keeps, which costs a lea and computes the same address.
-static void tier1_select_sinkable(const IrFunction* function, const uint32_t* uses, const uint32_t* address_uses, uint8_t* sinkable)
+static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
 {
     const uint32_t count = function->instruction_count;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        sinkable[node] = tier1_select_pure_address(function, node) && uses[node] != 0 && address_uses[node] == uses[node] ? 1 : 0;
-    }
     for (uint32_t reverse = count; reverse != 0; reverse -= 1)
     {
         const uint32_t node = reverse - 1;
-        if (sinkable[node] == 0 && tier1_select_pure_address(function, node))
+        if (sinkable[node] == (BUSTER_TIER1_SELECT_SINKABLE | BUSTER_TIER1_SELECT_KEPT))
         {
-            sinkable[function->a[node]] = 0;
-            if (function->op[node] == IR_ADDRESS || function->op[node] == IR_ADD)
-            {
-                const uint32_t index = function->b[node];
-                sinkable[index < count ? index : function->a[node]] = 0;
-            }
+            const uint32_t index = function->op[node] == IR_ADDRESS || function->op[node] == IR_ADD ? function->b[node] : BUSTER_IR_NONE;
+            sinkable[function->a[node]] |= BUSTER_TIER1_SELECT_KEPT;
+            sinkable[index < count ? index : function->a[node]] |= BUSTER_TIER1_SELECT_KEPT;
         }
     }
 }
@@ -4725,7 +4719,7 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         // then addresses base + index itself, and the address needs no lea where no other user takes its value.
         // Only a node no other user needs (tier1_select_sinkable) goes: folding one whose lea stays would only lengthen
         // its inputs' lives past it, which speedtest1's spills showed.
-        const bool sinkable = forest->sinkable != 0 && forest->sinkable[node] != 0;
+        const bool sinkable = forest->sinkable != 0 && forest->sinkable[node] == BUSTER_TIER1_SELECT_SINKABLE;
         bool taken = node < root && (block == root_block ? shared || forest->uses[node] == 1 : shared && sinkable);
         if (taken && op == IR_ADDRESS)
         {
@@ -6607,8 +6601,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     uint32_t* pending = 0;
     // Each node's last user, its only one where it has a single use: the bottom-up path's classes read it.
     uint32_t* users = 0;
-    // Each node's uses as an address, and whether a memory operand may take it from an earlier block (#1217).
-    uint32_t* address_uses = 0;
+    // Whether a memory operand may take a node from an earlier block (#1217, tier1_select_sinkable).
     uint8_t* sinkable = 0;
     if (error == TIER1_SELECT_OK)
     {
@@ -6616,7 +6609,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         blocks = ir_allocate(scratch, count, 4, &ok);
         users = ir_allocate(scratch, count, 4, &ok);
         uses = ir_allocate(scratch, count, 4, &ok);
-        address_uses = ir_allocate(scratch, count, 4, &ok);
         sinkable = ir_allocate(scratch, count, 1, &ok);
         barriers = ir_allocate(scratch, count, 4, &ok);
         depths = ir_allocate(scratch, count, 4, &ok);
@@ -6681,6 +6673,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         }
         effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : BUSTER_TIER1_SELECT_VALUES;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
+        const bool pure = op == IR_ADDRESS || op == IR_ADD || op == IR_INTTOPTR || op == IR_PTRTOINT;
+        const uint32_t address_operand = tier1_select_address_operand(function, node, op, pure);
+        sinkable[node] |= pure ? BUSTER_TIER1_SELECT_SINKABLE : 0;
         // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), and its use counts, but
         // nothing folds into a phi, so its depth doesn't order the phi's choice. Its own loop leaves the others' as it was.
         for (uint32_t p = 0; error == TIER1_SELECT_OK && op == IR_PHI && p < operand_count; p += 1)
@@ -6694,6 +6689,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 uses[operand.value] += 1;
                 users[operand.value] = node;
+                sinkable[operand.value] |= BUSTER_TIER1_SELECT_KEPT;
             }
         }
         for (uint32_t p = 0; error == TIER1_SELECT_OK && op != IR_PHI && p < operand_count; p += 1)
@@ -6711,7 +6707,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 uses[operand.value] += 1;
                 users[operand.value] = node;
-                address_uses[operand.value] += tier1_select_address_use(function, node, operand.value) ? 1 : 0;
+                sinkable[operand.value] |= address_operand == BUSTER_TIER1_SELECT_ANY || address_operand == operand.value ? 0 : BUSTER_TIER1_SELECT_KEPT;
                 const uint32_t next = operand.value < node ? depths[operand.value] + 1 : 0;
                 depths[node] = next > depths[node] ? next : depths[node];
             }
@@ -6733,7 +6729,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     if (error == TIER1_SELECT_OK)
     {
-        tier1_select_sinkable(function, uses, address_uses, sinkable);
+        tier1_select_sinkable(function, sinkable);
         tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
         tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
         tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
