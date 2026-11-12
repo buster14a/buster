@@ -276,6 +276,13 @@ The rest are small: preprocessing (9.8 ms) and parsing (9.6 ms) have their own
 issues (#117, #126, #451); Tier 0 takes 5.0 ms; the object's build and write
 take 0.6 ms.
 
+**Across the stages (#2524).** At `d96b2e73` the function bodies are 87% of the
+compile's user cycles, and the stages from `check-input` to `lower` spend about
+1,600 cycles on each expression node, which five of them visit in turn.
+[The node machine's design](node-machine.md) is the change for that: one visit
+per node from the parser's tree to the typed stream, with this pipeline as its
+twin. It has the measurements, by stage and by node, and the estimate.
+
 ## Memory first touched (#528, #572)
 
 Three allocations touched far more memory than they used.
