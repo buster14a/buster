@@ -2255,6 +2255,24 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
         }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token + 1 < parser->tokens.count &&
+                 parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
+                 check_action_is_scalar(types, type_conversion_operand(types, graph->types[node])) &&
+                 (check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_STRUCT || check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_UNION ||
+                  check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_ATOMIC))
+        {
+            // A cast to an arithmetic or pointer type (an atomic one's value type too) from a record (#2375, clang's CheckCStyleCast,
+            // err_typecheck_expect_scalar_operand), or from an atomic rvalue (#2230): the operand's type after its lvalue
+            // conversion, its qualifiers dropped and its sugar kept where they are none (a cast's as written), at the
+            // operand's first token, the getExprLoc of the conversion clang wraps it in (a member access's base too).
+            const TypeId converted = type_unqualified(type_strip_aligned(types, operand_type));
+            const bool cast = operand < count && graph->ops[operand] == CHECK_OP_CAST;
+            const uint32_t spelling = converted != operand_type ? 0 :
+                                      cast ? check_input_operand_type_spelling(input, parser, operand) : check_semantic_operand_spelling(parser, input, stream, types, operand);
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, converted, spelling);
+            *location = token + 1;
+            result = type.length == 0 ? NULL : check_warning_text(scratch, "operand of type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer);
+        }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token < parser->tokens.count &&
                  parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
                  (check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_UNION || check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_STRUCT))

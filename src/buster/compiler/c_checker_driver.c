@@ -9596,6 +9596,9 @@ struct CheckDriverTypoEdits
     // The names whose tails (check_driver_typo_tail) a reading didn't confirm, at the original's tokens, which no later
     // view leaves out again.
     uint32_t rejected[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    // Beside each replacement, whether it is a parameter's unknown type name's (CHECK_TYPO_PARAMETER), whose error is
+    // "unknown type name" with a keyword too.
+    bool parameters[BUSTER_CHECK_DRIVER_TYPO_EDITS];
     const InternTable* table;
     uint32_t count;
     uint32_t rejected_count;
@@ -9637,7 +9640,7 @@ static uint32_t check_driver_view_token(const Parser* view, const Parser* origin
 }
 
 // Inserts an edit in token order, unless one is at its token or overlaps it. Whether it was added.
-static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit edit, uint32_t keyword, uint32_t type, uint32_t name)
+static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit edit, uint32_t keyword, uint32_t type, uint32_t name, bool parameter)
 {
     uint32_t at = 0;
     while (at < edits->count && edits->edits[at].token < edit.token)
@@ -9654,6 +9657,7 @@ static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit e
         edits->keywords[k] = edits->keywords[k - 1];
         edits->types[k] = edits->types[k - 1];
         edits->names[k] = edits->names[k - 1];
+        edits->parameters[k] = edits->parameters[k - 1];
     }
     if (added)
     {
@@ -9661,6 +9665,7 @@ static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit e
         edits->keywords[at] = keyword;
         edits->types[at] = type;
         edits->names[at] = name;
+        edits->parameters[at] = parameter;
         edits->count += 1;
     }
     return added;
@@ -9718,12 +9723,17 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
         fresh = edits->rejected[r] != (origin != NULL ? origin[at] : at);
     }
     *begin = fresh ? first : at;
-    *name_of = fresh ? at : at - 1;
     uint32_t result = fresh ? at : 0;
     const uint8_t kind = at < count ? view->tokens.kinds[at] : PARSE_KIND_END;
     const bool operand = kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING;
+    // (Or a parenthesized name's, `(myin)x`: clang's MaybeTypeCast reads the name as an expression's, its correction may
+    // be a typedef's, and the expression is invalid either way.)
+    const bool cast = at >= 4 && view->tokens.kinds[at - 1] == PARSE_KIND_R_PAREN && view->tokens.kinds[at - 2] == PARSE_KIND_IDENTIFIER &&
+                      view->tokens.kinds[at - 3] == PARSE_KIND_L_PAREN;
     const uint32_t name = result == 0 && !diagnostic->probe && operand && at >= 2 && view->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER ? at - 1 :
-                          BUSTER_CHECK_NONE;
+                          result == 0 && !diagnostic->probe && operand && cast ? at - 2 :
+                                                                                  BUSTER_CHECK_NONE;
+    *name_of = fresh ? at : name < count ? name : at - 1;
     const uint8_t before = name < count ? view->tokens.kinds[name - 1] : PARSE_KIND_END;
     bool near = name < count && before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW;
     const uint32_t named = near && origin != NULL ? origin[name] : name;
@@ -9823,9 +9833,9 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
             const CheckPrefixEdit attributes_out = { .token = diagnostic->token, .end = name, .name = 0, .kind = 0 };
             const CheckPrefixEdit empty = { .token = name, .end = 0, .name = 0, .kind = PARSE_KIND_SEMI };
             const CheckPrefixEdit rest_out = { .token = name + 1, .end = end + 1, .name = 0, .kind = 0 };
-            added |= check_driver_typo_add(edits, attributes_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-            added |= check_driver_typo_add(edits, empty, 0, taken, name);
-            added |= check_driver_typo_add(edits, rest_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            added |= check_driver_typo_add(edits, attributes_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
+            added |= check_driver_typo_add(edits, empty, 0, taken, name, false);
+            added |= check_driver_typo_add(edits, rest_out, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
         }
         confirmed &= !attributes || (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && taken < count);
         if (name < count && !confirmed && edits->rejected_count < BUSTER_CHECK_DRIVER_TYPO_EDITS)
@@ -9835,13 +9845,19 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
             added = true;
         }
     }
-    for (uint32_t r = 0; r < input->report_count; r += 1)
+    // (Each report's, then each parameter's unknown type name's, CheckInput.parameter_typo_tokens.)
+    for (uint32_t r = 0; r < input->report_count + input->parameter_typo_count; r += 1)
     {
-        const CheckInputReport* report = input->reports + r;
-        const bool statement = report->message == CHECK_INPUT_UNDECLARED && (report->detail & CHECK_TYPO_STATEMENT) != 0;
-        const uint32_t token = statement ? check_driver_original_token(original, checking, report->token) : BUSTER_CHECK_NONE;
-        const uint32_t keyword = report->detail & (CHECK_TYPO_STATEMENT - 1);
-        const uint32_t type = statement && report->subject != 0 ? check_driver_original_token(original, checking, report->subject - 1) : BUSTER_CHECK_NONE;
+        const bool parameter = r >= input->report_count;
+        const uint32_t p = parameter ? r - input->report_count : 0;
+        const CheckInputReport* report = parameter ? NULL : input->reports + r;
+        const uint32_t detail = parameter ? input->parameter_typo_details[p] : report->detail;
+        const uint32_t subject = parameter ? input->parameter_typo_types[p] : report->subject;
+        const bool statement = parameter || (report->message == CHECK_INPUT_UNDECLARED && (detail & CHECK_TYPO_STATEMENT) != 0);
+        const uint32_t token = statement ? check_driver_original_token(original, checking, parameter ? input->parameter_typo_tokens[p] : report->token) :
+                                           BUSTER_CHECK_NONE;
+        const uint32_t keyword = detail & (CHECK_TYPO_STATEMENT - 1);
+        const uint32_t type = statement && subject != 0 ? check_driver_original_token(original, checking, subject - 1) : BUSTER_CHECK_NONE;
         uint32_t name = 0;
         uint8_t kind = PARSE_KIND_IDENTIFIER;
         if (keyword != 0 && keyword <= BUSTER_ARRAY_LENGTH(check_typo_keywords))
@@ -9861,7 +9877,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         if (token < count && name != 0 && kind != PARSE_KIND_UNKNOWN && original->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
         {
             const CheckPrefixEdit edit = { .token = token, .end = 0, .name = name, .kind = kind };
-            added |= check_driver_typo_add(edits, edit, keyword, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE);
+            added |= check_driver_typo_add(edits, edit, keyword, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE, parameter);
         }
     }
     // A probe's statement whose expression has an undeclared name that no correction took: its rest is left out.
@@ -9897,7 +9913,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && end > at)
         {
             const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };
-            added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
         }
     }
     return added;
@@ -9933,7 +9949,7 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
             const uint32_t name = original->tokens.names[edit->token];
             const char* other = noted ? (const char*)intern_bytes(pp->table, original->tokens.names[type]) : check_typo_keywords[keyword - 1];
             const int other_length = noted ? (int)intern_length(pp->table, original->tokens.names[type]) : (int)strlen(other);
-            snprintf(message, 512, "%s '%.*s'; did you mean '%.*s'?", typedef_name ? "unknown type name" : "use of undeclared identifier",
+            snprintf(message, 512, "%s '%.*s'; did you mean '%.*s'?", typedef_name || edits->parameters[e] ? "unknown type name" : "use of undeclared identifier",
                      (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
             if (note != NULL)
             {
@@ -10104,6 +10120,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     prefix_only = true;
                     ready = true;
                 }
+                else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                {
+                    // A parameter's unknown type first: every declaration before the first other error.
+                    checking = &prefix.parser;
+                    prefix_only = true;
+                    ready = true;
+                }
                 else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
                 {
                     // Only completed original expressions can contribute diagnostics. The synthetic closure
@@ -10229,6 +10252,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         resumed.parser.whole_view = true;
                         checking = recovered;
+                    }
+                    else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                    {
+                        checking = &prefix.parser;
                     }
                     else if (check_repair_make(&repair, recovered, pp, arena, scratch) == CHECK_REPAIR_READY)
                     {
