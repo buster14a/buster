@@ -10036,12 +10036,17 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   a builtin's call) is "not yet supported" in user code; in a system header
   the condition is kept and decides nothing, as #1361's fortify wrappers had
   it. A function declaration with a `pass_object_size` parameter (#1361's
-  object-size wrappers, `CheckInputAttributes.object_sizes`) doesn't read its
-  conditions at all, whatever their shape and wherever it is: none is built,
-  checked or kept (`check_input_conditions`), so in user code clang's
-  diagnostics of them are missing, an undeclared name's error and a
-  condition's warning or error at a use or a call alike
-  ([#2147](https://github.com/buster14a/buster/issues/2147)).
+  object-size wrappers, `CheckInputAttributes.object_sizes`) in a system
+  header doesn't read its conditions at all, whatever their shape: none is
+  built, checked or kept (`check_input_conditions`), as glibc's fortify
+  wrappers need. A user's reads them as any other function's (#2147): an
+  undeclared name is clang's error, and the conditions decide at uses and
+  calls, overloads and addresses; a shape the steps don't take (a
+  `__builtin_object_size` of the parameter) is kept and decides nothing, as
+  a system header's is, where clang's warns at a call that overflows. Still
+  apart: clang disables an inherited `enable_if` that names a parameter at
+  every call of a redeclaration (its condition's parameters aren't the
+  redeclaration's), which this checker evaluates.
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's

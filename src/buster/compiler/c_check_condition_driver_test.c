@@ -842,6 +842,39 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .errors = 6,
         .notes = 10,
     },
+    // A user's function with a pass_object_size parameter reads its conditions as any other's (#2147): an undeclared name,
+    // a constant condition at a call, enable_if's and diagnose_if's at calls, overloads, and its address.
+    {
+        .name = "pass_object_size functions' undeclared and constant conditions",
+        .source = "void *f(void *p __attribute__((pass_object_size(0))), unsigned long n)\n"
+                  "    __attribute__((diagnose_if(zz, \"always\", \"warning\")));\n"
+                  "void *f2(void *p __attribute__((pass_object_size(0))), unsigned long n)\n"
+                  "    __attribute__((diagnose_if(1, \"always\", \"warning\")));\n"
+                  "void g(void) { char b[4]; f2(b, 8); }\n",
+        .warnings = 1,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "pass_object_size functions' conditions at calls",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "void *f(void *p __attribute__((pass_object_size(0))), unsigned long n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "int g(int *p __attribute__((pass_object_size(1))), int k) OV __attribute__((enable_if(k > 0, \"pos\")));\n"
+                  "int g(int *p, int k) OV;\n"
+                  "int h(char *p __attribute__((pass_object_size(0))), int k) __attribute__((diagnose_if(k == 3, \"three\", \"warning\"), diagnose_if(k == 4, \"four\", \"error\")));\n"
+                  "void t(void) { char b[4]; int i[2]; f(b, 8); f(b, 200); g(i, 1); g(i, 0); h(b, 3); h(b, 4); h(b, 5); (void)&f; }\n",
+        .warnings = 1,
+        .errors = 3,
+        .notes = 3,
+    },
+    {
+        .name = "pass_object_size functions' conditions that hold",
+        .source = "void *f(void *p __attribute__((pass_object_size(0))), unsigned long n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "char gb[4];\n"
+                  "int h(char *p __attribute__((pass_object_size(0))), int k) __attribute__((enable_if(k == 3, \"three\")));\n"
+                  "int h2(int k, char *p __attribute__((pass_object_size(0)))) __attribute__((enable_if(k == 3, \"three\")));\n"
+                  "void t(char *q) { char b[4]; f(0, 8); f(gb, 8); f(&gb[1], 8); f(q, 8); h(b, 3); h(gb, 3); h2(3, b); }\n",
+    },
 };
 
 static void check_test_driver_conditions(CheckTest* test, const char* clang, const char* executable, const char* directory)
