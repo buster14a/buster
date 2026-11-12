@@ -200,7 +200,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--passes N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself (`c_check_node_machine.c`), run after the
 pipeline on every full expression the census takes, compared with what the
 pipeline made and timed. No compile takes its entries.
@@ -225,7 +225,11 @@ pipeline made and timed. No compile takes its entries.
   the body's that must stay one to one.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
-  the action alone. `--passes N` (5 by default; 0 for none) times each file's
+  the action alone. `--repeat N` (1 by default) runs each expression's sweeps
+  N times in a row in the timing passes, so that a run after the first finds
+  its inputs in the caches, as the reader leaves them in step 2; the
+  difference of two runs' figures is that warm cost. `--passes N` (5 by
+  default; 0 for none) times each file's
   taken expressions N times a sweep set, T alone, T and C, and all three,
   interleaved, and keeps each set's least cycles and instructions (this
   thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X

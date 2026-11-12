@@ -774,13 +774,28 @@ run, which the sweeps are most of):
   hashed tables. C's most sampled instruction is its branch on whether a
   record is evaluated.
 
-The levers for the gate, in order:
+Two follow-ups tested what the profiles suggested (the same record's `v7` and
+`v8` at main `a7ca9e8e`):
+
+- **The type table's lookups aren't the cost.** Each type's first complete
+  position was put in a per-unit table, so a member's and a pointer's
+  completeness became one load. Leaves took a path without the operand
+  machinery. T then ran 368 instructions a node instead of 391, and
+  `check_action_source_complete` left the profile, but T's cycles didn't move
+  (95 to 96).
+- **Neither are cold inputs.** `--repeat 2` runs each expression's sweeps twice
+  in a row, so the second run finds its inputs in the caches, as the reader
+  leaves them in step 2. The second run costs 152.8 cycles a node (T 79.2)
+  against the first's 171.7: the shadow's cold data is 11% of the cost. The
+  rest is the sweeps' own work, about 670 instructions a node at an IPC of
+  4.4.
+
+So the gate asks for fewer instructions a node, about a fifth fewer at the
+sweeps' IPC. The levers, in order:
 
 1. **The design's 28-byte records** in place of whole values, with the leaf's
    class and standing read once from its declaration, as step 2 reads them.
-2. **A tag's completion position** answering `check_action_source_complete` by
-   one compare. That also serves the graph run.
-3. **The context and template tables baked** in place of C's and X's branches.
+2. **The context and template tables baked** in place of C's and X's branches.
 
 Coverage comes after: calls first.
 

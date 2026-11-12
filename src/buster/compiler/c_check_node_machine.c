@@ -377,6 +377,10 @@ struct NodeMachine
     // wrapper, and whether it is valid and has no such wrapper. One load answers what T, C and X ask of a type, where the
     // type table's columns take one each, each a miss of the first-level cache for a unit as large as sqlite3.c's.
     uint32_t* type_words;
+    // Every type's first source position at which check_context_source_complete takes it as complete with the graph's tag
+    // history (UINT32_MAX: none), by type index: one load where the function's walk reads four of the type table's
+    // columns and the history.
+    uint32_t* type_complete_at;
     uint32_t type_count;
     // --scalar: T types every node by the action, the rows' exact twin.
     bool scalar;
@@ -420,6 +424,52 @@ struct NodeMachine
     uint32_t stopped;
 };
 
+// The first source position at which check_context_source_complete takes `type` as complete, with `graph`'s tag history:
+// none (UINT32_MAX) for an incomplete type, every one (0) without a history or for a type whose base, past its arrays,
+// names no tag, and else its tag's completion's (none past the history).
+static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGraph* graph, TypeId type)
+{
+    uint32_t position = type_is_complete(types, type) ? 0 : UINT32_MAX;
+    if (position == 0 && graph->tag_completions != NULL)
+    {
+        TypeId base = type_strip_aligned(types, type);
+        while (type_kind_is_array(type_kind(types, base)))
+        {
+            base = type_strip_aligned(types, type_element(types, base));
+        }
+        const uint8_t kind = type_kind(types, base);
+        const uint32_t tag = types->types.index[type_index(base)];
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
+        {
+            position = tag < graph->tag_completion_count ? graph->tag_completions[tag] : UINT32_MAX;
+        }
+    }
+    return position;
+}
+
+// Whether `type` is complete at node `node`'s source position (check_action_source_complete's answer for an action at the
+// node), by the unit's table, and by the function for a type past it.
+static bool node_machine_complete(const NodeMachine* machine, TypeId type, uint32_t node)
+{
+    const CheckGraph* graph = machine->graph;
+    const uint32_t index = type_index(type);
+    const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
+    bool complete = false;
+    if (index < machine->type_count)
+    {
+        // UINT32_MAX is never, even at a node without a position; a rule refused for it takes the action instead.
+        const uint32_t at = machine->type_complete_at[index];
+        complete = at != UINT32_MAX && at <= position;
+    }
+    else
+    {
+        CheckAction context = { .node = node };
+        context.context = check_graph_context(graph, node, false);
+        complete = check_action_source_complete(machine->types, type, &context);
+    }
+    return complete;
+}
+
 // The machine's columns for `program`'s unit, from `arena`: whether there was room.
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
@@ -434,6 +484,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
         .verify = verify,
     };
     machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
+    machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     machine->codes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
@@ -453,7 +504,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
     machine->classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
     machine->tape = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, entries);
-    const bool room = machine->type_words != NULL && classes != NULL && facts != NULL && machine->codes != NULL && machine->left != NULL && machine->right != NULL &&
+    const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->codes != NULL && machine->left != NULL && machine->right != NULL &&
                       machine->values != NULL && machine->words != NULL && machine->facts != NULL &&
                       machine->value_classes != NULL && machine->converted != NULL &&
                       machine->conversion_flags != NULL && machine->member_offsets != NULL && machine->states != NULL && machine->contexts != NULL &&
@@ -469,6 +520,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
             const uint8_t kind = valid ? check_action_kind(program->types, type) : BUSTER_TYPE_KIND_NONE;
             machine->type_words[index] = (uint32_t)classes[index] | (uint32_t)facts[index] << 8 | (uint32_t)kind << 16 |
                                          (plain ? BUSTER_NODE_MACHINE_WORD_PLAIN : 0) | (valid ? BUSTER_NODE_MACHINE_WORD_VALID : 0);
+            machine->type_complete_at[index] = valid ? node_machine_complete_at(program->types, &program->input->graph, type) : UINT32_MAX;
         }
     }
     return room && node_machine_tables_initialize();
@@ -742,12 +794,7 @@ static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node,
     }
     const uint8_t kind = type_kind(types, record);
     taken = taken && space == 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && base.constant_kind == CHECK_CONSTANT_NONE;
-    if (taken)
-    {
-        CheckAction context = { .op = op, .node = node };
-        context.context = check_graph_context(graph, node, false);
-        taken = check_action_source_complete(types, record, &context);
-    }
+    taken = taken && node_machine_complete(machine, record, node);
     uint64_t offset = 0;
     uint32_t qualifiers = 0;
     const uint32_t member = taken ? type_lookup_member(types, record, graph->members[node], &offset, &qualifiers) : 0;
@@ -930,9 +977,7 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
     {
         const TypeId element = type_element(types, type_strip_aligned(types, pointer->type));
         const uint8_t kind = check_action_kind(types, element);
-        CheckAction context = { .op = op, .node = node };
-        context.context = check_graph_context(machine->graph, node, false);
-        taken = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && check_action_source_complete(types, element, &context);
+        taken = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && node_machine_complete(machine, element, node);
     }
     if (taken)
     {
@@ -1063,54 +1108,62 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
     {
         const uint32_t node = node_machine_node(machine, r);
         const CheckOp op = graph->ops[node];
-        const uint32_t a = node_machine_operand(machine, r, 0);
-        const uint32_t b = node_machine_operand(machine, r, 1);
-        const uint32_t c = node_machine_operand(machine, r, 2);
+        const bool context = (graph->contexts != NULL && graph->contexts[node] != 0) || (graph->fp_environments != NULL && graph->fp_environments[node] != 0);
+        uint32_t word = 0;
         machine->codes[r] = (uint8_t)op;
-        machine->left[r] = a;
-        machine->right[r] = b;
-        if (!node_machine_code(op))
+        if (op == CHECK_OP_VALUE)
         {
-            refusal = NODE_MACHINE_REFUSED_CODE;
-        }
-        else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST || (op != CHECK_OP_VALUE && graph->argument_counts[node] != 0))
-        {
-            refusal = NODE_MACHINE_REFUSED_SHAPE;
-        }
-        else if ((graph->contexts != NULL && graph->contexts[node] != 0) || (graph->fp_environments != NULL && graph->fp_environments[node] != 0))
-        {
-            refusal = NODE_MACHINE_REFUSED_CONTEXT;
-        }
-        else if (op == CHECK_OP_VALUE)
-        {
+            // A leaf, two in five records: its record is the reader's, with no operand to find and its type's word read once.
             CheckValue* value = machine->values + r;
             node_machine_leaf(graph, node, value);
-            const uint32_t word = node_machine_word(machine, value->type);
+            word = node_machine_word(machine, value->type);
             const bool valid = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0 && (uint8_t)(word >> 16) != BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-            refusal = value->overload_head != 0 || !valid ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
+            refusal = context ? NODE_MACHINE_REFUSED_CONTEXT : value->overload_head != 0 || !valid ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
+            machine->left[r] = UINT32_MAX;
+            machine->right[r] = UINT32_MAX;
             machine->converted[2 * r] = value->type;
             machine->converted[2 * r + 1] = 0;
             machine->conversion_flags[2 * r] = 0;
             machine->conversion_flags[2 * r + 1] = 0;
             machine->member_offsets[r] = 0;
         }
-        else if (!machine->scalar && a != UINT32_MAX && c == UINT32_MAX &&
-                 ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
-        {
-            machine->row_nodes += 1;
-            machine->twin_differences += machine->verify && !node_machine_same_as_action(machine, r, op);
-        }
         else
         {
-            CheckActionResult result;
-            memset(&result, 0, sizeof(result));
-            node_machine_action(machine, r, op, &result);
-            refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
-            node_machine_store(machine, r, op, &result);
-            machine->action_nodes += 1;
-            machine->action_ops[op] += 1;
+            const uint32_t a = node_machine_operand(machine, r, 0);
+            const uint32_t b = node_machine_operand(machine, r, 1);
+            const uint32_t c = node_machine_operand(machine, r, 2);
+            machine->left[r] = a;
+            machine->right[r] = b;
+            if (!node_machine_code(op))
+            {
+                refusal = NODE_MACHINE_REFUSED_CODE;
+            }
+            else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST || graph->argument_counts[node] != 0)
+            {
+                refusal = NODE_MACHINE_REFUSED_SHAPE;
+            }
+            else if (context)
+            {
+                refusal = NODE_MACHINE_REFUSED_CONTEXT;
+            }
+            else if (!machine->scalar && a != UINT32_MAX && c == UINT32_MAX &&
+                     ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
+            {
+                machine->row_nodes += 1;
+                machine->twin_differences += machine->verify && !node_machine_same_as_action(machine, r, op);
+            }
+            else
+            {
+                CheckActionResult result;
+                memset(&result, 0, sizeof(result));
+                node_machine_action(machine, r, op, &result);
+                refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
+                node_machine_store(machine, r, op, &result);
+                machine->action_nodes += 1;
+                machine->action_ops[op] += 1;
+            }
+            word = node_machine_word(machine, machine->values[r].type);
         }
-        const uint32_t word = node_machine_word(machine, machine->values[r].type);
         const uint8_t facts = (uint8_t)(word >> 8);
         machine->words[r] = word;
         machine->facts[r] = facts;

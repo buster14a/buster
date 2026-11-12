@@ -214,7 +214,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
     snprintf(path, sizeof(path), "%s/shadow.c", directory);
     const char* text = node_shadow_test_text;
     bool valid = parse_test_write(path, text, strlen(text));
-    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1 };
+    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1, .repeat = 1 };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
