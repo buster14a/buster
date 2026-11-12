@@ -1498,6 +1498,37 @@ jobs:
           grep -v '^#' "$out/dso.txt" | sed '/^$/d'
           grep -v '^#' "$out/symbol.txt" | sed -n '/^$/d; 1,80p'
 
+      - name: Gauge sqlite3.c's compile at one worker and at eight, by stage
+        # #2536's step 0 (docs/all-core-path.md; docs/commands/all-core.md): -c --lanes 1 of the frozen sqlite3.c as
+        # independent processes, one worker on CPU 2 and eight on CPUs 0 to 7 (one a physical core), each worker's
+        # compiles one after another. Six rounds counted run by run (both modes' cycles, the peak, the faults), then six
+        # rounds sampled on the workers' CPUs (both modes' cycles by stage, each run's stages from its own --time-stages
+        # report): about 30 s. Every main state this job measures (a push, the nightly backlog and snapshot) and never
+        # a pull request: the later steps' gates are this table's. It fails when a compile fails, a counter or a sample
+        # is missing, or the objects of one worker and of eight differ; its figures don't gate.
+        if: github.event_name != 'pull_request'
+        run: |
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          out="$RUNNER_TEMP/all-core"
+          rm -rf "$out"
+          mkdir -p "$out/objects"
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$out/allcore" tools/allcore/allcore.c
+          "$out/allcore" self-test
+          command=(./build/compiler --time-stages --lanes 1 -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c" -o "$out/objects/%l.w%w.o")
+          "$out/allcore" counted --out "$out" -- "${command[@]}"
+          "$out/allcore" sampled --out "$out" -- "${command[@]}"
+          "$out/allcore" table --out "$out" --bytes "$(stat -c %s "$sqlite/sqlite3.c")"
+          cmp "$out/objects/one.w0.o" "$out/objects/eight.w7.o"
+          cat "$out"/counted/*.strays.txt "$out"/sampled/*.strays.txt
+          {
+              echo '### sqlite3.c at one worker and at eight (#2536, step 0)'
+              for table in whole table; do
+                  echo
+                  awk -F'\t' 'NR == 1 { rule = "|"; for (i = 1; i <= NF; i += 1) rule = rule (i == 1 ? " --- |" : " ---: |") } { line = "|"; for (i = 1; i <= NF; i += 1) line = line " " $i " |"; print line } NR == 1 { print rule }' "$out/$table.tsv"
+              done
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
         # whole source reader is timed per mode, with the handoff's pieces alone and their memory.
@@ -1923,6 +1954,13 @@ jobs:
       - name: Exercise the tailnet session hook with stand-in daemons
         if: ${{ !cancelled() }}
         run: bash .claude/hooks/test-join-tailnet.sh
+      # The all-core gauge (#2536) measures on the 9700X on main's states alone; its reductions' fixtures run here, on
+      # pull requests too.
+      - name: Check the all-core gauge's reductions against fixtures
+        if: ${{ !cancelled() }}
+        run: |
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing -o "$RUNNER_TEMP/allcore" tools/allcore/allcore.c
+          "$RUNNER_TEMP/allcore" self-test
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated

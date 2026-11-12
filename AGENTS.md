@@ -411,6 +411,7 @@ Source entry points below are relative to `src/buster/compiler/`, except
 `tools/` paths; each guide has the details. [Detailed section
 index](docs/commands/README.md#detailed-sections).
 
+- `allcore` (the all-core gauge) — `tools/allcore/allcore.c` — [guide](docs/commands/all-core.md).
 - `test-assembler, benchmark-assembler` — `assembler.c` — [guide](docs/commands/assembler.md).
 - `test-bind, benchmark-bind` — `bind.c` — [guide](docs/commands/bind.md).
 - `test-bindings, test-parser-bindings` — `c_bindings.c` — [guide](docs/commands/bindings.md).
@@ -470,11 +471,11 @@ index](docs/commands/README.md#detailed-sections).
 - `test-ssa, test-ssa-ir, test-ssa-source` — `ssa.c` — [guide](docs/commands/ssa.md).
 - `test-streaming, benchmark-streaming` — `streaming.c` — [guide](docs/commands/streaming.md).
 - `test-tier0[-inline], benchmark-backend[-source]` — `tier0.c` — [guide](docs/commands/tier0.md).
-- `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs, measure-tier1-rows` — `tier1_select.c` — [guide](docs/commands/tier1.md).
+- `test-tier1-{select,pipeline,masks}, measure-tier1-{programs,rows}` — `tier1_select.c` — [guide](docs/commands/tier1.md).
 - `test-tier1-allocation, benchmark-tier1-allocation` — `tier1_allocate.c` — [guide](docs/commands/tier1-allocation.md).
-- `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
-- `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
-- `test-tier1-frame, test-tier1-frame-execution` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
+- `benchmark-tier1-{,code-}certificate`, allocation and code certificate checks — `tier1_certificate.c` — [guide](docs/commands/tier1-certificate.md).
+- `test-tier1-cfg[-source]` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
+- `test-tier1-frame[-execution]` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
 - `test-tier1-schedule, benchmark-tier1-schedule` — `tier1_schedule.c` — [guide](docs/commands/tier1-schedule.md).
 - `test-check-units, benchmark-check-units` — `c_checker_units.c` — [guide](docs/commands/translation-units.md).
 - `test-types, benchmark-types` — `c_types.c` — [guide](docs/commands/types.md).
@@ -483,5 +484,5 @@ index](docs/commands/README.md#detailed-sections).
 - `test-x86-encoder, benchmark-x86-encoder` — `x86_64_encoder.c` — [guide](docs/commands/x86-encoder.md).
 - `test-x86-intrinsics` — `x86_intrinsics_test.c` — [guide](docs/commands/x86-intrinsics.md).
 - `test-x86-semantics, benchmark-x86-semantics` — `x86_semantics.c` — [guide](docs/commands/x86-semantics.md).
-- `test-x86-target, test-x86-target-selection` — `x86_target.c` — [guide](docs/commands/x86-target.md).
+- `test-x86-target[-selection]` — `x86_target.c` — [guide](docs/commands/x86-target.md).
 - `test-x86-zen5, measure-x86-zen5, measure-mask-spills` — `x86_zen5.c` — [guide](docs/commands/x86-zen5.md).

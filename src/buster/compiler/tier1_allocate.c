@@ -128,6 +128,19 @@ struct Tier1Allocation
     uint64_t scratch_bytes;
 };
 
+// #2538: another problem's verdict, taken inside an assignment (tier1_allocate_verdict): a problem over the same
+// intervals but for the registers each may take (`allowed_registers`, one per interval) and its classes' `registers`,
+// whether its own assignment would meet a constraint. `taken` says the verdict was taken (an input without hints or with
+// fixed ranges takes none), `constraint` what it is.
+typedef struct Tier1AllocationVerdict Tier1AllocationVerdict;
+struct Tier1AllocationVerdict
+{
+    const uint32_t* allowed_registers;
+    uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    bool taken;
+    bool constraint;
+};
+
 typedef struct Tier1AllocationLocation Tier1AllocationLocation;
 struct Tier1AllocationLocation
 {
@@ -767,7 +780,7 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
 // Without them the body has no hint code at all, so that an input without hints runs the code it ran before them.
 // Both production paths color regular classes; `color` is false only for the independent scan reference. The production
 // class-event column is eight temporary bytes per interval on either host, independent of `vector`'s filtering kernels.
-static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, Tier1Allocation* result)
+static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
     (void)vector;
 
@@ -960,6 +973,95 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         {
             present |= 1u << columns.classes[i];
         }
+        // #2538: the other problem's verdict, over this assignment's events, before its own scans. A class the common path
+        // would color under that problem (every interval free, its pressure within the registers) meets no constraint.
+        // Otherwise the scan fails only where a required start or use finds every register its interval may take held by
+        // intervals required there; an interval that may take every register of its class can't, while the class has at
+        // least as many registers as the most required uses at one position, of which it is one. So only an interval
+        // whose registers are fewer, a parameter's bound definition, can fail, before its end, and the scan's state at an
+        // event depends on the events before it alone: the verdict is the scan's over the events at positions below the
+        // last such end. Where the class has fewer registers than that most, the scan runs whole. Then every column the
+        // scans write goes back to where the assignment's own scans expect it.
+        if (error == TIER1_ALLOCATION_OK && verdict != 0)
+        {
+            const bool whole = columns.use_required == 0 || columns.flags != 0;
+            Tier1AllocationInput other = columns;
+            other.allowed_registers = verdict->allowed_registers;
+            for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+            {
+                other.registers[c] = verdict->registers[c];
+            }
+            verdict->taken = true;
+            verdict->constraint = false;
+            for (uint32_t class = 0; class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+            {
+                const uint32_t registers = verdict->registers[class];
+                bool regular = color;
+                bool members = false;
+                uint32_t bound_end = 0;
+                for (uint32_t i = 0; ((present >> class) & 1) != 0 && i < columns.count; i += 1)
+                {
+                    if (columns.classes[i] == class)
+                    {
+                        const bool bound = verdict->allowed_registers[i] != registers;
+                        members = true;
+                        regular &= !bound;
+                        bound_end = bound && columns.ends[i] > bound_end ? columns.ends[i] : bound_end;
+                        allowed[i] = verdict->allowed_registers[i];
+                    }
+                }
+                // The class's pressure, and its most required uses at one position: a position's uses are adjacent events.
+                int32_t live = 0;
+                uint32_t peak = 0;
+                uint32_t most = 0;
+                uint32_t here = 0;
+                uint32_t at = UINT32_MAX;
+                for (uint32_t e = 0; members && e < event_count; e += 1)
+                {
+                    const bool use_event = (events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) != 0;
+                    const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
+                    const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
+                    if (columns.classes[interval] == class && use_event)
+                    {
+                        here = columns.use_positions[use] == at ? here + 1 : 1;
+                        at = columns.use_positions[use];
+                        most = here > most ? here : most;
+                    }
+                    else if (columns.classes[interval] == class)
+                    {
+                        live += (events[e] & 1) != 0 ? 1 : -1;
+                        peak = (uint32_t)live > peak ? (uint32_t)live : peak;
+                    }
+                }
+                regular &= peak <= (uint32_t)__builtin_popcount(registers);
+                if (members && !regular)
+                {
+                    // The events at positions below the last bound end: after the fill, buckets[q] counts those at or below q.
+                    const bool all = whole || most > (uint32_t)__builtin_popcount(registers);
+                    const uint32_t prefix = all ? event_count : bound_end == 0 ? 0 : buckets[bound_end - 1];
+                    const bool assigned = columns.use_required != 0 ? tier1_allocate_scan_uses(&other, class, events, prefix, use_intervals, allowed, value_weights, regs, split, kinds, &pieces, hinted ? value_last : 0) :
+                                                                      tier1_allocate_scan(&other, class, events, prefix, allowed, regs, split, kinds, hinted ? value_last : 0);
+                    verdict->constraint = verdict->constraint || !assigned;
+                }
+            }
+            for (uint32_t i = 0; i < columns.count; i += 1)
+            {
+                allowed[i] = columns.allowed_registers[i];
+                split[i] = columns.ends[i];
+                regs[i] = UINT8_MAX;
+                kinds[i] = BUSTER_TIER1_ALLOCATE_REGISTER;
+                if (columns.use_required != 0)
+                {
+                    pieces.heads[i] = UINT32_MAX;
+                    pieces.tails[i] = UINT32_MAX;
+                }
+            }
+            pieces.count = 0;
+            if (hinted && value_last != 0)
+            {
+                memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0));
+            }
+        }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
         {
             bool regular = color;
@@ -1114,15 +1216,26 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
     return valid;
 }
 
-// The hinted copy: valid hints, then the body with its hint code.
-static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+// The hinted copy: valid hints, then the body with its hint code, and with `verdict` another problem's.
+static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
-    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, vector, true, true, result) : TIER1_ALLOCATION_INVALID;
+    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, vector, true, true, verdict, result) : TIER1_ALLOCATION_INVALID;
 }
 
 static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
 {
-    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, result) : tier1_allocate_body(input, arena, vector, true, false, result);
+    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, 0, result) : tier1_allocate_body(input, arena, vector, true, false, 0, result);
+}
+
+// #2538: tier1_allocate (or with `vector` false its scalar twin), and another problem's verdict over the same intervals
+// (Tier1AllocationVerdict), whose scans share this call's validation and sorted events. Only a hinted input without
+// fixed ranges, as tier1_cfg's are, takes one; `verdict->taken` says so.
+static __attribute__((unused)) Tier1AllocationError tier1_allocate_verdict(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+{
+    const bool hinted = input != 0 && input->hint_values != 0 && input->fixed.count == 0;
+    verdict->taken = false;
+    verdict->constraint = false;
+    return hinted ? tier1_allocate_hinted(input, arena, BUSTER_HOST_VECTOR && vector, verdict, result) : tier1_allocate_impl(input, arena, BUSTER_HOST_VECTOR && vector, result);
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
@@ -1148,11 +1261,11 @@ static __attribute__((unused)) Tier1AllocationError tier1_allocate_scan_referenc
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     if (input != 0 && input->hint_values != 0)
     {
-        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, false, true, result) : TIER1_ALLOCATION_INVALID;
+        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, false, true, 0, result) : TIER1_ALLOCATION_INVALID;
     }
     else
     {
-        error = tier1_allocate_body(input, arena, false, false, false, result);
+        error = tier1_allocate_body(input, arena, false, false, false, 0, result);
     }
     return error;
 }

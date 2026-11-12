@@ -29,6 +29,51 @@ requirements. [Command index](README.md).
   The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
   (#179)" have the contract and what is pending.
 
+## One allocation for two problems (#2538)
+
+`tier1_cfg_allocate` is three functions in a row: `tier1_cfg_prepare`
+(validation to the intervals, its working state left on the scratch arena in a
+`Tier1CfgPrepared`), `tier1_cfg_assign` (one `tier1_allocate` over those
+intervals for a problem's registers and column) and `tier1_cfg_finish` (lookup
+columns, slot sharing, the splits' and edges' moves); `tier1_cfg_release` gives
+the scratch back. Without fixed ranges the intervals serve every problem over
+the same values: `tier1_cfg_column` writes another problem's column (each
+value's run its allowed set, its definition's interval its bound registers),
+after `tier1_cfg_input_valid`'s two checks on a value's registers, 16 values a
+step with a scalar twin, and refuses an input with fixed ranges.
+`tier1_cfg_order_prepare` and `tier1_cfg_order_run` are the CFG consumer's
+order: the intervals, then the preferred problem (`Tier1CfgPreference`: its
+registers and each value's set, to which `tier1_cfg_preferred` adds a bound
+definition's registers) assigned with the plain problem's verdict inside its
+call (`tier1_cfg_assign_verdict`, `tier1_allocate_verdict`), the definitions
+freed and the preferred problem assigned again where the verdict is a
+constraint, and the standing allocation finished once; the plain problem is
+assigned whole only where the preferred allocation isn't taken. Without the
+preference's `verdict`, or where none was taken, the plain problem is assigned
+whole first. `tier1_cfg_differs` compares two allocations field by field.
+
+`tier1_allocate_verdict` takes another problem's verdict over the same
+intervals inside one assignment: per class, nothing where that problem would
+color the class; else its scan over the events at positions below the last end
+of an interval whose registers are fewer than its class's, or over every event
+where the class has fewer registers than the most required uses at one
+position. Then the scans' columns go back for the assignment's own.
+
+`test-tier1-cfg` runs each case as two problems, in one call (with the verdict
+inside, and with the plain problem first) and in two whole `tier1_cfg_allocate`
+calls, on both paths (`tier1_cfg_test_two_orders`): a random preferred problem
+(the general class widened, each value's set its own, the new registers or
+both, and in a case of four one required value given no register), with the
+definitions unbound, bound at random and bound in clashing pairs, two values
+required at one position given one register, which drives the constraint
+path; with fixed ranges another column must be refused, and the case runs
+without them. The verdicts, the problems left and the standing allocations
+must agree, and the checker must accept it. `test-tier1-cfg-source` does the
+same for every function of real C with the verdict inside, unbound and in
+clashing pairs, a required use added at each definition so that one can be
+bound. Mutants that drop the column's bound registers, the constraint retry,
+the verdict's prefix or its reset of the hints fail them.
+
 ## Edge validation and emission indexing (#1356)
 
 `tier1_cfg_input_valid` checks both complete offset arrays before any edge-array
