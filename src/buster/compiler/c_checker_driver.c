@@ -2861,8 +2861,8 @@ static uint32_t check_driver_unit_end_class(const Parser* parser, const Preproce
 // Splits a reader's warning events (`events`) into those published where they stand (`kept`) and the unit-end ones
 // (`late`), which clang's ActOnEndOfTranslationUnit gives after every other diagnostic (#2238): late[0] the tentative
 // arrays' warnings, late[1] the unused file-scope declarations' and then the unused block-scope typedefs', which it
-// leaves out once any error has occurred, a warning -Werror promotes included. Each keeps its order. `kept` may be `events`; a unit with unit-end events copies
-// them into `arena`. Whether there was room.
+// leaves out once any error has occurred, a warning -Werror promotes included. Each keeps its order. `kept` may be
+// `events`; a unit with unit-end events copies them into `arena`. Whether there was room.
 static bool check_driver_unit_end_split(const Parser* parser, const Preprocessor* pp, const CheckWarningEvents* events, Arena* arena,
                                         CheckWarningEvents* kept, CheckWarningEvents late[2])
 {

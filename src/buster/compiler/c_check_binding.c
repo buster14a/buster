@@ -341,16 +341,10 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && (!declaration_used || set_only) &&
                               !check_input_unused_suppressed(output, token, kind) && chain_marked[event] == 0 && main_file &&
-                              (parameter || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
-        const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
-        const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
-        const uint32_t id = set_only ? CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE : kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
-                              token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
-                              chain_marked[event] == 0 && main_file &&
                               (parameter || local_typedef || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
-        const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
+        const uint32_t id = set_only ? CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE : kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
                             local_typedef ? CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF :
                             parameter ? CHECK_WARNING_ID_UNUSED_PARAMETER :
                             const_variable ? CHECK_WARNING_ID_UNUSED_CONST_VARIABLE : CHECK_WARNING_ID_UNUSED_VARIABLE;
