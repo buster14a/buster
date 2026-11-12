@@ -487,6 +487,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void g(int x, char *y) { enum Y { B, C }; enum Y { B, D }; int v = B; (void)x; (void)y; (void)v; }\n"
         "int k(void) { enum W { P, Q }; enum W { P, R }; enum W { P, S }; return P; }\n"
         "int z = undeclared;\n",
+        // An unnamed member record that is a struct in one definition and a union in the other (#1826): clang's error is
+        // the inner record's, "'' is a struct here" at the earlier one, without the outer member's notes; nested too.
+        "/* gnu23 only */\nstruct S { struct { int a; } *p; };\nstruct S { union { int a; } *p; };\n"
+        "struct U { union { int a; } *p; int z; };\nstruct U { struct { int a; } *p; int z; };\n"
+        "struct V { int k; struct { union { int a; } *q; } *p; };\nstruct V { int k; struct { struct { int a; } *q; } *p; };\nint use = undeclared;\n",
+        // A member record that is an incompatible redefinition itself, behind _Atomic, const, pointers and arrays (#1826):
+        // the outer error's note spells it an int in its place (`_Atomic(int) *`), and the inner record is found past the
+        // qualifier that heads its subtree.
+        "/* gnu23 only */\nstruct S { _Atomic struct T { int a; } *p; };\nstruct S { _Atomic struct T { long a; } *p; };\n"
+        "struct W { const struct X { int a; } * volatile p[3]; };\nstruct W { const struct X { long a; } * volatile p[3]; };\n"
+        "struct Y { _Atomic struct { int a; } *p; };\nstruct Y { _Atomic union { int a; } *p; };\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
@@ -788,6 +799,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void h(void) __attribute__((cleanup(qq)));\nstruct S { int m __attribute__((aligned(yyy))); int n; } s;\n"
         "void k(void) { int l __attribute__((aligned(xxx))) = 1; int unused; (void)l; }\nint y = 1/0;\n"
         "int f(void) { return undeclared_fn(1); }\n",
+        // A member access whose base is no structure or union (#2288): clang's "member reference base type ... is not a
+        // structure or union" at the operator, the type as written for `.`; `.` of a pointer to one is "is a pointer; did you
+        // mean to use '->'?" there, and `->` of no pointer "member reference type ... is not a pointer" at the member's name.
+        "typedef int myint;\nstruct S { int a; } s, *sp;\nunion U { int u; } uu;\nint z = sizeof(((int *)0)->a);\n"
+        "int f(int x, int *p, double d, myint m)\n{\n    int unused;\n    x = p->a + (1, 2);\n    d.re = 1;\n    uu.v = 2;\n"
+        "    return x.a + sp.a + x->b + sizeof(d.k) + m.c + s.zz + sp->yy;\n}\nint g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
         // Any name that stays undeclared before an operand (#2255): clang's "use of undeclared identifier", its expression
         // invalid and its rest skipped as a keyword's typo's is, and the unit goes on. Before C23, `u8'a'` is the name `u8`
         // and a character constant.
