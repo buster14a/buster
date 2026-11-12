@@ -8,7 +8,7 @@ compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
 text says otherwise. The record
-[stage1-build-design-2040-2026-11-12](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/stage1-build-design-2040-2026-11-12)
+[stage1-build-design-2040-2026-11-12](https://github.com/buster14a/buster-performance/tree/be1fddaf542d8a5fe90f0a641ff4efc322e872b7/docs/measurements/stage1-build-design-2040-2026-11-12)
 has the raw runs, the scripts and the prototype. Part of
 [#2040](https://github.com/buster14a/buster/issues/2040); the design's issue is
 [#2559](https://github.com/buster14a/buster/issues/2559).
