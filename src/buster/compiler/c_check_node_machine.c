@@ -39,12 +39,15 @@
 // The most records an expression the machine takes has (docs/node-machine.md, "The records and the tapes").
 #define BUSTER_NODE_MACHINE_MOST 4096u
 // The most entries one row writes: a record's own and its conversion's (BUSTER_CHECK_LOWER_TEMPLATE_MOST), or an update's
-// first row. The tape holds BUSTER_NODE_MACHINE_ROW_MOST entries a record.
+// first row.
 #define BUSTER_NODE_MACHINE_ROW_MOST 8u
-// The most entries X writes at one record before it tests its rows against BUSTER_NODE_MACHINE_ROW_MOST: its own row and
-// its conversion's, and an update's first row after it. X refuses an expression before a record that would find fewer
-// left on the tape.
+// The most entries one row writes before X tests it against BUSTER_NODE_MACHINE_ROW_MOST and refuses it (12: a record's
+// own 8 and its conversion's 4).
 #define BUSTER_NODE_MACHINE_RECORD_MOST 32u
+// The tape's entries: every row an expression can keep, BUSTER_NODE_MACHINE_ROW_MOST each, and the row that X refuses. A
+// record ends one row, and an update's destination a second (the update's first): an update and its destination are two
+// records, so an expression has at most one and a half rows a record.
+#define BUSTER_NODE_MACHINE_TAPE_MOST (BUSTER_NODE_MACHINE_MOST * BUSTER_NODE_MACHINE_ROW_MOST * 3u / 2u + BUSTER_NODE_MACHINE_RECORD_MOST)
 // The builtin types a row's operand may be: a code below this.
 #define BUSTER_NODE_MACHINE_KINDS 24u
 // A record's state in C: reached and evaluated by its consumer's template; and an update's destination, after whose
@@ -461,7 +464,8 @@ struct NodeMachine
     uint32_t* consumers;
     NodeMachineUpdate* updates;
     uint32_t update_count;
-    // X's tape: the expression's entries, a local's holding its object, and the temporaries it has numbered.
+    // X's tape, BUSTER_NODE_MACHINE_TAPE_MOST entries: the expression's entries, a local's holding its object, and the
+    // temporaries it has numbered.
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* tape;
@@ -521,7 +525,7 @@ static bool node_machine_complete(const NodeMachine* machine, TypeId type, uint3
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
-    const uint32_t entries = BUSTER_NODE_MACHINE_MOST * BUSTER_NODE_MACHINE_ROW_MOST;
+    const uint32_t entries = BUSTER_NODE_MACHINE_TAPE_MOST;
     *machine = (NodeMachine){
         .program = program,
         .types = (TypeTable*)program->types,
@@ -1608,29 +1612,6 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
             kind = node_machine_local(machine, known_object) ? CHECK_LOWER_TEMPLATE_LOCAL : CHECK_LOWER_TEMPLATE_GLOBAL;
         }
     }
-    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)
-    {
-        // An update's first row follows its destination's entries: a direct one's destination isn't evaluated, and its
-        // first row reads it by name.
-        const uint32_t k = machine->update_count;
-        NodeMachineUpdate* update = machine->updates + k;
-        if (!address && k < BUSTER_NODE_MACHINE_MOST / 2 && node_machine_update_plan(machine, r, update))
-        {
-            kind = BUSTER_NODE_MACHINE_TEMPLATE_UPDATE;
-            machine->update_count = k + 1;
-            if (!update->direct)
-            {
-                node_machine_evaluate(machine, a, true, 0);
-            }
-            if (!update->increment && !update->power)
-            {
-                node_machine_evaluate(machine, b, false, update->right);
-            }
-            machine->states[a] |= BUSTER_NODE_MACHINE_SPLIT;
-            machine->consumers[a] = k;
-            machine->consumers[r] = k;
-        }
-    }
     else if (op == CHECK_OP_SELECT)
     {
         kind = CHECK_LOWER_TEMPLATE_PASS;
@@ -1745,6 +1726,29 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
             }
         }
     }
+    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)
+    {
+        // An update's first row follows its destination's entries: a direct one's destination isn't evaluated, and its
+        // first row reads it by name.
+        const uint32_t k = machine->update_count;
+        NodeMachineUpdate* update = machine->updates + k;
+        if (!address && k < BUSTER_NODE_MACHINE_MOST / 2 && node_machine_update_plan(machine, r, update))
+        {
+            kind = BUSTER_NODE_MACHINE_TEMPLATE_UPDATE;
+            machine->update_count = k + 1;
+            if (!update->direct)
+            {
+                node_machine_evaluate(machine, a, true, 0);
+            }
+            if (!update->increment && !update->power)
+            {
+                node_machine_evaluate(machine, b, false, update->right);
+            }
+            machine->states[a] |= BUSTER_NODE_MACHINE_SPLIT;
+            machine->consumers[a] = k;
+            machine->consumers[r] = k;
+        }
+    }
     return kind;
 }
 
@@ -1810,9 +1814,14 @@ static void node_machine_address(NodeMachine* machine, uint32_t object, int64_t 
     }
 }
 
-// Record `r`'s own entries by its template (check_lower_template_own's), after its operands'. `object` as in C.
-static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
+static bool node_machine_update_last(NodeMachine* machine, const NodeMachineUpdate* update);
+
+// Record `r`'s own entries by its template (check_lower_template_own's), after its operands', or an update's second row:
+// whether the templates take them (an update's conversion back). `object` as in C. Inlined into X's loop, as
+// node_machine_convert is.
+static inline __attribute__((always_inline)) bool node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
 {
+    bool takes = true;
     const CheckProgram* program = machine->program;
     const TypeTable* types = machine->types;
     const CheckOp op = (CheckOp)machine->codes[r];
@@ -1921,6 +1930,11 @@ static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
     {
         node_machine_put(machine, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type));
     }
+    else if (kind == BUSTER_NODE_MACHINE_TEMPLATE_UPDATE)
+    {
+        takes = node_machine_update_last(machine, machine->updates + machine->consumers[r]);
+    }
+    return takes;
 }
 
 // The entries of a conversion from `from` (its facts `from_facts`, its class on the stack `source`) to `to`
@@ -1974,7 +1988,7 @@ static inline __attribute__((always_inline)) bool node_machine_convert(NodeMachi
 }
 
 // Record `r`'s conversion's entries, from its type to its target in its context: whether the templates take it.
-static bool node_machine_conversion(NodeMachine* machine, uint32_t r)
+static inline __attribute__((always_inline)) bool node_machine_conversion(NodeMachine* machine, uint32_t r)
 {
     return machine->contexts[r] != 0 || node_machine_convert(machine, machine->values[r].type, machine->facts[r], machine->value_classes[r], machine->targets[r]);
 }
@@ -2055,44 +2069,54 @@ static __attribute__((noinline)) bool node_machine_update_last(NodeMachine* mach
     return takes;
 }
 
+// X's row of a record that ends a row of its own: its own entries and its conversion's, whether the templates take
+// them, at most BUSTER_NODE_MACHINE_ROW_MOST. `object` as in C.
+static inline __attribute__((always_inline)) NodeMachineRefusal node_machine_row_of(NodeMachine* machine, uint32_t r, uint32_t object)
+{
+    const uint32_t before = machine->entry_count;
+    const bool own = node_machine_own(machine, r, object);
+    const bool takes = own && node_machine_conversion(machine, r);
+    return !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+}
+
+// X at an update's destination's record (BUSTER_NODE_MACHINE_SPLIT): its own row where it is evaluated (an address's),
+// then the update's first row, each of at most BUSTER_NODE_MACHINE_ROW_MOST entries. Out of line, as the updates are.
+static __attribute__((noinline)) NodeMachineRefusal node_machine_expand_split(NodeMachine* machine, uint32_t r, uint8_t state)
+{
+    NodeMachineRefusal refusal = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0 ? node_machine_row_of(machine, r, 0) : NODE_MACHINE_TAKEN;
+    if (refusal == NODE_MACHINE_TAKEN)
+    {
+        const uint32_t before = machine->entry_count;
+        const bool takes = node_machine_update_first(machine, machine->updates + machine->consumers[r]);
+        refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+    }
+    return refusal;
+}
+
 // X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, and after
-// an update's destination's, the update's first row. `object` as in C.
+// an update's destination's, the update's first row. `object` as in C. The tape holds every row an expression can keep
+// (BUSTER_NODE_MACHINE_TAPE_MOST), so no record tests the room left.
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
     const uint32_t count = machine->count;
-    const uint32_t room = BUSTER_NODE_MACHINE_MOST * BUSTER_NODE_MACHINE_ROW_MOST - BUSTER_NODE_MACHINE_RECORD_MOST;
     machine->entry_count = 0;
     machine->temporary_count = 0;
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < count)
     {
         const uint8_t state = machine->states[r];
-        refusal = machine->entry_count > room ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
-        if (refusal == NODE_MACHINE_TAKEN && (state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
+        if (state == BUSTER_NODE_MACHINE_EVALUATED)
         {
-            const uint32_t before = machine->entry_count;
-            bool takes = true;
-            if (machine->templates[r] == BUSTER_NODE_MACHINE_TEMPLATE_UPDATE)
-            {
-                takes = node_machine_update_last(machine, machine->updates + machine->consumers[r]);
-            }
-            else
-            {
-                node_machine_own(machine, r, r == count - 1 ? object : 0);
-            }
-            takes = takes && node_machine_conversion(machine, r);
-            refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+            refusal = node_machine_row_of(machine, r, r == count - 1 ? object : 0);
         }
-        if (refusal == NODE_MACHINE_TAKEN && (state & BUSTER_NODE_MACHINE_SPLIT) != 0)
+        else if (state != 0)
         {
-            const uint32_t before = machine->entry_count;
-            const bool takes = node_machine_update_first(machine, machine->updates + machine->consumers[r]);
-            refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+            refusal = node_machine_expand_split(machine, r, state);
         }
-        machine->stopped = r;
         r += refusal == NODE_MACHINE_TAKEN;
     }
+    machine->stopped = r;
     return refusal;
 }
 
