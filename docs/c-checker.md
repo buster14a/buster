@@ -10525,9 +10525,14 @@ enables, which this checker doesn't all give.
     a hard one (incompatible types, another address space) (#2413,
     `check_graph_report_arguments`, which checks the call again with each failed
     argument taken as its parameter's type: only for a call already in error).
-    Still apart: a later argument's `-Wpointer-sign` or qualifier warning comes
-    before an earlier argument's error here, where clang gives them in argument
-    order;
+    A call's argument conversions' warnings (`-Wpointer-sign`, qualifiers) and
+    errors come in argument order, as clang's ConvertArgumentsForCall gives
+    them once every argument is built (#2481): each error is published at the
+    call's token with the warnings (`check_driver_pointer_arguments`), and
+    each takes its argument's first token's place among them
+    (`pp_diagnostic_suborder`). Still apart: a parenthesized argument's
+    conversion diagnostics are at its first token inside the parentheses,
+    where clang's are at its `(`;
   - the types as written: an array's and a function's unconverted, a qualified
     lvalue's qualified, with their typedefs;
   - clang's fix-it words (`check_driver_conversion_hint`,

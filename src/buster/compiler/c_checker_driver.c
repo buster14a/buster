@@ -3063,10 +3063,13 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                         const uint32_t index = check_diagnostic_warning_index(warning);
                         if (source.length != 0 && target.length != 0 && (note_token == BUSTER_CHECK_NONE || note != NULL))
                         {
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_notes_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, notes, note != NULL,
                                 "passing %.*s to parameter of type %.*s %s [%s%s]", (int)source.length, source.pointer, (int)target.length, target.pointer,
                                 check_driver_pointer_wording(types, warning, nested, conversion.type, value.type),
                                 severity >= CHECK_WARNING_ERROR ? "-Werror," : "", check_warning_descriptions[index].option);
+                            // In argument order among the call's failed conversions' errors, which complete with it (#2481).
+                            pp_diagnostic_suborder(pp, previous, (uint64_t)parser->tokens.sources[located] + 1u);
                         }
                         else
                         {
@@ -3607,7 +3610,7 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
 // fix-it its last words (check_driver_conversion_hint). NULL for any other report, which the generic message keeps.
 static const char* check_driver_conversion_error(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, uint32_t* note_token,
-                                                 const char** note, Arena* scratch)
+                                                 const char** note, uint32_t* argument, Arena* scratch)
 {
     const CheckGraph* graph = stream->graph;
     const uint32_t node = report->node;
@@ -3636,6 +3639,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
+    *argument = BUSTER_CHECK_NONE;
     if (applies && op == CHECK_OP_INITIALIZE)
     {
         source = graph->operand0[node];
@@ -3677,6 +3681,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         // (check_driver_parameter_source).
         const uint32_t index = argument_index - 1;
         source = graph->argument_nodes[graph->argument_offsets[node] + index];
+        *argument = source;
         const uint32_t callee = graph->operand0[node];
         TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
         function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
@@ -3826,7 +3831,9 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     const bool function = expected != 0 && type_kind(types, expected) == BUSTER_TYPE_KIND_FUNCTION;
     uint32_t note_token = BUSTER_CHECK_NONE;
     const char* note = NULL;
-    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, scratch) : NULL;
+    uint32_t argument = BUSTER_CHECK_NONE;
+    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument, scratch) :
+                                   NULL;
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
     // The target as the words spell it: between the action's words and the source's.
@@ -4579,6 +4586,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // A failed assignment conversion's clang words, with an argument's parameter note (#147).
                     uint32_t conversion_note_token = BUSTER_CHECK_NONE;
                     const char* conversion_note = NULL;
+                    // A call's failed argument's (#2481): clang converts a call's arguments in order, once they are all
+                    // built, each one's warnings and errors alike, so its error is published with the call's conversion
+                    // warnings, at the call's token (check_driver_pointer_arguments), in its argument's place among them.
+                    uint32_t conversion_argument = BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_overload_address(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
@@ -4586,8 +4597,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
-                                                                    &conversion_note_token, &conversion_note, scratch);
+                                                                    &conversion_note_token, &conversion_note, &conversion_argument, scratch);
                     }
+                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ?
+                                                    check_warning_graph_first(stream->graph, parser, conversion_argument) : BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
@@ -4605,7 +4618,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     else if (source != BUSTER_CHECK_NONE)
                     {
                         const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                        uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
+                        uint32_t publication = argument_first < count ? check_driver_publication_position(parser, pp, stream->graph->tokens[node], publication_end) :
+                                               completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
                         // An alias or ifunc definition's error is clang's after the multiversioning error at the
                         // function's name, though its location is its earlier attribute (#839).
                         if (phase == 0 && input->reports[index].sort != 0)
@@ -5854,7 +5868,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
                         }
-                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder : 0);
+                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
+                                                             argument_first < count ? (uint64_t)parser->tokens.sources[argument_first] + 1u : 0);
                     }
                     else
                     {
