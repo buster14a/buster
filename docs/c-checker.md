@@ -5451,16 +5451,35 @@ a member, a cast's and `sizeof`'s type name). What is dropped:
   `long long`, `long _Bool` a `long`.
 - **`_Complex` with a type it doesn't take.**
 
-The reader finds the error where a specifier makes the list invalid. Only then
-does `check_declspec_scan` work out which token clang drops: once over the list,
-then again without that token, to check that nothing else is wrong. The
+A list can have several errors (#1820 (c)), and clang gives each and goes on.
+A specifier whose kind's slot is taken is an error at it and is dropped, so
+the list goes on without it: `int float char` gives two errors and is an
+`int`, `long long long long` two and is a `long long`. Then come the list's
+end's errors, in `DeclSpec::Finish`'s chain, each unsetting what it is about
+before the next check: a sign the type doesn't take (every sign is dropped),
+then a width (the type becomes `int`), then `_Complex` (every `_Complex` is
+dropped). So `unsigned long float double` gives "cannot combine" at `double`,
+then the sign's error, then "'long float' is invalid", and is a `long`.
+
+The reader finds the first error where a specifier makes the list invalid.
+Only then does `check_declspec_scan` work out every error and the set of
+specifiers clang drops (`CheckDeclspecDrops`: a bit per token from the list's
+first, at most 256 of them, and the sign and `_Complex` slots), once over the
+list, then again without them, to check that nothing else is wrong. The
 recovery applies where:
 
-- the dropped specifier is a keyword;
-- the list without it has no other error;
+- the dropped specifiers are keywords, or, in a declaration's own list, types
+  of no keyword (`int typeof(int)`, `int _BitInt(8)`, `int _Atomic(int)`,
+  `int struct S`), which the reader has read past already;
+- the list without them has no other error;
 - the reader's state up to the error can be rebuilt from the scan's slots: a
-  keyword's type, or a tag's, typedef name's or `typeof`'s type that the
+  keyword's type, or a tag's, typedef name's or `typeof`'s type that a
   dropped token didn't replace.
+
+Every error is reported there, recovered; the reader then leaves out the
+dropped keywords after that point, warning for a repeated sign or `_Complex`
+among them as clang does (`unsigned float unsigned`), and a later refusal at a
+dropped type of no keyword rebuilds the state again without a report.
 
 A `_Complex` the type doesn't take is dropped at the list's end too, where the
 reader checks it (`_Complex _Bool` is a `_Bool`), with every `_Complex` of the
@@ -5469,9 +5488,10 @@ keyword too (`typeof(_Bool) _Complex`, `struct S _Complex`).
 
 The operand readers recover the same way. A `typeof`'s or an `_Atomic`'s type
 name (`check_constant_specifiers`) and an enum's fixed underlying type
-(`check_input_enum_underlying`) are read again without the dropped specifier
-(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`
-and `enum E : long float` a `long`.
+(`check_input_enum_underlying`) are read again without the dropped specifiers
+(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`,
+`typeof(int float char)` an `int` and `enum E : long float` a `long`. They
+take dropped keywords only.
 
 An error of the list's end (a sign, a width or a `_Complex` the type doesn't
 take) is published at the token after the list. It comes after the list's
@@ -5480,11 +5500,11 @@ repeated specifiers' warnings, in clang's discovery order:
 
 Still stopping the reader:
 
-- a list with a second error (`int float char x;`, `_Complex _Bool int y;`,
-  `unsigned float unsigned x;`), where clang reports both;
-- a storage class's conflict;
-- a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
-  `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
+- a storage class's conflict (`register _Thread_local int r;` in a block);
+- a type of no keyword dropped in an operand reader's type name
+  (`typeof(int typeof(int))`);
+- an enum's base of no integer type (`enum E : float`, clang's "non-integral
+  type 'float' is an invalid underlying type").
 
 Error-free lists never reach this. The semantic-recovery fixtures cover each
 kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a

@@ -656,10 +656,10 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
     bool saw = false;
     bool valid = true;
     bool reading = true;
-    // A list that doesn't combine is read again without the specifier clang's DeclSpec drops (#1447, review on #1820:
+    // A list that doesn't combine is read again without the specifiers clang's DeclSpec drops (#1447, review on #1820:
     // `typeof(_Complex _Bool)`), every _Complex for a _Complex's, as check_input_specifiers recovers it.
-    uint32_t skip = BUSTER_CHECK_NONE;
-    bool skip_complex = false;
+    CheckDeclspecDrops drops;
+    bool skipping = false;
     bool attempt = true;
     while (attempt)
     {
@@ -683,7 +683,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             const uint32_t name = parser->tokens.names[i];
             const uint8_t kind = parser->tokens.kinds[i];
             bool consumed = true;
-            if (i == skip || (skip_complex && check_declspec_complex_name(name)))
+            if (skipping && check_declspec_dropped(parser, &drops, i))
             {
                 // (Dropped.)
             }
@@ -854,11 +854,10 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
             base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
         }
-        const uint32_t dropped = !valid && skip == BUSTER_CHECK_NONE && saw ? check_input_specifiers_dropped(parser, *cursor, end) : BUSTER_CHECK_NONE;
-        attempt = dropped != BUSTER_CHECK_NONE;
-        skip = attempt ? dropped : skip;
-        skip_complex = attempt && check_declspec_complex_name(parser->tokens.names[dropped]);
-        if (!attempt && valid && skip != BUSTER_CHECK_NONE)
+        attempt = !valid && !skipping && saw && check_input_specifiers_dropped(parser, *cursor, end, false, &drops);
+        const bool reread = skipping;
+        skipping |= attempt;
+        if (!attempt && valid && reread)
         {
             // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
             const uint32_t count = reader->output->report_count;
