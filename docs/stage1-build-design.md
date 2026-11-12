@@ -49,8 +49,8 @@ has the raw runs, the scripts and the prototype. Part of
   itself (2 s, for a compile path 3.4 to 5.4 times slower); the units' sources
   split so that front ends run in parallel too.
 - **Found on the way:** CI's toolchain on the 9700X can't build #2058's parts
-  (lever 7), so its clean Release build compiles the units whole: 97.1 s where
-  the same clang with the parts takes 68.9 s.
+  (lever 7): a clean Release build with it compiles the units whole and takes
+  97.1 s, where the same clang with the parts takes 68.9 s.
 
 ## Today
 
@@ -498,9 +498,11 @@ own units would mean building LLVM on the host, which is the owner's call.
   step says `parallel native generation is off: no llvm-nm 23.1.4,
   llvm-objcopy 23.1.4, LLVM libraries llvm-config can link, shared or static`,
   and a clean build takes 97.1 s, the checker's unit alone 96.7 s, and an edit
-  of `c_check_input.c` 87.8 s. That is how CI's job on the 9700X builds
-  Release today: 28 s longer than the same clang takes with the parts. `tools/ci/setup-benchpress.sh` now stages the two
-  tools, not the libraries; the hosted install stages `libLLVM*.a`.
+  of `c_check_input.c` 87.8 s: 28 s longer than the same clang takes with the
+  parts. This was measured with CI's environment (the staged tree first on
+  `PATH`, its resource directory and library path), not read from a CI job's
+  log. `tools/ci/setup-benchpress.sh` now stages the two tools, not the
+  libraries; the hosted install stages `libLLVM*.a`.
 
 **What it costs.** Nothing is fetched: CI's job already builds with it, so a
 session that uses it builds what CI builds, and a session that doesn't builds
