@@ -170,25 +170,32 @@ struct CheckAttestedRecord
     bool contradiction;
 };
 
-// A name's state, by key (IdentId * 2 + namespace), one cache line: its current hash in the unit whose stamp it has, and
-// its declarers in the unit whose list stamp it has, a list of the unit's entries in source order (entry_declarations,
-// entry_next, entry_previous) with its first and last entry and their count, and the reach's two cursors and what is
-// still between them.
+// A name's state across the lane's units, by key (IdentId * 2 + namespace), 16 bytes: in the unit whose stamp it has,
+// its current hash, and its declarers' list (`local`, an index of the unit's dense lists, or BUSTER_ATTESTED_NONE). A
+// header's names take consecutive ids where the lane first interns them, so that four of them share a cache line, which
+// the compile between two units evicts.
 typedef struct CheckAttestedKey CheckAttestedKey;
 struct CheckAttestedKey
 {
-    CheckAttestedHash hash;
-    uint32_t hash_stamp;
-    uint32_t list_stamp;
+    uint64_t hash;
+    uint32_t stamp;
+    uint32_t local;
+};
+_Static_assert(sizeof(CheckAttestedKey) == 16, "four names' states a cache line");
+
+// A name's declarers in the unit (CheckAttested.lists, by a key's `local`): a list of the unit's entries in source
+// order (entry_declarations, entry_next, entry_previous), its first and last entry and their count, and the reach's two
+// cursors and what is still between them.
+typedef struct CheckAttestedList CheckAttestedList;
+struct CheckAttestedList
+{
     uint32_t first;
     uint32_t last;
     uint32_t count;
     uint32_t low;
     uint32_t high;
     uint32_t remaining;
-    uint32_t padding[4];
 };
-_Static_assert(sizeof(CheckAttestedKey) == 64, "a name's state is one cache line");
 
 // A name entry of a declaration's list (CheckAttested.name_entries): its key, and its class above it.
 #define BUSTER_ATTESTED_CLASS_SHIFT 25u
@@ -249,7 +256,8 @@ struct CheckAttested
     uint32_t* entry_declarations;
     uint32_t* entry_next;
     uint32_t* entry_previous;
-    uint32_t* distinct_keys;
+    // The unit's declarers' lists, one a name it declares (`distinct_count` of them).
+    CheckAttestedList* lists;
     uint32_t distinct_count;
     uint64_t* marks;
     // Each pragma's place (the declaration it comes before, or its own), its hash, and the keys it spells.
@@ -584,28 +592,51 @@ struct CheckAttestedListing
 };
 
 // Token `t`, of role `role` and parts `action` (BUSTER_ATTESTED_ACT_*), into the lists, and the declaration it ends where
-// it is a root (`root`). Both paths call it for every token with a part or a root, the scalar one for every token.
+// it is a root (`root`). Both paths call it for every token with a part or a root, the scalar one for every token. Its
+// common parts take no branch, since on a unit's first pass their order is a new one: an identifier's entry is written
+// at every step and counted at an identifier's, the level's flags are chosen, and the level above the stack's top is
+// written at every step and taken at an opener's (nothing reads a level above the top before an opener writes it). The
+// rare ones, a string in an asm or attribute group and a file-scope asm, and a root, branch.
 static inline __attribute__((always_inline)) void check_attested_list_token(CheckAttestedListing* listing, uint32_t t, uint8_t role, uint8_t action, bool root)
 {
     uint8_t* const stack_flags = listing->stack_flags;
     uint8_t* const stack_bases = listing->stack_bases;
-    uint32_t depth = listing->depth;
-    if (action != 0)
+    uint8_t* const stack_roles = listing->stack_roles;
+    const uint32_t depth = listing->depth;
+    const uint8_t level_flags = stack_flags[depth];
+    const uint8_t base = stack_bases[depth];
+    const bool identifier = (action & BUSTER_ATTESTED_ACT_IDENTIFIER) != 0;
+    const bool opens = (action & BUSTER_ATTESTED_ACT_OPEN) != 0;
+    const bool closes = (action & BUSTER_ATTESTED_ACT_CLOSE) != 0 && depth != 0;
+    // An identifier's class and entry.
+    const uint32_t id = listing->names[t] < BUSTER_ATTESTED_MAX_IDS ? listing->names[t] : 0;
+    const bool tag = role == PARSE_ROLE_TAG || role == PARSE_ROLE_LEAF_RIGHT;
+    const uint8_t operand = check_attested_level_class(base, level_flags);
+    const uint8_t name_class = tag ? BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP | BUSTER_ATTESTED_TAG :
+                               role == PARSE_ROLE_SPECIFIER ? BUSTER_ATTESTED_LOOKS_UP :
+                               role == PARSE_ROLE_MEMBER ? 0 : operand;
+    listing->name_entries[listing->names_count] = (id * 2 + (tag ? 1u : 0u)) | (uint32_t)name_class << BUSTER_ATTESTED_CLASS_SHIFT;
+    listing->names_count += identifier ? 1u : 0u;
+    // The level's flags: an identifier takes its enumerator, a comma starts the next item, a `;` the next member, and
+    // an `=` or a bit-field's `:` an expression.
+    const uint8_t item = base == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
+    const uint8_t flags = identifier ? level_flags & ~BUSTER_ATTESTED_LEVEL_ENUMERATOR :
+                          (action & BUSTER_ATTESTED_ACT_COMMA) != 0 ? item :
+                          (action & BUSTER_ATTESTED_ACT_SEMI) != 0 ? 0 :
+                          (action & BUSTER_ATTESTED_ACT_EXPRESSION) != 0 ? level_flags | BUSTER_ATTESTED_LEVEL_EXPRESSION : level_flags;
+    stack_flags[depth] = flags;
+    // The level an opener would open, above the top.
+    const uint8_t opened = check_attested_opened_base(role, check_attested_level_class(base, flags));
+    stack_roles[depth + 1] = role;
+    stack_bases[depth + 1] = opened;
+    stack_flags[depth + 1] = opened == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
+    listing->symbol_groups += opens && check_attested_symbol_group(role) ? 1u : 0u;
+    listing->symbol_groups -= closes && check_attested_symbol_group(stack_roles[depth]) && listing->symbol_groups != 0 ? 1u : 0u;
+    listing->declaration_flags |= opens && role == PARSE_ROLE_OPEN_BODY ? BUSTER_ATTESTED_DEFINITION : 0;
+    listing->depth = depth + (opens ? 1u : 0u) - (closes ? 1u : 0u);
+    if (__builtin_expect((action & (BUSTER_ATTESTED_ACT_STRING | BUSTER_ATTESTED_ACT_ASM)) != 0, 0))
     {
-        const uint8_t level_flags = stack_flags[depth];
-        if ((action & BUSTER_ATTESTED_ACT_IDENTIFIER) != 0)
-        {
-            const uint32_t id = listing->names[t] < BUSTER_ATTESTED_MAX_IDS ? listing->names[t] : 0;
-            const bool tag = role == PARSE_ROLE_TAG || role == PARSE_ROLE_LEAF_RIGHT;
-            const uint8_t operand = check_attested_level_class(stack_bases[depth], level_flags);
-            const uint8_t name_class = tag ? BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP | BUSTER_ATTESTED_TAG :
-                                       role == PARSE_ROLE_SPECIFIER ? BUSTER_ATTESTED_LOOKS_UP :
-                                       role == PARSE_ROLE_MEMBER ? 0 : operand;
-            stack_flags[depth] = level_flags & ~BUSTER_ATTESTED_LEVEL_ENUMERATOR;
-            listing->name_entries[listing->names_count] = (id * 2 + (tag ? 1u : 0u)) | (uint32_t)name_class << BUSTER_ATTESTED_CLASS_SHIFT;
-            listing->names_count += 1;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_STRING) != 0 && listing->symbol_groups != 0)
+        if ((action & BUSTER_ATTESTED_ACT_STRING) != 0 && listing->symbol_groups != 0)
         {
             listing->string_tokens[listing->strings] = t;
             listing->string_declarations[listing->strings] = listing->declaration;
@@ -616,34 +647,6 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
                  (t == listing->first || (t == listing->first + 1 && listing->kinds[listing->first] == PARSE_KIND_EXTENSION)))
         {
             listing->declaration_flags |= BUSTER_ATTESTED_ASM;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_COMMA) != 0)
-        {
-            stack_flags[depth] = stack_bases[depth] == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_SEMI) != 0)
-        {
-            // A struct body's member declaration ends: its bit-field's width with it.
-            stack_flags[depth] = 0;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_EXPRESSION) != 0)
-        {
-            stack_flags[depth] = level_flags | BUSTER_ATTESTED_LEVEL_EXPRESSION;
-        }
-        if ((action & BUSTER_ATTESTED_ACT_OPEN) != 0)
-        {
-            const uint8_t base = check_attested_opened_base(role, check_attested_level_class(stack_bases[depth], stack_flags[depth]));
-            depth += 1;
-            listing->stack_roles[depth] = role;
-            stack_bases[depth] = base;
-            stack_flags[depth] = base == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
-            listing->symbol_groups += check_attested_symbol_group(role) ? 1u : 0u;
-            listing->declaration_flags |= role == PARSE_ROLE_OPEN_BODY ? BUSTER_ATTESTED_DEFINITION : 0;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_CLOSE) != 0 && depth != 0)
-        {
-            listing->symbol_groups -= check_attested_symbol_group(listing->stack_roles[depth]) && listing->symbol_groups != 0 ? 1u : 0u;
-            depth -= 1;
         }
     }
     if (root)
@@ -664,11 +667,10 @@ static inline __attribute__((always_inline)) void check_attested_list_token(Chec
         listing->name_starts[declaration + 1] = listing->names_count;
         listing->declaration_flags = 0;
         listing->first = t + 1;
-        depth = 0;
+        listing->depth = 0;
         listing->symbol_groups = 0;
         stack_flags[0] = 0;
     }
-    listing->depth = depth;
 }
 
 // The lists of `parser`'s unit into the census's unit arrays; whether there was room. One pass in source order, with a
@@ -969,43 +971,49 @@ static __attribute__((noinline)) void check_attested_literals(CheckAttested* cen
 // The chain: in source order, each declaration's semantic hash from its own, the ambient state (the pragmas before it)
 // and the current hash of each name its list declares or looks up; the memo's probe; then its declared names' hashes.
 
-static CheckAttestedHash check_attested_name_hash(const CheckAttested* census, uint32_t key)
+// Name `key`'s current hash in the unit: 0 before a declaration of it.
+static uint64_t check_attested_name_hash(const CheckAttested* census, uint32_t key)
 {
     const CheckAttestedKey* state = census->keys + key;
-    return state->hash_stamp == census->stamp ? state->hash : (CheckAttestedHash){ 0 };
+    return state->stamp == census->stamp ? state->hash : 0;
 }
 
+// Name `key` declared by a declaration (or a pragma) of semantic hash `by`: its current hash made from the last one and
+// `by`; its state the unit's from here, with no declarers' list yet where it had none.
 static void check_attested_declare(CheckAttested* census, uint32_t key, CheckAttestedHash by)
 {
-    const CheckAttestedHash before = check_attested_name_hash(census, key);
     CheckAttestedKey* state = census->keys + key;
-    state->hash = check_attested_step((CheckAttestedHash){ .low = before.low ^ by.low, .high = before.high ^ by.high }, key);
-    state->hash_stamp = census->stamp;
+    const bool current = state->stamp == census->stamp;
+    const uint64_t before = current ? state->hash : 0;
+    state->hash = check_attested_mum(before ^ by.low ^ BUSTER_ATTESTED_K0, by.high ^ key ^ BUSTER_ATTESTED_K1) | 1;
+    state->local = current ? state->local : BUSTER_ATTESTED_NONE;
+    state->stamp = census->stamp;
 }
 
 // Declaration `d` among the declarers of `key`, the last of them yet: the reach's list, in source order.
 static void check_attested_declarer(CheckAttested* census, uint32_t key, uint32_t d, uint32_t* entries, uint32_t* distinct)
 {
+    // (check_attested_declare has made the name's state the unit's.)
     const uint32_t entry = *entries;
     CheckAttestedKey* state = census->keys + key;
     census->entry_declarations[entry] = d;
     census->entry_next[entry] = BUSTER_ATTESTED_NONE;
-    if (state->list_stamp != census->stamp)
+    if (state->local == BUSTER_ATTESTED_NONE)
     {
-        state->list_stamp = census->stamp;
-        state->first = entry;
-        state->count = 0;
+        state->local = *distinct;
+        census->lists[*distinct] = (CheckAttestedList){ .first = entry, .last = entry, .count = 0 };
         census->entry_previous[entry] = BUSTER_ATTESTED_NONE;
-        census->distinct_keys[*distinct] = key;
         *distinct += 1;
     }
     else
     {
-        census->entry_previous[entry] = state->last;
-        census->entry_next[state->last] = entry;
+        CheckAttestedList* list = census->lists + state->local;
+        census->entry_previous[entry] = list->last;
+        census->entry_next[list->last] = entry;
     }
-    state->last = entry;
-    state->count += 1;
+    CheckAttestedList* list = census->lists + state->local;
+    list->last = entry;
+    list->count += 1;
     *entries = entry + 1;
 }
 
@@ -1043,10 +1051,10 @@ static __attribute__((noinline)) void check_attested_chain(CheckAttested* census
         {
             const uint32_t entry = name_entries[n];
             const bool listed = (entry >> BUSTER_ATTESTED_CLASS_SHIFT & (BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP)) != 0;
-            const CheckAttestedHash name = check_attested_name_hash(census, entry & BUSTER_ATTESTED_KEY_MASK);
+            const uint64_t name = check_attested_name_hash(census, entry & BUSTER_ATTESTED_KEY_MASK);
             const uint64_t placed = (uint64_t)entry ^ (uint64_t)(n - start) << 32;
-            low += listed ? check_attested_mum(name.low ^ placed ^ BUSTER_ATTESTED_K0, BUSTER_ATTESTED_K1) : 0;
-            high += listed ? check_attested_mum(name.high ^ placed ^ BUSTER_ATTESTED_K2, BUSTER_ATTESTED_K3) : 0;
+            low += listed ? check_attested_mum(name ^ placed ^ BUSTER_ATTESTED_K0, BUSTER_ATTESTED_K1) : 0;
+            high += listed ? check_attested_mum(name ^ placed ^ BUSTER_ATTESTED_K2, BUSTER_ATTESTED_K3) : 0;
         }
         const CheckAttestedHash hash = check_attested_step((CheckAttestedHash){ .low = own.low ^ ambient.low ^ low, .high = own.high ^ ambient.high ^ high }, end - start);
         census->semantics[d] = hash;
@@ -1084,38 +1092,40 @@ static void check_attested_reach_one(CheckAttested* census, uint8_t* reached, ui
 // Every declarer of `key` before declaration `position`.
 static void check_attested_rise(CheckAttested* census, uint8_t* reached, uint32_t* pending, uint32_t key, uint32_t position)
 {
-    CheckAttestedKey* state = key < 2 * BUSTER_ATTESTED_MAX_IDS ? census->keys + key : NULL;
-    if (state != NULL && state->list_stamp == census->stamp)
+    const CheckAttestedKey* state = key < 2 * BUSTER_ATTESTED_MAX_IDS ? census->keys + key : NULL;
+    if (state != NULL && state->stamp == census->stamp && state->local != BUSTER_ATTESTED_NONE)
     {
-        uint32_t entry = state->low;
-        uint32_t remaining = state->remaining;
+        CheckAttestedList* list = census->lists + state->local;
+        uint32_t entry = list->low;
+        uint32_t remaining = list->remaining;
         while (remaining != 0 && census->entry_declarations[entry] < position)
         {
             check_attested_reach_one(census, reached, pending, census->entry_declarations[entry]);
             entry = census->entry_next[entry];
             remaining -= 1;
         }
-        state->low = entry;
-        state->remaining = remaining;
+        list->low = entry;
+        list->remaining = remaining;
     }
 }
 
 // Every declarer of `key` after declaration `position`.
 static void check_attested_fall(CheckAttested* census, uint8_t* reached, uint32_t* pending, uint32_t key, uint32_t position)
 {
-    CheckAttestedKey* state = key < 2 * BUSTER_ATTESTED_MAX_IDS ? census->keys + key : NULL;
-    if (state != NULL && state->list_stamp == census->stamp)
+    const CheckAttestedKey* state = key < 2 * BUSTER_ATTESTED_MAX_IDS ? census->keys + key : NULL;
+    if (state != NULL && state->stamp == census->stamp && state->local != BUSTER_ATTESTED_NONE)
     {
-        uint32_t entry = state->high;
-        uint32_t remaining = state->remaining;
+        CheckAttestedList* list = census->lists + state->local;
+        uint32_t entry = list->high;
+        uint32_t remaining = list->remaining;
         while (remaining != 0 && census->entry_declarations[entry] > position)
         {
             check_attested_reach_one(census, reached, pending, census->entry_declarations[entry]);
             entry = census->entry_previous[entry];
             remaining -= 1;
         }
-        state->high = entry;
-        state->remaining = remaining;
+        list->high = entry;
+        list->remaining = remaining;
     }
 }
 
@@ -1124,10 +1134,10 @@ static void check_attested_cursors(CheckAttested* census)
 {
     for (uint32_t k = 0; k < census->distinct_count; k += 1)
     {
-        CheckAttestedKey* state = census->keys + census->distinct_keys[k];
-        state->low = state->first;
-        state->high = state->last;
-        state->remaining = state->count;
+        CheckAttestedList* list = census->lists + k;
+        list->low = list->first;
+        list->high = list->last;
+        list->remaining = list->count;
     }
 }
 
@@ -1349,7 +1359,7 @@ static bool check_attested_unit_arrays(CheckAttested* census, uint32_t count, ui
     census->entry_declarations = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->entry_next = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->entry_previous = arena_push_array(arena, slots, sizeof(uint32_t), 64);
-    census->distinct_keys = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+    census->lists = arena_push_array(arena, slots, sizeof(CheckAttestedList), 64);
     census->marks = arena_push_array(arena, slots / 64 + 2, sizeof(uint64_t), 64);
     census->string_tokens = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->string_declarations = arena_push_array(arena, slots, sizeof(uint32_t), 64);
