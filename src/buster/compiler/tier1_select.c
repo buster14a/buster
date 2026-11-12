@@ -4742,14 +4742,16 @@ static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t roo
 // the single-use rule, so it doesn't duplicate a shared lea. The object may live in the entry block past the walk's
 // block: the producer materializes every slot address there, which dominates every use. A direct symbol's address
 // ends it too (#2573), from any block, since it reads no value either: the operand is the symbol plus the displacement,
-// rip-relative, which has no index, so an address with one keeps the symbol's lea as its base. No narrowed address or
-// speculative load is introduced: the walk stops at the base, the first node it can't take.
+// rip-relative, which has no index, so an address with one keeps the symbol's lea as its base. Either leaf is taken one
+// node past the walk's bound: the typed stream puts a ptrtoint and an inttoptr around each member's address, so
+// `sqlite3Config.m.xSize` is eight nodes above its symbol, and taking the leaf there lengthens no value's life. No
+// narrowed address or speculative load is introduced: the walk stops at the base, the first node it can't take.
 static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address, bool shared)
 {
     const IrFunction* function = forest->function;
     const uint32_t root_block = forest->blocks[root];
     bool walking = address.object == BUSTER_IR_NONE;
-    for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
+    for (uint32_t step = 0; walking && step <= BUSTER_TIER1_SELECT_WALK; step += 1)
     {
         const uint32_t node = address.base;
         const uint32_t op = function->op[node];
@@ -4767,7 +4769,8 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         // Only a node no other user needs (tier1_select_sinkable) goes: folding one whose lea stays would only lengthen
         // its inputs' lives past it, which speedtest1's spills showed.
         const bool sinkable = forest->sinkable != 0 && forest->sinkable[node] == BUSTER_TIER1_SELECT_SINKABLE;
-        bool taken = node < root && (block == root_block ? shared || forest->uses[node] == 1 : shared && sinkable);
+        // Past the bound, only a leaf.
+        bool taken = step < BUSTER_TIER1_SELECT_WALK && node < root && (block == root_block ? shared || forest->uses[node] == 1 : shared && sinkable);
         if (taken && op == IR_ADDRESS)
         {
             const IrAddress operand = function->addresses[function->c[node]];

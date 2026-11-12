@@ -151,6 +151,34 @@ __attribute__((noinline)) long symbols_loop(long n)
     return total + symbols_hidden;
 }
 
+// Two members deep, a value and a function to call: the typed stream's conversions around each member's address make
+// the walk's chain to the symbol its bound's length.
+struct SymbolsInner
+{
+    long pad;
+    long value;
+    int (*call)(int);
+};
+
+struct SymbolsOuter
+{
+    int a;
+    struct SymbolsInner inner;
+};
+
+struct SymbolsOuter symbols_outer;
+
+__attribute__((noinline)) long symbols_nested(long x)
+{
+    symbols_outer.inner.pad = x;
+    return symbols_outer.inner.value;
+}
+
+__attribute__((noinline)) int symbols_nested_call(int x)
+{
+    return symbols_outer.inner.call(x);
+}
+
 // Through the GOT and the thread pointer: never a rip-relative access of the symbol itself.
 __attribute__((noinline)) long symbols_got(long value)
 {
@@ -213,6 +241,28 @@ void symbols_atomic(long value);
 long symbols_loop(long n);
 long symbols_got(long value);
 long symbols_tls(long value);
+long symbols_nested(long x);
+int symbols_nested_call(int x);
+
+struct SymbolsInner
+{
+    long pad;
+    long value;
+    int (*call)(int);
+};
+
+struct SymbolsOuter
+{
+    int a;
+    struct SymbolsInner inner;
+};
+
+extern struct SymbolsOuter symbols_outer;
+
+static int symbols_twice(int x)
+{
+    return 2 * x;
+}
 
 long symbols_external = 40;
 struct SymbolsRecord symbols_external_record = { .i32 = 9, .u8 = 0xc8 };
@@ -284,6 +334,9 @@ int main(void)
         valid = symbols_loop(5) == total + hidden && valid;
         const long old = symbols_external;
         valid = symbols_got(value) == old + symbols_external_record.i32 + 1 && symbols_external == value && symbols_external_record.i16 == (short)value && valid;
+        symbols_outer.inner.value = value ^ 7;
+        symbols_outer.inner.call = symbols_twice;
+        valid = symbols_nested(value) == (value ^ 7) && symbols_outer.inner.pad == value && symbols_nested_call((int)value) == 2 * (int)value && valid;
         const long tls = symbols_local_tls + symbols_oracle_tls;
         valid = symbols_tls(value) == tls + (value == 3) && symbols_local_tls == value && symbols_oracle_tls == value + 1 && valid;
     }
@@ -463,9 +516,9 @@ static bool symbols_shape(const char* path)
             valid = false;
         }
     }
-    // Six functions of each width, two of each operation and the eight others, each seen once.
+    // Six functions of each width, two of each operation and the ten others, each seen once.
 #define BUSTER_SYMBOLS_COUNT(...) +1
-    const unsigned expected = 6 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 8;
+    const unsigned expected = 6 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 10;
 #undef BUSTER_SYMBOLS_COUNT
     if (functions != expected || direct_references < expected - 3)
     {

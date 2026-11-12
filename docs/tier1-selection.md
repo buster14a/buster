@@ -91,7 +91,11 @@ patterns are:
   keeps its sequence, its accesses going through the register it leaves. A
   rip-relative operand has no index, so a table reached through one
   (`yy_lookahead`, `sqlite3Stat.nowValue[op]`) keeps its symbol's `lea` as the
-  base. An address-valued root takes the leaf under the single-use rule:
+  base. The walk takes either leaf one node past its bound: the typed stream
+  puts a ptrtoint and an inttoptr around each member's address, so
+  `sqlite3Config.m.xSize`, an indirect call's callee in `sqlite3MallocSize`, is
+  eight nodes above its symbol, and the leaf reads no value whose life it could
+  lengthen. An address-valued root takes the leaf under the single-use rule:
   `&g.member` is one `lea g+off(%rip)`, which a CFG fragment recomputes as it
   does a symbol's own `lea`. The pattern carries the symbol in `stack_object`
   with `rip`; the symbol's node keeps the register leaf's class in the
