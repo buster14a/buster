@@ -1085,9 +1085,22 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
 | `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
 | `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| `vselect m, op(a, b), w` of an `add`, `sub`, `mul`, shift, floating operation or `lane_op` only the select reads, at its lanes (#1840) | `MASKED_BINARY` | the operation's EVEX form under `k`: `vpaddd x{k}, a, b` merging into `w`, which `x` takes first by a `vmovdqa64` unless it holds it (xmm15 keeping an operand that move would overwrite), or `vpaddd x{k}{z}, a, b` where `w` is a zero vector |
 | the same at other lanes ([the SIMD IR guide](ir-simd.md)'s "Lanes") | `BINARY`, `COMPARE`, `SELECT` | the lanes' forms (`tier1_select_lane_forms`, `_compares`, `_blends`): `vpaddb` to `vpaddq`, `vpsubb` to `vpsubq`, `vpmullw`, `vpmullq`, `vpsllvw` to `vpsllvq`, `vpsrlv*`, `vpsrav*`, `vaddps` to `vdivpd`; `vpcmp[u]b` to `vpcmp[u]q`, `vcmpps` and `vcmppd` (the rows' EQ_OQ, NEQ_UQ, LT_OS, LE_OS, GT_OS and GE_OS); `vpblendmb` to `vpblendmq` |
 | `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
 | `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+A masked operation (`tier1_select_masked_binary`) has four values: the
+operation's two operands, the mask and the passthrough `w` (`values[3]`, the
+`fourth` hole; `BUSTER_TIER1_SELECT_VALUES`), which the selection's costs and
+needs, the effective uses, liveness, both emitters, the code certificate and
+the straight-line check walk with the other three. The bitwise operations don't
+fold: their forms (`vpandq`, `vporq`, `vpxord`) mask a dword or a qword, not the
+select's lanes. Each form the fold can make has a complete Zen 5 row,
+`test-tier1-select`'s "every masked operation's form" check; zeroing on
+registers takes the unmasked row, as the model has it. On `main_unit_frontend.c`
+and `main_unit_backend.c`, compiled by `--tier1 -march=znver5`, the fold takes
+31 of 261 `vpblendm` and 82 of 411 into their operations.
 
 Unmasked, a quadword `and` or `or` is the doublewords' bits, and `x86_semantics.c`
 models those forms. A function with a vector constant keeps its frame out of the
