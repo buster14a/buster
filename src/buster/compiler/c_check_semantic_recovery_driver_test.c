@@ -790,6 +790,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // Statement checks in clang's words (#2406): a `case` or a `default` outside any switch at its keyword; a subscript of
+        // a function's pointer at that operand, the pointee's typedef as written; and of neither an array, a pointer nor a
+        // vector at its `[`.
+        "typedef int fn(void);\nint h(void); fn *p; int c; struct S { int a; } s; double d;\nvoid k(void)\n{\n    int unused;\n"
+        "    h[3];\n    p[1];\n    3[h];\n    c[0];\n    0[c];\n    s[1];\n    d[2];\n    { case 1: c = 2; }\n    default: c = 3;\n}\n"
+        "int g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
         // A member access whose base is no structure or union (#2288): clang's "member reference base type ... is not a
         // structure or union" at the operator, the type as written for `.`; `.` of a pointer to one is "is a pointer; did you
         // mean to use '->'?" there, and `->` of no pointer "member reference type ... is not a pointer" at the member's name.
