@@ -1335,6 +1335,54 @@ static const CheckDriverDefaultWarningFixture check_driver_parameter_typedef_fix
     },
 };
 
+// A counted_by family member's type as clang's CountAttributedType prints it (#1842's 3c, check_driver_counted_type): each
+// keyword's, a pointer's attribute before the placeholder and a flexible array's after it, through `&` and an array's
+// decay, as a failed conversion's source or an assigned member target, with the a.k.a.; a sibling declarator without
+// one keeps none.
+static const CheckDriverDefaultWarningFixture check_driver_counted_sugar_fixtures[] =
+{
+    {
+        .name = "counted_by family sugar",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct B { int n; int *__counted_by(n) p; char *__attribute__((sized_by(n))) q; void *__attribute__((sized_by_or_null(n))) r; int *__attribute__((counted_by_or_null(n))) s; };\n"
+                  "struct F { int n; int fam[] __counted_by(n); };\n"
+                  "void f(struct B *b, struct F *g)\n"
+                  "{\n"
+                  "    long *l;\n"
+                  "    l = b->p;\n"
+                  "    l = b->q;\n"
+                  "    l = b->r;\n"
+                  "    l = b->s;\n"
+                  "    l = g->fam;\n"
+                  "    l = &b->p;\n"
+                  "    double d = b->p;\n"
+                  "    int *ok = b->p;\n"
+                  "}\n",
+        .errors = 6,
+    },
+    {
+        .name = "counted_by sugar of targets and siblings",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct B { int n; int *__counted_by(n) p; int *__counted_by(n) p2, *plain; };\n"
+                  "struct F { int n; int fam[] __counted_by(n); };\n"
+                  "void take(long *x);\n"
+                  "void f(struct B *b, struct F *g, struct B v, long *l)\n"
+                  "{\n"
+                  "    b->p = l;\n"
+                  "    v.p = l;\n"
+                  "    take(b->p);\n"
+                  "    take(g->fam);\n"
+                  "    l = b->p2;\n"
+                  "    l = b->plain;\n"
+                  "    l = v.p;\n"
+                  "    l = &g->fam;\n"
+                  "    int *q = b->p;\n"
+                  "}\n",
+        .errors = 8,
+        .notes = 2,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
@@ -1346,6 +1394,8 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_size_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_size_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_counted_sugar_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_counted_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_parameter_typedef_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_parameter_typedef_fixtures));
 }

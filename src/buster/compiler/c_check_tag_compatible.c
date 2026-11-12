@@ -22,6 +22,9 @@ typedef enum CheckTagMismatch
     CHECK_TAG_MISMATCH_ATTRIBUTE,
     // The same of a member's attributes: clang's -Wodr error of "a member with an attribute", the comparison going on.
     CHECK_TAG_MISMATCH_MEMBER_ATTRIBUTE,
+    // (7 and 8 are an enum's, c_check_enum_input.c.) An unnamed member record of the earlier definition and the second's
+    // in its place are a struct and a union (#1826): clang's error is the second's, noted at the earlier "is a struct here".
+    CHECK_TAG_MISMATCH_KIND = 9,
 } CheckTagMismatch;
 
 // Report flags in CheckInputReport.bit_widths beside the widths: the first note's member is unnamed, and the second's.
@@ -78,12 +81,26 @@ struct CheckTagQueue
     // The last walk met the second definition's record that is an incompatible C23 redefinition itself: clang's member
     // of an invalid declaration's type is an int.
     bool invalid;
+    // The last walk met an unnamed record of the earlier definition whose counterpart is of the other kind: their keywords,
+    // or BUSTER_CHECK_NONE (CHECK_TAG_MISMATCH_KIND).
+    uint32_t kind_left;
+    uint32_t kind_right;
+    bool kind_union;
 };
 
 // A record's keyword from its body's `}`, a token before it: the struct or union keyword before the body's `{`.
 static uint32_t check_tag_keyword_of(const Parser* parser, uint32_t close)
 {
     uint32_t keyword = close < parser->tokens.count && parser->tokens.kinds[close] == PARSE_KIND_R_BRACE ? parser->tree.parents[close] : BUSTER_CHECK_NONE;
+    // A record after a specifier that heads its subtree (`_Atomic struct T { … }`, #1826): the body's parent is the
+    // specifier, and the keyword the first after it.
+    const bool headed = keyword != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] != PARSE_KIND_L_BRACE;
+    uint32_t first = headed ? keyword : close;
+    while (first < close && parser->tokens.kinds[first] != PARSE_KIND_STRUCT)
+    {
+        first += 1;
+    }
+    keyword = first < close ? first : keyword;
     for (uint32_t steps = 0; keyword != BUSTER_CHECK_NONE && keyword != 0 && steps < 256 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT; steps += 1)
     {
         keyword -= 1;
@@ -113,6 +130,8 @@ static bool check_tag_member_types(const CheckInputReader* reader, CheckTagQueue
     queue->pending[0] = left;
     queue->pending[1] = right;
     queue->invalid = false;
+    queue->kind_left = BUSTER_CHECK_NONE;
+    queue->kind_right = BUSTER_CHECK_NONE;
     bool result = true;
     while (result && count != 0)
     {
@@ -148,6 +167,11 @@ static bool check_tag_member_types(const CheckInputReader* reader, CheckTagQueue
             const uint32_t b_written = check_tag_written(reader, queue, 1, b_tag);
             const bool compared = a_written != BUSTER_CHECK_NONE || b_written != BUSTER_CHECK_NONE;
             result = type_qualifiers(a) == type_qualifiers(b) && (!compared || (a_kind == b_kind && queue->count < queue->capacity));
+            // clang's structural comparison of the two records reports their kinds' mismatch itself, at the second's.
+            const bool kinds = type_qualifiers(a) == type_qualifiers(b) && a_written != BUSTER_CHECK_NONE && b_written != BUSTER_CHECK_NONE && a_kind != b_kind;
+            queue->kind_left = kinds ? a_written : queue->kind_left;
+            queue->kind_right = kinds ? b_written : queue->kind_right;
+            queue->kind_union = kinds ? a_kind == BUSTER_TYPE_KIND_UNION : queue->kind_union;
             if (result && compared)
             {
                 // A named record compared with an unnamed one is where its own body is.
@@ -191,6 +215,37 @@ static bool check_tag_member_types(const CheckInputReader* reader, CheckTagQueue
         }
     }
     return result;
+}
+
+// A member's type as clang's note spells it where its record is an incompatible C23 redefinition itself (#1826,
+// CheckTagQueue.invalid): that record, an invalid declaration's type, is an int, and the pointers, atomics and arrays
+// around it stay (`_Atomic(int) *`). Another shape around it is an int alone, as before.
+static TypeId check_tag_invalid_member_type(CheckInputReader* reader, TypeId type)
+{
+    TypeTable* types = reader->types;
+    TypeId levels[16];
+    uint32_t depth = 0;
+    TypeId at = type_strip_aligned(types, type);
+    uint8_t kind = type_kind(types, type_unqualified(at));
+    while (depth < BUSTER_ARRAY_LENGTH(levels) && (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_ATOMIC || kind == BUSTER_TYPE_KIND_ARRAY))
+    {
+        levels[depth++] = at;
+        at = type_strip_aligned(types, types->types.base[type_index(type_unqualified(at))]);
+        kind = type_kind(types, type_unqualified(at));
+    }
+    const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    TypeId result = record ? BUSTER_TYPE_INT | type_qualifiers(at) : BUSTER_TYPE_INT;
+    for (uint32_t level = depth; record && result != 0 && level-- > 0;)
+    {
+        const TypeId outer = levels[level];
+        const uint32_t index = type_index(type_unqualified(outer));
+        const uint8_t outer_kind = type_kind(types, type_unqualified(outer));
+        const TypeId built = outer_kind == BUSTER_TYPE_KIND_POINTER ? type_pointer(types, result) :
+                             outer_kind == BUSTER_TYPE_KIND_ATOMIC ? type_atomic(types, result) : type_array(types, result, types->types.extent[index]);
+        result = built != 0 ? built | type_qualifiers(outer) : 0;
+    }
+    reader->output->resource |= result == 0;
+    return result != 0 ? result : BUSTER_TYPE_INT;
 }
 
 // The name token of a record's member called `name` in its body from `open`, its `{`: its first such identifier among the
@@ -491,7 +546,8 @@ static bool check_input_tag_compatible(CheckInputReader* reader, uint32_t keywor
         const uint32_t old_name = earlier_keyword < parser->tokens.count ? check_tag_name_token(parser, earlier_keyword, name, &old_open) : BUSTER_CHECK_NONE;
         // Room for every record's pair once, and for every member's walk.
         const uint64_t mark = reader->scratch->length;
-        CheckTagQueue queue = { .capacity = types->tags.count + 1, .pending_capacity = types->members.count + types->parameters.count + 2 };
+        CheckTagQueue queue = { .capacity = types->tags.count + 1, .pending_capacity = types->members.count + types->parameters.count + 2,
+                               .kind_left = BUSTER_CHECK_NONE, .kind_right = BUSTER_CHECK_NONE };
         queue.pairs = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckTagPair, queue.capacity);
         queue.pending = queue.pairs != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, TypeId, (uint64_t)queue.pending_capacity * 2) : NULL;
         valid = queue.pending != NULL;
@@ -553,7 +609,12 @@ static bool check_input_tag_compatible(CheckInputReader* reader, uint32_t keywor
                 const bool widths = old_width == new_width;
                 compatible = named && widths &&
                              check_tag_member_types(reader, &queue, types->members.type[old_begin + m], types->members.type[new_begin + m]);
-                if (valid && !compatible)
+                if (valid && !compatible && named && widths && queue.kind_right != BUSTER_CHECK_NONE)
+                {
+                    valid = check_tag_report(reader, queue.kind_right, CHECK_TAG_MISMATCH_KIND, queue.kind_left, BUSTER_CHECK_NONE, 0, queue.kind_union, BUSTER_CHECK_TAG_FIRST_UNNAMED,
+                                             queue.bodies[1][1]);
+                }
+                else if (valid && !compatible)
                 {
                     const CheckTagMismatch mismatch = !named ? CHECK_TAG_MISMATCH_NAME : !widths ? CHECK_TAG_MISMATCH_BIT_FIELD : CHECK_TAG_MISMATCH_TYPE;
                     // Each width plus one, 0 for a member that isn't a bit-field: the second definition's in the high half.
@@ -562,7 +623,7 @@ static bool check_input_tag_compatible(CheckInputReader* reader, uint32_t keywor
                     const uint32_t widths_pair = mismatch != CHECK_TAG_MISMATCH_BIT_FIELD ? 0 : (new_field ? 0 : new_width + 1) << 16 | (old_field ? 0 : old_width + 1);
                     const uint32_t flags = (types->members.name[new_begin + m] == 0 ? BUSTER_CHECK_TAG_FIRST_UNNAMED : 0) |
                                            (types->members.name[old_begin + m] == 0 ? BUSTER_CHECK_TAG_SECOND_UNNAMED : 0);
-                    const TypeId new_type = queue.invalid ? BUSTER_TYPE_INT : types->members.type[new_begin + m];
+                    const TypeId new_type = queue.invalid ? check_tag_invalid_member_type(reader, types->members.type[new_begin + m]) : types->members.type[new_begin + m];
                     valid = check_tag_report(reader, at, mismatch, new_member, old_member, new_type, types->members.type[old_begin + m], widths_pair | flags,
                                              queue.bodies[1][1]);
                 }

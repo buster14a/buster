@@ -8173,12 +8173,18 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_redefinition_driver_test.c"
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
+#include "c_check_implicit_value_driver_test.c"
+#include "c_check_chained_comparison_driver_test.c"
+#include "c_check_builtin_pointer_sign_driver_test.c"
+#include "c_check_shift_op_parentheses_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
+#include "c_check_asm_label_auto_driver_test.c"
 #include "c_check_assert_const_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
 #include "c_check_address_space_driver_test.c"
+#include "c_check_sizeof_array_decay_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_shift_count_driver_test.c"
 #include "c_check_int_in_bool_driver_test.c"
@@ -9113,12 +9119,18 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_conditions(&test, clang, executable, directory);
+            check_test_driver_implicit_values(&test, clang, executable, directory);
+            check_test_driver_chained_comparisons(&test, clang, executable, directory);
+            check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);
+            check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
+            check_test_driver_asm_label_auto(&test, clang, executable, directory);
             check_test_driver_assert_const(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);
             check_test_driver_address_spaces(&test, clang, executable, directory);
+            check_test_driver_sizeof_array_decay(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -9312,6 +9324,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_sizes(&test, clang, executable, directory);
+                check_test_driver_asm_recovery(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
