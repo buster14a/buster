@@ -1228,6 +1228,19 @@ static PredefinesOptions check_test_program_predefines(void)
 // section's programs include them (the intrinsics' headers, check_test_program_x86's).
 static bool check_test_program_includes = false;
 
+// Whether a program has a target_clones body that is compiled once per version (CheckProgramTargetGroup.copies). Only
+// check_program_select makes those copies, as -c does: lowered without it, the body is its first version's alone, and
+// every other version's name is a symbol at that code (#2516).
+static bool check_test_program_cloned(const CheckProgram* program)
+{
+    bool copies = false;
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        copies |= program->target_groups[g].copies;
+    }
+    return copies;
+}
+
 // The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
 // oracle and the harness alike. Nothing here contracts a * b + c into one fused operation (docs/c-checker.md), which
 // clang's default (-ffp-contract=on) does even at -O0 where the target has FMA (x86-64-v4's vector programs).
@@ -1967,8 +1980,9 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             arena_pop_to(&scratch, facts_mark);
         }
         // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
-        // (MMX's, whose builtins no row takes) are no part of it.
-        if (ready && check_test_program_includes)
+        // (MMX's, whose builtins no row takes) are no part of it. So does one with target_clones copies, which only the
+        // selection makes.
+        if (ready && (check_test_program_includes || check_test_program_cloned(&program)))
         {
             CheckProgramSelection selected;
             ready = check_program_select(&selected, &program, &data, path == 0, &output, &scratch);

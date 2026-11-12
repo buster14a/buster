@@ -65,7 +65,7 @@ static Tier1EmitError tier1_debug_straight(const Tier1SelectPlan* plan, const Ti
         valid = first >= body && first <= end && end <= code->count;
         valid = valid && use_first <= use_end && use_end <= plan->effective_use_count;
         uint32_t uses = 0;
-        for (uint32_t p = 0; valid && !plan->covered[node] && p < 3; p += 1)
+        for (uint32_t p = 0; valid && !plan->covered[node] && p < BUSTER_TIER1_SELECT_VALUES; p += 1)
         {
             const uint32_t operand = pattern->values[p];
             if (operand != BUSTER_IR_NONE)

@@ -826,10 +826,10 @@ static uint64_t tier1_select_test_plan_costs(const Tier1SelectPlan* plan, Arena*
     {
         const Tier1SelectPattern* pattern = &plan->patterns[node];
         uint64_t expected = pattern->intrinsic_cost;
-        for (uint32_t operand = 0; operand < 3; operand += 1)
+        for (uint32_t operand = 0; operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
         {
             const uint32_t value = pattern->values[operand];
-            const bool repeated = (operand > 0 && pattern->values[0] == value) || (operand > 1 && pattern->values[1] == value);
+            const bool repeated = (operand > 0 && pattern->values[0] == value) || (operand > 1 && pattern->values[1] == value) || (operand > 2 && pattern->values[2] == value);
             const bool child = value < node && uses[value] == 1 && blocks[value] == blocks[node];
             expected += !repeated && child ? plan->costs[value] : 0;
         }
@@ -1011,6 +1011,49 @@ static void tier1_select_test_lane_forms(Tier1SelectTest* test)
         }
     }
     tier1_select_test_expect(test, forms != 0 && uncovered == 0, "every form a vector operation's lanes select is one x86 semantics covers");
+}
+
+// The masked operations' forms (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): every BINARY's but the bitwise ones' and
+// every valid LANE_OP's EVEX form at each lanes and width that takes a writemask, under one and zeroing where it may,
+// has a complete Zen 5 row, so that the fold never emits a record the model can't cost.
+static void tier1_select_test_masked_forms(Tier1SelectTest* test)
+{
+    uint32_t forms = 0;
+    uint32_t incomplete = 0;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
+    {
+        const uint32_t operations = kind == 0 ? BUSTER_TIER1_VECTOR_OPERATIONS : 32;
+        for (uint32_t operation = 0; operation < operations; operation += 1)
+        {
+            const bool bitwise = kind == 0 && operation >= BUSTER_TIER1_VECTOR_AND && operation <= BUSTER_TIER1_VECTOR_XOR;
+            for (uint32_t lane = 0; !bitwise && (kind == 0 || ir_lane_op_flags_valid(operation)) && lane < (kind == 0 ? IR_SIMD_LANE_COUNT : 1u); lane += 1)
+            {
+                for (uint32_t width = 16; width <= 64; width *= 2)
+                {
+                    const uint16_t form = tier1_select_masked_form(kind == 1, operation, lane, width);
+                    const uint8_t evex = form != X86_FORM_NONE ? x86_form_description(form)->evex : 0;
+                    for (uint32_t zeroing = 0; (evex & BUSTER_X86_EVEX_MASK) != 0 && zeroing < ((evex & BUSTER_X86_EVEX_ZEROING) != 0 ? 2u : 1u); zeroing += 1)
+                    {
+                        const X86Instruction record = {
+                            .form = form,
+                            .reg = 1,
+                            .vvvv = 2,
+                            .rm = 3,
+                            .mode = BUSTER_X86_REGISTER_DIRECT,
+                            .decorations = (uint8_t)(1u | (zeroing != 0 ? BUSTER_X86_DECORATION_ZEROING : 0u)),
+                        };
+                        forms += 1;
+                        if (!x86_zen5_accounts(x86_zen5_id(&record), BUSTER_X86_COST_ALL_COLUMNS))
+                        {
+                            fprintf(stderr, "masked form without a complete Zen 5 row: %s %s\n", ir_form_names[form], zeroing != 0 ? "REGISTER" : "MASKED");
+                            incomplete += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tier1_select_test_expect(test, forms != 0 && incomplete == 0, "every masked operation's form has a complete Zen 5 row");
 }
 
 // A 16-byte vector's NOT, COMPARE and SELECT at a target without AVX (#1425's review): a NOT is pcmpeqd's every bit and
@@ -1286,6 +1329,7 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 {
     tier1_select_test_address_arithmetic(test);
     tier1_select_test_coalesced_addresses(test);
+    tier1_select_test_masked_forms(test);
     Arena input = arena_reserve(1u << 20);
     Arena output = arena_reserve(1u << 20);
     Arena scratch = arena_reserve(1u << 20);
@@ -2148,7 +2192,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 const uint32_t node = 6 + c;
                                 const Tier1SelectPattern* pattern = &plan->patterns[node];
                                 tier1_select_test_expect(test, pattern->rule == TIER1_RULE_CALL && pattern->immediate == 1 && pattern->width == tier1_select_width(result_types[type]) && pattern->fold_count == 0 && plan->covered[node] == 0, "CALL pattern publishes symbol and result width without folding");
-                                for (uint32_t p = 0; p < 3; p += 1)
+                                for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_VALUES; p += 1)
                                 {
                                     tier1_select_test_expect(test, pattern->values[p] == BUSTER_IR_NONE, "CALL ordinary value slots remain absent");
                                 }

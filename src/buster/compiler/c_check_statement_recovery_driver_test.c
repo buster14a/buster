@@ -251,6 +251,30 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         // too (#2162).
         "int f(void) { return _Alignof(int[undecl3]); }\n"
         "int k(void) { return d; }\n",
+        // A declaration constant's error inside a body (#2120): the view leaves out the declaration and its uses, and its
+        // reading's later errors, in statements it keeps whole, are the unit's, in each round.
+        "int k(int b, ...);\n"
+        "int h(int a);\n"
+        "void f(void)\n"
+        "{\n"
+        "    typeof(k()) u;\n"
+        "    typeof(k()) w;\n"
+        "    (void)u; (void)w;\n"
+        "    (void)sizeof(h(1, 2));\n"
+        "    int unused;\n"
+        "}\n",
+        // A statement expression's left-out last statement makes its value void in the view, whose error isn't the unit's;
+        // a later statement's is.
+        "int k(int b, ...);\n"
+        "int h(int a);\n"
+        "int a[sizeof(k())];\n"
+        "void f(void)\n"
+        "{\n"
+        "    int x = ({ typeof(k()) v; 1; });\n"
+        "    int y = ({ int z = k(); });\n"
+        "    h(1, 2);\n"
+        "    (void)(x + y);\n"
+        "}\n",
         // A file-scope array initialized by a compound literal whose body holds a value that is no constant (#1812): the
         // literal's error once at its place, and no mismatch of the array's type with the literal's, which clang's invalid
         // literal leaves out; a valid body's mismatch is still given.

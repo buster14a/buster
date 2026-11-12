@@ -8,7 +8,8 @@
 // requests, under the default, -Werror and -w policies, with -fsyntax-only and -c. Also #2189's other items: CFString's
 // argument of no ordinary literal (check_semantic_expression), dump_struct's rest argument that doesn't convert to its
 // printer's parameter with clang's two notes (check_driver_dump_struct), and verbose_trap through a const pointer whose
-// own initializer lost the designator (check_input_verbose_trap_object).
+// own initializer lost the designator (check_input_verbose_trap_object). And #2460: a builtin's argument that doesn't
+// convert, in the conversion's words (check_driver_builtin_conversion).
 
 static const CheckDriverDefaultWarningFixture check_driver_builtin_pointer_sign_fixtures[] =
 {
@@ -68,6 +69,20 @@ static const CheckDriverDefaultWarningFixture check_driver_builtin_pointer_sign_
                   "void f7(void) { __builtin_verbose_trap(\"c\", (const char*)(const void*)q2); }\n",
         .warnings = 0,
         .errors = 4,
+        .notes = 0,
+    },
+    {
+        // A builtin's argument that doesn't convert to its parameter (#2460, check_driver_builtin_conversion): the
+        // conversion's own words at the argument, no parameter's note; CFString's then adds its literal's error.
+        .name = "builtin arguments that don't convert",
+        .source = "struct S { int a; } s;\n"
+                  "void g(void) { (void)__builtin_strlen(1); }\n"
+                  "void h(void) { (void)__builtin_strlen(L\"a\"); }\n"
+                  "void k(void) { (void)__builtin___CFStringMakeConstantString(1); }\n"
+                  "void m(char *p, int *ip) { (void)__builtin_strlen(s); (void)__builtin_memcpy(p, 1, 2); "
+                  "(void)__builtin___CFStringMakeConstantString(ip); }\n",
+        .warnings = 0,
+        .errors = 8,
         .notes = 0,
     },
 };
