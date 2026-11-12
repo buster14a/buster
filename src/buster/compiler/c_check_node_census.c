@@ -1773,6 +1773,8 @@ struct NodeShadow
     uint64_t taken_nodes;
     uint64_t taken_records;
     uint64_t entries;
+    // The taken expressions' calls, each compared with its row of the function's calls table.
+    uint64_t calls;
     // Each refusal's expressions and their evaluated nodes, and the operators the code refusal stopped at.
     uint64_t refused_expressions[NODE_MACHINE_REFUSALS];
     uint64_t refused_nodes[NODE_MACHINE_REFUSALS];
@@ -1848,11 +1850,46 @@ static bool node_shadow_same_value(const NodeMachine* machine, uint32_t r)
                stream->conversions[node].operands[k].flags == node_machine_record_conversion_flags(machine, r, k);
     }
     same = same && stream->member_offsets[node] == node_machine_record_member_offset(machine, r);
+    // A call's arguments' conversions, the stream's in its argument list.
+    const CheckGraph* graph = &machine->program->input->graph;
+    const bool call = node_machine_record_op(machine, r) == CHECK_OP_CALL;
+    const uint32_t count = call ? node_machine_record_argument_count(machine, r) : 0;
+    same = same && (!call || count == graph->argument_counts[node]);
+    for (uint32_t i = 0; same && i < count; i += 1)
+    {
+        const CheckConversion* expected_conversion = stream->argument_conversions + graph->argument_offsets[node] + i;
+        same = expected_conversion->type == node_machine_record_argument_converted(machine, r, i) &&
+               expected_conversion->flags == node_machine_record_argument_conversion_flags(machine, r, i);
+    }
+    return same;
+}
+
+// Whether the machine's call rows are the function's from row `base` on (Tier0Function's calls table): each one's callee's
+// symbol, its arguments' count, classes and sizes, whether it is variadic, and no result object.
+static bool node_shadow_same_calls(const NodeMachine* machine, const Tier0Function* function, uint32_t base)
+{
+    bool same = base <= function->call_count && machine->call_count <= function->call_count - base;
+    for (uint32_t k = 0; same && k < machine->call_count; k += 1)
+    {
+        const uint32_t r = machine->call_records[k];
+        const uint32_t row = base + k;
+        const uint32_t count = node_machine_record_argument_count(machine, r);
+        const uint32_t at = function->call_first[row];
+        same = function->call_targets[row] == node_machine_call_target(machine, r) && function->call_argument_counts[row] == count &&
+               (function->call_variadic[row] != 0) == node_machine_call_variadic(machine, r) &&
+               (function->call_result_objects == NULL || function->call_result_objects[row] == 0) && at <= function->argument_count && count <= function->argument_count - at;
+        for (uint32_t i = 0; same && i < count; i += 1)
+        {
+            const TypeId argument = node_machine_record_argument_converted(machine, r, i);
+            same = function->argument_classes[at + i] == node_machine_class(machine, argument) && (function->argument_sizes == NULL || function->argument_sizes[at + i] == 0);
+        }
+    }
     return same;
 }
 
 // Whether the tape is the lowering's entries for the expression whose root pop is `pop`: the entries its nodes' tasks and
-// their conversions own, from the root's pop on.
+// their conversions own, from the root's pop on. A call's row is relative on the tape: the stream's rows are the tape's
+// plus one base, the row its first call has, and their contents the machine's (node_shadow_same_calls).
 static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* machine, const CheckLowerOwnerPop* pop, uint32_t* compared)
 {
     const Tier0Function* function = s->function;
@@ -1862,6 +1899,7 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
     uint32_t e = pop->entry;
     uint32_t t = 0;
     bool same = true;
+    uint64_t base = UINT64_MAX;
     bool inside = e < function->count;
     while (inside)
     {
@@ -1871,13 +1909,19 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
         if (inside)
         {
             const uint8_t kind = function->kinds[e];
+            // A row of the tape's calls (so that the rows the tape names, distinct as the stream's are, are all its own).
+            const bool call = kind == BUSTER_TYPED_CALL && t < machine->entry_count && machine->tape[t] < machine->call_count && function->values[e] >= machine->tape[t];
+            base = call && base == UINT64_MAX ? function->values[e] - machine->tape[t] : base;
             same = same && t < machine->entry_count && machine->kinds[t] == kind && machine->classes[t] == function->classes[e] &&
-                   (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) : machine->tape[t] == function->values[e]);
+                   (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
+                    kind == BUSTER_TYPED_CALL                 ? call && machine->tape[t] + base == function->values[e] :
+                                                                machine->tape[t] == function->values[e]);
             t += 1;
             e += 1;
             inside = e < function->count;
         }
     }
+    same = same && (machine->call_count == 0 || (base < UINT32_MAX && node_shadow_same_calls(machine, function, (uint32_t)base)));
     *compared = t;
     return same && t == machine->entry_count;
 }
@@ -1940,6 +1984,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         shadow->taken_nodes += nodes;
         shadow->taken_records += machine->count;
         shadow->entries += machine->entry_count;
+        shadow->calls += machine->call_count;
         shadow->value_differences += !values;
         shadow->entry_differences += !entries;
         shadow->row_nodes += machine->row_nodes - row_nodes;
@@ -2064,9 +2109,9 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
 static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_ops)
 {
     printf("node-shadow: census-taken expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " records=%" PRIu64 "\n", shadow->expressions, shadow->nodes, shadow->records);
-    printf("node-shadow: machine-taken expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%) records=%" PRIu64 " entries=%" PRIu64 "\n",
+    printf("node-shadow: machine-taken expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%) records=%" PRIu64 " entries=%" PRIu64 " calls=%" PRIu64 "\n",
            shadow->taken_expressions, node_census_share(shadow->taken_expressions, shadow->expressions), shadow->taken_nodes,
-           node_census_share(shadow->taken_nodes, shadow->nodes), shadow->taken_records, shadow->entries);
+           node_census_share(shadow->taken_nodes, shadow->nodes), shadow->taken_records, shadow->entries, shadow->calls);
     printf("node-shadow: differences values=%" PRIu64 " entries=%" PRIu64 " twin=%" PRIu64 " (row-typed nodes %" PRIu64 ", action-typed %" PRIu64 "%s)\n",
            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
            shadow->verify ? ", verified" : "");
