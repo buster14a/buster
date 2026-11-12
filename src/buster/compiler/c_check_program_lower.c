@@ -11539,6 +11539,200 @@ static bool check_lower_x86_named(const BuiltinIntrinsicInfo* info, const char* 
     return info != NULL && info->name_length == length && memcmp(info->name, name, length) == 0;
 }
 
+// A 32-byte builtin's split (check_x86_splits), or NULL.
+static const CheckX86Split* check_x86_split_of(const CheckX86LowerRule* rule)
+{
+    const CheckX86Split* split = NULL;
+    for (uint32_t i = 0; split == NULL && i < BUSTER_ARRAY_LENGTH(check_x86_splits); i += 1)
+    {
+        if (strlen(check_x86_splits[i].wide) == rule->name_length && memcmp(check_x86_splits[i].wide, rule->name, rule->name_length) == 0)
+        {
+            split = check_x86_splits + i;
+        }
+    }
+    return split;
+}
+
+// A 32-byte x86 builtin whose row the target can't run, on its vector's halves (check_x86_split_of, #2426), as LLVM's
+// legalization splits it for clang's code in a target_clones copy without AVX or AVX2: or false, with nothing pushed,
+// where the builtin has no split or a half's 128-bit row is refused too. Its arguments but the immediate are set into
+// frame temporaries, the last first; then each half of the result is computed into its own temporary at its offset: a
+// row's of the arguments' halves at that offset (an integer argument whole), or a move of an argument's half or quarter,
+// or zeros; then the result is read whole. vec_ext's is one row of its element's half, whose value is the call's.
+// Pushed last first.
+static bool check_lower_x86_split(CheckLowerWriter* writer, uint32_t node, const CheckX86LowerRule* rule, uint64_t immediate, bool strict)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = graph->argument_offsets[node];
+    const uint32_t count = graph->argument_counts[node];
+    const CheckX86Split* split = check_x86_split_of(rule);
+    const CheckX86LowerRule* narrow = split != NULL && split->narrow != NULL ? check_x86_lower_rule(split->narrow, (uint32_t)strlen(split->narrow)) : NULL;
+    const CheckX86SplitKind kind = split != NULL ? split->kind : CHECK_X86_SPLIT_SAME;
+    const bool rows = split != NULL && kind <= CHECK_X86_SPLIT_ELEMENT;
+    // ELEMENT's half, and its index there; the others' immediates by half.
+    const uint32_t lanes = 16u / (rule->element != 0 ? rule->element : 1u);
+    const uint32_t index = (uint32_t)(immediate & (2u * lanes - 1u));
+    const uint32_t selected = index / lanes;
+    const uint32_t shift = kind == CHECK_X86_SPLIT_NIBBLE ? 4 : kind == CHECK_X86_SPLIT_PAIR ? 2 : kind == CHECK_X86_SPLIT_TRIPLE ? 3 : 0;
+    const uint64_t field = shift != 0 ? (1ull << shift) - 1u : ~0ull;
+    bool valid = split != NULL && count <= BUSTER_TIER0_OPERATION_OPERANDS + 1u && count >= 1 &&
+                 (!rows || (narrow != NULL && narrow->bytes == 16 && narrow->immediate == rule->immediate && narrow->family == rule->family));
+    Tier0Operation halves[2];
+    bool used[2] = { false, false };
+    for (uint32_t h = 0; valid && rows && h < 2; h += 1)
+    {
+        used[h] = kind != CHECK_X86_SPLIT_ELEMENT || h == selected;
+        const uint64_t at = kind == CHECK_X86_SPLIT_ELEMENT ? index % lanes : (immediate >> (shift * h)) & field;
+        valid = !used[h] || check_x86_lower_row_of(&writer->target, narrow, at, 4, 0, strict, halves + h) == NULL;
+    }
+    // Each taken argument's temporary and whether it is a vector's (whose halves the rows read).
+    uint32_t temporaries[BUSTER_TIER0_OPERATION_OPERANDS + 1] = { 0 };
+    uint8_t classes[BUSTER_TIER0_OPERATION_OPERANDS + 1] = { 0 };
+    uint32_t taken = 0;
+    for (uint32_t a = 0; valid && a < count; a += 1)
+    {
+        if (a != rule->immediate)
+        {
+            const TypeId type = stream->argument_conversions[first + a].type;
+            classes[taken] = check_lower_x86_operand_class(check_lower_x86_bits_class(writer, type));
+            taken += 1;
+        }
+    }
+    for (uint32_t h = 0; valid && rows && h < 2; h += 1)
+    {
+        valid = !used[h] || halves[h].operand_count == taken;
+        for (uint32_t j = 0; valid && used[h] && j < taken; j += 1)
+        {
+            if (halves[h].operand_classes[j] != BUSTER_TYPED_CLASS_VECTOR)
+            {
+                halves[h].operand_classes[j] = classes[j];
+            }
+            else
+            {
+                valid = classes[j] == BUSTER_TYPED_CLASS_VECTOR;
+            }
+        }
+    }
+    if (valid)
+    {
+        const TypeId result = check_lower_x86_bits_type(writer, check_stream_type(stream, node));
+        const bool scalar = rule->family == CHECK_X86_LOWER_EXTRACT;
+        uint32_t indices[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t h = 0; rows && h < 2; h += 1)
+        {
+            indices[h] = used[h] ? check_lower_operation_index(writer, halves + h) : BUSTER_CHECK_NONE;
+        }
+        uint32_t a_index = 0;
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            if (a != rule->immediate)
+            {
+                const TypeId type = stream->argument_conversions[first + a].type;
+                temporaries[a_index] = classes[a_index] == BUSTER_TYPED_CLASS_VECTOR ? check_lower_temporary_of(writer, type) : check_lower_temporary(writer, classes[a_index]);
+                a_index += 1;
+            }
+        }
+        if (scalar)
+        {
+            const uint8_t integer = halves[selected].result_class;
+            if (integer != BUSTER_TYPED_CLASS_VOID && integer != BUSTER_TYPED_CLASS_VECTOR)
+            {
+                check_lower_convert(writer, check_lower_class_type(integer), result);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_X86, integer, indices[selected]);
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 16);
+            check_lower_element_address(writer, temporaries[0], selected * 16u);
+        }
+        else
+        {
+            const uint32_t out = check_lower_temporary_of(writer, result);
+            const uint32_t pieces = kind == CHECK_X86_SPLIT_LANE_EXTRACT ? 1 : kind == CHECK_X86_SPLIT_QUARTER_PERMUTE ? 4 : 2;
+            const uint32_t width = kind == CHECK_X86_SPLIT_QUARTER_PERMUTE ? 8 : 16;
+            const uint8_t moved = width == 8 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VECTOR;
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+            for (uint32_t p = pieces; p-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+            {
+                // A move's source: an argument's piece, or none for zeros (LANE_PERMUTE's bit 3).
+                uint32_t source = 0;
+                uint32_t from = p;
+                bool zero = false;
+                const uint32_t control = (uint32_t)(immediate >> (4u * p));
+                switch (kind)
+                {
+                    case CHECK_X86_SPLIT_LANE_EXTRACT: from = (uint32_t)(immediate & 1u); break;
+                    case CHECK_X86_SPLIT_LANE_INSERT: source = p == (uint32_t)(immediate & 1u) ? 1u : 0u; from = source != 0 ? 0u : p; break;
+                    case CHECK_X86_SPLIT_LANE_PERMUTE: zero = (control & 8u) != 0; source = (control >> 1) & 1u; from = control & 1u; break;
+                    case CHECK_X86_SPLIT_QUARTER_PERMUTE: from = (uint32_t)(immediate >> (2u * p)) & 3u; break;
+                    default: break;
+                }
+                if (zero)
+                {
+                    for (uint32_t q = 2; q-- > 0;)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+                        check_lower_element_address(writer, out, p * width + q * 8u);
+                    }
+                }
+                else
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SET, moved, moved == BUSTER_TYPED_CLASS_VECTOR ? width : 0);
+                    if (rows && used[p])
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, indices[p]);
+                        for (uint32_t j = taken; j-- > 0;)
+                        {
+                            if (classes[j] == BUSTER_TYPED_CLASS_VECTOR)
+                            {
+                                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 16);
+                                check_lower_element_address(writer, temporaries[j], p * 16u);
+                            }
+                            else
+                            {
+                                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, classes[j], temporaries[j]);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_LOAD, moved, moved == BUSTER_TYPED_CLASS_VECTOR ? width : 0);
+                        check_lower_element_address(writer, temporaries[source], from * width);
+                    }
+                    check_lower_element_address(writer, out, p * width);
+                }
+            }
+        }
+        for (uint32_t j = 0; j < taken; j += 1)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, classes[j], temporaries[j]);
+            if (j + 1 < taken && classes[j + 1] != classes[j])
+            {
+                // As check_lower_vector_split's: Tier 0 reads an entry's last operand's class from the entry before it.
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, classes[j], 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, classes[j], temporaries[j]);
+            }
+        }
+        writer->vectors = true;
+        for (uint32_t a = count; a-- > 0;)
+        {
+            if (a != rule->immediate)
+            {
+                const TypeId type = stream->argument_conversions[first + a].type;
+                const uint8_t class = check_lower_x86_bits_class(writer, type);
+                const uint8_t widened = check_lower_x86_operand_class(class);
+                if (widened != class)
+                {
+                    check_lower_convert(writer, check_lower_x86_bits_type(writer, type), check_lower_class_type(widened));
+                }
+                check_lower_operand(writer, node, a + 3, false, type);
+            }
+        }
+    }
+    return valid;
+}
+
 // An x86 builtin's row (#136, #148): an X86 entry of its row (check_x86_lower_row), after its arguments but its immediate,
 // which the row's records take, and the row's result converted to the call's type. Its record in the stream
 // (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
@@ -11636,7 +11830,13 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         }
         operand += taken;
     }
-    if (reason == NULL && operand != (reduce ? row.operand_count + tail.operand_count - 1 : row.operand_count))
+    // A 32-byte builtin the target can't run, on its halves (#2426), where it has a split and its halves' rows.
+    const bool split = reason != NULL && constants && rule != NULL && rule->bytes == 32 && rule->immediate_extra == 0 &&
+                       rounded == BUSTER_CHECK_X86_NO_IMMEDIATE && check_lower_x86_split(writer, node, rule, immediate, strict);
+    if (split)
+    {
+    }
+    else if (reason == NULL && operand != (reduce ? row.operand_count + tail.operand_count - 1 : row.operand_count))
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
