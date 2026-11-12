@@ -59,8 +59,10 @@ static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, cons
     }
     else if (group == UINT32_MAX)
     {
-        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+        // -w leaves an error by default that no option demoted (BUSTER_CHECK_WARNING_DEFAULT_ERROR, #2213).
+        const bool kept = (event->flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) != 0 && command.mapped >= CHECK_WARNING_ERROR;
+        severity = (command.quiet && !kept) || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, kept ? command.mapped : command.severity);
     }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
