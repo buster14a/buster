@@ -43,8 +43,10 @@
 // where clang evaluates out of source order, an assignment's right side first). Clang emits the eager functions in
 // source order, and the deferred ones in the order its emission first referred to them or a declaration queued them,
 // depth first; this takes those in source order. Where the feature an error names is the first of the rest of a
-// function's map (an attribute's arch= CPU's, or a caller's attribute that turns several off), clang's order is its
-// StringMap's and this one predefines_features', so the two may name another feature for the same call.
+// function's map (an attribute's arch= CPU's, or a caller's attribute that turns several off), it is the first in the
+// order clang's StringMap iterates the map's keys (#2093, check_target_feature_order, c_check_feature_map.c), and a
+// caller's attribute's errors come in that order; but under -march=native and for a cpu_specific version's map, where
+// the order is predefines_features' (docs/x86-target.md).
 //
 // The walk is code generation's emission: #487's walk, Sema's reachability, with code generation's rules where they
 // differ (CheckTargetFeatureEmission): nothing after an expression statement that ends in a call that doesn't return —
@@ -71,6 +73,8 @@
 // sites it then finds (clang's headers give every intrinsic one, but a unit compiled for the features its intrinsics
 // need, the usual one, refers to none that fails).
 
+#include "c_check_feature_map.c"
+
 typedef struct CheckTargetFeatureError CheckTargetFeatureError;
 struct CheckTargetFeatureError
 {
@@ -89,7 +93,44 @@ struct CheckTargetFeatureError
     const BuiltinIntrinsicInfo* builtin;
     // The builtin's error is an SSE compare's predicate past 7 (check_target_feature_predicate), whose expression is avx.
     bool predicate;
+    // clang's AVX calling-convention diagnostic of a direct call (#2367, X86_64TargetCodeGenInfo::checkFunctionCallABI):
+    // a vector argument or result wider than 128 bits, of `abi_type`, which `feature` (avx, or avx512f past 256 bits)
+    // passes otherwise, where the caller or the callee lacks it; `warning` where both lack it (-Wpsabi), else an error.
+    // `abi_call` is the call's node and `abi_argument` the argument's index, UINT32_MAX for the result: the driver finds
+    // the parameter's or the callee's declared type's spelling by them. Not an error of the function's features.
+    // With `abi_definition`, the check of the definition of the caller itself (checkFunctionABI), whose declaration's
+    // name `abi_call` is: its result's (`abi_argument` UINT32_MAX) or its parameter's, a warning; `token` is then its body's
+    // opening brace, which places its publication.
+    bool abi;
+    bool abi_definition;
+    bool warning;
+    TypeId abi_type;
+    uint32_t abi_call;
+    uint32_t abi_argument;
 };
+
+// The errors among `count`, which refuse the unit: not -Wpsabi's warnings (#2367).
+static uint32_t check_target_feature_hard(const CheckTargetFeatureError* errors, uint32_t count)
+{
+    uint32_t hard = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        hard += !errors[i].warning;
+    }
+    return hard;
+}
+
+// The errors among `count` after which clang emits no further function: the target features' alone, not the AVX
+// calling convention's (#2367), after which it goes on.
+static uint32_t check_target_feature_stops(const CheckTargetFeatureError* errors, uint32_t count)
+{
+    uint32_t stops = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        stops += !errors[i].abi;
+    }
+    return stops;
+}
 
 // A function's attributes that the check reads, from its declarations before a token.
 typedef struct CheckTargetFeatureAttributes CheckTargetFeatureAttributes;
@@ -173,6 +214,8 @@ struct CheckTargetFeatureMaps
     CheckTargetFeatureCached cache[BUSTER_CHECK_TARGET_FEATURE_CACHE];
     CheckTargetFeatureCallee callees[BUSTER_CHECK_TARGET_FEATURE_CALLEES];
     CheckTargetFeatureBuiltins builtins;
+    // The unit's types hold a vector wider than 128 bits: its direct calls take the AVX calling-convention check (#2367).
+    bool abi;
 };
 
 typedef struct CheckTargetFeatureEmission CheckTargetFeatureEmission;
@@ -341,27 +384,134 @@ static int32_t check_target_feature_lacked(PredefinesFeatures callee, Predefines
     return result;
 }
 
+// The order of the true features of a function's map, as clang's checkTargetFeatures iterates it (#2093,
+// c_check_feature_map.c): `order`'s predefines_features indices, and their count, or 0 where it isn't known (a
+// cpu_specific version's map, and -march=native's, whose features the driver lists in the host's own map's order). The
+// map is initFeatureMap's of the CPU and a list (ASTContext::getFunctionFeatureMap): a target attribute's of its arch=
+// CPU, or the unit's, and of the command line's -m features (the driver's, its last of each, in order) followed by the
+// attribute's items; a target_clones function's first version's, of its arch= CPU or the unit's and "+" its string
+// alone; and a function without either's, the command line's own map.
+static uint32_t check_target_feature_order(const CheckTargetFeatureMaps* maps, const CheckTargetFeatureAttributes* attributes, int32_t* order)
+{
+    uint32_t count = 0;
+    const PredefinesOptions* options = maps->options;
+    if (attributes->specific == 0 && !maps->host.native)
+    {
+        uint16_t list[256];
+        uint32_t listed = 0;
+        const char* cpu = maps->host.name;
+        String8 text = { 0 };
+        const String8 first = attributes->clones != 0 ? check_target_feature_clone(attributes->clones, 0) : (String8){ 0 };
+        const bool clone = attributes->version == 0 && attributes->clones != 0 && first.length != 0 && !check_input_attribute_equal(first, "default");
+        if (attributes->version != 0)
+        {
+            text = attributes->version->text;
+        }
+        // The command line's -m features, each one's last, in the order of those (the driver's unifyTargetFeatures).
+        for (uint32_t i = 0; !clone && i < options->feature_count; i += 1)
+        {
+            bool later = false;
+            for (uint32_t j = i + 1; j < options->feature_count; j += 1)
+            {
+                later |= (options->features[j] >> 1) == (options->features[i] >> 1);
+            }
+            const char* name = predefines_features[options->features[i] >> 1].name;
+            if (!later)
+            {
+                check_feature_map_item(list, &listed, BUSTER_ARRAY_LENGTH(list), name, (uint32_t)strlen(name), (options->features[i] & 1) != 0);
+            }
+        }
+        if (clone && predefines_item_starts(first.pointer, (uint32_t)first.length, "arch="))
+        {
+            cpu = 0;
+            text = first;
+        }
+        else if (clone)
+        {
+            check_feature_map_item(list, &listed, BUSTER_ARRAY_LENGTH(list), first.pointer, (uint32_t)first.length, true);
+        }
+        // The attribute's items: arch='s CPU, a no- item's feature off and any other on, but tune=, fpmath= and
+        // branch-protection=, and the names clang doesn't know (filterFunctionTargetAttrs).
+        uint32_t cursor = 0;
+        const char* item = 0;
+        uint32_t item_length = 0;
+        const char* arch = 0;
+        uint32_t arch_length = 0;
+        while (text.length != 0 && predefines_attribute_item(text.pointer, (uint32_t)text.length, &cursor, &item, &item_length))
+        {
+            if (predefines_item_starts(item, item_length, "arch="))
+            {
+                uint32_t start = 5;
+                while (start < item_length && predefines_space(item[start]))
+                {
+                    start += 1;
+                }
+                arch = arch == 0 ? item + start : arch;
+                arch_length = arch_length == 0 ? item_length - start : arch_length;
+            }
+            else if (!clone && !predefines_item_starts(item, item_length, "tune=") && !predefines_item_starts(item, item_length, "fpmath=") &&
+                     !predefines_item_starts(item, item_length, "branch-protection="))
+            {
+                const bool off = predefines_item_starts(item, item_length, "no-");
+                check_feature_map_item(list, &listed, BUSTER_ARRAY_LENGTH(list), item + (off ? 3 : 0), item_length - (off ? 3u : 0u), !off);
+            }
+        }
+        uint64_t known[2] = { 0, 0 };
+        const bool valid_arch = arch != 0 && check_feature_map_cpu(arch, arch_length, known);
+        const char* name = valid_arch ? arch : cpu != 0 ? cpu : maps->host.name;
+        const uint32_t length = valid_arch ? arch_length : (uint32_t)strlen(name);
+        CheckFeatureMap map;
+        check_feature_map_initialize(&map, name, length, list, listed);
+        uint8_t keys[BUSTER_CHECK_FEATURE_MAP_BUCKETS];
+        const uint32_t total = check_feature_map_order(&map, keys);
+        for (uint32_t k = 0; k < total; k += 1)
+        {
+            const char* key = check_feature_map_features[keys[k]].name;
+            const int32_t feature = predefines_feature_index(key, strlen(key));
+            if (feature >= 0)
+            {
+                order[count++] = feature;
+            }
+        }
+    }
+    return count;
+}
+
+// The first of `order`'s `count` features (a map's, check_target_feature_order) in `callee` that `caller` lacks, or
+// where the order isn't known, the first by index (predefines_features'); -1 for none.
+static int32_t check_target_feature_first_lacked(const int32_t* order, uint32_t count, PredefinesFeatures callee, PredefinesFeatures caller)
+{
+    int32_t result = count == 0 ? check_target_feature_lacked(callee, caller, 0) : -1;
+    for (uint32_t i = 0; i < count && result < 0; i += 1)
+    {
+        result = predefines_has(callee, (uint32_t)order[i]) && !predefines_has(caller, (uint32_t)order[i]) ? order[i] : -1;
+    }
+    return result;
+}
+
 // The feature a callee's error names where its target attribute applies, or -1 for none (checkTargetFeatures'
-// required features): the attribute's own features, in its order, of those its map has, then the rest of its map.
-static int32_t check_target_feature_required(const CheckInputAttribute* version, PredefinesFeatures callee, PredefinesFeatures caller)
+// required features): the attribute's own features, in its order, of those its map has, then the rest of its map, in
+// the map's order where that is known (`order`, check_target_feature_order).
+static int32_t check_target_feature_required(const CheckInputAttribute* version, PredefinesFeatures callee, PredefinesFeatures caller, const int32_t* order,
+                                             uint32_t order_count)
 {
     // The first the caller lacks of the whole map, where the attribute's own lacks none; the usual call lacks none at all,
     // which needs no reading of the attribute.
-    const int32_t first = check_target_feature_lacked(callee, caller, 0);
+    const int32_t any = check_target_feature_lacked(callee, caller, 0);
     int32_t result = -1;
     const char* text = version->text.pointer;
     const uint32_t length = (uint32_t)version->text.length;
     uint32_t cursor = 0;
     const char* item = 0;
     uint32_t item_length = 0;
-    while (first >= 0 && result < 0 && predefines_attribute_item(text, length, &cursor, &item, &item_length))
+    while (any >= 0 && result < 0 && predefines_attribute_item(text, length, &cursor, &item, &item_length))
     {
         const bool named = !predefines_item_starts(item, item_length, "arch=") && !predefines_item_starts(item, item_length, "tune=") &&
                            !predefines_item_starts(item, item_length, "no-");
         const int32_t feature = named ? predefines_feature_index(item, item_length) : -1;
         result = feature >= 0 && predefines_has(callee, (uint32_t)feature) && !predefines_has(caller, (uint32_t)feature) ? feature : -1;
     }
-    return result >= 0 ? result : first;
+    return result >= 0 || any < 0 ? result : check_target_feature_first_lacked(order, order_count, callee, caller);
 }
 
 // Whether clang checks a call of a function of `callee`'s attributes in a function of `caller`'s (CodeGenFunction::EmitCall).
@@ -379,7 +529,7 @@ static bool check_target_feature_fails(CheckTargetFeatureMaps* maps, const Check
     bool result = false;
     if (check_target_feature_checked(caller, callee) && callee->targeted && !callee->versions)
     {
-        result = check_target_feature_required(callee->version, check_target_feature_map(maps, callee), caller_map) >= 0;
+        result = check_target_feature_required(callee->version, check_target_feature_map(maps, callee), caller_map, NULL, 0) >= 0;
     }
     else if (check_target_feature_checked(caller, callee) && caller->targeted && !caller->versions)
     {
@@ -1932,6 +2082,186 @@ static bool check_target_feature_cleanup_emitted(CheckX86DiagnosticWalk* walk, C
     return emitted;
 }
 
+// The size in bits of a vector type wider than 128 bits, after an aligned typedef, or 0 for any other type: the types
+// whose passing AVX and AVX-512F change (#2367).
+static uint64_t check_target_feature_abi_bits(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const uint8_t kind = base != 0 ? type_kind(types, base) : 0;
+    const uint64_t bits = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? 8 * type_size(types, base) : 0;
+    return bits > 128 ? bits : 0;
+}
+
+// Whether a feature map has feature `feature` (an index in predefines_features).
+static bool check_target_feature_has(PredefinesFeatures map, uint32_t feature)
+{
+    return ((map.words[feature / 64] >> (feature % 64)) & 1) != 0;
+}
+
+// clang's checkAVXParam for a type of `bits` (check_target_feature_abi_bits): past 256 bits avx512f, past 128 avx; where
+// neither the caller nor the callee has it a warning, but for a `permissive` callee (internal, or always_inline: "no
+// explicit features and the function is internal, be permissive"), and where one lacks it an error. Fills `error` and
+// returns true where it diagnoses, which ends the call's checks.
+static bool check_target_feature_abi_param(PredefinesFeatures caller, PredefinesFeatures callee, bool permissive, uint64_t bits, CheckTargetFeatureError* error)
+{
+    const uint32_t feature = bits > 256 ? PREDEFINES_FEATURE_AVX512F : PREDEFINES_FEATURE_AVX;
+    const bool caller_has = check_target_feature_has(caller, feature);
+    const bool callee_has = check_target_feature_has(callee, feature);
+    error->feature = feature;
+    error->warning = !caller_has && !callee_has;
+    return bits != 0 && !(caller_has && callee_has) && !(error->warning && permissive);
+}
+
+// Whether clang is permissive with `object`'s AVX calling convention (check_target_feature_abi_param): an internal
+// function's, or an always_inline one's.
+static bool check_target_feature_abi_permissive(const CheckProgram* program, uint32_t object, const CheckTargetFeatureAttributes* attributes)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const bool internal = declaration < input->token_count && check_input_linkage(input->declaration_bits, declaration) == 1;
+    return internal || attributes->always_inline;
+}
+
+// An object's declared type, by its declaration (CheckProgram.object_declarations), or 0.
+static TypeId check_target_feature_object_type(const CheckProgram* program, uint32_t object)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    return declaration < input->token_count && input->declared_types != NULL ? type_strip_aligned(program->types, input->declared_types[declaration]) : 0;
+}
+
+// The function type of call `node`'s callee: its designator's, or a pointer's element; 0 for none.
+static TypeId check_target_feature_callee_type(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const uint32_t callee = graph->operand0[node];
+    TypeId type = callee < graph->count ? type_strip_aligned(types, check_stream_type(program->stream, callee)) : 0;
+    type = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, type)) : type;
+    return type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_FUNCTION ? type : 0;
+}
+
+// clang's AVX calling-convention check of direct call `node` (#2367, checkFunctionCallABI): each argument that is a vector
+// wider than 128 bits, of its converted type (a variadic one's promoted one), named by its parameter's declared type
+// where it has one; then, where none is diagnosed, the callee's vector result. The first diagnosed ends the call's checks.
+// Appends it to `errors`; returns false without room.
+static bool check_target_feature_abi(const CheckProgram* program, CheckTargetFeatureMaps* maps, PredefinesFeatures caller_map,
+                                     const CheckTargetFeatureAttributes* callee, uint32_t node, CheckTargetFeatureError base, Arena* output,
+                                     CheckTargetFeatureError** errors, uint32_t* error_count)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const TypeId function = check_target_feature_callee_type(program, node);
+    uint32_t parameter_count = 0;
+    const TypeId* parameters = function != 0 ? type_parameters(types, function, &parameter_count) : NULL;
+    (void)parameters;
+    const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+    const uint32_t count = graph->argument_counts != NULL ? graph->argument_counts[node] : 0;
+    const bool permissive = check_target_feature_abi_permissive(program, base.callee, callee);
+    PredefinesFeatures callee_map = { 0 };
+    bool mapped = false;
+    bool reported = false;
+    bool valid = true;
+    for (uint32_t i = 0; function != 0 && !reported && i < count; i += 1)
+    {
+        const TypeId type = stream->argument_conversions[first + i].type;
+        const uint64_t bits = check_target_feature_abi_bits(types, type);
+        callee_map = bits != 0 && !mapped ? check_target_feature_map(maps, callee) : callee_map;
+        mapped = mapped || bits != 0;
+        CheckTargetFeatureError error = base;
+        error.abi = true;
+        error.abi_call = node;
+        error.abi_argument = i;
+        error.abi_type = i < parameter_count ? parameters[i] : type;
+        reported = check_target_feature_abi_param(caller_map, callee_map, permissive, bits, &error);
+        valid = !reported || check_target_feature_report(output, errors, error_count, error);
+    }
+    const TypeId result = function != 0 ? type_return(types, function) : 0;
+    const uint64_t bits = check_target_feature_abi_bits(types, result);
+    if (!reported && bits != 0)
+    {
+        callee_map = mapped ? callee_map : check_target_feature_map(maps, callee);
+        CheckTargetFeatureError error = base;
+        error.abi = true;
+        error.abi_call = node;
+        error.abi_argument = UINT32_MAX;
+        error.abi_type = result;
+        reported = check_target_feature_abi_param(caller_map, callee_map, permissive, bits, &error);
+        valid = !reported || check_target_feature_report(output, errors, error_count, error);
+    }
+    return valid;
+}
+
+// clang's AVX calling-convention check of body `b`'s own definition (#2367, X86_64TargetCodeGenInfo::checkFunctionABI),
+// when it emits it, before its calls': its result's, whatever follows, then its parameters' up to the first diagnosed,
+// against its own features (`map`) as both caller and callee, so a warning alone, and none for an internal or an
+// always_inline function. Appends them; returns false without room.
+static bool check_target_feature_abi_definition(const CheckProgram* program, uint32_t b, bool deferred, const CheckTargetFeatureAttributes* attributes,
+                                                PredefinesFeatures map, Arena* output, CheckTargetFeatureError** errors, uint32_t* error_count)
+{
+    const CheckProgramBody* body = program->bodies + b;
+    const TypeTable* types = program->types;
+    const TypeId function = check_target_feature_object_type(program, body->object);
+    const bool checked = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION &&
+                         !check_target_feature_abi_permissive(program, body->object, attributes);
+    uint32_t count = 0;
+    const TypeId* parameters = checked ? type_parameters(types, function, &count) : NULL;
+    const CheckTargetFeatureError base = {
+        .token = body->opening,
+        .caller = body->object,
+        .callee = body->object,
+        .deferred = deferred,
+        .abi = true,
+        .abi_definition = true,
+        .abi_call = program->object_declarations[body->object],
+    };
+    bool valid = true;
+    bool reported = false;
+    for (uint32_t i = 0; checked && !reported && i <= count; i += 1)
+    {
+        // The result first, then the parameters.
+        CheckTargetFeatureError error = base;
+        error.abi_argument = i == 0 ? UINT32_MAX : i - 1;
+        error.abi_type = i == 0 ? type_return(types, function) : parameters[i - 1];
+        const bool diagnosed = check_target_feature_abi_param(map, map, false, check_target_feature_abi_bits(types, error.abi_type), &error);
+        reported = diagnosed && i != 0;
+        valid = valid && (!diagnosed || check_target_feature_report(output, errors, error_count, error));
+    }
+    return valid;
+}
+
+// Whether a function type passes or returns a vector wider than 128 bits, or is variadic, whose arguments may be such
+// vectors (#2367): its direct calls are the AVX calling-convention check's.
+static bool check_target_feature_abi_type(const TypeTable* types, TypeId function)
+{
+    bool result = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    if (result)
+    {
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, function, &count);
+        result = (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0 || check_target_feature_abi_bits(types, type_return(types, function)) != 0;
+        for (uint32_t i = 0; !result && i < count; i += 1)
+        {
+            result = check_target_feature_abi_bits(types, parameters[i]) != 0;
+        }
+    }
+    return result;
+}
+
+// Whether a unit's types hold a vector wider than 128 bits, which only the AVX calling-convention check (#2367) needs:
+// a scan for the vector kinds' types, which a unit without vectors ends at once.
+static bool check_target_feature_abi_unit(const TypeTable* types)
+{
+    bool found = false;
+    for (uint32_t index = 1; !found && index < types->types.count; index += 1)
+    {
+        const uint8_t kind = types->types.kind[index];
+        found = (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && types->types.size[index] > 16;
+    }
+    return found;
+}
+
 // Checks body `b`'s calls, which its walk reached (`calls`, `count` of them in clang's emission order: a call's node in
 // the low half, or with the high half 1, a cleanup's scope's end, its CHECK_CONTROL_CLEANUP's index in the body):
 // appends each error. Returns false without room.
@@ -1981,21 +2311,40 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
         }
         else if (object != 0 && check_target_feature_checked(caller, &callee) && callee.targeted && !callee.versions)
         {
-            const int32_t feature = check_target_feature_required(callee.version, check_target_feature_map(maps, &callee), caller_map);
+            const PredefinesFeatures callee_map = check_target_feature_map(maps, &callee);
+            int32_t order[BUSTER_CHECK_FEATURE_MAP_BUCKETS];
+            const uint32_t order_count = check_target_feature_lacked(callee_map, caller_map, 0) >= 0 ? check_target_feature_order(maps, &callee, order) : 0;
+            const int32_t feature = check_target_feature_required(callee.version, callee_map, caller_map, order, order_count);
             CheckTargetFeatureError error = base;
             error.feature = (uint32_t)feature;
             valid = feature < 0 || check_target_feature_report(output, errors, error_count, error);
         }
         else if (object != 0 && check_target_feature_checked(caller, &callee) && caller->targeted && !caller->versions)
         {
+            // An error for each feature of the callee's map the caller lacks, in the map's order where that is known.
             const PredefinesFeatures callee_map = check_target_feature_map(maps, &callee);
-            for (int32_t feature = check_target_feature_lacked(callee_map, caller_map, 0); valid && feature >= 0;
+            int32_t order[BUSTER_CHECK_FEATURE_MAP_BUCKETS];
+            const uint32_t order_count = check_target_feature_lacked(callee_map, caller_map, 0) >= 0 ? check_target_feature_order(maps, &callee, order) : 0;
+            for (uint32_t i = 0; valid && i < order_count; i += 1)
+            {
+                CheckTargetFeatureError error = base;
+                error.feature = (uint32_t)order[i];
+                const bool lacked = predefines_has(callee_map, (uint32_t)order[i]) && !predefines_has(caller_map, (uint32_t)order[i]);
+                valid = !lacked || check_target_feature_report(output, errors, error_count, error);
+            }
+            for (int32_t feature = order_count == 0 ? check_target_feature_lacked(callee_map, caller_map, 0) : -1; valid && feature >= 0;
                  feature = check_target_feature_lacked(callee_map, caller_map, (uint32_t)feature + 1))
             {
                 CheckTargetFeatureError error = base;
                 error.feature = (uint32_t)feature;
                 valid = check_target_feature_report(output, errors, error_count, error);
             }
+        }
+        // After the call's feature errors, its AVX calling-convention check (#2367): a direct call's alone, as clang's
+        // EmitCall makes it with the callee's declaration.
+        if (valid && maps->abi && !builtin && !cleanup && object != 0)
+        {
+            valid = check_target_feature_abi(program, maps, caller_map, &callee, node, base, output, errors, error_count);
         }
     }
     return valid;
@@ -2013,12 +2362,16 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
     bool valid = true;
     // A unit with a target attribute (attribute_keys), or with an x86 builtin's call (#148), whose features its function
     // may lack.
-    if ((program->attribute_keys != 0 || program->stream->x86_count != 0) && options != NULL)
+    // Or with a vector wider than 128 bits (#2367), whose direct calls take the AVX calling-convention check, where some
+    // function may lack avx512f: the unit, or one with an attribute.
+    const bool abi = options != NULL && program->body_count != 0 && check_target_feature_abi_unit(program->types);
+    if ((program->attribute_keys != 0 || program->stream->x86_count != 0 || abi) && options != NULL)
     {
         const CheckInput* input = program->input;
         const uint64_t mark = scratch->length;
         CheckTargetFeatureMaps maps = { .program = program, .options = options, .host = program->host_read ? program->host : predefines_host_of(options) };
         maps.unit = predefines_apply(options, &maps.host, maps.host.cpu, 0, 0);
+        maps.abi = abi && (program->attribute_keys != 0 || !check_target_feature_has(maps.unit, PREDEFINES_FEATURE_AVX512F));
         // The objects with a key: a callee without one has no attribute, which only a flatten caller checks.
         const uint64_t words = ((uint64_t)program->object_count + 63) / 64;
         uint64_t* attributed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words);
@@ -2084,9 +2437,10 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
         // Clang's emission order: the functions it must emit, where the unit defines them (body_eager), the first with an
         // error the last (it emits no function after it, nor the deferred ones); then, where none has one, every deferred
         // function (its deferred emission goes on past an error).
-        for (uint32_t deferred = 0; valid && *count == 0 && deferred < 2; deferred += 1)
+        // The AVX calling convention's diagnostics (#2367) don't end the emission: the target features' errors do.
+        for (uint32_t deferred = 0; valid && check_target_feature_stops(*errors, *count) == 0 && deferred < 2; deferred += 1)
         {
-            for (uint32_t b = 0; valid && (deferred != 0 || *count == 0) && b < program->body_count; b += 1)
+            for (uint32_t b = 0; valid && (deferred != 0 || check_target_feature_stops(*errors, *count) == 0) && b < program->body_count; b += 1)
             {
                 const CheckProgramBody* body = program->bodies + b;
                 const bool eager = program->body_eager != 0 && program->body_eager[b] != 0;
@@ -2103,16 +2457,30 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     candidate = (caller.flatten && caller.targeted && !caller.versions && check_target_feature_lacked(maps.unit, caller_map, 0) >= 0) ||
                                 (lacking != 0 && lacking[b] != 0);
                     const bool plain = !caller.targeted && !caller.flatten;
+                    // Its own definition's AVX calling-convention check (#2367), where it may lack avx512f.
+                    candidate = candidate || (maps.abi && !check_target_feature_has(caller_map, PREDEFINES_FEATURE_AVX512F) &&
+                                              check_target_feature_abi_type(program->types, check_target_feature_object_type(program, body->object)));
                     for (uint32_t r = 0; !candidate && r < body->reference_count; r += 1)
                     {
                         const uint32_t object = program->references[body->reference_first + r];
                         const bool keyed = object < program->object_count && ((attributed[object / 64] >> (object % 64)) & 1) != 0;
+                        // A function whose calls take the AVX calling-convention check (#2367), where its caller or it may
+                        // lack avx512f: the walk finds its calls and their types.
+                        bool abi_candidate = false;
+                        if (maps.abi && check_target_feature_abi_type(program->types, check_target_feature_object_type(program, object)))
+                        {
+                            const CheckTargetFeatureAttributes callee = keyed ? check_target_feature_attributes(program, object, UINT32_MAX) :
+                                                                                (CheckTargetFeatureAttributes){ 0 };
+                            abi_candidate = !check_target_feature_has(caller_map, PREDEFINES_FEATURE_AVX512F) ||
+                                            !check_target_feature_has(check_target_feature_map(&maps, &callee), PREDEFINES_FEATURE_AVX512F);
+                        }
+                        candidate = abi_candidate;
                         CheckTargetFeatureCallee* answer = maps.callees + object % BUSTER_CHECK_TARGET_FEATURE_CALLEES;
-                        if (keyed && plain && answer->object == object)
+                        if (!abi_candidate && keyed && plain && answer->object == object)
                         {
                             candidate = answer->fails;
                         }
-                        else
+                        else if (!abi_candidate)
                         {
                             const CheckTargetFeatureAttributes callee = keyed ? check_target_feature_attributes(program, object, UINT32_MAX) :
                                                                                 (CheckTargetFeatureAttributes){ 0 };
@@ -2270,6 +2638,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                         }
                     }
                     const uint32_t before = *count;
+                    valid = valid && (!maps.abi || check_target_feature_abi_definition(program, b, deferred != 0, &caller, caller_map, output, errors, count));
                     valid = valid &&
                             check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, item_count, output, errors, count);
                     // A target_clones body's errors once per copy clang emits, each checked against the first version's

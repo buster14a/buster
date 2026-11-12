@@ -382,11 +382,55 @@ is `+avx2`, `"arch=X"` X's CPU, `"default"` the unit's). Its errors come once fo
 each copy clang emits: each distinct version, a repeated one once
 (`check_target_feature_clone_count`). So `target_clones("avx2", "default")`
 calling an AVX2 `always_inline` function passes, and its `default` copy, whose
-instruction set lacks the callee's, is then refused by name where it reaches a
-builtin it can't lower. Clang compiles that copy with an out-of-line call of the
-intrinsic, through a mismatched vector ABI. Not given: clang's AVX ABI errors
-for such calls' wide vector arguments and returns, which buster gives for no
-function (#2367).
+instruction set lacks the callee's, calls the intrinsic out of line, as clang's
+does, through a mismatched vector ABI. A 256-bit builtin in the body itself (a
+macro intrinsic's: `_mm256_extract_epi32`, `_mm256_shuffle_epi32`,
+`_mm256_permute2x128_si256`) runs in a copy without AVX or AVX2 on its vector's
+16-byte halves, as LLVM's type legalization splits it (#2426,
+`check_lower_x86_split`, `check_x86_splits`): an in-lane operation's 128-bit
+builtin on each half at that half's immediate, `vec_ext`'s and `vec_set`'s on
+the index's half, and the lane and quarter moves (`vextractf128`,
+`vinsertf128`, `vperm2f128`, `vpermq`, `vpermpd`) as moves of the halves and
+quarters. A builtin whose 128-bit form the copy can't lower either stays
+refused by name: at the x86-64 baseline, those of SSE3 to SSE4.1 and AVX that
+have no SSE2 form here (`palignr`, the blends, `round`, `dpps`, `mpsadbw`,
+`pextrb`, `pinsrb`, `pinsrd`, `pinsrq`, `vpermilpd`, and compares by predicates
+past 7), which LLVM expands into SSE2 sequences (#1834).
+Such a call's wide vector arguments and results take the AVX calling-convention
+check below, against the same first version's features.
+
+The same pass gives clang's AVX calling-convention diagnostics (#2367,
+`X86_64TargetCodeGenInfo::checkFunctionCallABI` and `checkFunctionABI`), in a
+unit whose types hold a vector wider than 128 bits where the unit or a target
+attribute may lack AVX-512F (`check_target_feature_abi_unit`; such a unit's
+bodies have their emission order, `CheckProgram.body_eager`). A vector argument
+or result past 256 bits needs `avx512f`, one past 128 bits `avx`; where neither
+function has it, the result is `-Wpsabi`'s warning ("AVX vector argument of type
+T without 'avx' enabled changes the ABI", `CHECK_WARNING_ID_PSABI`, on by
+default, its pragmas and `-Werror=` as any warning's), and where one of them
+lacks it, the same words as an error. Clang is permissive where neither has the
+feature and the callee is internal or `always_inline`. The checks are:
+
+- **A direct call's.** After the call's own feature errors, each argument in
+  order, by its converted type (a variadic one's promoted type), named by its
+  parameter's declared type where it has one and by its own sugar otherwise, then
+  the callee's declared result type. The first diagnosed one ends the call's
+  checks. It is reported at the call's beginning (`check_target_feature_abi`).
+- **An emitted definition's own.** These come before its body's calls, against
+  its own features as both caller and callee, so they are warnings alone. The
+  result is checked first and reported at its type's typedef, whatever follows.
+  Then the parameters, up to the first diagnosed one, each reported at its name
+  (an unnamed one's at its end) (`check_target_feature_abi_definition`).
+
+Unlike a target feature's error, which ends the emission, these errors don't:
+clang goes on to the next function and the deferred ones, and so does the pass
+(`check_target_feature_stops`). Each target_clones copy reports them once.
+`test-checker-driver` compares every line about its fixtures and the exit
+status with clang `-c`'s, on both paths, for `-march=x86-64` and
+`-march=x86-64-v3`, with `-Wpsabi`, `-Werror=psabi` and `-Wno-psabi`
+(`c_check_avx_abi_driver_test.c`). Difference left: a K&R definition's parameter
+is placed at its identifier list's name and printed by its canonical type, where
+clang places it at the declaration list's name and prints its typedef.
 
 That walk is Sema's reachability, its CFG's, which #487's range warnings
 follow, as clang's do. Code generation emits other code in a few shapes, and the
@@ -507,10 +551,27 @@ declaration queued them, depth first, and the driver in source order: the errors
 of two deferred functions come in the other order where their definitions are in
 the other order from the first uses or the declarations that queue them. Where
 clang evaluates a statement out of source order (an assignment's right side
-first), the order of several errors in it may differ; and where an error's
-feature is the first of the rest of a map (an `arch=` CPU's, or a caller's
-attribute that turns several features off), clang's order is its `StringMap`'s
-and the driver's `predefines_features`', so the two may name different features.
+first), the order of several errors in it may differ.
+
+Where an error's feature is the first of the rest of a map (an `arch=` CPU's,
+or a caller's attribute that turns several features off), it is the first the
+map's `llvm::StringMap` iterates to, and a caller's attribute's errors come in
+that order (#2093, `c_check_feature_map.c`). A `StringMap` iterates its
+buckets, so the order follows from the keys' hashes (`xxh3_64bits`, truncated
+to 32 bits: `xxh3_short.c`), its linear probing and its doublings past three
+quarters full, and the order in which `X86TargetInfo::initFeatureMap` first
+writes the keys: `sse2` and what it implies, the CPU's features in LLVM's
+`FeatureInfos` order, each followed by what it implies, then the command line's
+`-m` features (the driver's last of each, in order) and the attribute's items,
+then the soft rules' `popcnt`, `mmx`, `xsave` and `crc32`. The features' order,
+direct implications and CPUs' features are `c_check_feature_map.inc`, generated
+from LLVM's `X86TargetParser` (`tools/generate_x86_feature_map.c`,
+THIRD_PARTY_NOTICES.md). Differences left: under `-march=native`, whose
+features the driver lists in the host's own map's order, and for a
+`cpu_specific` version's map, the feature named is still the first by
+`predefines_features`' order; and the driver's features that no `-m` feature
+flag gives (`-mretpoline`'s, `-mharden-sls`'s), which are keys of clang's map
+too, aren't modeled.
 `--lower-all`, #129's test option, checks every definition it lowers, those
 clang never emits among them.
 

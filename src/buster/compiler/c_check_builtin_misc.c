@@ -249,6 +249,11 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
         check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, index);
         accepted = false;
     }
+    if (!accepted && destination != 0 && output->action.diagnostic == CHECK_DIAG_INCOMPATIBLE && output->action.diagnostic_operand == index)
+    {
+        // The parameter its argument didn't convert to (#2460), for the error's words (check_driver_builtin_conversion).
+        output->argument_conversions[index] = (CheckConversion){ .type = destination, .flags = BUSTER_CHECK_CONVERT_FAILED };
+    }
     if (accepted)
     {
         check_action_conversion(table, value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, output->argument_conversions + index, input->node);
