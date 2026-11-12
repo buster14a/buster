@@ -4566,6 +4566,14 @@ Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
 fixtures compare each with clang.
 
+A block's thread-local object without `static` or `extern` (`_Thread_local int
+z;`, C23's `thread_local`, GNU's `__thread`, a `for`'s declaration too) is
+clang's "'_Thread_local' variables must have global storage" (`'__thread'` for
+GNU's) at the keyword (#2420, `CHECK_INPUT_THREAD_NON_GLOBAL`), and the report
+recovers: the reader goes on with the declaration, as clang does. With
+`register` beside it, clang's "cannot combine" comes first, and the reader
+still stops there (two errors of one specifier list, #1820 (c)).
+
 #### Invalid declarations (#1447)
 
 Clang marks a declaration whose declarator or type is in error invalid, keeps it
