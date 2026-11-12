@@ -1038,10 +1038,23 @@ template's jumps and the exits' jumps the body's branches, and the exit's move
 into eax its last record. Its call row returns that int (`check_lower_asm_call`'s
 result, a body call of class I32 to Tier 0's validator), and the statement's
 code dispatches on it as on the helper's. The statement costs no call, return,
-frame or block address, but still the exit's move, compare and branch: clang's
-`callbr` jumps from the template straight to the labels. Jumping straight would
-make the body's call row a block's terminator with several successors, which
-Tier 0's validator and `ir_lower` don't take yet. Under `--tier1` the statement
+frame or block address.
+
+Where nothing runs after the body, Tier 0 drops the exits and the dispatch, and
+the template's jumps go straight to the labels, as clang's `callbr` does
+(#2351). That takes a body without outputs (`Tier0AsmBody.exits`: its exits
+fall straight into the move into eax), whose call row has no value under its
+arguments on any stack and isn't a deep entry's, and the dispatch the lowering
+writes after it (a SET_LOCAL of the exit's temporary, then per label a LOCAL,
+CONST, EQ and BRANCH_TRUE), none of whose entries is a label
+(`tier0_asm_direct`). The typed stream keeps the dispatch, so the validator,
+the inliner and the IR see the statement's edges as before; Tier 0 absorbs its
+entries, branches from the template's jump to label l (to the exit's record
+before) to the target of the l-th BRANCH_TRUE, and takes the dispatch's
+references from the temporary, which then has no home. A statement with outputs,
+or one under a value of its expression (a statement expression's), keeps the
+exit's move, compare and branch: its label's exit would need its own copy of the
+outputs' stores, and of the restores after the call row. Under `--tier1` the statement
 keeps its helper, as the IR's body call returns nothing. Tier 0 sorts its branch
 columns where a body has branches: a body's are a deferred entry's, written after
 the branches of the entries that follow it.
@@ -1391,7 +1404,7 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
+templates of references to names, asm goto under `--tier1` (and the dispatch of one with outputs or under an expression's value, #2351), `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
