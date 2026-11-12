@@ -1835,18 +1835,19 @@ static bool node_shadow_same_value(const NodeMachine* machine, uint32_t r)
     const CheckStream* stream = machine->program->stream;
     const uint32_t node = node_machine_node(machine, r);
     const CheckValue expected = check_stream_value(stream, node);
-    const CheckValue* value = machine->values + r;
-    bool same = expected.type == value->type && expected.category == value->category && expected.flags == value->flags &&
-                expected.constant_kind == value->constant_kind && expected.object == value->object && expected.offset == value->offset &&
-                expected.fault == value->fault && expected.overload_head == value->overload_head && expected.bit_width == value->bit_width;
-    same = same && (expected.constant_kind == CHECK_CONSTANT_NONE || expected.integer == value->integer);
-    same = same && (expected.constant_kind != CHECK_CONSTANT_FLOATING || memcmp(expected.floating_storage, value->floating_storage, 10) == 0);
+    CheckValue value;
+    node_machine_record_value(machine, r, &value);
+    bool same = expected.type == value.type && expected.category == value.category && expected.flags == value.flags &&
+                expected.constant_kind == value.constant_kind && expected.object == value.object && expected.offset == value.offset &&
+                expected.fault == value.fault && expected.overload_head == value.overload_head && expected.bit_width == value.bit_width;
+    same = same && (expected.constant_kind == CHECK_CONSTANT_NONE || expected.integer == value.integer);
+    same = same && (expected.constant_kind != CHECK_CONSTANT_FLOATING || memcmp(expected.floating_storage, value.floating_storage, 10) == 0);
     for (uint32_t k = 0; k < 2; k += 1)
     {
-        same = same && stream->conversions[node].operands[k].type == machine->converted[2 * r + k] &&
-               stream->conversions[node].operands[k].flags == machine->conversion_flags[2 * r + k];
+        same = same && stream->conversions[node].operands[k].type == node_machine_record_converted(machine, r, k) &&
+               stream->conversions[node].operands[k].flags == node_machine_record_conversion_flags(machine, r, k);
     }
-    same = same && stream->member_offsets[node] == machine->member_offsets[r];
+    same = same && stream->member_offsets[node] == node_machine_record_member_offset(machine, r);
     return same;
 }
 

@@ -209,9 +209,9 @@ takes its entries.
   accessors, `node_machine_begin` and `node_machine_run`; then one file a
   sweep, T `c_check_node_machine_type.c`, C `c_check_node_machine_contexts.c`
   and X `c_check_node_machine_expand.c`, which `main.c` includes after it in
-  the checker unit, before `baked.c`. C and X read a record only through the
-  accessors (`node_machine_record_*`, below), so that a new record layout
-  changes the machine's file and T alone.
+  the checker unit, before `baked.c`. C, X and the shadow's comparison read a
+  record only through the accessors (`node_machine_record_*`, below), so that
+  a new record layout changes the machine's file and T alone.
 - **The record accessors,** each `(machine, r)` and one load or store today:
   - what T wrote: `_op`, `_left`, `_right` (operand records, `UINT32_MAX` for
     none), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
@@ -221,7 +221,10 @@ takes its entries.
   - C's own: `_evaluated`, `_context`, `_target` and `_template`, written by
     `node_machine_records_set_unevaluated(machine, count)` and
     `node_machine_record_set_evaluated`, `_set_context`, `_set_target` and
-    `_set_template`.
+    `_set_template`;
+  - the shadow's: `node_machine_record_value(machine, r, &value)`, the whole
+    value, which its comparison with the stream reads with `_converted`,
+    `_conversion_flags` and `_member_offset`.
 
   They cost nothing on the 9700X: T's code is the same, C runs the same
   instructions a node and X ten fewer ([the design](../node-machine.md#step-1-the-shadow)).

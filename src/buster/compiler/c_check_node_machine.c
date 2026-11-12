@@ -39,9 +39,9 @@
 // - NodeMachine: the unit's state (node_machine_begin) and the current expression's columns, which T writes, C reads and
 //   writes its own of, and X reads, writing the tape.
 // - The type words (node_machine_word, node_machine_class, node_machine_facts, node_machine_aggregate): one load a type.
-// - The record accessors (node_machine_record_*): every read of a record by C and X, and C's writes of its own columns,
-//   go through them, so that a record's layout (today T's columns, a whole CheckValue a record; the design's 28 bytes
-//   next) changes here and in T alone.
+// - The record accessors (node_machine_record_*): every read of a record by C, X and the shadow's comparison, and C's
+//   writes of its own columns, go through them, so that a record's layout (today T's columns, a whole CheckValue a
+//   record; the design's 28 bytes next) changes here and in T alone.
 // - node_machine_local and node_machine_address_takes: what C and X ask of an object.
 // - node_machine_run: the three sweeps, one after another.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
@@ -349,6 +349,13 @@ static inline uint32_t node_machine_record_conversion_flags(const NodeMachine* m
 static inline uint64_t node_machine_record_member_offset(const NodeMachine* machine, uint32_t r)
 {
     return machine->member_offsets[r];
+}
+
+// Its whole value into `value`, every field as the action would give it: the shadow's comparison with the stream
+// (c_check_node_census.c) reads it, not C or X.
+static inline void node_machine_record_value(const NodeMachine* machine, uint32_t r, CheckValue* value)
+{
+    check_value_copy(value, machine->values + r);
 }
 
 // C's columns. Whether its consumer evaluates it (none is, until C reaches it), its context
