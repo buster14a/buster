@@ -760,21 +760,14 @@ static CheckProgramTargetOption* check_program_target_options(const CheckProgram
     return options;
 }
 
-// Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): one with inline assembly,
-// whose plans are a body's own (check_program_asm). (A switch's jump tables are each copy's own,
-// check_lower_switch_tables, and so are its labels' symbols, check_program_target_number, #2247.)
+// Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): a naked function's, whose
+// templates are its whole code, planned once per body (check_program_asm_plan_naked). (A switch's jump tables are each
+// copy's own, check_lower_switch_tables, and so are its labels' symbols, check_program_target_number, and its asm
+// statements' plans, made for the copy's instruction set, check_program_asm_plan_of, #2247.)
 static bool check_program_target_copy_refused(const CheckProgram* program, uint32_t b)
 {
-    const Parser* parser = program->parser;
     const CheckProgramBody* body = program->bodies + b;
-    const uint32_t closing = parser != NULL && body->opening < parser->tokens.count ? parser->tree.parents[body->opening] : 0;
-    bool refused = parser == NULL || closing <= body->opening || closing >= parser->tokens.count;
-    for (uint32_t token = body->opening; !refused && token < closing; token += 1)
-    {
-        const uint8_t kind = parser->tokens.kinds[token];
-        refused = kind == PARSE_KIND_ASM;
-    }
-    return refused;
+    return program->parser == NULL || (program->object_naked != 0 && body->object < program->object_count && program->object_naked[body->object] <= body->declaration);
 }
 
 // target_clones' body copies (#1838), as clang compiles its body once per version, with that version's instruction set:
