@@ -3535,7 +3535,12 @@ library builtins too, of the implicit declarations' rules: undeclared, a call
 declares the function with its row's prototype where the unit has a `FILE`
 (C99's error, C89's warning), and warns that it needs `<stdio.h>` where it
 hasn't, as clang does. `test-checker-driver` compares the errors of calls
-without a `FILE` with clang's (`c_check_generic_builtin_driver_test.c`).
+without a `FILE` with clang's (`c_check_generic_builtin_driver_test.c`). A
+library builtin named outside a call before any call declares it
+(`int *q = malloc;`, #2348) is declared as clang's lookup declares it, as
+its name is resolved: its error and note come before the error of the
+expression around it, which completes at the same place
+(`c_check_implicit_value_driver_test.c`).
 
 `test-checker` (`c_check_program_library_test.c`, alone with
 `--program-library`) checks the lists against clang's table and accounts for

@@ -2395,9 +2395,10 @@ static CBuiltinLibraryNamed check_driver_library_named(Preprocessor* pp, const T
 // C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
 // with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
 // and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
-// note naming the header that declares it, where its row has one.
+// note naming the header that declares it, where its row has one. `promoted` is "-Werror," where -Werror made the warning
+// before C99 an error, else "".
 static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
-                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
+                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, const char* promoted, Arena* scratch)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
     const uint64_t mark = scratch->length;
@@ -2428,7 +2429,8 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
     else
     {
         pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
-                                    "implicitly declaring library function '%.*s' with type %s [-Wimplicit-function-declaration]", (int)length, name, type);
+                                    "implicitly declaring library function '%.*s' with type %s [%s-Wimplicit-function-declaration]", (int)length, name, type,
+                                    promoted);
     }
 }
 
@@ -4277,12 +4279,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
                                                    severity == CHECK_WARNING_ERROR ? (default_error && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
+                    // A warning the policy made an error is clang's "-Werror," one; a default error has no prefix.
+                    const char* promoted = !default_error && severity >= CHECK_WARNING_ERROR ? "-Werror," : "";
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
+                        // Clang declares the builtin as its name is resolved, before the expression around it is built: where
+                        // the name completes with that expression (a value's `int *q = malloc;`, #2348), its error comes first.
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
-                                                      intern_length(pp->table, name), input->implicit_function_c99, scratch);
+                                                      intern_length(pp->table, name), input->implicit_function_c99, promoted, scratch);
+                        pp_diagnostic_suborder(pp, previous, 1);
                     }
                     else if (default_error)
                     {
@@ -4309,8 +4317,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     else
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
-                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [%s-Wimplicit-function-declaration]",
+                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name), promoted);
                     }
                 }
                 else
