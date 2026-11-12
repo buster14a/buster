@@ -668,6 +668,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
         "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
         "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
+        // A definition that is also an alias or ifunc (#2449): clang's handler drops the attribute, and the declaration stays a
+        // valid definition, its later uses quiet.
+        "int x __attribute__((alias(\"y\")));\n"
+        "int y;\n"
+        "int use(void) { return x + y; }\n"
+        "int z = undeclared;\n"
+        "void *r(void) { return 0; }\n"
+        "int h(void) __attribute__((ifunc(\"r\"))) { return 3; }\n"
+        "int k(void) { return h() + x + nope; }\n"
+        "extern int w __attribute__((alias(\"y\"))) = 4;\n"
+        "int m(void) { return w + nope2; }\n"
+        "static int s __attribute__((alias(\"y\")));\n"
+        "int n(void) { return s; }\n",
         // A recovered error in a definition's head, a specifier's or an attribute's, and then errors that stop the reader
         // (#1835): the later bodies keep their warnings, and the definitions' own bodies theirs, since clang gives those
         // errors before the body opens its scope; a body with an error of its own loses its unused variables.

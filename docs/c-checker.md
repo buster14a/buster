@@ -4187,7 +4187,12 @@ What the lowering covers past scalars (#145's programs):
   Sema's, at `-fsyntax-only` too (`check_input_attribute_definition`): a
   definition (a body, an initializer, an external tentative definition, or an
   earlier alias or ifunc of the declaration) that is also an alias or ifunc,
-  "definition 'f' cannot also be an alias"; and a weakref with external
+  "definition 'f' cannot also be an alias", after which clang's handler drops
+  the attribute and the declaration stays a valid definition, as the reader
+  does (the report is a recovered one, #2449: later uses of it are quiet;
+  left: a function's definition with an alias after an alias declaration of
+  it lacks clang's two "redefinition of 'f'" errors around it); and
+  a weakref with external
   linkage, in a block, without a target or on a typedef. A static variable's
   alias or weakref is no tentative definition, and an alias, ifunc or weakref
   target defines its entity for later redeclarations, functions' and
@@ -4283,7 +4288,11 @@ What the lowering covers past scalars (#145's programs):
   the object's OS/ABI with clang's object's, and runs the programs, linked
   from `-c`'s objects and by the direct path. The `common` attribute and
   `-fcommon` make common symbols (`BUSTER_LINK_SYMBOL_COMMON`, `-c`'s objects'
-  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md).
+  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md). An alias
+  of a common symbol (`extern int x __attribute__((alias("y"))); int y;` at
+  `-c -fcommon`) is refused by name in `c_check_program_emit.c`, where clang's
+  integrated assembler errors ("Common symbol 'y' cannot be used in
+  assignment expr"; #2449).
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
