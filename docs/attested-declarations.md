@@ -641,12 +641,14 @@ stage counters of the command with the skip:
   as the lane's intern table, which grows with the command
   (`check_input_run`'s `parameter_seen`, `member_seen`, the linked and
   library declarations, the builtins' names and the binding table's heads: 34
-  bytes a name a unit); `memset` is 108 M of the skipped command's user
-  cycles. A stamp a unit, as the passes' own per-name state has, would leave
-  them alone. `check_input_intrinsic_initialize` is 63 M: every unit looks
-  its operands' names up among the intrinsics' again, and the answer is a
-  name's, which the lane's intern table could keep (step 3 takes the skipped
-  tokens' share of it).
+  bytes a name a unit). A stamp a unit, as the passes' own per-name state has,
+  would leave them alone. libc's `memset` is 108 M of the skipped command's
+  user cycles, and 53 M in a command of as many empty units; these arrays'
+  part of it wasn't measured. `check_input_intrinsic_initialize` is 63 M:
+  every unit looks its operands' names up among the intrinsics' again
+  ([#893](https://github.com/buster14a/buster/issues/893) has the lookup's
+  cost in one unit), and the answer is a name's, which the lane's intern
+  table could keep (step 3 takes the skipped tokens' share of it).
 - **The parser (6%) and the emission (4%; 8% of `sqlite3.c`)**, which no
   measurement here puts above the others.
 
