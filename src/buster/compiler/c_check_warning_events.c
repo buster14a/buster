@@ -217,6 +217,9 @@ enum
     CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 147,
     // A C23 attribute list before C23 (#2409): -Wc23-extensions' clang extension, off by default, -pedantic's.
     CHECK_WARNING_ID_C23_ATTRIBUTES = 148,
+    // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
+    // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
+    CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 149,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -552,6 +555,8 @@ typedef enum CheckWarningEventKind
     // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
     // cast's type, payload.name its spelling.
     CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
+    // An enum's fixed underlying type in a declaration with a declarator (#2213), at its `:`: its description's words.
+    CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -673,6 +678,9 @@ typedef enum CheckWarningUnitEnd
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
 // `#pragma pack`, `#pragma options align` or `#pragma align` warning, whose payload.name is its CheckPackMessage).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
+// An error by default, clang's DefaultError (#2213: -Welaborated-enum-base), which -Wno-error=NAME demotes to a warning;
+// its flag has no "-Werror," while it is one.
+#define BUSTER_CHECK_WARNING_DEFAULT_ERROR 0x40u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
 // warning group's index in pp_features_warning plus one, 0 for none.
@@ -763,9 +771,11 @@ static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
     const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA | BUSTER_CHECK_WARNING_PACK_PRAGMA;
     const uint32_t payload = flags & histories;
-    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
+    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED |
+                      BUSTER_CHECK_WARNING_DEFAULT_ERROR)) == 0 &&
            (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && (payload & (payload - 1)) == 0 &&
-           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
+           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE) &&
+           ((flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) == 0 || (flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0);
 }
 
 static uint32_t check_warning_capacity(uint32_t capacity, uint32_t needed)
