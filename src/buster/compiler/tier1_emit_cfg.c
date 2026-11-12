@@ -3999,6 +3999,46 @@ static bool tier1_emit_cfg_preference_fatal(Tier1CfgError error)
     return error != TIER1_CFG_OK && error != TIER1_CFG_CONSTRAINT && error != TIER1_CFG_CAPACITY;
 }
 
+// The calls before each position (#2538): `before[q]`, for q from 0 to `positions`, counts the calls of `calls` (in
+// position order, each below `positions`) at positions below q. A 0/1 column of the calls' positions, one past each,
+// and its prefix sum, 16 positions a step: within a register by four shifted adds, then the carry, the last lane's
+// sum, broadcast into the next step. tier1_emit_cfg_calls_before_scalar is its twin.
+static void tier1_emit_cfg_calls_before_vector(const uint32_t* calls, uint32_t call_count, uint32_t positions, uint32_t* before)
+{
+    memset(before, 0, ((uint64_t)positions + 1) * sizeof(uint32_t));
+    for (uint32_t k = 0; k < call_count; k += 1)
+    {
+        before[calls[k] + 1] = 1;
+    }
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i last = _mm512_set1_epi32(15);
+    __m512i carry = zero;
+    for (uint32_t q = 0; q <= positions; q += 16)
+    {
+        const uint32_t left = positions + 1 - q;
+        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        __m512i sum = _mm512_maskz_loadu_epi32(lanes, before + q);
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 15));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 14));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 12));
+        sum = _mm512_add_epi32(sum, _mm512_alignr_epi32(sum, zero, 8));
+        sum = _mm512_add_epi32(sum, carry);
+        _mm512_mask_storeu_epi32(before + q, lanes, sum);
+        carry = _mm512_permutexvar_epi32(last, sum);
+    }
+}
+
+// The scalar twin of tier1_emit_cfg_calls_before_vector: the running count.
+static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t call_count, uint32_t positions, uint32_t* before)
+{
+    uint32_t k = 0;
+    for (uint32_t q = 0; q <= positions; q += 1)
+    {
+        before[q] = k;
+        k += k < call_count && calls[k] == q;
+    }
+}
+
 // Values live across a call into callee-saved registers, which the prologue saves once, rather than in caller-saved ones
 // that every call saves and restores around itself: from the plain problem's intervals (`intervals`), each value whose
 // interval covers a call's definition phase, but the call's own result, is allowed the callee-saved registers alone (and a
@@ -4007,7 +4047,13 @@ static bool tier1_emit_cfg_preference_fatal(Tier1CfgError error)
 // would otherwise save and restore around itself (tier1_emit_cfg_asm), and may take the callee-saved ones too where it
 // crosses no call: a phi's web as one, as for calls. The preferred problem's allowed sets, on the output arena, and how
 // many general values it moves (`crossing`, none: nothing to prefer). False where an arena is short.
-static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing)
+//
+// An interval crosses a call where the first call at or past its start is before its end and isn't its value's own
+// definition. With `counted` (#2538's step 4) that is two loads of the calls before each position
+// (tier1_emit_cfg_calls_before_vector, or its scalar twin without `vector`): a call in [start, end), unless the first is
+// the value's own, which only a call's result's interval can start at. Without it, the first call at or past the start
+// by halving the calls, the form tier1_emit_cfg_two_calls keeps, which --verify compares.
+static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, bool vector, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing)
 {
     const IrFunction* function = plan->function;
     const uint32_t callee = emitted->callee_registers;
@@ -4021,6 +4067,18 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
         if (tier1_select_function_call(function, node))
         {
             calls[call_count++] = base + 2 * node + 1;
+        }
+    }
+    uint32_t* before = ok && counted ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
+    if (before != 0)
+    {
+        if (BUSTER_VECTOR_PATH(vector))
+        {
+            tier1_emit_cfg_calls_before_vector(calls, call_count, input->position_count, before);
+        }
+        else
+        {
+            tier1_emit_cfg_calls_before_scalar(calls, call_count, input->position_count, before);
         }
     }
     // The asm bodies' definition phases, in position order, and the general registers each touches.
@@ -4076,6 +4134,9 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
     for (uint32_t v = 0; ok && v < input->value_count; v += 1)
     {
         const uint32_t node = emitted->value_nodes[v];
+        const uint32_t own = base + 2 * node + 1;
+        // Where the value is a call's result: then its definition's interval starts at that call, which it doesn't cross.
+        const bool called = before != 0 && tier1_select_function_call(function, node);
         // A mask keeps its class's registers (#179): no opmask register survives a call.
         const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
         bool crosses = false;
@@ -4084,16 +4145,25 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
         {
             const uint32_t start = intervals->intervals.starts[i];
             const uint32_t end = intervals->intervals.ends[i];
-            // The first call at or past the interval's start, by halving: the calls are in position order.
-            uint32_t low = 0;
-            uint32_t high = call_count;
-            while (low < high)
+            if (before != 0)
             {
-                const uint32_t middle = low + (high - low) / 2;
-                low = calls[middle] < start ? middle + 1 : low;
-                high = calls[middle] < start ? high : middle;
+                // A call in [start, end), and the first of them not the value's own: none before its own in the interval.
+                const bool inside = called && start <= own && own < end;
+                crosses |= before[end] != before[start] && !(inside && before[own] == before[start]);
             }
-            crosses |= low < call_count && calls[low] < end && calls[low] != base + 2 * node + 1;
+            else
+            {
+                // The first call at or past the interval's start, by halving: the calls are in position order.
+                uint32_t low = 0;
+                uint32_t high = call_count;
+                while (low < high)
+                {
+                    const uint32_t middle = low + (high - low) / 2;
+                    low = calls[middle] < start ? middle + 1 : low;
+                    high = calls[middle] < start ? high : middle;
+                }
+                crosses |= low < call_count && calls[low] < end && calls[low] != own;
+            }
             // The bodies the interval covers (a body defines no value), each's registers.
             uint32_t first = 0;
             uint32_t past = body_count;
@@ -4176,7 +4246,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
     uint32_t moved = 0;
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, vector, output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     if (error == TIER1_EMIT_OK && moved != 0)
     {
@@ -4223,7 +4293,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
     uint32_t moved = 0;
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &allowed, &moved) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     if (error == TIER1_EMIT_OK)
     {
