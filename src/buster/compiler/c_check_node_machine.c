@@ -890,7 +890,9 @@ static bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uin
 // T's logical operator, `&&` or `||` at record `r` of records `a` and `b`, by check_action_logic's steps for operands the
 // common conversions take, both scalars without a fault (the machine refuses a node of a floating-point environment
 // before, whose promotion the action would make): whether it typed the node. The action is its twin, as for the rules.
-static bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+// Out of line, as the logical operators are few: inlined, it made node_machine_rule too large for clang to inline the
+// store and pointer rules, which T reaches far more often.
+static __attribute__((noinline)) bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
 {
     TypeTable* types = machine->types;
     CheckValue left;
@@ -1312,8 +1314,9 @@ static uint8_t node_machine_child_context(const NodeMachine* machine, uint32_t c
     return context;
 }
 
-// Record `child` evaluated by its consumer with `address` and `target`.
-static void node_machine_evaluate(NodeMachine* machine, uint32_t child, bool address, TypeId target)
+// Record `child` evaluated by its consumer with `address` and `target`. Always inlined: C calls it for every evaluated
+// operand, and out of line it cost C 227 of its 3,024 samples on sqlite3.c on the 9700X (#2524's logical operators).
+static inline __attribute__((always_inline)) void node_machine_evaluate(NodeMachine* machine, uint32_t child, bool address, TypeId target)
 {
     machine->states[child] = BUSTER_NODE_MACHINE_EVALUATED;
     machine->contexts[child] = node_machine_child_context(machine, child, address, target);
@@ -1346,8 +1349,9 @@ static bool node_machine_testable(const NodeMachine* machine, TypeId type)
 // no vector): its template, with its evaluated operands given their targets and its segments after them, or
 // CHECK_LOWER_TEMPLATE_NONE. A condition the program knows (check_program_runtime_truth's, from its record) leaves its
 // untaken operand unevaluated and numbers no label; a conditional of one operand twice (`a ?: b`), whose condition the
-// tasks keep in a temporary, is the tasks'.
-static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
+// tasks keep in a temporary, is the tasks'. Out of line, as these operators are few, so that C's classification of the
+// others stays as small as it was.
+static __attribute__((noinline)) CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
 {
     const uint32_t a = machine->left[r];
     const uint32_t b = machine->right[r];
@@ -1639,7 +1643,7 @@ static uint32_t node_machine_subtree_first(const NodeMachine* machine, uint32_t 
 // its left). Only an expression with labels runs it, and it reads the labeled records alone (C listed them in `stack`,
 // their subtrees' first records after them): a walk of every record cost C 125 cycles a new taken node on sqlite3.c on
 // the 9700X, three times its average, by its branches. Scalar: an expression has a few, and their order is the tree's.
-static void node_machine_number_labels(NodeMachine* machine)
+static __attribute__((noinline)) void node_machine_number_labels(NodeMachine* machine)
 {
     const uint32_t labeled = machine->label_count / 2;
     uint32_t* records = machine->stack;
