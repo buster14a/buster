@@ -71,7 +71,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-lowering, benchmark-lowering-source` | `c_lowering.c` | [lowering](lowering.md) |
 | `measure-lowering-templates` | `c_check_lower_inventory.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
-| `measure-node-machine [--shadow]` | `c_check_node_census.c`, `c_check_node_machine.c` | [lowering](lowering.md#node-machine-census-2524) |
+| `measure-node-machine [--shadow]` | `c_check_node_census.c`, `c_check_node_machine*.c` | [lowering](lowering.md#node-machine-census-2524) |
 | micro-architecture campaign (`run.sh`, `uarch test`) | `tools/microarch/run.sh`, `tools/microarch/uarch.c` | [microarch](microarch.md) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
