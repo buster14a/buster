@@ -154,7 +154,10 @@ static const char node_census_test_quiet[] =
 // the action alike. Its calls: direct and discarded, nested (whose rows the tasks number in preorder, outer first, where
 // the entries are in postorder), variadic (a char and a float promoted), of pointers converted to a parameter's (to
 // const char and to void, and null), through a pointer, a member and a call's result; and refused, a long double's
-// parameter (the templates') and a pointer whose first parameter is a jmp_buf's (a callee that returns twice).
+// parameter (the templates') and a pointer whose first parameter is a jmp_buf's (a callee that returns twice). The
+// argument memo's keys come again (node_machine_argument_memo): a string and a null pointer constant for the same
+// parameters, integer constants where a value of their type filled the entry, variadic constants, and a function
+// designator.
 static const char node_shadow_test_text[] =
     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
     "struct __jmp_buf_tag { long b[8]; };\n"
@@ -165,6 +168,7 @@ static const char node_shadow_test_text[] =
     "void w(const char*, void*);\n"
     "int (*pick(int))(int);\n"
     "int ldf(long double);\n"
+    "int ap(int (*)(int), int);\n"
     "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r, int (*fp)(int, double),\n"
     "       int (*sj)(struct __jmp_buf_tag*))\n"
     "{\n"
@@ -201,6 +205,9 @@ static const char node_shadow_test_text[] =
     "    x = v(a, c, e, q); // machine: taken\n"
     "    w(\"ab\", q); // machine: taken\n"
     "    w(0, 0); // machine: taken\n"
+    "    w(\"cd\", 0); // machine: taken\n"
+    "    x = f(2) + f(x) + v(1, 2, a) + v(a, b, 4); // machine: taken\n"
+    "    x = ap(f, 1) + ap(f, x); // machine: taken\n"
     "    x = fp(c, e); // machine: taken\n"
     "    x = p->cb(x); // machine: taken\n"
     "    x = pick(a)(b); // machine: taken\n"
