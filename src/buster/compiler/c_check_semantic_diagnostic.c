@@ -1941,6 +1941,96 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     return result;
 }
 
+// A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete (#1842's 3d,
+// CHECK_DIAG_COUNTED_INCOMPLETE), worded and placed as clang's: "cannot use 'b->p' with '__counted_by' attributed type
+// 'struct Inc * __counted_by(n)' (aka 'struct Inc *') because the pointee type 'struct Inc' is incomplete" at the member's
+// expression, or "cannot assign to 'B::p' ..." at an assignment's `=`; with "consider providing a complete definition for
+// 'struct Inc'" at its forward declaration's keyword and "consider using '__sized_by' instead of '__counted_by'" at the
+// count's name. NULL where the member isn't found, which keeps the generic message.
+static const char* check_semantic_counted_incomplete(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                     const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
+                                                     uint32_t* note_count, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const bool assigned = graph->ops[report->node] == CHECK_OP_ASSIGN;
+    const uint32_t node = assigned ? graph->operand0[report->node] : report->node;
+    const uint32_t member = node < graph->count ? check_semantic_member_of(parser, input, stream, types, node) : 0;
+    const uint32_t kind = member != 0 ? (types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT : BUSTER_TYPE_COUNT_NONE;
+    const bool counted = kind == BUSTER_TYPE_COUNTED_BY || kind == BUSTER_TYPE_COUNTED_BY_OR_NULL;
+    const TypeId pointer = counted ? type_strip_aligned(types, types->members.type[member]) : 0;
+    const TypeId pointee = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(types, pointer) : 0;
+    const String8 written = pointee != 0 ? check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, node, pointer) : (String8){ 0 };
+    const String8 incomplete = written.length != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0) : (String8){ 0 };
+    const char* name = kind == BUSTER_TYPE_COUNTED_BY ? "counted_by" : "counted_by_or_null";
+    const char* result = NULL;
+    // What it uses: the member's expression as written, or the record's member.
+    const uint32_t first = written.length != 0 ? check_common_subtree_start(parser, graph->tokens[node]) : 0;
+    const uint32_t last = graph->tokens[node] + 1;
+    const char* used = written.length != 0 && !assigned ? check_semantic_requirement(parser, pp, first, last + 1, NULL, scratch) : NULL;
+    const TypeId record = assigned && written.length != 0 ? type_unqualified(type_strip_aligned(types, graph->ops[node] == CHECK_OP_ARROW ?
+                          type_element(types, type_strip_aligned(types, check_stream_type(stream, graph->operand0[node]))) : check_stream_type(stream, graph->operand0[node]))) : 0;
+    const uint32_t tag = record != 0 ? types->types.index[type_index(record)] : 0;
+    const uint32_t tag_name = record != 0 && tag < types->tags.count ? types->tags.name[tag] : 0;
+    const String8 record_name = tag_name != 0 ? check_driver_warning_name(pp, tag_name) : (String8){ 0 };
+    const String8 member_name = member != 0 ? check_driver_warning_name(pp, types->members.name[member]) : (String8){ 0 };
+    if (used != NULL)
+    {
+        result = check_warning_text(scratch, "cannot use '%s' with '__%s' attributed type %.*s because the pointee type %.*s is incomplete", used, name, (int)written.length,
+                                    written.pointer, (int)incomplete.length, incomplete.pointer);
+        *location = first;
+    }
+    else if (assigned && record_name.length != 0 && incomplete.length != 0)
+    {
+        result = check_warning_text(scratch, "cannot assign to '%.*s::%.*s' with '__%s' attributed type %.*s because the pointee type %.*s is incomplete",
+                                    (int)record_name.length, record_name.pointer, (int)member_name.length, member_name.pointer, name, (int)written.length, written.pointer,
+                                    (int)incomplete.length, incomplete.pointer);
+        *location = report->token;
+    }
+    // The notes: the pointee's forward declaration's keyword, and the count's name in the member's attribute.
+    const TypeId bare = result != NULL ? type_unqualified(type_strip_aligned(types, pointee)) : 0;
+    const uint8_t bare_kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+    const uint32_t bare_tag = bare_kind == BUSTER_TYPE_KIND_STRUCT || bare_kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(bare)] : types->tags.count;
+    const uint32_t bare_name = bare_tag < types->tags.count ? types->tags.name[bare_tag] : 0;
+    uint32_t declared = BUSTER_CHECK_NONE;
+    for (uint32_t t = 0; bare_name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
+    {
+        declared = parser->tokens.names[t] == bare_name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
+                   type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
+    }
+    const uint32_t keyword = declared != BUSTER_CHECK_NONE && declared > 0 && parser->tokens.kinds[declared - 1] == PARSE_KIND_STRUCT ? declared - 1 : declared;
+    if (keyword != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+    {
+        note[(*note_count)++] = (PPOutputDiagnosticNote){
+            .token = parser->tokens.sources[keyword],
+            .message = check_warning_text(scratch, "consider providing a complete definition for %.*s", (int)incomplete.length, incomplete.pointer),
+        };
+    }
+    const uint32_t declarator = result != NULL ? check_semantic_member_token(parser, input, types, member) : BUSTER_CHECK_NONE;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    if (declarator < parser->tokens.count)
+    {
+        check_driver_place_extent(parser, declarator, &begin, &end);
+    }
+    uint32_t count = BUSTER_CHECK_NONE;
+    for (uint32_t t = begin; count == BUSTER_CHECK_NONE && t + 3 < end; t += 1)
+    {
+        String8 spelled = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
+        const bool underscored = spelled.length > 4 && memcmp(spelled.pointer, "__", 2) == 0 && memcmp(spelled.pointer + spelled.length - 2, "__", 2) == 0;
+        spelled = underscored ? (String8){ .pointer = spelled.pointer + 2, .length = spelled.length - 4 } : spelled;
+        const bool attribute = spelled.length == strlen(name) && memcmp(spelled.pointer, name, spelled.length) == 0 && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
+        count = attribute ? t + 2 : BUSTER_CHECK_NONE;
+    }
+    if (count != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+    {
+        note[(*note_count)++] = (PPOutputDiagnosticNote){
+            .token = parser->tokens.sources[count],
+            .message = check_warning_text(scratch, "consider using '__%s' instead of '__%s'", kind == BUSTER_TYPE_COUNTED_BY ? "sized_by" : "sized_by_or_null", name),
+        };
+    }
+    return result;
+}
+
 // An alignment builtin's argument as clang's getExprLoc places its error (#2221): a binary operator's at the operator,
 // any other's at its first token, a parenthesized one's `(` included.
 static uint32_t check_semantic_alignment_place(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument)
@@ -2423,7 +2513,24 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
                  (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)))
         {
-            result = "expression is not assignable";
+            // GCC's cast as an lvalue (#2264, clang's IsModifiable, CM_LValueCast): a cast, through parentheses, whose
+            // operand is an lvalue through its implicit conversions, "assignment to cast is illegal, lvalue casts are not
+            // supported" at the cast's `(`, for assignments, compound assignments, increments and decrements alike.
+            uint32_t inner = operand < count && graph->ops[operand] == CHECK_OP_CAST ? graph->operand0[operand] : BUSTER_CHECK_NONE;
+            for (uint32_t steps = 0; inner < count && graph->ops[inner] == CHECK_OP_CONVERT && steps < count; steps += 1)
+            {
+                inner = graph->operand0[inner];
+            }
+            const bool cast = inner < stream->count && check_stream_value(stream, inner).category == CHECK_LVALUE;
+            const uint32_t close = cast ? graph->tokens[operand] : BUSTER_CHECK_NONE;
+            uint32_t open = close;
+            while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+            {
+                open -= 1;
+            }
+            const bool found = open < parser->tokens.count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close;
+            result = found ? "assignment to cast is illegal, lvalue casts are not supported" : "expression is not assignable";
+            *location = found ? open : token;
         }
         else if (report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED && operand_type != 0)
         {
@@ -2443,6 +2550,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 const char* fields = check_semantic_const_fields(parser, pp, input, stream, types, operand, operand_type, note, &note_count, scratch);
                 result = fields != NULL ? fields : check_semantic_const_assignment(parser, pp, input, stream, types, spell, operand, note, &note_count, scratch);
             }
+        }
+        else if (report->diagnostic == CHECK_DIAG_COUNTED_INCOMPLETE)
+        {
+            const char* counted = check_semantic_counted_incomplete(parser, pp, input, stream, types, report, spell, location, note, &note_count, scratch);
+            result = counted != NULL ? counted : result;
         }
         else if (report->diagnostic == CHECK_DIAG_ADDRESS_SPACE || report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_OVERLAP ||
                  report->diagnostic == CHECK_DIAG_ADDRESS_SPACE_NESTED)

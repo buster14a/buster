@@ -166,7 +166,7 @@ static bool x86_zen5_test_cases(void)
     valid &= x86_zen5_test_expect(x86_zen5_id(&masked_load) == 0, "a masked load with an index has no row");
     valid &= x86_zen5_test_kind((X86Instruction){ .form = X86_FORM_VMOVDQU32_Z_ZM512, .reg = 1, .rm = 2, .decorations = 4 | BUSTER_X86_DECORATION_ZEROING },
                                 X86_FORM_VMOVDQU32_Z_ZM512, X86_COST_REGISTER, "a zeroing masked register move");
-    const X86Instruction unmasked_row = { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 };
+    const X86Instruction unmasked_row = { .form = X86_FORM_VPANDQ_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 4 };
     valid &= x86_zen5_test_expect(x86_zen5_id(&unmasked_row) == 0, "a merging opmask without a masked row has no case");
     const X86Instruction unknown[] = {
         { .form = X86_FORM_NONE },

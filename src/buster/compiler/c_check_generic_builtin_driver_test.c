@@ -352,6 +352,11 @@ static void check_test_driver_counted_by(CheckTest* test, const char* clang, con
         "int n;\nstruct D3 { int n; int *p1 __attribute__((counted_by(sizeof n + 1.0))); int *p2 __attribute__((counted_by(n + sizeof(n))));\n"
         "int *p3 __attribute__((counted_by((typeof(n))1))); int *p4 __attribute__((counted_by(n + nope))); int *p5 __attribute__((counted_by(m + n))); int m; };\n",
         "struct D4 { int n; int *p __attribute__((counted_by(sizeof(n) * 1.0))); };\n",
+        // An argument's own diagnostics (#1842): -Wdivision-by-zero at a `/` or `%` by a constant zero, before the
+        // attribute's error; a member access on no record, clang's error, then its integer one.
+        "struct A { int n; int *p __attribute__((counted_by(n / 0))); };\nstruct B { int n; int *p __attribute__((counted_by(__alignof__(n)))); };\nstruct C { int n; int *p __attribute__((counted_by(n.x))); };\n",
+        "int g;\nstruct A { int n; int *p __attribute__((counted_by(n % 0))); };\nstruct B { int n; int *p __attribute__((counted_by(n / (g - g)))); };\nstruct C { int n; int *p __attribute__((counted_by(sizeof(n / 0)))); };\nstruct D { int n; int *p __attribute__((counted_by(n / 0 + n / 0))); };\n",
+        "struct T { int a; };\nstruct A { int n; struct T t; int *p __attribute__((counted_by(n.b))); };\n",
         "struct D5 { int n; int x __attribute__((counted_by(n))); };\nunion D6 { int n; int *p __attribute__((counted_by(n))); };\n"
         "struct D7 { int n; int *p __attribute__((counted_by(-n))); int *q __attribute__((counted_by(n))); };\nint f(struct D7 *s) { return s->q != 0; }\nint y = 1.5 + \"\";\n",
         "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nstruct P { int k; char *p __attribute__((sized_by(k))); int *q __attribute__((counted_by(k))); };\nint g(int *);\nint *f(struct S *s) { return __builtin_counted_by_ref(s->fam); }\n",
