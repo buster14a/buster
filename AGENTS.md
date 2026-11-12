@@ -4,7 +4,7 @@ This file is the shared repository guide for coding agents. `CLAUDE.md` imports
 it. Keep always-needed rules here and command/module details in the linked
 guides under `docs/commands/`; do not maintain parallel copies.
 
-## Goal and scope
+## Goal and scope<!--B-->
 
 Build a new C compiler whose **implementation runs on Linux/x86-64, tuned for
 AMD Zen 5**, with heavy, deliberate use of SIMD intrinsics. Optimize both
