@@ -50,9 +50,10 @@ on:
   # ruleset requiring the queue merges only what passed. Nothing triggers it until a ruleset turns the queue on. No
   # path filter: every candidate runs, documentation alone included. `checks_requested` is the event's only type,
   # named so that a type GitHub adds later doesn't start runs.
+  # The disposable drill branch (#1430): candidates for merge-queue-drill only, never main's.
   merge_group:
     types: [checks_requested]
-    branches: [main]
+    branches: [merge-queue-drill]
 
 permissions:
   contents: read

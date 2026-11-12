@@ -2911,9 +2911,10 @@ static bool changes_main_policy(Text workflow)
             }
             else if (section == 1 && queue)
             {
-                // A merge-queue candidate for main: the one event type, and no path or other filter.
+                // A merge-queue candidate for the disposable drill branch (#1430): the one event type, and no path or
+                // other filter.
                 const bool types = text_equal_c(line, "    types: [checks_requested]");
-                const bool branch = text_equal_c(line, "    branches: [main]");
+                const bool branch = text_equal_c(line, "    branches: [merge-queue-drill]");
                 queue_types += types;
                 queue_branches += branch;
                 valid = valid && (types || branch);
@@ -2950,11 +2951,11 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "on:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "source-only path inclusion" },
         { "on:", "    branches: [main]", "    branches: [release]", "wrong push branch" },
         { "on:", "  push:", "  pull_request_target:", "missing main push" },
-        { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'", "merge-queue documentation exclusion" },
-        { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "merge-queue source-only inclusion" },
-        { "  merge_group:", "    branches: [main]", "    branches: [release]", "merge queue of another branch" },
+        { "  merge_group:", "    branches: [merge-queue-drill]", "    branches: [merge-queue-drill]\n    paths-ignore:\n      - 'docs/**'", "merge-queue documentation exclusion" },
+        { "  merge_group:", "    branches: [merge-queue-drill]", "    branches: [merge-queue-drill]\n    paths:\n      - 'src/**'", "merge-queue source-only inclusion" },
+        { "  merge_group:", "    branches: [merge-queue-drill]", "    branches: [release]", "merge queue of another branch" },
         { "  merge_group:", "    types: [checks_requested]", "    types: [destroyed]", "merge queue without its checks" },
-        { "  merge_group:", "  merge_group:\n    types: [checks_requested]\n    branches: [main]\n", "", "missing merge-queue trigger" },
+        { "  merge_group:", "  merge_group:\n    types: [checks_requested]\n    branches: [merge-queue-drill]\n", "", "missing merge-queue trigger" },
         { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
         { "concurrency:", " || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id))", "", "candidates share one pending slot" },
         { "  changes:", " || github.event_name == 'merge_group' || ", " || ", "a candidate skips the selector and its self-tests" },
