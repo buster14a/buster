@@ -1119,13 +1119,42 @@ static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const
     return bounds;
 }
 
-static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgAllocation* result)
+// What tier1_cfg_prepare leaves for tier1_cfg_assign and tier1_cfg_finish (#2538): the intervals, in the output arena
+// as a result's are, and on the scratch arena the working state the two read, which tier1_cfg_release gives back. The
+// intervals don't depend on the registers a value may take where the input has no fixed range, so one preparation serves
+// every problem over the same values that tier1_cfg_column describes. The arenas' lengths at the preparation's start,
+// which a failure of the three restores.
+typedef struct Tier1CfgPrepared Tier1CfgPrepared;
+struct Tier1CfgPrepared
+{
+    // The intervals and each value's run of them, the position column and liveness's counts; intervals.allowed_registers
+    // is the input's own problem's column, the one the interval builder wrote.
+    Tier1CfgAllocation candidate;
+    Dataflow liveness;
+    // The values used outside their definition's block, by dense id, and the inverse.
+    uint32_t* dense;
+    uint32_t* dense_values;
+    // Each block's entry state's size, for the edges' moves.
+    uint32_t* entering;
+    // The splits: each piece of a range after the first in its block, by the position it starts at and its value.
+    uint32_t* split_positions;
+    uint32_t* split_values;
+    uint32_t dense_count;
+    uint32_t splits;
+    uint64_t output_saved;
+    uint64_t scratch_saved;
+    bool vector;
+};
+
+// Validation, homes and dense values, hints, liveness, block lists and the intervals (1. and 2. above), for `input`'s
+// problem. Failure restores both arenas.
+static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgPrepared* prepared)
 {
     Tier1CfgError error = TIER1_CFG_INVALID;
     const uint64_t output_saved = output != 0 ? output->length : 0;
     const uint64_t scratch_saved = scratch != 0 ? scratch->length : 0;
     Tier1CfgAllocation candidate = { 0 };
-    const bool arguments = input != 0 && output != 0 && scratch != 0 && output != scratch && result != 0;
+    const bool arguments = input != 0 && output != 0 && scratch != 0 && output != scratch && prepared != 0;
     if (arguments && tier1_cfg_input_valid(input, scratch))
     {
         error = TIER1_CFG_CAPACITY;
@@ -1630,240 +1659,24 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         }
         if (ready)
         {
-            const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
-            ready = allocated == TIER1_ALLOCATION_OK;
-            error = allocated == TIER1_ALLOCATION_OK ? error : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
-            if (ready)
-            {
-                tier1_cfg_install_lookup(input, output, scratch, &candidate);
-                ready = input->slot_widths == 0 || candidate.allocation.spill_count < 2 || tier1_cfg_share_slots(input, &candidate, scratch);
-                error = ready ? error : TIER1_CFG_CAPACITY;
-            }
-        }
-        // Splits by position, counted then filled: the values whose ranges are cut there, and the distinct positions.
-        const uint32_t splits = ready ? (uint32_t)pieces.splits : 0;
-        uint32_t* split_offsets = ready ? arena_push_array(scratch, (uint64_t)input->position_count + 2, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        uint32_t* split_values = ready ? arena_push_array(scratch, (uint64_t)splits + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && split_offsets != 0 && split_values != 0;
-        uint32_t split_positions = 0;
-        uint32_t split_widest = 0;
-        if (ready)
-        {
-            memset(split_offsets, 0, ((uint64_t)input->position_count + 2) * sizeof(uint32_t));
-            for (uint32_t k = 0; k < splits; k += 1)
-            {
-                split_offsets[pieces.split_positions[k] + 1] += 1;
-            }
-            for (uint32_t q = 0; q <= input->position_count; q += 1)
-            {
-                const uint32_t here = split_offsets[q + 1];
-                split_positions += here != 0;
-                split_widest = here > split_widest ? here : split_widest;
-                split_offsets[q + 1] += split_offsets[q];
-            }
-            for (uint32_t k = 0; k < splits; k += 1)
-            {
-                split_values[split_offsets[pieces.split_positions[k]]] = pieces.split_values[k];
-                split_offsets[pieces.split_positions[k]] += 1;
-            }
-            // The fill advanced each start to the next's: shift them back.
-            for (uint32_t q = input->position_count + 1; q > 0; q -= 1)
-            {
-                split_offsets[q] = split_offsets[q - 1];
-            }
-            split_offsets[0] = 0;
-        }
-        // Edge and split moves: each edge's, then each split's, resolved into a staging area, then all published at
-        // their exact extent. An edge has at most four moves per value of its successor's entry state
-        // (tier1_resolve_moves' bound, two per move, and a slot-to-slot move takes two), and a split as many per value
-        // it cuts.
-        const uint32_t spills = ready ? candidate.allocation.spill_count : 0;
-        const uint32_t locations = BUSTER_TIER1_CFG_SPILL + spills + BUSTER_TIER1_ALLOCATE_CLASSES;
-        uint64_t bound = 4 * (uint64_t)splits;
-        uint32_t widest = split_widest;
-        for (uint32_t e = 0; ready && e < input->edge_count; e += 1)
-        {
-            const uint32_t target = input->successors[e];
-            bound += 4 * (uint64_t)entering[target];
-            widest = entering[target] > widest ? entering[target] : widest;
-        }
-        ready = ready && bound <= UINT32_MAX;
-        uint32_t* spill_ends = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)candidate.allocation.fragment_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && (spills == 0 || spill_ends != 0);
-        if (ready && spills != 0)
-        {
-            tier1_cfg_spill_prefix(&candidate, spill_ends);
-        }
-        Tier1CfgEdge edge = { .spill_ends = spill_ends };
-        uint32_t* staged = ready ? arena_push_array(scratch, (bound + 2) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        uint32_t* sources = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        uint32_t* destinations = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        edge.recompute = ready ? arena_push_array(scratch, ((uint64_t)widest + 1) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        edge.carried_at = ready ? arena_push_array(scratch, locations, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        edge.carried_stamps = ready ? arena_push_array(scratch, locations, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
-        {
-            edge.pending[c] = ready ? arena_push_array(scratch, ((uint64_t)widest + 1) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-            ready = ready && edge.pending[c] != 0;
-        }
-        candidate.edge_placements = ready ? arena_push(output, (uint64_t)input->edge_count + 1, 1) : 0;
-        candidate.edge_move_offsets = ready ? arena_push_array(output, (uint64_t)input->edge_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        candidate.split_positions = ready ? arena_push_array(output, (uint64_t)split_positions + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        candidate.split_move_offsets = ready ? arena_push_array(output, (uint64_t)split_positions + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && staged != 0 && sources != 0 && destinations != 0 && edge.recompute != 0 && edge.carried_at != 0 && edge.carried_stamps != 0 && candidate.edge_placements != 0 && candidate.edge_move_offsets != 0 && candidate.split_positions != 0 && candidate.split_move_offsets != 0;
-        if (ready)
-        {
-            memset(edge.carried_stamps, 0, (uint64_t)locations * sizeof(uint32_t));
-        }
-        Tier1CfgBoundaries bounds = { 0 };
-        if (ready)
-        {
-            bounds = tier1_cfg_boundaries(input, &candidate, &liveness, dense_values, dense_count, scratch);
-        }
-        uint32_t staged_count = 0;
-        for (uint32_t b = 0; ready && b < blocks; b += 1)
-        {
-            const uint32_t exit = input->block_starts[b + 1] - 1;
-            edge.block_start = input->block_starts[b];
-            if (bounds.ready)
-            {
-                uint32_t rank = 0;
-                for (uint64_t w = 0; w < words; w += 1)
-                {
-                    uint64_t bits = liveness.out[(uint64_t)b * words + w];
-                    while (bits != 0)
-                    {
-                        const uint32_t i = (uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits));
-                        bits &= bits - 1;
-                        bounds.exit_at[i] = bounds.exit_locations[bounds.out_offsets[b] + rank];
-                        bounds.exit_stamp[i] = b + 1;
-                        rank += 1;
-                    }
-                }
-            }
-            for (uint32_t e = input->successor_offsets[b]; ready && e < input->successor_offsets[b + 1]; e += 1)
-            {
-                const uint32_t target = input->successors[e];
-                const uint32_t entry = input->block_starts[target];
-                candidate.edge_move_offsets[e] = staged_count;
-                edge.stamp += 1;
-                edge.recompute_count = 0;
-                for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
-                {
-                    edge.pending_count[c] = 0;
-                    edge.memory_pair[c] = false;
-                }
-                uint32_t rank = 0;
-                for (uint64_t w = 0; ready && w < words; w += 1)
-                {
-                    uint64_t bits = liveness.in[(uint64_t)target * words + w];
-                    while (ready && bits != 0)
-                    {
-                        const uint32_t i = (uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits));
-                        const uint32_t v = dense_values[i];
-                        bits &= bits - 1;
-                        if (bounds.ready)
-                        {
-                            const uint32_t from = bounds.exit_stamp[i] == b + 1 ? bounds.exit_at[i] : BUSTER_TIER1_CFG_NONE;
-                            const uint32_t to = bounds.entry_locations[bounds.in_offsets[target] + rank];
-                            ready = tier1_cfg_edge_known(input, &candidate, &edge, v, v, from, to, exit);
-                        }
-                        else
-                        {
-                            ready = tier1_cfg_edge_value(input, &candidate, &edge, v, v, exit, entry);
-                        }
-                        rank += 1;
-                    }
-                }
-                uint32_t j = 0;
-                while (input->predecessors[input->predecessor_offsets[target] + j] != b)
-                {
-                    j += 1;
-                }
-                for (uint32_t k = input->phi_offsets[target]; ready && k < input->phi_offsets[target + 1]; k += 1)
-                {
-                    const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
-                    if (operand == BUSTER_TIER1_CFG_NONE)
-                    {
-                        ready = true;
-                    }
-                    else if (bounds.ready)
-                    {
-                        const uint32_t id = dense[operand];
-                        const uint32_t from = id != BUSTER_TIER1_CFG_NONE && bounds.exit_stamp[id] == b + 1 ? bounds.exit_at[id] : BUSTER_TIER1_CFG_NONE;
-                        ready = tier1_cfg_edge_known(input, &candidate, &edge, input->phi_values[k], operand, from, bounds.phi_locations[k], exit);
-                    }
-                    else
-                    {
-                        ready = tier1_cfg_edge_value(input, &candidate, &edge, input->phi_values[k], operand, exit, entry);
-                    }
-                }
-                ready = ready && tier1_cfg_edge_stage(input, spills, &edge, scratch, sources, destinations, staged, bound + 2, &staged_count, &candidate.temp_slots);
-                error = ready ? error : TIER1_CFG_INVALID;
-                if (ready)
-                {
-                    const bool moves = staged_count != candidate.edge_move_offsets[e] || (input->edge_copies != 0 && input->edge_copies[e] != 0);
-                    const bool one_successor = input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
-                    const bool one_predecessor = input->predecessor_offsets[target + 1] - input->predecessor_offsets[target] == 1;
-                    candidate.edge_placements[e] = !moves ? TIER1_CFG_EDGE_EMPTY : one_successor ? TIER1_CFG_EDGE_PREDECESSOR : one_predecessor ? TIER1_CFG_EDGE_SUCCESSOR : TIER1_CFG_EDGE_SPLIT;
-                    candidate.split_edges += candidate.edge_placements[e] == TIER1_CFG_EDGE_SPLIT;
-                }
-            }
-        }
-        if (ready)
-        {
-            candidate.edge_move_offsets[input->edge_count] = staged_count;
-        }
-        // Slot-current elision is for CFG edges only; keep the existing split-move contract unchanged.
-        edge.spill_ends = 0;
-        // Each split's moves: from the value's location just before the position to its new piece's.
-        for (uint32_t q = 0; ready && q < input->position_count; q += 1)
-        {
-            if (split_offsets[q] != split_offsets[q + 1])
-            {
-                candidate.split_positions[candidate.split_count] = q;
-                candidate.split_move_offsets[candidate.split_count] = staged_count;
-                candidate.split_count += 1;
-                edge.stamp += 1;
-                edge.recompute_count = 0;
-                for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
-                {
-                    edge.pending_count[c] = 0;
-                    edge.memory_pair[c] = false;
-                }
-                for (uint32_t k = split_offsets[q]; ready && k < split_offsets[q + 1]; k += 1)
-                {
-                    ready = q != 0 && tier1_cfg_edge_value(input, &candidate, &edge, split_values[k], split_values[k], q - 1, q);
-                }
-                ready = ready && tier1_cfg_edge_stage(input, spills, &edge, scratch, sources, destinations, staged, bound + 2, &staged_count, &candidate.temp_slots);
-                error = ready ? error : TIER1_CFG_INVALID;
-            }
-        }
-        if (ready)
-        {
-            candidate.split_move_offsets[candidate.split_count] = staged_count;
-            candidate.move_count = staged_count;
-            candidate.move_sources = arena_push_array(output, (uint64_t)staged_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
-            candidate.move_destinations = arena_push_array(output, (uint64_t)staged_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
-            candidate.move_values = arena_push_array(output, (uint64_t)staged_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
-            ready = candidate.move_sources != 0 && candidate.move_destinations != 0 && candidate.move_values != 0;
-            error = ready ? TIER1_CFG_OK : TIER1_CFG_CAPACITY;
-        }
-        for (uint32_t m = 0; ready && m < staged_count; m += 1)
-        {
-            candidate.move_sources[m] = staged[(uint64_t)m * 3];
-            candidate.move_destinations[m] = staged[(uint64_t)m * 3 + 1];
-            candidate.move_values[m] = staged[(uint64_t)m * 3 + 2];
+            *prepared = (Tier1CfgPrepared){
+                .candidate = candidate,
+                .liveness = liveness,
+                .dense = dense,
+                .dense_values = dense_values,
+                .entering = entering,
+                .split_positions = pieces.split_positions,
+                .split_values = pieces.split_values,
+                .dense_count = dense_count,
+                .splits = (uint32_t)pieces.splits,
+                .output_saved = output_saved,
+                .scratch_saved = scratch_saved,
+                .vector = vector,
+            };
+            error = TIER1_CFG_OK;
         }
     }
-    if (error == TIER1_CFG_OK)
-    {
-        candidate.retained_bytes = output->length - output_saved;
-        candidate.scratch_bytes = scratch->length - scratch_saved;
-        arena_pop_to(scratch, scratch_saved);
-        *result = candidate;
-    }
-    else
+    if (error != TIER1_CFG_OK)
     {
         if (output != 0)
         {
@@ -1873,6 +1686,302 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         {
             arena_pop_to(scratch, scratch_saved);
         }
+    }
+    return error;
+}
+
+// One assignment (3. above) over the prepared intervals, for `input`'s registers and `column`, the registers each
+// interval may take: null for the prepared column, the input the preparation was given; else tier1_cfg_column's for
+// another problem over the same values. Failure leaves the result unchanged; tier1_allocate restores the output arena.
+static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, const uint32_t* column, Arena* output, Tier1CfgAllocation* result)
+{
+    Tier1CfgAllocation candidate = prepared->candidate;
+    candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
+    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        candidate.intervals.registers[c] = input->registers[c];
+    }
+    const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(prepared->vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
+    const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
+    if (error == TIER1_CFG_OK)
+    {
+        *result = candidate;
+    }
+    return error;
+}
+
+// Lookup columns, slot sharing, the splits' and the edges' moves (4. and 5. above) for an assignment of the prepared
+// intervals, `result` as tier1_cfg_assign left it, with `input` its problem. The scratch arena goes back to where this
+// found it, the preparation's state kept; failure restores the output arena too and leaves the result unchanged.
+static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
+{
+    Tier1CfgError error = TIER1_CFG_CAPACITY;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    Tier1CfgAllocation candidate = *result;
+    const uint32_t blocks = input->block_count;
+    const Dataflow liveness = prepared->liveness;
+    const uint64_t words = liveness.row_words;
+    const uint32_t* dense = prepared->dense;
+    const uint32_t* dense_values = prepared->dense_values;
+    const uint32_t dense_count = prepared->dense_count;
+    const uint32_t* entering = prepared->entering;
+    tier1_cfg_install_lookup(input, output, scratch, &candidate);
+    bool ready = input->slot_widths == 0 || candidate.allocation.spill_count < 2 || tier1_cfg_share_slots(input, &candidate, scratch);
+    // Splits by position, counted then filled: the values whose ranges are cut there, and the distinct positions.
+    const uint32_t splits = ready ? prepared->splits : 0;
+    uint32_t* split_offsets = ready ? arena_push_array(scratch, (uint64_t)input->position_count + 2, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* split_values = ready ? arena_push_array(scratch, (uint64_t)splits + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    ready = ready && split_offsets != 0 && split_values != 0;
+    uint32_t split_positions = 0;
+    uint32_t split_widest = 0;
+    if (ready)
+    {
+        memset(split_offsets, 0, ((uint64_t)input->position_count + 2) * sizeof(uint32_t));
+        for (uint32_t k = 0; k < splits; k += 1)
+        {
+            split_offsets[prepared->split_positions[k] + 1] += 1;
+        }
+        for (uint32_t q = 0; q <= input->position_count; q += 1)
+        {
+            const uint32_t here = split_offsets[q + 1];
+            split_positions += here != 0;
+            split_widest = here > split_widest ? here : split_widest;
+            split_offsets[q + 1] += split_offsets[q];
+        }
+        for (uint32_t k = 0; k < splits; k += 1)
+        {
+            split_values[split_offsets[prepared->split_positions[k]]] = prepared->split_values[k];
+            split_offsets[prepared->split_positions[k]] += 1;
+        }
+        // The fill advanced each start to the next's: shift them back.
+        for (uint32_t q = input->position_count + 1; q > 0; q -= 1)
+        {
+            split_offsets[q] = split_offsets[q - 1];
+        }
+        split_offsets[0] = 0;
+    }
+    // Edge and split moves: each edge's, then each split's, resolved into a staging area, then all published at
+    // their exact extent. An edge has at most four moves per value of its successor's entry state
+    // (tier1_resolve_moves' bound, two per move, and a slot-to-slot move takes two), and a split as many per value
+    // it cuts.
+    const uint32_t spills = ready ? candidate.allocation.spill_count : 0;
+    const uint32_t locations = BUSTER_TIER1_CFG_SPILL + spills + BUSTER_TIER1_ALLOCATE_CLASSES;
+    uint64_t bound = 4 * (uint64_t)splits;
+    uint32_t widest = split_widest;
+    for (uint32_t e = 0; ready && e < input->edge_count; e += 1)
+    {
+        const uint32_t target = input->successors[e];
+        bound += 4 * (uint64_t)entering[target];
+        widest = entering[target] > widest ? entering[target] : widest;
+    }
+    ready = ready && bound <= UINT32_MAX;
+    uint32_t* spill_ends = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)candidate.allocation.fragment_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    ready = ready && (spills == 0 || spill_ends != 0);
+    if (ready && spills != 0)
+    {
+        tier1_cfg_spill_prefix(&candidate, spill_ends);
+    }
+    Tier1CfgEdge edge = { .spill_ends = spill_ends };
+    uint32_t* staged = ready ? arena_push_array(scratch, (bound + 2) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* sources = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* destinations = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    edge.recompute = ready ? arena_push_array(scratch, ((uint64_t)widest + 1) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    edge.carried_at = ready ? arena_push_array(scratch, locations, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    edge.carried_stamps = ready ? arena_push_array(scratch, locations, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+    {
+        edge.pending[c] = ready ? arena_push_array(scratch, ((uint64_t)widest + 1) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        ready = ready && edge.pending[c] != 0;
+    }
+    candidate.edge_placements = ready ? arena_push(output, (uint64_t)input->edge_count + 1, 1) : 0;
+    candidate.edge_move_offsets = ready ? arena_push_array(output, (uint64_t)input->edge_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    candidate.split_positions = ready ? arena_push_array(output, (uint64_t)split_positions + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    candidate.split_move_offsets = ready ? arena_push_array(output, (uint64_t)split_positions + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    ready = ready && staged != 0 && sources != 0 && destinations != 0 && edge.recompute != 0 && edge.carried_at != 0 && edge.carried_stamps != 0 && candidate.edge_placements != 0 && candidate.edge_move_offsets != 0 && candidate.split_positions != 0 && candidate.split_move_offsets != 0;
+    if (ready)
+    {
+        memset(edge.carried_stamps, 0, (uint64_t)locations * sizeof(uint32_t));
+    }
+    Tier1CfgBoundaries bounds = { 0 };
+    if (ready)
+    {
+        bounds = tier1_cfg_boundaries(input, &candidate, &liveness, dense_values, dense_count, scratch);
+    }
+    uint32_t staged_count = 0;
+    for (uint32_t b = 0; ready && b < blocks; b += 1)
+    {
+        const uint32_t exit = input->block_starts[b + 1] - 1;
+        edge.block_start = input->block_starts[b];
+        if (bounds.ready)
+        {
+            uint32_t rank = 0;
+            for (uint64_t w = 0; w < words; w += 1)
+            {
+                uint64_t bits = liveness.out[(uint64_t)b * words + w];
+                while (bits != 0)
+                {
+                    const uint32_t i = (uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits));
+                    bits &= bits - 1;
+                    bounds.exit_at[i] = bounds.exit_locations[bounds.out_offsets[b] + rank];
+                    bounds.exit_stamp[i] = b + 1;
+                    rank += 1;
+                }
+            }
+        }
+        for (uint32_t e = input->successor_offsets[b]; ready && e < input->successor_offsets[b + 1]; e += 1)
+        {
+            const uint32_t target = input->successors[e];
+            const uint32_t entry = input->block_starts[target];
+            candidate.edge_move_offsets[e] = staged_count;
+            edge.stamp += 1;
+            edge.recompute_count = 0;
+            for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+            {
+                edge.pending_count[c] = 0;
+                edge.memory_pair[c] = false;
+            }
+            uint32_t rank = 0;
+            for (uint64_t w = 0; ready && w < words; w += 1)
+            {
+                uint64_t bits = liveness.in[(uint64_t)target * words + w];
+                while (ready && bits != 0)
+                {
+                    const uint32_t i = (uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits));
+                    const uint32_t v = dense_values[i];
+                    bits &= bits - 1;
+                    if (bounds.ready)
+                    {
+                        const uint32_t from = bounds.exit_stamp[i] == b + 1 ? bounds.exit_at[i] : BUSTER_TIER1_CFG_NONE;
+                        const uint32_t to = bounds.entry_locations[bounds.in_offsets[target] + rank];
+                        ready = tier1_cfg_edge_known(input, &candidate, &edge, v, v, from, to, exit);
+                    }
+                    else
+                    {
+                        ready = tier1_cfg_edge_value(input, &candidate, &edge, v, v, exit, entry);
+                    }
+                    rank += 1;
+                }
+            }
+            uint32_t j = 0;
+            while (input->predecessors[input->predecessor_offsets[target] + j] != b)
+            {
+                j += 1;
+            }
+            for (uint32_t k = input->phi_offsets[target]; ready && k < input->phi_offsets[target + 1]; k += 1)
+            {
+                const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                if (operand == BUSTER_TIER1_CFG_NONE)
+                {
+                    ready = true;
+                }
+                else if (bounds.ready)
+                {
+                    const uint32_t id = dense[operand];
+                    const uint32_t from = id != BUSTER_TIER1_CFG_NONE && bounds.exit_stamp[id] == b + 1 ? bounds.exit_at[id] : BUSTER_TIER1_CFG_NONE;
+                    ready = tier1_cfg_edge_known(input, &candidate, &edge, input->phi_values[k], operand, from, bounds.phi_locations[k], exit);
+                }
+                else
+                {
+                    ready = tier1_cfg_edge_value(input, &candidate, &edge, input->phi_values[k], operand, exit, entry);
+                }
+            }
+            ready = ready && tier1_cfg_edge_stage(input, spills, &edge, scratch, sources, destinations, staged, bound + 2, &staged_count, &candidate.temp_slots);
+            error = ready ? error : TIER1_CFG_INVALID;
+            if (ready)
+            {
+                const bool moves = staged_count != candidate.edge_move_offsets[e] || (input->edge_copies != 0 && input->edge_copies[e] != 0);
+                const bool one_successor = input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
+                const bool one_predecessor = input->predecessor_offsets[target + 1] - input->predecessor_offsets[target] == 1;
+                candidate.edge_placements[e] = !moves ? TIER1_CFG_EDGE_EMPTY : one_successor ? TIER1_CFG_EDGE_PREDECESSOR : one_predecessor ? TIER1_CFG_EDGE_SUCCESSOR : TIER1_CFG_EDGE_SPLIT;
+                candidate.split_edges += candidate.edge_placements[e] == TIER1_CFG_EDGE_SPLIT;
+            }
+        }
+    }
+    if (ready)
+    {
+        candidate.edge_move_offsets[input->edge_count] = staged_count;
+    }
+    // Slot-current elision is for CFG edges only; keep the existing split-move contract unchanged.
+    edge.spill_ends = 0;
+    // Each split's moves: from the value's location just before the position to its new piece's.
+    for (uint32_t q = 0; ready && q < input->position_count; q += 1)
+    {
+        if (split_offsets[q] != split_offsets[q + 1])
+        {
+            candidate.split_positions[candidate.split_count] = q;
+            candidate.split_move_offsets[candidate.split_count] = staged_count;
+            candidate.split_count += 1;
+            edge.stamp += 1;
+            edge.recompute_count = 0;
+            for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+            {
+                edge.pending_count[c] = 0;
+                edge.memory_pair[c] = false;
+            }
+            for (uint32_t k = split_offsets[q]; ready && k < split_offsets[q + 1]; k += 1)
+            {
+                ready = q != 0 && tier1_cfg_edge_value(input, &candidate, &edge, split_values[k], split_values[k], q - 1, q);
+            }
+            ready = ready && tier1_cfg_edge_stage(input, spills, &edge, scratch, sources, destinations, staged, bound + 2, &staged_count, &candidate.temp_slots);
+            error = ready ? error : TIER1_CFG_INVALID;
+        }
+    }
+    if (ready)
+    {
+        candidate.split_move_offsets[candidate.split_count] = staged_count;
+        candidate.move_count = staged_count;
+        candidate.move_sources = arena_push_array(output, (uint64_t)staged_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        candidate.move_destinations = arena_push_array(output, (uint64_t)staged_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        candidate.move_values = arena_push_array(output, (uint64_t)staged_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        ready = candidate.move_sources != 0 && candidate.move_destinations != 0 && candidate.move_values != 0;
+        error = ready ? TIER1_CFG_OK : TIER1_CFG_CAPACITY;
+    }
+    for (uint32_t m = 0; ready && m < staged_count; m += 1)
+    {
+        candidate.move_sources[m] = staged[(uint64_t)m * 3];
+        candidate.move_destinations[m] = staged[(uint64_t)m * 3 + 1];
+        candidate.move_values[m] = staged[(uint64_t)m * 3 + 2];
+    }
+    if (error == TIER1_CFG_OK)
+    {
+        candidate.retained_bytes = output->length - prepared->output_saved;
+        candidate.scratch_bytes = scratch->length - prepared->scratch_saved;
+        arena_pop_to(scratch, scratch_mark);
+        *result = candidate;
+    }
+    else
+    {
+        arena_pop_to(output, output_mark);
+        arena_pop_to(scratch, scratch_mark);
+    }
+    return error;
+}
+
+// The scratch arena back to where tier1_cfg_prepare found it, once nothing reads the preparation's state.
+static void tier1_cfg_release(const Tier1CfgPrepared* prepared, Arena* scratch)
+{
+    arena_pop_to(scratch, prepared->scratch_saved);
+}
+
+// The three in a row, for the input's own problem.
+static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgAllocation* result)
+{
+    Tier1CfgPrepared prepared = { 0 };
+    Tier1CfgAllocation candidate = { 0 };
+    Tier1CfgError error = result != 0 ? tier1_cfg_prepare(input, output, scratch, vector, &prepared) : TIER1_CFG_INVALID;
+    const bool held = error == TIER1_CFG_OK;
+    error = held ? tier1_cfg_assign(input, &prepared, 0, output, &candidate) : error;
+    error = error == TIER1_CFG_OK ? tier1_cfg_finish(input, &prepared, output, scratch, &candidate) : error;
+    if (held && error == TIER1_CFG_OK)
+    {
+        tier1_cfg_release(&prepared, scratch);
+        *result = candidate;
+    }
+    else if (held)
+    {
+        arena_pop_to(output, prepared.output_saved);
+        arena_pop_to(scratch, prepared.scratch_saved);
     }
     return error;
 }
