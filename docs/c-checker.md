@@ -5281,6 +5281,29 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name, clang's invalid expression, its rest is left out to its `;`, with the
   parser's error. Before C23 a name's call is an undeclared function's, which
   no search reads as a keyword (`whil (a)` stays a call).
+- **A parameter's unknown type name** (`ParseImplicitInt`'s
+  `DiagnoseUnknownTypeName`): clang corrects it to a typedef's name or a type
+  specifier's or storage class's keyword and reads the parameter with it,
+  "unknown type name 'myin'; did you mean 'myint'?" with "'myint' declared
+  here" (a keyword's has no note: `unsignd` is `unsigned`, `constt` is
+  `const`). The parse reads such a parameter in place, and the prefix view
+  reads it as `int` (`Parser.recovered_parameter_types`); where a unit's first
+  error is one, the driver takes that view, with every declaration before the
+  first other error, before a repair view, which would end at its declaration
+  (`check_prefix_parameter_view`), and the recovery rounds read past it. The
+  reader searches each such `int` whose source still spells the name, among the
+  declarations visible there, a block's own typedefs too
+  (`check_input_parameter_typo`, `check_typo_parameter`), and lists what it
+  suggests (`CheckInput.parameter_typo_tokens`, `CHECK_TYPO_PARAMETER`); the
+  driver reads the unit again with the type in the name's place, as for a
+  statement's start, and the error is its own. A name nothing is near keeps
+  the parser's "unknown type name" alone and reads as `int`.
+- **A parenthesized name before an operand** (`(myin)x`, clang's
+  `MaybeTypeCast`): the parse fails at the operand; clang reads the name as an
+  expression's, whose correction may be a typedef's ("use of undeclared
+  identifier 'myin'; did you mean 'myint'?"), and the expression is invalid
+  either way, with no recovery as a cast. The recovery view leaves the operand's
+  tail out as for a name before an operand (`check_driver_typo_tail`).
 - **A name after a block item's GNU attributes** that no binding of the parse
   names, which the parser reads as an implicit int's declarator
   (`parse_scalar_attribute_name`): clang's statement reader asks Sema what it
@@ -5336,6 +5359,13 @@ Left as they were:
   '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
   `__builtin_c23_va_start` named outside a call before C23).
 
+- A parameter's correction to a storage class (`statc v` to `static`) reads
+  the parameter with it, but buster lacks clang's "invalid storage class
+  specifier in function declarator" and stops reading that declaration
+  ("invalid or unsupported declaration"); so does a declaration's identifier
+  list (`int b(voi);`, clang's "a parameter list without types is only
+  allowed in a function definition"), which ends the reading before a later
+  parameter's search.
 - A statement start's correction whose statement then fails to parse in a way
   no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
   & 1`) ends the checking of its body there, as other such parse errors do;
