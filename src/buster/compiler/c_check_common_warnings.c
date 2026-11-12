@@ -2184,15 +2184,35 @@ static bool check_common_range_promoted(const TypeTable* types, TypeId type, uin
     return result;
 }
 
-// Whether a comparison is one clang's CheckTautologicalComparison may find always true or false: an integer constant
-// expression on exactly one side. The comparison walk's candidates test it before any type.
-static bool check_common_range_candidate(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+// Whether a comparison is one clang's CheckTautologicalComparison may find out of range: an integer constant expression on
+// exactly one side, and on the other an operand whose range is narrower than the comparison's type, a narrower type's
+// or a boolean's. An operand of the comparison's width covers all of its values, wrapped or not. The comparison walk's
+// candidates test it before they take the comparison, so that the common `x == 0` costs no walk.
+static bool check_common_range_candidate(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
 {
     const uint32_t left = graph->operand0[node];
     const uint32_t right = graph->operand1[node];
     const bool left_constant = check_common_integer_constant(stream, left) && (check_stream_flags(stream, left) & BUSTER_CHECK_ICE) != 0;
     const bool right_constant = check_common_integer_constant(stream, right) && (check_stream_flags(stream, right) & BUSTER_CHECK_ICE) != 0;
-    return left < graph->count && right < graph->count && left_constant != right_constant;
+    bool result = left < graph->count && right < graph->count && left_constant != right_constant;
+    const uint32_t constant = right_constant ? right : left;
+    const uint32_t other = right_constant ? left : right;
+    const CheckOp other_op = result ? graph->ops[other] : CHECK_OP_COUNT;
+    const bool known_boolean = other_op == CHECK_OP_NOT || other_op == CHECK_OP_LOGICAL_AND || other_op == CHECK_OP_LOGICAL_OR ||
+                               (other_op >= CHECK_OP_LESS && other_op <= CHECK_OP_NOT_EQUAL);
+    uint32_t own_width = 0;
+    uint32_t other_width = 0;
+    uint32_t constant_width = 0;
+    bool own_signed = false;
+    bool other_signed = false;
+    bool constant_signed = false;
+    const TypeId other_type = result ? check_stream_type(stream, other) : 0;
+    const bool narrow = result && !known_boolean && (check_common_integer(types, other_type, &own_width, &own_signed) || check_wide_type(types, other_type, &own_width, &own_signed)) &&
+                        check_common_range_promoted(types, other_type, &other_width, &other_signed) &&
+                        check_common_range_promoted(types, check_stream_type(stream, constant), &constant_width, &constant_signed) &&
+                        own_width < (constant_width > other_width ? constant_width : other_width);
+    result &= known_boolean || narrow;
+    return result;
 }
 
 // clang's -Wtautological-constant-out-of-range-compare (#2218, CheckTautologicalComparison): an integer constant
@@ -2211,7 +2231,7 @@ static bool check_common_out_of_range(CheckCommonEmission* emission, uint32_t no
     const Parser* parser = emission->parser;
     const CheckOp op = graph->ops[node];
     const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
-    const bool candidate = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) == 0 && check_common_range_candidate(graph, stream, node);
+    const bool candidate = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) == 0 && check_common_range_candidate(graph, stream, types, node);
     const bool constant_right = candidate && check_common_integer_constant(stream, graph->operand1[node]);
     const uint32_t constant = constant_right ? graph->operand1[node] : graph->operand0[node];
     const uint32_t other = constant_right ? graph->operand0[node] : graph->operand1[node];
@@ -5849,7 +5869,7 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL &&
-                            (enabled->sign_compare || (enabled->out_of_range && check_common_range_candidate(graph, stream, node)));
+                            (enabled->sign_compare || (enabled->out_of_range && check_common_range_candidate(graph, stream, types, node)));
     // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
     const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
     // (A self-assignment is no walk's: check_common_self_assigns gives it, in unreachable code too.)
