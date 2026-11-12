@@ -3796,6 +3796,38 @@ static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* 
     return result;
 }
 
+// A library or GNU builtin's argument that doesn't convert to its parameter (#2460): the conversion's words as an ordinary
+// call's argument's (check_driver_conversion_words), at the argument's first token, with no parameter's note, which clang
+// gives only where a declaration names the parameter. The parameter is what check_builtin_misc_convert recorded in the
+// failed argument's conversion (its type, BUSTER_CHECK_CONVERT_FAILED). NULL for another report.
+static const char* check_driver_builtin_conversion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                   CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && node < stream->count &&
+                           graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] != CBUILTIN_DUMP_STRUCT && graph->argument_counts != NULL &&
+                           graph->argument_offsets != NULL && stream->argument_conversions != NULL;
+    const uint32_t operand = candidate ? stream->diagnostic_operands[node] : 0;
+    const uint32_t count = candidate ? graph->argument_counts[node] : 0;
+    const char* result = NULL;
+    if (operand < count)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        const CheckConversion conversion = stream->argument_conversions[offset + operand];
+        const uint32_t source = graph->argument_nodes[offset + operand];
+        const char* words = conversion.flags == BUSTER_CHECK_CONVERT_FAILED && conversion.type != 0 ?
+                            check_driver_conversion_words(parser, pp, input, stream, types, spell, source, conversion.type, 0, 0, BUSTER_CHECK_NONE,
+                                                          BUSTER_CHECK_NONE, 3, scratch) : NULL;
+        if (words != NULL)
+        {
+            result = words;
+            *located = check_semantic_argument_begin(parser, graph, node, operand);
+        }
+    }
+    return result;
+}
+
 // An overload set's address that matches no candidate (#2384), as clang's assignment diagnostic gives it: the conversion
 // error with '<overloaded function type>' as its source, "incompatible function pointer types ..." where the enable_ifs
 // leave one candidate, whose address clang converts, else "... incompatible type ...", with a note at each candidate, the
@@ -4571,6 +4603,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
+                    bool builtin_converted = false;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_builtin_conversion(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, scratch);
+                        builtin_converted = x86_message != NULL;
                     }
                     if (x86_message == NULL && phase == 1)
                     {
@@ -5834,6 +5872,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
                                                         check_semantic_note_count(x86_note), "%s", x86_message);
+                            // CFString's argument that doesn't convert is no ordinary literal either: clang's CheckObjCString
+                            // adds its own error after the conversion's (#2460).
+                            if (builtin_converted && stream->graph->members[stream->reports[index].node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, "CFString literal is not a string constant");
+                            }
                         }
                         else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
                                  input->reports[index].note_token < count)
