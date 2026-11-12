@@ -52,8 +52,6 @@
 #define BUSTER_NODE_MACHINE_AFTER_CONDITION 0x02u
 // A conditional's jump from the end of its first arm to its end, and its second arm's label.
 #define BUSTER_NODE_MACHINE_AFTER_ARM 0x04u
-// It numbers two labels (NodeMachine.label_bases): a logical operator or a conditional whose condition isn't known.
-#define BUSTER_NODE_MACHINE_LABELED 0x08u
 
 // A type's word's flags (NodeMachine.type_words): no aligned typedef's wrapper (type_strip_aligned is the type itself), and
 // type_is_valid.
@@ -441,9 +439,9 @@ struct NodeMachine
     // C's: each record's state, its context (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer
     // converts it to, and its template (CheckLowerTemplate, or past it NodeMachineTemplate). Where its state has
     // BUSTER_NODE_MACHINE_AFTER_CONDITION or _AFTER_ARM, `hooks` is its consumer's record, whose segment follows its row;
-    // where it has _LABELED, `label_bases` is the first of its two labels, counted from the expression's first in the
+    // where its template is NODE_MACHINE_TEMPLATE_BRANCH, `label_bases` is the first of its two labels, counted from the expression's first in the
     // order the tasks number them (node_machine_number_labels), of the expression's `label_count`. `stack` is the
-    // numbering's.
+    // numbering's: the labeled records C met, then their subtrees' first records.
     uint8_t* states;
     uint8_t* contexts;
     TypeId* targets;
@@ -543,7 +541,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->templates = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
     machine->hooks = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->label_bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
-    machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+    machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
     machine->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
     machine->classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
     machine->tape = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, entries);
@@ -1387,7 +1385,7 @@ static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r,
         else if (node_machine_testable(machine, type_a) && (conditional || node_machine_testable(machine, type_b)))
         {
             kind = (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCH;
-            machine->states[r] |= BUSTER_NODE_MACHINE_LABELED;
+            machine->stack[machine->label_count / 2] = r;
             machine->label_count += 2;
             node_machine_evaluate_hooked(machine, a, type_a, r, BUSTER_NODE_MACHINE_AFTER_CONDITION);
             if (conditional)
@@ -1615,49 +1613,51 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
     return kind;
 }
 
+// The first record of record `r`'s subtree. Its operands' subtrees come before it one after another (X's postorder), so it
+// is its first operand's first record, the operand of the least record, down to a leaf.
+static uint32_t node_machine_subtree_first(const NodeMachine* machine, uint32_t r)
+{
+    uint32_t first = r;
+    bool deeper = true;
+    while (deeper)
+    {
+        const bool leaf = machine->codes[first] == CHECK_OP_VALUE;
+        const uint32_t a = leaf ? UINT32_MAX : machine->left[first];
+        const uint32_t b = leaf ? UINT32_MAX : machine->right[first];
+        const uint32_t c = machine->codes[first] == CHECK_OP_CONDITIONAL ? node_machine_operand(machine, first, 2) : UINT32_MAX;
+        const uint32_t least = a < b ? (a < c ? a : c) : (b < c ? b : c);
+        deeper = least < first;
+        first = deeper ? least : first;
+    }
+    return first;
+}
+
 // The labels' numbers (NodeMachine.label_bases), each labeled record's first, in the order the tasks number them: the
-// order they pop the records, a preorder of the evaluated records from the root with each record's operands in the order
-// of their entries, which is the records' (X's postorder). Only an expression with a labeled record has it: a stack, not
-// the recursion check-call-graph forbids, and scalar, as so few expressions have labels (a vector of the records' states
-// would not find their tree's order).
+// order they pop the records, a preorder from the root with each record's operands in the order of their entries, which
+// is the records' (X's postorder). A labeled record's rank in it among the labeled records is the number of those that are
+// its ancestors (whose subtree, from its first record to it, holds it) and of those before its subtree's first record (to
+// its left). Only an expression with labels runs it, and it reads the labeled records alone (C listed them in `stack`,
+// their subtrees' first records after them): a walk of every record cost C 125 cycles a new taken node on sqlite3.c on
+// the 9700X, three times its average, by its branches. Scalar: an expression has a few, and their order is the tree's.
 static void node_machine_number_labels(NodeMachine* machine)
 {
-    uint32_t top = 0;
-    uint32_t next = 0;
-    machine->stack[top++] = machine->count - 1;
-    while (top != 0)
+    const uint32_t labeled = machine->label_count / 2;
+    uint32_t* records = machine->stack;
+    uint32_t* firsts = machine->stack + labeled;
+    for (uint32_t i = 0; i < labeled; i += 1)
     {
-        top -= 1;
-        const uint32_t r = machine->stack[top];
-        if ((machine->states[r] & BUSTER_NODE_MACHINE_LABELED) != 0)
+        firsts[i] = node_machine_subtree_first(machine, records[i]);
+    }
+    for (uint32_t i = 0; i < labeled; i += 1)
+    {
+        const uint32_t r = records[i];
+        uint32_t rank = 0;
+        for (uint32_t j = 0; j < labeled; j += 1)
         {
-            machine->label_bases[r] = next;
-            next += 2;
+            const uint32_t other = records[j];
+            rank += (other > r && firsts[j] <= r) || other < firsts[i];
         }
-        // Its evaluated operands, the last pushed first, so that the first pops first (a tree's: none twice).
-        uint32_t operands[3] = {
-            machine->codes[r] != CHECK_OP_VALUE ? machine->left[r] : UINT32_MAX,
-            machine->codes[r] != CHECK_OP_VALUE ? machine->right[r] : UINT32_MAX,
-            machine->codes[r] == CHECK_OP_CONDITIONAL ? node_machine_operand(machine, r, 2) : UINT32_MAX,
-        };
-        for (uint32_t i = 0; i < 3; i += 1)
-        {
-            operands[i] = operands[i] < r && (machine->states[operands[i]] & BUSTER_NODE_MACHINE_EVALUATED) != 0 ? operands[i] : UINT32_MAX;
-        }
-        for (uint32_t pushed = 0; pushed < 3; pushed += 1)
-        {
-            // The greatest of those not yet pushed.
-            uint32_t greatest = 3;
-            for (uint32_t i = 0; i < 3; i += 1)
-            {
-                greatest = operands[i] != UINT32_MAX && (greatest == 3 || operands[i] > operands[greatest]) ? i : greatest;
-            }
-            if (greatest != 3)
-            {
-                machine->stack[top++] = operands[greatest];
-                operands[greatest] = UINT32_MAX;
-            }
-        }
+        machine->label_bases[r] = 2 * rank;
     }
 }
 
