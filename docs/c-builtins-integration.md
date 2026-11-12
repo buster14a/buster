@@ -1473,8 +1473,12 @@ code whose runs equal clang -O0's on both paths.
   complete object of a size but an `_Atomic` or `_BitInt` one (records, unions,
   arrays and long double among them), whose values are pointers converting to
   pointers to its unqualified type, but a store's value and a compare-exchange's
-  desired one to the first argument's own pointer type, qualifiers kept, as
-  clang's ByValType. The lowering copies the values into C11's representation
+  desired one (and an exchange's result) to the first argument's own pointer
+  type, qualifiers kept, as clang's ByValType. One of those in an address space
+  the object's doesn't include is clang's "passing 'int *' to parameter of type
+  '__attribute__((address_space(256))) int *' changes address space of
+  pointer", at the argument (#2233); the others, pointers to the value type,
+  drop the space, as clang's do. The lowering copies the values into C11's representation
   buffers and the results back out (`CheckLowerAtomic.by_pointer`), through the
   native leaves for aligned objects of 1, 2, 4 or 8 bytes and libatomic's generic
   functions otherwise, as clang's code calls them.
@@ -1718,8 +1722,19 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   const objects' constant initializers wherever the expression holds them
   (`const int c = 3;` makes `__builtin_align_up(x, c + 0)` an error), must be at
   least 1, at most 2 to the source's width less 1 (a pointer's 64), and a power
-  of 2, in that order; 1 draws clang's `-Wtautological-compare`, which the
-  checker records but doesn't report. The checker's runtime view of the argument
+  of 2, in that order, each error in clang's words at the alignment as clang's
+  getExprLoc places it, a binary operator's at its operator (#2221,
+  `check_semantic_alignment`): "requested alignment must be 1 or greater",
+  "requested alignment must be N or smaller" (N in decimal, past 128 bits
+  too) and "requested alignment is not a power of 2". A source of another type
+  is "operand of type 'T' where arithmetic or pointer type is required", with
+  a floating one's or a function pointer's note, and an alignment of no
+  integer type "used type 'T' where integer is required". An alignment of 1
+  draws clang's `-Wtautological-compare` at the alignment, unevaluated
+  operands' too (`check_input_alignment_one`): "aligning a value to 1 byte is
+  a no-op", or is_aligned's "the result of checking whether a value is aligned
+  to 1 byte is always true", but not where the source's own type is refused.
+  The checker's runtime view of the argument
   reads no const object, so the source adapter evaluates it as a constant
   context would (`check_input_misc_evidence`), and the call's checks and
   folds take that value from its evidence (`CheckBuiltinCall.alignment_evaluated`)
@@ -1923,7 +1938,13 @@ refuses each by name, as clang's code generation does for x86:
 object p points to, as clang's `PaddingClearer` does.
 
 - **Sema.** p is a pointer as written (an array isn't one) to a complete object
-  type that isn't const. Volatile and `_Atomic` pointees are fine.
+  type that isn't const. Volatile and `_Atomic` pointees are fine. Each refusal
+  is clang's error at the argument's first token (#2414,
+  `check_semantic_clear_padding`): "passing 'T' to parameter of incompatible
+  type pointer: type mismatch at 1st parameter ('T' vs pointer)", a function
+  pointer's "must be a pointer to a trivially-copyable type", "variable has
+  incomplete type 'T'" with a tag's note, and "read-only variable is not
+  assignable".
 - **Bits.** The bits no scalar, bit-field or vector of the object holds are
   padding:
   - a record's holes and tail, and an unnamed bit-field;

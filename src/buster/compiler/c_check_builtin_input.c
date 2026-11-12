@@ -228,6 +228,34 @@ static bool check_input_builtin_callee(const CheckInputReader* reader, uint32_t 
     return reader->builtins[close] != CBUILTIN_NONE || intrinsic || library;
 }
 
+// clang's warning of an alignment builtin's alignment of 1 (#2221, SemaBuiltinAlignment's warn_alignment_builtin_useless):
+// align_up's and align_down's "aligning a value to 1 byte is a no-op", is_aligned's "... is always true", at the alignment
+// argument [first, last) as clang's getExprLoc places it (a binary operator's at its operator, any other's at its first
+// token), once the call `closing` is read. Rare: scalar.
+static void check_input_alignment_one(CheckInputReader* reader, uint16_t builtin, uint32_t first, uint32_t last, uint32_t closing)
+{
+    const Parser* parser = reader->parser;
+    uint32_t root = first;
+    for (uint32_t t = first; t < last; t += 1)
+    {
+        const uint32_t parent = parser->tree.parents[t];
+        root = parent < first || parent >= last || parent == t ? t : root;
+    }
+    const uint8_t role = parser->tree.roles[root];
+    const bool binary = (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA;
+    const CheckWarningEvent event =
+    {
+        .id = builtin == CBUILTIN_IS_ALIGNED ? CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE : CHECK_WARNING_ID_ALIGNMENT_NO_OP,
+        .kind = CHECK_WARNING_EVENT_ALIGNMENT_ONE,
+        .token = binary ? root : first,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = closing,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+    };
+    check_input_warning_once(reader, &event);
+}
+
 static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader* reader, uint32_t node, uint32_t token, uint32_t count, uint32_t end,
                                                                 CheckBuiltinCall* evidence)
 {
@@ -244,6 +272,21 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         evidence->alignment_low = (uint64_t)value.integer;
         evidence->alignment_high = (uint64_t)(value.integer >> 64);
         evidence->alignment_limbs = value.floating_storage[0];
+        // Not where the source's own type is refused first (a floating one, a record, an enumeration, a function pointer),
+        // as far as the source evaluator reads it.
+        const uint32_t keyword = reader->first_child[token];
+        CheckValue source = { 0 };
+        const bool typed = value.integer == 1 && value.floating_storage[0] == 0 && keyword + 2 < end &&
+                           check_input_evaluate_cached(reader, keyword + 2, end, &source) && source.type != 0;
+        const TypeId bare = typed ? type_unqualified(type_strip_aligned(reader->types, source.type)) : 0;
+        const uint8_t kind = typed ? type_kind(reader->types, bare) : BUSTER_TYPE_KIND_NONE;
+        const bool refused = typed && kind != BUSTER_TYPE_KIND_INTEGER && kind != BUSTER_TYPE_KIND_BIT_INT && !type_kind_is_array(kind) &&
+                             !(kind == BUSTER_TYPE_KIND_POINTER && type_kind(reader->types, type_strip_aligned(reader->types, type_element(reader->types, bare))) !=
+                                                                   BUSTER_TYPE_KIND_FUNCTION);
+        if (value.integer == 1 && value.floating_storage[0] == 0 && !refused)
+        {
+            check_input_alignment_one(reader, builtin, end + 1, last, token);
+        }
     }
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
     {
