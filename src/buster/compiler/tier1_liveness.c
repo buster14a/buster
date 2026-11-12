@@ -141,7 +141,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             {
                 error = TIER1_LIVENESS_INVALID;
             }
-            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
             {
                 error = pattern->values[operand] == BUSTER_IR_NONE ? error : TIER1_LIVENESS_INVALID;
             }
@@ -155,7 +155,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             {
                 error = TIER1_LIVENESS_INVALID;
             }
-            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
             {
                 error = pattern->values[operand] == BUSTER_IR_NONE ? error : TIER1_LIVENESS_INVALID;
             }
@@ -175,7 +175,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             {
                 error = TIER1_LIVENESS_INVALID;
             }
-            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
             {
                 if (pattern->values[operand] != BUSTER_IR_NONE)
                 {
@@ -197,7 +197,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             {
                 error = TIER1_LIVENESS_INVALID;
             }
-            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
             {
                 if (pattern->values[operand] != BUSTER_IR_NONE)
                 {

@@ -3521,7 +3521,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 const Tier1SelectPattern* pattern = &plan->patterns[node];
                 // A long double (#141) is in its frame object, no register.
                 bool registered = function->type[node] == IR_VOID || function->type[node] == IR_F80 || tier1_emit_cfg_holds(emitted, node, transitions.registers[node]);
-                for (uint32_t p = 0; p < 3; p += 1)
+                for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_VALUES; p += 1)
                 {
                     const uint32_t value = pattern->values[p];
                     registered &= value == BUSTER_IR_NONE || tier1_emit_cfg_holds(emitted, value, transitions.registers[value]);

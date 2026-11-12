@@ -1387,7 +1387,7 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
     {
         // The operands' registers, as the selection reads them (tier1_select_holes): its pattern's values and its own.
         const Tier1SelectPattern* pattern = &plan->patterns[node];
-        for (uint32_t p = 0; valid && p < 3; p += 1)
+        for (uint32_t p = 0; valid && p < BUSTER_TIER1_SELECT_VALUES; p += 1)
         {
             const uint32_t operand = pattern->values[p];
             const uint32_t operand_value = operand != BUSTER_IR_NONE ? emitted->node_values[operand] : BUSTER_TIER1_CFG_NONE;
@@ -1451,7 +1451,7 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
             }
             kernel->referenced = referenced ? kernel->reference.instruction : UINT32_MAX;
         }
-        for (uint32_t p = 0; p < 3; p += 1)
+        for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_VALUES; p += 1)
         {
             if (pattern->values[p] != BUSTER_IR_NONE)
             {
