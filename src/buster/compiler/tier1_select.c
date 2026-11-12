@@ -1952,17 +1952,26 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // consumer resolves folded frame operands to their final base and displacement before this decision.
         const bool add = record.mode == BUSTER_X86_MEMORY_BASE_INDEX(0) && record.displacement == 0 && record.rm != X86_REGISTER_RSP &&
                          (destination == record.rm || destination == record.index);
+        // So does a base plus a displacement that allocation put in the base's register, `p += c` and `i + 1` in place:
+        // add of the displacement, whose form (add, sub or inc) the request's batch chooses, as clang's code does (#1217).
+        // A 32-bit destination's low half is the same either way. An rsp base, never a value's register, keeps LEA.
+        const bool add_immediate = record.mode == BUSTER_X86_MEMORY_BASE && record.displacement != 0 && destination == record.rm && record.rm != X86_REGISTER_RSP;
         if (add)
         {
             const uint8_t other = destination == record.rm ? record.index : record.rm;
             record = tier1_select_register_record(width == 8 ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32, destination, other);
+            tier1_select_append(&result, record);
+        }
+        else if (add_immediate)
+        {
+            tier1_select_request(&result, X86_OPERATION_ADD, width, destination, (int64_t)record.displacement, 0);
         }
         else
         {
             record.reg = destination;
             record.form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M;
+            tier1_select_append(&result, record);
         }
-        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_LOAD:
@@ -2172,7 +2181,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_DIVIDE_POWER:
     {
         // The bias in the scratch register: the dividend's sign through every bit, then its low `shift` bits (for a shift
-        // of 1 the sign bit alone), added to the dividend by a lea, which leaves the dividend for the remainder's mask.
+        // of 1 the sign bit alone), added to the dividend by a lea, which leaves the dividend for the remainder's mask,
+        // or by an add where allocation put the result in the dividend's register (#1217: a pointer difference's
+        // division by its element's size, luaD_precall's, as clang's add).
         const uint8_t bias = BUSTER_TIER1_SELECT_SCRATCH;
         const uint32_t bits = width * 8;
         const uint32_t shift = holes->scale;
@@ -2182,7 +2193,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - 1) });
         }
         tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - shift) });
-        tier1_select_append(&result, (X86Instruction){ .form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M, .reg = destination, .rm = holes->left, .index = bias, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) });
+        const X86Instruction biased = destination == holes->left ? tier1_select_register_record(width == 8 ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32, destination, bias) :
+                                                                   (X86Instruction){ .form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M, .reg = destination, .rm = holes->left, .index = bias, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) };
+        tier1_select_append(&result, biased);
         if ((holes->immediate & 2) != 0)
         {
             const int32_t mask = (int32_t)((UINT64_C(1) << shift) - 1);
@@ -3051,6 +3064,9 @@ struct Tier1SelectForest
     // Semantic range certificates: the low byte is the number of possibly nonzero bits, the high byte the smallest
     // signed width. These describe the IR value; canonical separately proves its physical register's upper bits.
     const uint16_t* known_bits;
+    // Optional: each pure address node whose every user takes it as an address, a load's or a store's or another such
+    // node's (tier1_select_sinkable, #1217), which a memory operand may fold from an earlier block. Null for none.
+    const uint8_t* sinkable;
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
     bool vectors;
@@ -4585,6 +4601,42 @@ static bool tier1_select_overflow_area(const IrFunction* function, uint32_t slot
     return slot < function->slot_count && (function->slots[slot].flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
 }
 
+// Which pure address nodes every user takes as an address (#1217), so that a memory operand may fold one from an earlier
+// block (tier1_select_address): the plan's use count ORs, by node, bit 1 for an address, an addition or a conversion
+// between a pointer and an integer, and bit 0 into an operand for each use that isn't an address use
+// (tier1_select_address_operand's) and each phi operand's, so that neither bit depends on the order the nodes come in.
+// A node of exactly bit 1 is sinkable. A node of both bits keeps its operands from being so, from the last node back:
+// their value is still computed for it. A 32-bit addition marked so is never sinkable, since its users take an integer,
+// and the walk takes a node only of the forms it can encode. A user before its operand (a computed goto's dispatch
+// block's) may be missed: the walk then folds a node some user keeps, which costs a lea and computes the same address.
+#define BUSTER_TIER1_SELECT_SINKABLE 2u
+#define BUSTER_TIER1_SELECT_KEPT 1u
+#define BUSTER_TIER1_SELECT_ANY (UINT32_MAX - 1)
+
+// The operand `user` takes as an address: a load's address, a store's (not where it is also the stored value), every
+// operand of a pure address node (BUSTER_TIER1_SELECT_ANY), or none (BUSTER_IR_NONE).
+static uint32_t tier1_select_address_operand(const IrFunction* function, uint32_t user, uint32_t op, bool pure)
+{
+    const uint32_t a = function->a[user];
+    const bool access = op == IR_LOAD || (op == IR_STORE && function->b[user] != a);
+    return pure ? BUSTER_TIER1_SELECT_ANY : access ? a : BUSTER_IR_NONE;
+}
+
+static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
+{
+    const uint32_t count = function->instruction_count;
+    for (uint32_t reverse = count; reverse != 0; reverse -= 1)
+    {
+        const uint32_t node = reverse - 1;
+        if (sinkable[node] == (BUSTER_TIER1_SELECT_SINKABLE | BUSTER_TIER1_SELECT_KEPT))
+        {
+            const uint32_t index = function->op[node] == IR_ADDRESS || function->op[node] == IR_ADD ? function->b[node] : BUSTER_IR_NONE;
+            sinkable[function->a[node]] |= BUSTER_TIER1_SELECT_KEPT;
+            sinkable[index < count ? index : function->a[node]] |= BUSTER_TIER1_SELECT_KEPT;
+        }
+    }
+}
+
 // A memory operand's address: base + index * 2^scale + displacement, the frame object the walk reached instead of a
 // base value, and the nodes its walk passed.
 typedef struct Tier1SelectAddress Tier1SelectAddress;
@@ -4671,7 +4723,14 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
         uint32_t constant_node = BUSTER_IR_NONE;
         uint8_t peeled = 0;
         const uint32_t block = forest->blocks[node];
-        bool taken = node < root && block == root_block && (shared || forest->uses[node] == 1);
+        // A memory operand also takes a pure address node of an earlier block (#1217): SSA makes that node, and the
+        // values it reads, dominate the access, and the effective uses keep those values live to it. Lua's `ra =
+        // RA(i)` is computed at a handler's start and stored through in the arms its type tests choose: each store
+        // then addresses base + index itself, and the address needs no lea where no other user takes its value.
+        // Only a node no other user needs (tier1_select_sinkable) goes: folding one whose lea stays would only lengthen
+        // its inputs' lives past it, which speedtest1's spills showed.
+        const bool sinkable = forest->sinkable != 0 && forest->sinkable[node] == BUSTER_TIER1_SELECT_SINKABLE;
+        bool taken = node < root && (block == root_block ? shared || forest->uses[node] == 1 : shared && sinkable);
         if (taken && op == IR_ADDRESS)
         {
             const IrAddress operand = function->addresses[function->c[node]];
@@ -6552,12 +6611,15 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     uint32_t* pending = 0;
     // Each node's last user, its only one where it has a single use: the bottom-up path's classes read it.
     uint32_t* users = 0;
+    // Whether a memory operand may take a node from an earlier block (#1217, tier1_select_sinkable).
+    uint8_t* sinkable = 0;
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
         blocks = ir_allocate(scratch, count, 4, &ok);
         users = ir_allocate(scratch, count, 4, &ok);
         uses = ir_allocate(scratch, count, 4, &ok);
+        sinkable = ir_allocate(scratch, count, 1, &ok);
         barriers = ir_allocate(scratch, count, 4, &ok);
         depths = ir_allocate(scratch, count, 4, &ok);
         level_offsets = ir_allocate(scratch, (uint64_t)count + 2, 4, &ok);
@@ -6621,6 +6683,9 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         }
         effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : BUSTER_TIER1_SELECT_VALUES;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
+        const bool pure = op == IR_ADDRESS || op == IR_ADD || op == IR_INTTOPTR || op == IR_PTRTOINT;
+        const uint32_t address_operand = tier1_select_address_operand(function, node, op, pure);
+        sinkable[node] |= pure ? BUSTER_TIER1_SELECT_SINKABLE : 0;
         // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), and its use counts, but
         // nothing folds into a phi, so its depth doesn't order the phi's choice. Its own loop leaves the others' as it was.
         for (uint32_t p = 0; error == TIER1_SELECT_OK && op == IR_PHI && p < operand_count; p += 1)
@@ -6634,6 +6699,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 uses[operand.value] += 1;
                 users[operand.value] = node;
+                sinkable[operand.value] |= BUSTER_TIER1_SELECT_KEPT;
             }
         }
         for (uint32_t p = 0; error == TIER1_SELECT_OK && op != IR_PHI && p < operand_count; p += 1)
@@ -6651,6 +6717,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 uses[operand.value] += 1;
                 users[operand.value] = node;
+                sinkable[operand.value] |= address_operand == BUSTER_TIER1_SELECT_ANY || address_operand == operand.value ? 0 : BUSTER_TIER1_SELECT_KEPT;
                 const uint32_t next = operand.value < node ? depths[operand.value] + 1 : 0;
                 depths[node] = next > depths[node] ? next : depths[node];
             }
@@ -6672,6 +6739,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     if (error == TIER1_SELECT_OK)
     {
+        tier1_select_sinkable(function, sinkable);
         tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
         tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
         tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
@@ -6710,6 +6778,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .barriers = barriers,
         .canonical = canonical,
         .known_bits = known_bits,
+        .sinkable = sinkable,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
     // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,

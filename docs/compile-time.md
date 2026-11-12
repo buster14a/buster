@@ -3047,10 +3047,13 @@ tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
 are), the checker unit's copies of Tier 0's tables, the Zen 5 cost model's
 tables and the unwind templates, and the frontend unit's copies of the
 parser's tables (#652, `parse_tables_initialize`, 17 KB, which every compile
-built before its parse), with their initialized flags, all in a section of their own
-(`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
-with them built, at their fixed addresses, and reads the pages it touches from
-the page cache, shared with every other process.
+built before its parse) and the checker unit's asm matcher's index (#2532,
+`check_asm_index_initialize`, 549 KB, which each unit with asm statements
+made), with their initialized flags, all in a section of their own
+(`buster_baked`, `baked.h`), 6.6 MB of the file (`test-baked-tables` prints
+its size). A compile's process starts with them built, at their fixed
+addresses, and reads the pages it touches from the page cache, shared with
+every other process.
 
 - **Why baked, not a snapshot.** A snapshot in the cache directory, as the C
   runtime has, would need the executable's identity, staleness checks, a

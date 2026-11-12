@@ -114,8 +114,9 @@ round alone.
 Before the lanes start, the calling thread builds the tables every unit's code
 reads and the first unit to need them would otherwise build: the parser's
 (through `parse_initialize`, in the front end's home: `main.c`), the
-encoder's, the semantics' and Tier 0's, and with unwind tables, theirs. The
-lanes then only read them.
+encoder's, the semantics' and Tier 0's, the lowering's runtime functions'
+names and the asm matcher's index (#2532), and with unwind tables, theirs,
+where the executable isn't baked with them. The lanes then only read them.
 
 ### The functions on the units' lanes
 

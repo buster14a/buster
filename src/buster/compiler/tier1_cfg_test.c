@@ -71,6 +71,9 @@ struct Tier1CfgTestTally
     uint64_t split_edges;
     uint64_t spills;
     uint64_t temp_slot_cases;
+    // Block entries where a recomputed value's register reads nothing before its recipe takes over, which its edges
+    // then leave unfilled (tier1_cfg_entry_unread, #1217).
+    uint64_t unread_entries;
     // The opmask class's share: moves of masks, spilled masks, and moves of masks at splits (around calls).
     uint64_t mask_moves;
     uint64_t mask_spills;
@@ -126,6 +129,16 @@ struct Tier1CfgTestTally
     // mutants' on every fourth of those.
     bool oracle;
     bool oracle_mutants;
+    // #2538: plain and preferred problems allocated in one call and in two (tier1_cfg_test_two_problems): the cases whose
+    // plain problem allocated, those whose preferred allocation was taken and those whose wasn't, those freed of their
+    // definitions' registers by a constraint, and those with fixed ranges, where another problem's column is refused
+    // (each then runs without them).
+    uint64_t two_cases;
+    uint64_t two_taken;
+    uint64_t two_refused;
+    uint64_t two_freed;
+    uint64_t two_fixed;
+    uint64_t two_seed;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -493,6 +506,284 @@ static bool tier1_cfg_test_unshared_verify(const Tier1CfgInput* input, const Tie
 // edge move's destination redirected to an unused register, and one interval fragment's register swapped.
 // `temp_slots` are the classes whose temporary slot the case must use, `split_moves` the fewest moves at splits it must
 // have; a case that `must_allocate` mustn't be refused.
+static uint64_t tier1_cfg_test_random(uint64_t* state)
+{
+    *state = *state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+    return *state >> 33;
+}
+
+// #2538: what one case of two problems gave on one path (tier1_cfg_test_two_orders).
+typedef struct Tier1CfgTwoOrders Tier1CfgTwoOrders;
+struct Tier1CfgTwoOrders
+{
+    // The two orders' plain verdicts, the problems they left and the allocations that stand agree; the first group of
+    // fields that differs where they don't (tier1_cfg_differs), and a failure of the CFG checker on the allocation.
+    bool agreed;
+    uint32_t differs;
+    bool verified;
+    // The plain problem allocated; the preferred allocation was taken; the plain verdict freed the definitions.
+    bool allocated;
+    bool taken;
+    bool freed;
+};
+
+// A plain problem and a preferred one over the same values, allocated in one call (tier1_cfg_order_prepare and
+// tier1_cfg_order_run, as the CFG consumer does, with the plain problem's verdict inside the preferred assignment's call
+// or with `verdict` false the plain problem assigned whole first) and in two (tier1_cfg_allocate on each, the order
+// before), on one path. The preferred problem gives each value `chosen[v]` and its definition's registers while bound,
+// and the general class the plain one's registers and `extra`. `allowed` is a column of the values' room.
+static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, bool vector, bool verdict, Arena* output, Arena* scratch, uint32_t* allowed)
+{
+    const uint64_t mark = output->length;
+    Tier1CfgTwoOrders outcome = { 0 };
+    const uint32_t general = plain->registers[BUSTER_TIER1_ALLOCATE_GPR];
+    // Two calls: the plain problem whole, again unbound where it meets a constraint, then the preferred one whole.
+    Tier1CfgInput two = *plain;
+    Tier1CfgAllocation first = { 0 };
+    Tier1CfgError first_error = vector ? tier1_cfg_allocate(&two, output, scratch, &first) : tier1_cfg_allocate_scalar(&two, output, scratch, &first);
+    if (first_error == TIER1_CFG_CONSTRAINT)
+    {
+        two.definition_registers = 0;
+        first_error = vector ? tier1_cfg_allocate(&two, output, scratch, &first) : tier1_cfg_allocate_scalar(&two, output, scratch, &first);
+    }
+    for (uint32_t v = 0; v < plain->value_count; v += 1)
+    {
+        allowed[v] = chosen[v] | (two.definition_registers != 0 ? two.definition_registers[v] : 0);
+    }
+    Tier1CfgInput preferred_two = two;
+    preferred_two.allowed_registers = allowed;
+    preferred_two.registers[BUSTER_TIER1_ALLOCATE_GPR] = general | extra;
+    Tier1CfgAllocation second = { 0 };
+    const Tier1CfgError second_error = first_error != TIER1_CFG_OK ? TIER1_CFG_INVALID : vector ? tier1_cfg_allocate(&preferred_two, output, scratch, &second) : tier1_cfg_allocate_scalar(&preferred_two, output, scratch, &second);
+    const bool taken_two = first_error == TIER1_CFG_OK && tier1_cfg_taken(second_error, &second);
+    // One call.
+    Tier1CfgInput one = *plain;
+    Tier1CfgOrder order;
+    const Tier1CfgPreference preference = {
+        .sets = chosen,
+        .registers = {
+            general | extra,
+            plain->registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+            plain->registers[BUSTER_TIER1_ALLOCATE_MASK],
+        },
+        .verdict = verdict,
+    };
+    Tier1CfgAllocation result = { 0 };
+    const uint32_t* preferred_allowed = 0;
+    Tier1CfgError preferred_error = TIER1_CFG_OK;
+    bool taken = false;
+    Tier1CfgError stands = tier1_cfg_order_prepare(&one, output, scratch, vector && BUSTER_HOST_VECTOR, &order);
+    stands = stands == TIER1_CFG_OK ? tier1_cfg_order_run(&one, &preference, output, scratch, &order, &result, &preferred_allowed, &preferred_error, &taken) : stands;
+    outcome.agreed = stands == first_error && (one.definition_registers == 0) == (two.definition_registers == 0);
+    outcome.verified = true;
+    if (stands == TIER1_CFG_OK && first_error == TIER1_CFG_OK)
+    {
+        outcome.differs = tier1_cfg_differs(plain, &result, taken_two ? &second : &first);
+        bool same = !taken || preferred_allowed != 0;
+        for (uint32_t v = 0; same && taken && v < plain->value_count; v += 1)
+        {
+            same = preferred_allowed[v] == allowed[v];
+        }
+        outcome.agreed = outcome.agreed && same && taken == taken_two && preferred_error == second_error && outcome.differs == 0;
+        Tier1CfgInput standing = taken ? preferred_two : one;
+        Tier1CfgCheck check;
+        outcome.verified = tier1_cfg_verify(&standing, &result, scratch, &check);
+        outcome.allocated = true;
+        outcome.taken = taken;
+        outcome.freed = plain->definition_registers != 0 && one.definition_registers == 0;
+    }
+    arena_pop_to(output, mark);
+    return outcome;
+}
+
+// Whether value v's definition needs a register: its first use is its own, required. Only such a definition can be bound
+// to registers, as a parameter's is to its incoming one (tier1_cfg_verify then checks it is there).
+static bool tier1_cfg_test_needs_register(const Tier1CfgInput* input, uint32_t v)
+{
+    const uint32_t use = input->use_offsets[v];
+    return use < input->use_offsets[v + 1] && input->use_positions[use] == input->definitions[v] && input->use_required != 0 && input->use_required[use] != 0;
+}
+
+// Binds pairs of values to one register where both need it at once: two values of a class whose definitions need a
+// register, used at one position of both definitions' block, both uses required, with a register both may take. Their
+// definitions' intervals both hold that register there, which the plain problem can't give both: it meets a constraint,
+// and the order frees every definition. `holders` has a column of the positions' room. Returns the pairs bound.
+static uint32_t tier1_cfg_test_clash(const Tier1CfgInput* input, uint32_t* holders, uint32_t* defined)
+{
+    uint32_t pairs = 0;
+    memset(holders, 0xff, (uint64_t)input->position_count * sizeof(uint32_t));
+    for (uint32_t v = 0; v < input->value_count; v += 1)
+    {
+        const uint32_t block = tier1_cfg_block_of(input, input->definitions[v]);
+        const bool candidate = tier1_cfg_test_needs_register(input, v) && input->allowed_registers[v] != 0;
+        for (uint32_t u = input->use_offsets[v] + 1; candidate && defined[v] == 0 && u < input->use_offsets[v + 1]; u += 1)
+        {
+            const uint32_t position = input->use_positions[u];
+            const uint32_t other = holders[position];
+            const uint32_t common = other != BUSTER_TIER1_CFG_NONE && other != v && input->classes[other] == input->classes[v] && defined[other] == 0 ? input->allowed_registers[other] & input->allowed_registers[v] : 0;
+            const bool here = input->use_required[u] != 0 && tier1_cfg_block_of(input, position) == block;
+            if (here && common != 0)
+            {
+                defined[v] = common & (0u - common);
+                defined[other] = defined[v];
+                pairs += 1;
+            }
+            else if (here && other == BUSTER_TIER1_CFG_NONE)
+            {
+                holders[position] = v;
+            }
+        }
+    }
+    return pairs;
+}
+
+// The preferred problem of a case of two problems: the general class widened by `extra`, a random part of the general
+// registers the plain problem leaves (never the scratch), and each general value's set, at random, its plain one, `extra`
+// alone or both; in about one case of four, one value with a required use gets no register at all, so that the preferred
+// problem meets a constraint and the plain allocation stands. `bind` binds definitions (`defined`): 1, about half the
+// values whose definitions need a register, each to one register of its own, as a parameter's is to its incoming
+// register; 2, pairs that clash (tier1_cfg_test_clash). Returns `extra`.
+static uint32_t tier1_cfg_test_preference(const Tier1CfgInput* input, uint64_t* random, uint32_t bind, uint32_t* chosen, uint32_t* defined, uint32_t* holders)
+{
+    const uint32_t spare = 0xffffu & ~input->registers[BUSTER_TIER1_ALLOCATE_GPR] & ~(UINT32_C(1) << input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR]);
+    uint32_t extra = 0;
+    for (uint32_t r = 0; r < 16; r += 1)
+    {
+        extra |= ((spare >> r) & 1) != 0 && tier1_cfg_test_random(random) % 2 == 0 ? UINT32_C(1) << r : 0;
+    }
+    const bool starve = tier1_cfg_test_random(random) % 4 == 0;
+    bool starved = false;
+    for (uint32_t v = 0; v < input->value_count; v += 1)
+    {
+        const uint32_t own = input->allowed_registers[v];
+        const uint32_t pick = (uint32_t)(tier1_cfg_test_random(random) % 3);
+        const bool required = input->use_required != 0 && input->use_offsets[v] < input->use_offsets[v + 1] && input->use_required[input->use_offsets[v]] != 0;
+        const bool none = starve && !starved && required && input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
+        starved = starved || none;
+        chosen[v] = input->classes[v] != BUSTER_TIER1_ALLOCATE_GPR ? own : none ? 0 : pick == 0 ? own : pick == 1 ? extra : own | extra;
+        uint32_t bit = 0;
+        if (bind == 1 && tier1_cfg_test_needs_register(input, v) && own != 0 && tier1_cfg_test_random(random) % 2 == 0)
+        {
+            const uint32_t skip = (uint32_t)(tier1_cfg_test_random(random) % (uint32_t)__builtin_popcount(own));
+            uint32_t rest = own;
+            for (uint32_t k = 0; k < skip; k += 1)
+            {
+                rest &= rest - 1;
+            }
+            bit = rest & (0u - rest);
+        }
+        defined[v] = bit;
+    }
+    if (bind == 2)
+    {
+        tier1_cfg_test_clash(input, holders, defined);
+    }
+    return extra;
+}
+
+// `input` with a required use at each definition, a phi's aside, ahead of the value's other uses at that position: then a
+// definition needs a register and can be bound to one (tier1_cfg_test_preference). Real C's problems
+// (tier1_cfg_ir.c's) have no use at a definition. False where the arena is short.
+static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* arena, Tier1CfgInput* result)
+{
+    const uint32_t values = input->value_count;
+    uint8_t* phi = arena_push(arena, (uint64_t)values + 1, 1);
+    uint32_t* offsets = arena_push_array(arena, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* positions = arena_push_array(arena, (uint64_t)input->use_count + values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint8_t* required = arena_push(arena, (uint64_t)input->use_count + values + 1, 1);
+    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0;
+    if (ready)
+    {
+        memset(phi, 0, (uint64_t)values + 1);
+        for (uint32_t k = 0; k < input->phi_count; k += 1)
+        {
+            phi[input->phi_values[k]] = 1;
+        }
+        uint32_t count = 0;
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            offsets[v] = count;
+            bool added = phi[v] != 0;
+            for (uint32_t u = input->use_offsets[v]; u <= input->use_offsets[v + 1]; u += 1)
+            {
+                const bool last = u == input->use_offsets[v + 1];
+                if (!added && (last || input->use_positions[u] >= input->definitions[v]))
+                {
+                    positions[count] = input->definitions[v];
+                    required[count] = 1;
+                    count += 1;
+                    added = true;
+                }
+                if (!last)
+                {
+                    positions[count] = input->use_positions[u];
+                    required[count] = input->use_required != 0 ? input->use_required[u] : 0;
+                    count += 1;
+                }
+            }
+        }
+        offsets[values] = count;
+        *result = *input;
+        result->use_offsets = offsets;
+        result->use_positions = positions;
+        result->use_required = required;
+        result->use_count = count;
+    }
+    return ready;
+}
+
+// #2538: a case of two problems (tier1_cfg_test_two_orders) on both paths, with a random preference and binding
+// (tier1_cfg_test_preference). Where the input has fixed ranges the intervals depend on the registers: then
+// tier1_cfg_column must refuse another problem, as the CFG consumer takes the order before, and the case runs without
+// them.
+static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, uint32_t bind)
+{
+    const uint64_t mark = output->length;
+    uint64_t random = tally->two_seed * UINT64_C(0x9e3779b97f4a7c15) + 1;
+    tally->two_seed += 1;
+    const uint32_t values = input->value_count;
+    uint32_t* defined = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* chosen = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* allowed = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* holders = arena_push_array(output, (uint64_t)input->position_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    const bool ready = defined != 0 && chosen != 0 && allowed != 0 && holders != 0;
+    tier1_cfg_test_expect(tally, ready, "two problems' columns");
+    const uint32_t extra = ready ? tier1_cfg_test_preference(input, &random, bind, chosen, defined, holders) : 0;
+    Tier1CfgInput plain = *input;
+    plain.definition_registers = bind != 0 ? defined : 0;
+    if (ready && input->fixed.count != 0)
+    {
+        Tier1CfgPrepared prepared = { 0 };
+        uint32_t* column = 0;
+        const bool held = tier1_cfg_prepare(&plain, output, scratch, BUSTER_HOST_VECTOR, &prepared) == TIER1_CFG_OK;
+        tier1_cfg_test_expect(tally, !held || tier1_cfg_column(&plain, &prepared, output, &column) == TIER1_CFG_INVALID, "another problem's column is refused where fixed ranges cut the intervals");
+        if (held)
+        {
+            tier1_cfg_release(&prepared, scratch);
+        }
+        tally->two_fixed += 1;
+        plain.fixed = (Tier1FixedIntervals){ 0 };
+    }
+    // Each path, with the plain problem's verdict inside the preferred assignment's call and with it assigned whole first.
+    for (uint32_t run = 0; ready && run < 4; run += 1)
+    {
+        const bool vector = run % 2 == 0;
+        const bool verdict = run < 2;
+        const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, vector, verdict, output, scratch, allowed);
+        if (!outcome.agreed && tally->failures < 20)
+        {
+            printf("test-tier1-cfg: two problems, %s path, %s, bound=%u: the orders disagree (fields %u)\n", vector ? "vector" : "scalar", verdict ? "verdict inside" : "plain first", bind, outcome.differs);
+        }
+        tier1_cfg_test_expect(tally, outcome.agreed, "one call's verdict, problem and allocation are two calls'");
+        tier1_cfg_test_expect(tally, outcome.verified, "the CFG checker accepts the allocation that stands");
+        tally->two_cases += run == 0 && outcome.allocated;
+        tally->two_taken += run == 0 && outcome.taken;
+        tally->two_refused += run == 0 && outcome.allocated && !outcome.taken;
+        tally->two_freed += run == 0 && outcome.freed;
+    }
+    arena_pop_to(output, mark);
+}
+
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
     Tier1CfgError errors[2] = {
@@ -549,6 +840,20 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                 tally->mask_spills += input->classes[result.allocation.spill_values[k]] == BUSTER_TIER1_ALLOCATE_MASK;
             }
             tally->temp_slot_cases += result.temp_slots != 0;
+            for (uint32_t b = 0; path == 0 && b < input->block_count; b += 1)
+            {
+                const uint32_t entry = input->block_starts[b];
+                for (uint32_t v = 0; v < input->value_count; v += 1)
+                {
+                    uint32_t location = 0;
+                    uint8_t kind = 0;
+                    const uint32_t interval = tier1_cfg_interval_oracle(&result, v, entry);
+                    const uint32_t position = interval != BUSTER_TIER1_CFG_NONE && result.intervals.starts[interval] < entry ? entry - 1 : entry;
+                    const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_fragment(&result, interval, position) : BUSTER_TIER1_CFG_NONE;
+                    const bool found = fragment != BUSTER_TIER1_CFG_NONE && tier1_cfg_entry_location(&result, v, entry, &location, &kind);
+                    tally->unread_entries += found && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result.allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
+                }
+            }
             tier1_cfg_test_expect(tally, (result.temp_slots & temp_slots) == temp_slots, "the case uses its temporary slots");
             tier1_cfg_test_expect(tally, result.move_count - result.edge_move_offsets[input->edge_count] >= split_moves, "the case moves values at its splits");
             if (mutate && path == 1)
@@ -816,12 +1121,10 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
     // whether a case allocates. A fixture always does.
     tier1_cfg_test_expect(tally, errors[0] == errors[1], "both paths agree on whether a case allocates");
     tier1_cfg_test_expect(tally, !must_allocate || errors[0] == TIER1_CFG_OK, name);
-}
-
-static uint64_t tier1_cfg_test_random(uint64_t* state)
-{
-    *state = *state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
-    return *state >> 33;
+    for (uint32_t bind = 0; bind < 3; bind += 1)
+    {
+        tier1_cfg_test_two_problems(tally, input, output, scratch, bind);
+    }
 }
 
 // A random value's class: a half general, a quarter vector and a quarter opmask.
@@ -1592,6 +1895,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.destination_mutants != 0 && tally.k0_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
         tier1_cfg_test_expect(&tally, count < 100 || tally.undefined_operands != 0, "the cases reach undefined phi operands");
+        tier1_cfg_test_expect(&tally, count < 500 || tally.unread_entries != 0, "the cases reach block entries whose recomputed value's register reads nothing");
         // #939: every allocation's certificate proved, and the oracle reached some of them.
         tier1_cfg_test_expect(&tally, tally.certificates == tally.allocations && tally.oracle_certificates != 0, "every allocation's certificate is proved, the oracle's share among them");
         // A mutant that moves a value wrongly must fail the certificate too: every order, definition and split
@@ -1600,10 +1904,14 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
         tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused), "the certificate refuses no mutant the verifier accepts");
+        // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
+        // case with fixed ranges.
+        tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);

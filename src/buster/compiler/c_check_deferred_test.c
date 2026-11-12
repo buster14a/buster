@@ -659,7 +659,10 @@ static bool check_deferred_test_resident(const uint8_t* begin, uint64_t bytes)
 // #764's fresh arena of rare columns (check_input_sparse_arena): base pages throughout where more than one lane reads the
 // deferred bodies, but source order and a deferred reading on one lane keep its small prefix and huge-page tail. Checks
 // the kernel's advice, not timing or whether a huge page happened to be allocated, with fresh mappings each time,
-// byte-sized and non-page-sized capacities among them, on both sides of the prefix.
+// byte-sized and non-page-sized capacities among them, on both sides of the prefix. Under both of the process's page
+// policies, whichever it started with (#2578): on a busy host (arena_pages_busy, #672), every arena is advised against
+// huge pages over its whole mapping, from 2 MB, and its commits advise none, so the huge-page tail is base pages too. The
+// 9700X's native correctness starts this test among eight commands at once, which is a busy host.
 static bool check_deferred_test_sparse_pages(void)
 {
     const uint64_t capacities[] =
@@ -676,9 +679,12 @@ static bool check_deferred_test_sparse_pages(void)
         BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_PAGE_BYTES,
         BUSTER_ARENA_HUGE_PAGE_BYTES,
     };
+    const bool was_busy = arena_pages_busy;
     bool valid = true;
-    for (uint32_t reading = 0; valid && reading < 2; reading += 1)
+    for (uint32_t reading = 0; valid && reading < 4; reading += 1)
     {
+        const bool busy = reading >= 2;
+        arena_pages_busy = busy;
         for (uint32_t mode = 0; valid && mode < 2; mode += 1)
         {
             for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
@@ -705,11 +711,12 @@ static bool check_deferred_test_sparse_pages(void)
                     const uint64_t base_pages = arena.capacity > arena.small ? arena.small : arena.mapping_bytes;
                     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
                     {
-                        const bool huge = !shared && offsets[i] >= small;
+                        const bool huge = !busy && !shared && offsets[i] >= small;
+                        const bool refused = busy ? arena.mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES : !huge && base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES;
                         const uintptr_t address = (uintptr_t)arena.base + offsets[i];
                         bool found = false;
                         const bool no_huge_flag = lane_test_vm_flag(address, "nh", &found);
-                        valid = found && no_huge_flag == (!huge && base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES);
+                        valid = found && no_huge_flag == refused;
                         const bool huge_flag = lane_test_vm_flag(address, "hg", &found);
                         valid = valid && found && huge_flag == huge && arena.base[offsets[i]] == 0;
                         valid = valid && (huge || (!lane_test_huge_capable(address, &found) && found));
@@ -726,6 +733,7 @@ static bool check_deferred_test_sparse_pages(void)
             }
         }
     }
+    arena_pages_busy = was_busy;
     Arena empty = check_input_sparse_arena(0, 0, true);
     Arena oversized = check_input_sparse_arena(BUSTER_ARENA_MAX_CAPACITY + 1, 0, true);
     valid = valid && empty.base == 0 && empty.capacity == 0 && oversized.base == 0 && oversized.capacity == 0;

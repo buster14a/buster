@@ -154,10 +154,11 @@ static const char node_census_test_quiet[] =
 // the action alike. Its calls: direct and discarded, nested (whose rows the tasks number in preorder, outer first, where
 // the entries are in postorder), variadic (a char and a float promoted), of pointers converted to a parameter's (to
 // const char and to void, and null), through a pointer, a member and a call's result; and refused, a long double's
-// parameter (the templates') and a pointer whose first parameter is a jmp_buf's (a callee that returns twice). The
-// argument memo's keys come again (node_machine_argument_memo): a string and a null pointer constant for the same
-// parameters, integer constants where a value of their type filled the entry, variadic constants, and a function
-// designator.
+// parameter (the templates') and a pointer whose first parameter is a jmp_buf's (a callee that returns twice). Calls
+// under and around `&&`, `||` and `?:` too, whose labels are numbered from their subtrees' least records, a call's
+// arguments included, and whose calls' rows in the tasks' preorder. The argument memo's keys come again
+// (node_machine_argument_memo): a string and a null pointer constant for the same parameters, integer constants where a
+// value of their type filled the entry, variadic constants, and a function designator.
 static const char node_shadow_test_text[] =
     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
     "struct __jmp_buf_tag { long b[8]; };\n"
@@ -198,6 +199,23 @@ static const char node_shadow_test_text[] =
     "        x = 1; // machine: taken\n"
     "    while (q != 0) // machine: taken\n"
     "        q = 0; // machine: taken\n"
+    "    x = a && b; // machine: taken\n"
+    "    x = a || (b && c); // machine: taken\n"
+    "    x = (a && b) || (c && u); // machine: taken\n"
+    "    x = !(a && d); // machine: taken\n"
+    "    x = a ? b : 1; // machine: taken\n"
+    "    d = a ? d : e; // machine: taken\n"
+    "    y = q ? *q : (a < b ? a : b); // machine: taken\n"
+    "    (void)(a ? (void)0 : (void)b); // machine: taken\n"
+    "    if (a && (b || c)) // machine: taken\n"
+    "        x = 2; // machine: taken\n"
+    "    x = 1 && a; // machine: taken\n"
+    "    x = 0 || a; // machine: taken\n"
+    "    x = 1 ? a : b; // machine: taken\n"
+    "    x = (q = 0, 1) && a; // machine: taken\n"
+    "    x = (q = 0, 0) && a; // machine: taken\n"
+    "    x = (q = 0, 1) || a; // machine: taken\n"
+    "    x = a ?: b; // machine: template\n"
     "    x = f(a); // machine: taken\n"
     "    f(b); // machine: taken\n"
     "    x = f(f(a) + 1) * 2; // machine: taken\n"
@@ -213,8 +231,11 @@ static const char node_shadow_test_text[] =
     "    x = pick(a)(b); // machine: taken\n"
     "    x = ldf(d); // machine: template\n"
     "    x = sj(0); // machine: callee\n"
-    "    x = a && b; // machine: code\n"
-    "    x = a ? b : 1; // machine: code\n"
+    "    x = a && f(b); // machine: taken\n"
+    "    x = f(a) || f(b); // machine: taken\n"
+    "    x = f(a ? b : c); // machine: taken\n"
+    "    x = a ? f(b) : f(c); // machine: taken\n"
+    "    x = f(a && b) + f(c || u); // machine: taken\n"
     "    x++; // machine: code\n"
     "    x += 2; // machine: code\n"
     "    y = q - r; // machine: template\n"

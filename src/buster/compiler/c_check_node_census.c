@@ -484,6 +484,9 @@ struct NodeCensusScratch
     NodeMachine* machine;
     const Tier0Function* function;
     const uint32_t* owners;
+    // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
+    const uint32_t* labels;
+    uint64_t label_count;
     uint32_t* object_locals;
     uint32_t* object_stamps;
     uint32_t* local_objects;
@@ -1789,6 +1792,10 @@ struct NodeShadow
     uint64_t value_differences;
     uint64_t entry_differences;
     uint64_t listed;
+    // The taken expressions with labels (a logical operator's or a conditional's), and their labels, each compared with the
+    // lowering's by its number from the expression's first and by its entry (node_shadow_same_label).
+    uint64_t labeled_expressions;
+    uint64_t labels;
     // T's nodes by row and by action, and the row-typed nodes the action types otherwise (--verify).
     uint64_t row_nodes;
     uint64_t action_nodes;
@@ -1891,9 +1898,21 @@ static bool node_shadow_same_calls(const NodeMachine* machine, const Tier0Functi
     return same;
 }
 
+// Whether a branch's entry, a target in the stream (an entry's index, check_lower_resolve_labels'), is the tape's: its label
+// `label`, counted from the expression's first (whose pop is `pop`), is the lowering's label of the same number counted
+// from the label its pop logged (the numbering, relative to the expression), and both labels' entries are the stream's
+// target (their places).
+static bool node_shadow_same_label(const NodeCensusScratch* s, const NodeMachine* machine, const CheckLowerOwnerPop* pop, uint64_t label, uint64_t target)
+{
+    const uint64_t logged = (uint64_t)pop->label + label;
+    return label < machine->label_count && logged < s->label_count && s->labels[logged] == target && pop->entry + (uint64_t)machine->label_entries[label] == target;
+}
+
 // Whether the tape is the lowering's entries for the expression whose root pop is `pop`: the entries its nodes' tasks and
-// their conversions own, from the root's pop on. A call's row is relative on the tape: the stream's rows are the tape's
-// plus one base, the row its first call has, and their contents the machine's (node_shadow_same_calls).
+// their conversions own, from the root's pop on; whether each of its labels is the lowering's of the same number,
+// counted from the expression's first, at the same entry; and its calls. A call's row is relative on the tape: the
+// stream's rows are the tape's plus one base, the row its first call has, and their contents the machine's
+// (node_shadow_same_calls).
 static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* machine, const CheckLowerOwnerPop* pop, uint32_t* compared)
 {
     const Tier0Function* function = s->function;
@@ -1913,17 +1932,25 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
         if (inside)
         {
             const uint8_t kind = function->kinds[e];
+            const bool branch = kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE;
             // A row of the tape's calls (so that the rows the tape names, distinct as the stream's are, are all its own).
             const bool call = kind == BUSTER_TYPED_CALL && t < machine->entry_count && machine->tape[t] < machine->call_count && function->values[e] >= machine->tape[t];
             base = call && base == UINT64_MAX ? function->values[e] - machine->tape[t] : base;
             same = same && t < machine->entry_count && machine->kinds[t] == kind && machine->classes[t] == function->classes[e] &&
                    (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
-                    kind == BUSTER_TYPED_CALL                 ? call && machine->tape[t] + base == function->values[e] :
-                                                                machine->tape[t] == function->values[e]);
+                    branch                       ? node_shadow_same_label(s, machine, pop, machine->tape[t], function->values[e]) :
+                    kind == BUSTER_TYPED_CALL    ? call && machine->tape[t] + base == function->values[e] :
+                                                   machine->tape[t] == function->values[e]);
             t += 1;
             e += 1;
             inside = e < function->count;
         }
+    }
+    // Every label, a branch's or not, at the lowering's label's entry.
+    for (uint32_t label = 0; same && label < machine->label_count; label += 1)
+    {
+        const uint64_t logged = (uint64_t)pop->label + label;
+        same = logged < s->label_count && s->labels[logged] == pop->entry + machine->label_entries[label];
     }
     same = same && (machine->call_count == 0 || (base < UINT32_MAX && node_shadow_same_calls(machine, function, (uint32_t)base)));
     *compared = t;
@@ -1999,6 +2026,8 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         }
         shadow->value_differences += !values;
         shadow->entry_differences += !entries;
+        shadow->labeled_expressions += machine->label_count != 0;
+        shadow->labels += machine->label_count;
         shadow->row_nodes += machine->row_nodes - row_nodes;
         shadow->action_nodes += machine->action_nodes - action_nodes;
         shadow->twin_differences += machine->twin_differences - twins;
@@ -2133,6 +2162,7 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     printf("node-shadow: differences values=%" PRIu64 " entries=%" PRIu64 " twin=%" PRIu64 " (row-typed nodes %" PRIu64 ", action-typed %" PRIu64 "%s)\n",
            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
            shadow->verify ? ", verified" : "");
+    printf("node-shadow: labels=%" PRIu64 " in taken expressions=%" PRIu64 "\n", shadow->labels, shadow->labeled_expressions);
     printf("node-shadow: argument-memo filled=%" PRIu64 " by-rule=%" PRIu64 " (taken calls' arguments %" PRIu64 ")\n", shadow->memo_fills, shadow->memo_rules,
            shadow->arguments);
     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
@@ -2240,11 +2270,15 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
     CheckCorpusPath* path = &source.path;
     CheckProgramSelection selected = source.selected;
     const uint64_t log_capacity = prepared ? 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
-    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + 4096);
-    CheckLowerOwners owners = { .capacity = log_capacity };
+    // Each body's labels: its controls' and the ones its tasks number (the shadow's branches are read there).
+    const uint64_t label_capacity = prepared ? 2 * (uint64_t)selected.program.control_count + selected.program.body_count + 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
+    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + label_capacity * sizeof(uint32_t) + 8192);
+    CheckLowerOwners owners = { .capacity = log_capacity, .label_capacity = label_capacity };
     owners.pops = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, CheckLowerOwnerPop, owners.capacity) : 0;
+    owners.labels = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, owners.label_capacity) : 0;
     CheckProgramLowered lowered = { 0 };
-    const bool lowering = prepared && owners.pops != 0 && check_program_lower_owners(&lowered, &selected.program, &owners, &path->output_arena, &path->scratch);
+    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 &&
+                          check_program_lower_owners(&lowered, &selected.program, &owners, &path->output_arena, &path->scratch);
     const bool complete = lowering && !owners.overflow;
     if (complete)
     {
@@ -2321,6 +2355,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 {
                     s.function = lowered.functions + b;
                     s.owners = lowered.entry_tokens[b];
+                    s.labels = owners.labels;
+                    s.label_count = owners.label_count;
                     s.body_stamp = b + 1;
                     node_census_body(census, &s, b, owners.pops + first, (uint32_t)(end - first));
                 }
