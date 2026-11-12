@@ -681,6 +681,24 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
         "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
         "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
+        // Several errors in one list (#1820 (c)): each specifier whose slot is taken is an error at it and dropped, the
+        // list going on, then its end's in DeclSpec::Finish's order (a sign, then a width, then _Complex), each recovered.
+        "int float char x;\nint a1 = u1;\n_Complex _Bool int y;\nint a2 = u2;\n_Complex _Bool _Atomic _Bool y2;\nint a3 = u3;\n"
+        "long long long long w;\nint a4 = u4;\nsigned unsigned float v;\nint a5 = u5;\nunsigned long float double d;\nint a6 = u6;\n"
+        "unsigned unsigned float uu;\nint a7 = u7;\nlong double long double ldd;\nint a8 = u8;\n",
+        // The same in the operand readers' type names, a parameter, a body, a cast, sizeof, _Alignof and members.
+        "typeof(unsigned unsigned float) q1;\nint b1 = v1;\ntypeof(int float char) q2;\nint b2 = v2;\n"
+        "enum F : long long long long { B };\nint b4 = v4;\n_Atomic(unsigned long float double) q3;\nint b5 = v5;\n"
+        "int f(int float char p, long long long long q) { short long char z = 1;\n"
+        "  return (int)(unsigned signed float)p + q + z + sizeof(signed unsigned double); }\n"
+        "struct T { long long long long m; int float char n; _Complex _Bool int k; } t;\nint b6 = v6;\n"
+        "int g(void) { return _Alignof(_Complex _Bool int) + sizeof(typeof(unsigned float double)); }\nint b9 = v9;\n",
+        // A second type of no keyword, dropped with its group (a _BitInt's, an _Atomic's, a tag's, a typeof's), a sign
+        // repeated after the type, and a repeated _Complex dropped beside a conflict.
+        "int _BitInt(8) x;\nint a1 = u1;\nint struct S2 { int m; } w2;\nstruct S2 s2;\nint a3 = u3;\n"
+        "int typeof(int) _Atomic(int) unsigned unsigned v;\nint a4 = u4;\n_Complex _Complex int _Bool cb;\nint a5 = u5;\n"
+        "unsigned float unsigned y;\nint a6 = u6;\nint _Atomic(int) z;\nint a7 = u7;\n"
+        "void f(void) { int float char x; char *p = &x; int typeof(long) y; p = &y; }\n",
         // A block's object with linkage beside one without (#2441): clang's extern, non-extern, static and non-static
         // wordings and notes, then the unit goes on.
         "void a(void) { int q; extern int q; }\n"

@@ -4336,26 +4336,34 @@ static void check_input_cfstring_class(CheckInputReader* reader)
 
 #include "c_check_declspec.c"
 
-// The report of specifiers from `first` to `end` that don't combine: clang's error, its place and its message, if it
-// gives one; else CHECK_INPUT_DECLARATION at `fallback` (#1127).
-static void check_input_report_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t fallback)
+// The reports of specifiers from `first` to `end` that don't combine: clang's errors, their places and their messages, in
+// clang's order (#1820 (c)), if it gives one; else CHECK_INPUT_DECLARATION at `fallback` (#1127). Only the first where the
+// list doesn't recover (`all` false): the reader stops at it, as clang's later errors don't come.
+static void check_input_report_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t fallback, bool all)
 {
-    CheckDeclspecResult declspec;
-    if (check_declspec_error(reader->parser, first, end, &declspec))
+    CheckDeclspecErrors errors;
+    if (check_declspec_scan(reader->parser, first, end, NULL, &errors, NULL))
     {
-        const CheckInputMessage message = declspec.error == CHECK_DECLSPEC_ERROR_SIGN ? CHECK_INPUT_SPECIFIER_SIGN :
-                                          declspec.error == CHECK_DECLSPEC_ERROR_WIDTH ? CHECK_INPUT_SPECIFIER_WIDTH :
-                                          declspec.error == CHECK_DECLSPEC_ERROR_COMPLEX ? CHECK_INPUT_SPECIFIER_COMPLEX : CHECK_INPUT_SPECIFIER_COMBINE;
-        const uint32_t count = reader->output->report_count;
-        check_input_report(reader, declspec.token, message);
-        if (reader->output->report_count != count)
+        const uint32_t count_reported = all ? errors.count : 1u;
+        for (uint32_t e = 0; e < count_reported; e += 1)
         {
-            reader->output->reports[count].specifier = declspec.first;
-            reader->output->reports[count].specifier_type = declspec.second;
-            // An error of the list's end follows the list's repeated specifiers' warnings, which come first at that point
-            // (check_input_duplicate_specifier), and precedes the declarator's diagnostics.
-            reader->output->reports[count].completion = declspec.finish != BUSTER_CHECK_NONE ? declspec.finish : 0;
-            reader->output->reports[count].suborder = declspec.finish != BUSTER_CHECK_NONE ? 2u : 0u;
+            const CheckDeclspecResult declspec = errors.items[e];
+            const CheckInputMessage message = declspec.error == CHECK_DECLSPEC_ERROR_SIGN ? CHECK_INPUT_SPECIFIER_SIGN :
+                                              declspec.error == CHECK_DECLSPEC_ERROR_WIDTH ? CHECK_INPUT_SPECIFIER_WIDTH :
+                                              declspec.error == CHECK_DECLSPEC_ERROR_COMPLEX ? CHECK_INPUT_SPECIFIER_COMPLEX : CHECK_INPUT_SPECIFIER_COMBINE;
+            const uint32_t count = reader->output->report_count;
+            check_input_report(reader, declspec.token, message);
+            if (reader->output->report_count != count)
+            {
+                reader->output->reports[count].specifier = declspec.first;
+                reader->output->reports[count].specifier_type = declspec.second;
+                // An error of the list's end follows the list's repeated specifiers' warnings, which come first at that
+                // point (check_input_duplicate_specifier), and precedes the declarator's diagnostics.
+                reader->output->reports[count].completion = declspec.finish != BUSTER_CHECK_NONE ? declspec.finish : 0;
+                // Several of them keep DeclSpec::Finish's order, whatever their places (#1820 (c): a sign's error before
+                // a width's).
+                reader->output->reports[count].suborder = declspec.finish != BUSTER_CHECK_NONE ? 2u + e : 0u;
+            }
         }
     }
     else
@@ -4396,24 +4404,79 @@ static uint32_t check_input_specifier_slot_type(uint8_t slot)
     return result;
 }
 
-// The specifier clang's DeclSpec drops for the list from `first` to `end`, which doesn't combine (#1447): a second type,
-// width or sign, at its error; a sign or _Complex the type doesn't take; the type a width doesn't take. BUSTER_CHECK_NONE
-// unless it is a keyword and the list has no other error without it (every _Complex of it, for a _Complex's), so that it
+// The specifiers clang's DeclSpec drops for the list from `first` to `end`, which doesn't combine (#1447, #1820 (c)), into
+// `drops`: each second type, width or sign, at its error; a sign or _Complex the type doesn't take; the type a width
+// doesn't take. False unless each dropped one is a keyword and the list has no other error without them, so that it
 // recovers; a storage class's conflict doesn't.
-static __attribute__((noinline, cold)) uint32_t check_input_specifiers_dropped(const Parser* parser, uint32_t first, uint32_t end)
+static __attribute__((noinline, cold)) bool check_input_specifiers_dropped(const Parser* parser, uint32_t first, uint32_t end, bool groups, CheckDeclspecDrops* drops)
 {
-    CheckDeclspecResult error;
-    CheckDeclspecSlots slots;
-    const bool erroneous = check_declspec_scan(parser, first, end, BUSTER_CHECK_NONE, &error, &slots);
-    const bool storage = error.first == CHECK_DECLSPEC_TYPEDEF || error.first >= CHECK_DECLSPEC_EXTERN;
-    const uint32_t dropped = !erroneous ? BUSTER_CHECK_NONE :
-                             error.error == CHECK_DECLSPEC_ERROR_COMBINE ? (storage ? BUSTER_CHECK_NONE : error.token) :
-                             error.error == CHECK_DECLSPEC_ERROR_WIDTH ? slots.type_token : error.token;
-    CheckDeclspecResult rest;
+    CheckDeclspecErrors errors;
+    bool recovered = check_declspec_scan(parser, first, end, NULL, &errors, NULL) && !errors.overflow && !errors.drops.overflow;
+    for (uint32_t e = 0; recovered && e < errors.count; e += 1)
+    {
+        const CheckDeclspecResult error = errors.items[e];
+        const bool storage = error.error == CHECK_DECLSPEC_ERROR_COMBINE && (error.first == CHECK_DECLSPEC_TYPEDEF || error.first >= CHECK_DECLSPEC_EXTERN);
+        recovered = !storage;
+    }
+    for (uint32_t t = first; recovered && t < end && t - first < CHECK_DECLSPEC_DROP_SPAN; t += 1)
+    {
+        const uint32_t offset = t - first;
+        const bool bit = ((errors.drops.bits[offset / 64] >> (offset % 64)) & 1) != 0;
+        // A type of no keyword (a typeof, an _Atomic's, a _BitInt's, a tag) only where the caller reads past it itself.
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool group = groups && (kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM);
+        recovered = !bit || group || check_input_specifier_keyword(parser, t);
+    }
+    *drops = errors.drops;
+    CheckDeclspecErrors rest;
     CheckDeclspecSlots whole;
-    const bool recovered = dropped != BUSTER_CHECK_NONE && check_input_specifier_keyword(parser, dropped) &&
-                           !check_declspec_scan(parser, first, end, dropped, &rest, &whole) && whole.known;
-    return recovered ? dropped : BUSTER_CHECK_NONE;
+    return recovered && !check_declspec_scan(parser, first, end, drops, &rest, &whole) && whole.known;
+}
+
+// A specifier `drops` leave out of an operand reader's list read again without them: a repeated _Complex or sign still
+// warns, as clang's DeclSpec gives it before the list's end (#1836); `complex_seen` and `sign_seen` (1 signed, 2
+// unsigned) are the list's so far.
+static void check_input_dropped_specifier_repeat(CheckInputReader* reader, const CheckDeclspecDrops* drops, uint32_t token, bool* complex_seen, uint32_t* sign_seen)
+{
+    const uint32_t name = reader->parser->tokens.names[token];
+    const bool complex = drops->complex && check_declspec_complex_name(name);
+    const bool sign = drops->sign && check_declspec_sign_name(name);
+    const uint32_t selected = name == C_NAME_UNSIGNED ? 2u : 1u;
+    if (complex && *complex_seen)
+    {
+        check_input_duplicate_specifier(reader, token, C_NAME_COMPLEX_C99);
+    }
+    if (sign && *sign_seen == selected)
+    {
+        check_input_duplicate_specifier(reader, token, name == C_NAME_UNSIGNED ? C_NAME_UNSIGNED : C_NAME_SIGNED);
+    }
+    *complex_seen |= complex;
+    *sign_seen = sign ? selected : *sign_seen;
+}
+
+// A sign or _Complex keyword at `token` that `drops`, the list's from `first`, leave out at its end (check_input_specifiers' recovery,
+// #1820 (c)): a repeat of the list's last one of its kind warns, as clang's DeclSpec gives it before the list's end.
+static __attribute__((noinline, cold)) void check_input_dropped_keyword_repeat(CheckInputReader* reader, const CheckDeclspecDrops* drops, uint32_t first,
+                                                                               uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t name = parser->tokens.names[token];
+    // (One dropped at its own error, a conflict's, is no repeat.)
+    const bool own = check_declspec_dropped_at(drops, token);
+    const bool complex = !own && check_declspec_complex_name(name);
+    const bool sign = !own && check_declspec_sign_name(name);
+    uint32_t earlier = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; (complex || sign) && t < token; t += 1)
+    {
+        const uint32_t other = parser->tokens.names[t];
+        const bool kept = !check_declspec_dropped_at(drops, t);
+        earlier = kept && ((complex && check_declspec_complex_name(other)) || (sign && check_declspec_sign_name(other))) ? t : earlier;
+    }
+    const bool same_sign = earlier != BUSTER_CHECK_NONE && (parser->tokens.names[earlier] == C_NAME_UNSIGNED) == (name == C_NAME_UNSIGNED);
+    if (earlier != BUSTER_CHECK_NONE && (complex || same_sign))
+    {
+        check_input_duplicate_specifier(reader, token, complex ? C_NAME_COMPLEX_C99 : name == C_NAME_UNSIGNED ? C_NAME_UNSIGNED : C_NAME_SIGNED);
+    }
 }
 
 // The reader's state of a specifier list's type, which check_input_specifiers builds token by token.
@@ -4430,19 +4493,21 @@ struct CheckInputSpecifierState
 };
 
 // A specifier list that doesn't combine at `at` (#1447), recovered as clang's DeclSpec recovers it: it drops the
-// specifier its error is about (a second type, width or sign, at the error; a sign or _Complex the type doesn't take;
+// specifiers its errors are about (a second type, width or sign, at its error; a sign or _Complex the type doesn't take;
 // the type a width doesn't take, which leaves int of that width: `long float` is a long), and the declaration stays
-// valid. Where the dropped specifier is a keyword, the list has no other error without it, and the state up to `at`
-// can be rebuilt from its slots, `state` is that list's to `at` without it, and the report is recovered (phase 1:
-// check_input_recover_reports). Else nothing changes: the caller reports and stops, as before. Only a refusal calls it.
-static __attribute__((noinline, cold)) bool check_input_specifiers_recover(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t at,
-                                                                           CheckInputSpecifierState* state)
+// valid. Where the dropped specifiers are keywords, the list has no other error without them, and the state up to `at`
+// can be rebuilt from its slots, `state` is that list's to `at` without them. The first call (`report`) finds them, into
+// `drops`, and reports every error of the list, recovered (phase 1: check_input_recover_reports; #1820 (c)); a later one
+// at another of them rebuilds the state alone. Else nothing changes: the caller reports and stops, as before. Only a
+// refusal calls it.
+static __attribute__((noinline, cold)) bool check_input_specifiers_recover(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t at, bool report,
+                                                                           CheckDeclspecDrops* drops, CheckInputSpecifierState* state)
 {
     const Parser* parser = reader->parser;
-    const uint32_t dropped = check_input_specifiers_dropped(parser, first, end);
-    CheckDeclspecResult rest;
+    CheckDeclspecErrors rest;
     CheckDeclspecSlots prefix;
-    bool recovered = dropped != BUSTER_CHECK_NONE && dropped <= at && !check_declspec_scan(parser, first, at + 1, dropped, &rest, &prefix) && prefix.known;
+    bool recovered = !report || check_input_specifiers_dropped(parser, first, end, true, drops);
+    recovered = recovered && !check_declspec_scan(parser, first, at + 1, drops, &rest, &prefix) && prefix.known && prefix.dropped != 0;
     const uint32_t keyword_type = recovered ? check_input_specifier_slot_type(prefix.type) : BUSTER_CHECK_NONE;
     // A type that is no keyword's is the reader's base already, unless `at` is a type keyword that took its place: not
     // int, which is a slot of its own, nor _Complex, a flag (review on #1820: `typeof(_Bool) _Complex x;`).
@@ -4450,9 +4515,9 @@ static __attribute__((noinline, cold)) bool check_input_specifiers_recover(Check
     const bool overwritten = parser->tokens.kinds[at] == PARSE_KIND_TYPE && at_name != C_NAME_INT && !check_declspec_complex_name(at_name);
     recovered = recovered && (keyword_type != BUSTER_CHECK_NONE || !overwritten);
     const uint32_t count = reader->output->report_count;
-    if (recovered)
+    if (recovered && report)
     {
-        check_input_report_specifiers(reader, first, end, at);
+        check_input_report_specifiers(reader, first, end, at, true);
         recovered = reader->output->report_count != count && check_input_recover_reports(reader, count);
     }
     if (recovered)
@@ -4501,13 +4566,14 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     bool integer_seen = false;
     TypeId base = 0;
     bool valid = colon + 1 < end;
-    // A base whose specifiers don't combine is read again without the one clang's DeclSpec drops (#1447, review on #1820:
+    // A base whose specifiers don't combine is read again without the specifiers clang's DeclSpec drops (#1447, review on #1820:
     // `enum E : _Complex _Bool`), every _Complex for a _Complex's, as check_input_specifiers recovers it; not one with
     // attributes, whose reading reports.
-    uint32_t skip = BUSTER_CHECK_NONE;
-    bool skip_complex = false;
+    CheckDeclspecDrops drops;
+    bool skipping = false;
     bool attributed = false;
     bool complex_seen = false;
+    uint32_t sign_seen = 0;
     bool attempt = true;
     while (attempt)
     {
@@ -4519,18 +4585,16 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         base = 0;
         valid = colon + 1 < end;
         complex_seen = false;
+        sign_seen = 0;
         for (uint32_t i = colon + 1; valid && i < end; i += 1)
         {
             const uint32_t name = parser->tokens.names[i];
             const uint8_t kind = parser->tokens.kinds[i];
-            if (i == skip || (skip_complex && check_declspec_complex_name(name)))
+            if (skipping && check_declspec_dropped(parser, &drops, i))
             {
-                // (Dropped; a repeated _Complex still warns, as clang's DeclSpec gives it before the list's end, #1836.)
-                if (skip_complex && check_declspec_complex_name(name) && complex_seen)
-                {
-                    check_input_duplicate_specifier(reader, i, C_NAME_COMPLEX_C99);
-                }
-                complex_seen |= check_declspec_complex_name(name);
+                // (Dropped; a repeated _Complex or sign still warns, as clang's DeclSpec gives it before the list's end,
+                // #1836.)
+                check_input_dropped_specifier_repeat(reader, &drops, i, &complex_seen, &sign_seen);
             }
             else if (check_input_read_qualifier(reader, i, &qualifiers))
             {
@@ -4625,17 +4689,14 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         {
             valid = !longs && !shorts && !signedness && !integer_seen;
         }
-        const uint32_t dropped = !valid && skip == BUSTER_CHECK_NONE && !attributed && colon + 1 < end ?
-                                 check_input_specifiers_dropped(parser, colon + 1, end) : BUSTER_CHECK_NONE;
-        attempt = dropped != BUSTER_CHECK_NONE;
-        skip = attempt ? dropped : skip;
-        skip_complex = attempt && check_declspec_complex_name(parser->tokens.names[dropped]);
+        attempt = !valid && !skipping && !attributed && colon + 1 < end && check_input_specifiers_dropped(parser, colon + 1, end, false, &drops);
+        skipping |= attempt;
     }
-    if (skip != BUSTER_CHECK_NONE)
+    if (skipping)
     {
         // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
         const uint32_t count = reader->output->report_count;
-        check_input_report_specifiers(reader, colon + 1, end, colon + 1);
+        check_input_report_specifiers(reader, colon + 1, end, colon + 1, true);
         valid = valid && reader->output->report_count != count && check_input_recover_reports(reader, count);
     }
     const TypeId integer = valid ? type_unqualified(type_strip_aligned(reader->types, base)) : 0;
@@ -5437,8 +5498,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     bool reported = false;
     // Whether a _BitInt's width had an undeclared name, which drops it (#1447).
     bool dropped_bit_int = false;
-    // Whether a specifier that doesn't combine was dropped, as clang's DeclSpec drops it (#1447): once per list.
+    // Whether specifiers that don't combine were dropped, as clang's DeclSpec drops them (#1447, #1820 (c)), and which:
+    // the rest of the list leaves those out.
     bool specifiers_recovered = false;
+    CheckDeclspecDrops specifier_drops;
     const uint32_t reports = reader->output->report_count;
     // Whether a _BitInt base is this list's own keyword's, which the list's signedness makes signed or unsigned below;
     // a typedef name's or a typeof's keeps the signedness it has.
@@ -5500,6 +5563,15 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             memset(reader->ignored + i, 1, after_group - i);
             i = after_group;
             saw = true;
+            continue;
+        }
+        if (__builtin_expect(specifiers_recovered, 0) && check_declspec_dropped(parser, &specifier_drops, i) && check_input_specifier_keyword(parser, i))
+        {
+            // A keyword clang's DeclSpec dropped (check_input_specifiers_recover), after the place the list was recovered;
+            // a repeated sign or _Complex still warns, as clang gives it before the list's end.
+            check_input_dropped_keyword_repeat(reader, &specifier_drops, first, i);
+            reader->ignored[i] = true;
+            i += 1;
             continue;
         }
         if (check_input_attribute_starts(parser, i, end))
@@ -5831,7 +5903,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 {
                     check_input_report(reader, check_input_auto_type_clash(reader, first, i, end, auto_clash), CHECK_INPUT_DECLARATION);
                 }
-                else if (!reported && !specifiers_recovered && auto_type == BUSTER_CHECK_NONE && check_input_specifiers_recover(reader, first, end, i, &state))
+                else if (!reported && auto_type == BUSTER_CHECK_NONE &&
+                         check_input_specifiers_recover(reader, first, end, i, !specifiers_recovered, &specifier_drops, &state))
                 {
                     // Clang's DeclSpec dropped a specifier, and the list goes on as valid (#1447).
                     base = state.base;
@@ -5846,7 +5919,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 }
                 else if (!reported)
                 {
-                    check_input_report_specifiers(reader, first, end, i);
+                    check_input_report_specifiers(reader, first, end, i, false);
                 }
                 reported |= !valid;
                 if (!valid)
@@ -5989,7 +6062,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         // A _Complex the type doesn't take, which clang's DeclSpec drops at the list's end (#1447, review on #1820): the
         // list goes on as its type alone, where it is otherwise valid.
         CheckInputSpecifierState state = { .base = base, .complex_token = complex_token, .complex = complex };
-        if (!valid && !specifiers_recovered && auto_type == BUSTER_CHECK_NONE && i > first && check_input_specifiers_recover(reader, first, end, i - 1, &state) &&
+        if (!valid && auto_type == BUSTER_CHECK_NONE && i > first &&
+            check_input_specifiers_recover(reader, first, end, i - 1, !specifiers_recovered, &specifier_drops, &state) &&
             !state.complex)
         {
             specifiers_recovered = true;
@@ -6083,7 +6157,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         // The list refused as a whole once it ended (a sign or a width the type doesn't take, typedef with a storage
         // class), which no report says yet: clang's.
-        check_input_report_specifiers(reader, first, end, first);
+        check_input_report_specifiers(reader, first, end, first, false);
     }
     *cursor = i;
     *storage_class = storage;
