@@ -967,7 +967,7 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const IrCheck verified = ir_verify(&f, scratch, 0);
         ir_optimize_test_expect(test, verified.error == IR_ERROR_PHI && verified.instruction == 0, "shared IR rejects phi with unreachable entry predecessor");
-        for (uint32_t passes = 0; passes < 16; passes += 1)
+        for (uint32_t passes = 0; passes < 32; passes += 1)
         {
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
@@ -1162,7 +1162,7 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         IrFunction f = { 0 };
         const bool created = kind < 3 ? ir_optimize_test_labels(input, &f, kind) : ir_optimize_test_aggregate_call(input, &f);
         ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "labels and ABI records fixtures verify");
-        for (uint32_t passes = 0; created && passes < 16; passes += 1)
+        for (uint32_t passes = 0; created && passes < 32; passes += 1)
         {
             ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
         }
@@ -1206,6 +1206,189 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         }
         arena_pop_to(input, 0);
     }
+}
+
+// Identities (#2554): every kind that forwards an operand (x op 0 and 0 op x, x * 1 and 1 * x, a division by one and
+// x & -1 at 32 and 64 bits), a chain of them (a shift of a shift), a subtraction from zero, a shift by three and an and
+// with one that don't, and the forwarded values read by a call's argument, an extension, an addition and a phi's input.
+static bool ir_optimize_test_identity(Arena* arena, IrFunction* f)
+{
+    const IrSizes sizes = {
+        .instruction_count = 35,
+        .block_count = 3,
+        .constant_count = 7,
+        .extra_count = 5,
+        .parameter_count = 2,
+        .call_count = 1,
+        .call_type_count = 1,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->parameter_types[0] = IR_I64;
+        f->parameter_types[1] = IR_I32;
+        f->constants[0].low = 0;
+        f->constants[1].low = 0;
+        f->constants[2].low = 3;
+        f->constants[3].low = 1;
+        f->constants[4].low = 1;
+        f->constants[5].low = UINT32_MAX;
+        f->constants[6].low = UINT64_MAX;
+        f->calls[0].result_type = IR_I64;
+        f->calls[0].argument_count = 1;
+        f->calls[0].parameter_count = 1;
+        f->call_types[0] = IR_I64;
+        f->extra[0] = 23;
+        f->extra[1] = 0;
+        f->extra[2] = 23;
+        f->extra[3] = 1;
+        f->extra[4] = 31;
+        f->block_offsets[1] = 31;
+        f->block_offsets[2] = 33;
+        f->block_offsets[3] = 35;
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 4, IR_SHL, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 5, IR_LSHR, IR_I64, 4, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 6, IR_ASHR, IR_I32, 1, 3, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 7, IR_ADD, IR_I64, 2, 5, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 8, IR_SUB, IR_I64, 7, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 9, IR_OR, IR_I32, 6, 3, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 10, IR_XOR, IR_I32, 3, 9, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 11, IR_SUB, IR_I64, 2, 0, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 12, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 13, IR_SHL, IR_I64, 8, 12, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 14, IR_CONST, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 15, IR_CONST, IR_I32, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 16, IR_CONST, IR_I32, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 17, IR_CONST, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 18, IR_MUL, IR_I64, 8, 14, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 19, IR_MUL, IR_I64, 14, 18, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 20, IR_UDIV, IR_I64, 19, 14, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 21, IR_SDIV, IR_I32, 10, 15, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 22, IR_AND, IR_I32, 16, 21, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 23, IR_AND, IR_I64, 20, 17, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 24, IR_ZEXT, IR_I64, 22, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 25, IR_ADD, IR_I64, 13, 24, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 26, IR_ADD, IR_I64, 25, 11, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 27, IR_AND, IR_I64, 0, 14, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 28, IR_ICMP, IR_I1, 27, 2, IR_NE);
+        ir_optimize_test_instruction(f, 29, IR_CALL, IR_I64, 7, 0, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 30, IR_CBR, IR_VOID, 28, 1, 2);
+        ir_optimize_test_instruction(f, 31, IR_ADD, IR_I64, 26, 29, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 32, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 33, IR_PHI, IR_I64, 1, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 34, IR_RET, IR_VOID, 33, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// Whether `operand` of `f` is a constant whose bits at `type`'s width are `expected`.
+static bool ir_optimize_test_constant_is(const IrFunction* f, uint32_t operand, uint32_t type, uint64_t expected)
+{
+    const uint32_t bits = ir_type_bits[type];
+    const uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    return f->op[operand] == IR_CONST && (f->constants[f->a[operand]].low & mask) == (expected & mask);
+}
+
+// How many of `f`'s operations are identities by their constant operands (the test's own reading of #2554's kinds).
+static uint32_t ir_optimize_test_identities_left(const IrFunction* f)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        const uint32_t op = f->op[i];
+        const uint32_t type = f->type[i];
+        const uint32_t a = f->a[i];
+        const uint32_t b = f->b[i];
+        bool identity = false;
+        if (op == IR_ADD || op == IR_OR || op == IR_XOR)
+        {
+            identity = ir_optimize_test_constant_is(f, a, type, 0) || ir_optimize_test_constant_is(f, b, type, 0);
+        }
+        else if (op == IR_SUB || op == IR_SHL || op == IR_LSHR || op == IR_ASHR)
+        {
+            identity = ir_optimize_test_constant_is(f, b, type, 0);
+        }
+        else if (op == IR_MUL)
+        {
+            identity = ir_optimize_test_constant_is(f, a, type, 1) || ir_optimize_test_constant_is(f, b, type, 1);
+        }
+        else if (op == IR_UDIV || op == IR_SDIV)
+        {
+            identity = ir_optimize_test_constant_is(f, b, type, 1);
+        }
+        else if (op == IR_AND)
+        {
+            identity = ir_optimize_test_constant_is(f, a, type, UINT64_MAX) || ir_optimize_test_constant_is(f, b, type, UINT64_MAX);
+        }
+        count += identity;
+    }
+    return count;
+}
+
+// #2554's identities through every pass mask with and without BUSTER_IR_OPTIMIZE_IDENTITY (both twins, executed), then
+// their shapes: with it, the thirteen identities are gone and their users read their operands (the call's argument and
+// the phi's input from b0 are the first parameter itself, the extension's the second), and the subtraction from zero, the
+// shift by three and the and with one stay; without it, all thirteen are still there.
+static void ir_optimize_test_identities(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    IrFunction f = { 0 };
+    const bool created = ir_optimize_test_identity(input, &f);
+    ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "identities fixture verifies");
+    ir_optimize_test_expect(test, created && ir_optimize_test_identities_left(&f) == 13, "identities fixture has its thirteen identities");
+    for (uint32_t passes = 0; created && passes < 32; passes += 1)
+    {
+        ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
+    }
+    for (uint32_t identity = 0; created && identity < 2; identity += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint64_t mark = vector->length;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes |= identity != 0 ? BUSTER_IR_OPTIMIZE_IDENTITY : 0;
+            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            const IrFunction* out = &result.function;
+            bool expected = check.error == IR_OK;
+            if (expected && identity != 0)
+            {
+                uint32_t parameters[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
+                uint32_t call = BUSTER_IR_NONE;
+                uint32_t phi = BUSTER_IR_NONE;
+                uint32_t extension = BUSTER_IR_NONE;
+                uint32_t counts[IR_OP_COUNT] = { 0 };
+                for (uint32_t i = 0; i < out->instruction_count; i += 1)
+                {
+                    if (out->op[i] == IR_PARAM && out->a[i] < 2)
+                    {
+                        parameters[out->a[i]] = i;
+                    }
+                    call = out->op[i] == IR_CALL ? i : call;
+                    phi = out->op[i] == IR_PHI ? i : phi;
+                    extension = out->op[i] == IR_ZEXT ? i : extension;
+                    counts[out->op[i]] += 1;
+                }
+                expected = ir_optimize_test_identities_left(out) == 0 && counts[IR_SHL] == 1 && counts[IR_LSHR] == 0 && counts[IR_ASHR] == 0 && counts[IR_SUB] == 1 && counts[IR_MUL] == 0 &&
+                           counts[IR_UDIV] == 0 && counts[IR_SDIV] == 0 && counts[IR_AND] == 1 && counts[IR_OR] == 0 && counts[IR_XOR] == 0 && parameters[0] != BUSTER_IR_NONE &&
+                           parameters[1] != BUSTER_IR_NONE && call != BUSTER_IR_NONE && phi != BUSTER_IR_NONE && extension != BUSTER_IR_NONE &&
+                           out->extra[out->calls[out->b[call]].argument_first] == parameters[0] && out->a[extension] == parameters[1] && out->b[phi] == 2 &&
+                           (out->extra[out->a[phi] + 1] == parameters[0] || out->extra[out->a[phi] + 3] == parameters[0]);
+            }
+            else if (expected)
+            {
+                expected = ir_optimize_test_identities_left(out) == 13;
+            }
+            ir_optimize_test_expect(test, expected, identity != 0 ? "identities forward their operands to calls, extensions, additions and phis" : "identities stay without the option");
+            arena_pop_to(vector, mark);
+        }
+    }
+    arena_pop_to(input, 0);
 }
 
 // An unused vector comparison (#141's element types, #1413's review): of floating lanes it stays, a floating-environment
@@ -1410,7 +1593,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction function = { 0 };
             const bool created = ir_optimize_test_diamond(&input, &function, kind);
             ir_optimize_test_expect(test, created, "diamond fixture allocation");
-            for (uint32_t passes = 0; created && passes < 16; passes += 1)
+            for (uint32_t passes = 0; created && passes < 32; passes += 1)
             {
                 ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, passes);
             }
@@ -1419,7 +1602,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         IrFunction loop = { 0 };
         const bool loop_created = ir_optimize_test_loop(&input, &loop);
         ir_optimize_test_expect(test, loop_created, "loop fixture allocation");
-        for (uint32_t passes = 0; loop_created && passes < 16; passes += 1)
+        for (uint32_t passes = 0; loop_created && passes < 32; passes += 1)
         {
             ir_optimize_test_compare(test, &loop, &vector, &scalar, &scratch, passes);
         }
@@ -1429,7 +1612,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction effects = { 0 };
             const bool effects_created = ir_optimize_test_effects(&input, &effects, kind != 0);
             ir_optimize_test_expect(test, effects_created, "effects fixture allocation");
-            for (uint32_t passes = 0; effects_created && passes < 16; passes += 1)
+            for (uint32_t passes = 0; effects_created && passes < 32; passes += 1)
             {
                 ir_optimize_test_compare(test, &effects, &vector, &scalar, &scratch, passes);
             }
@@ -1437,7 +1620,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction switch_function = { 0 };
             const bool switch_created = ir_optimize_test_switch(&input, &switch_function, kind != 0);
             ir_optimize_test_expect(test, switch_created, "switch fixture allocation");
-            for (uint32_t passes = 0; switch_created && passes < 16; passes += 1)
+            for (uint32_t passes = 0; switch_created && passes < 32; passes += 1)
             {
                 ir_optimize_test_compare(test, &switch_function, &vector, &scalar, &scratch, passes);
             }
@@ -1454,6 +1637,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         }
         ir_optimize_test_threading(test, &scratch);
         ir_optimize_test_records(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_identities(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_vector_compares(test, &input, &vector, &scratch);
         ir_optimize_test_debug_bindings(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_debug_blocks(test, &input, &vector, &scalar, &scratch);

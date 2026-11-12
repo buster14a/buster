@@ -415,7 +415,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT;
+        options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY;
         options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
