@@ -926,7 +926,7 @@ static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrep
         const uint32_t reg = transitions->registers[plan->effective_use_values[u]];
         needed |= reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << reg : 0;
     }
-    for (uint32_t p = 0; selected && p < 3; p += 1)
+    for (uint32_t p = 0; selected && p < BUSTER_TIER1_SELECT_VALUES; p += 1)
     {
         const uint32_t value = plan->patterns[node].values[p];
         const uint32_t reg = value < function->instruction_count ? transitions->registers[value] : UINT8_MAX;
@@ -1619,7 +1619,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         {
             const Tier1SelectPattern* pattern = &plan->patterns[node];
             bool allocated = plan->function->type[node] == IR_VOID || tier1_select_register_allowed(transitions.registers[node]);
-            for (uint32_t p = 0; p < 3; p += 1)
+            for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_VALUES; p += 1)
             {
                 const uint32_t value = pattern->values[p];
                 allocated &= value == BUSTER_IR_NONE || tier1_select_register_allowed(transitions.registers[value]);

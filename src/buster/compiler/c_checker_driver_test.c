@@ -5885,6 +5885,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                                           check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           (warning & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                           check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning, scratch) :
+                                          warning == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                          check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
@@ -6494,9 +6496,27 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\nint e1(int x) { return h(g(x)) + h(x); }\n",
           true, true },
+        // The feature an error names is the first its map's StringMap iterates to (#2093, c_check_feature_map.c).
         { "an arch= attribute", "-march=x86-64",
           "static inline __attribute__((always_inline, target(\"arch=haswell\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true,
-          false },
+          true },
+        { "an arch= attribute of a later CPU", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"arch=znver4\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true,
+          true },
+        { "an attribute that turns its feature off again", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx512f,no-avx512f\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n",
+          true, true },
+        { "an apxf attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"apxf\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true, true },
+        { "an arch= attribute over -mavx", "-mavx",
+          "static inline __attribute__((always_inline, target(\"arch=skylake-avx512\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n",
+          true, true },
+        { "a caller's attribute below the unit's CPU", "-march=x86-64-v2",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"arch=x86-64\"))) int caller(int x) { return h(x); }\n",
+          true, true },
+        { "a caller's attribute that turns a feature off", "-march=haswell",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"no-avx2\"))) int caller(int x) { return h(x); }\n",
+          true, true },
         { "an intrinsic of a feature the unit lacks", "-march=x86-64",
           "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", true, true },
         { "an intrinsic of a feature the unit has", "-march=x86-64-v3",
@@ -7105,6 +7125,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
+#include "c_check_avx_abi_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -8227,12 +8248,15 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_builtin_pointer_sign_driver_test.c"
 #include "c_check_shift_op_parentheses_driver_test.c"
 #include "c_check_alignment_builtin_driver_test.c"
+#include "c_check_lvalue_cast_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
 #include "c_check_asm_label_auto_driver_test.c"
 #include "c_check_assert_const_driver_test.c"
 #include "c_check_assert_bool_driver_test.c"
 #include "c_check_ident_driver_test.c"
 #include "c_check_c23_attributes_driver_test.c"
+#include "c_check_empty_unit_driver_test.c"
+#include "c_check_integer_overflow_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
@@ -9182,12 +9206,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);
             check_test_driver_shift_op_parentheses(&test, clang, executable, directory);
             check_test_driver_alignment_builtins(&test, clang, executable, directory);
+            check_test_driver_lvalue_casts(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_asm_label_auto(&test, clang, executable, directory);
             check_test_driver_assert_const(&test, clang, executable, directory);
             check_test_driver_assert_bool(&test, clang, executable, directory);
             check_test_driver_ident(&test, clang, executable, directory);
             check_test_driver_c23_attributes(&test, clang, executable, directory);
+            check_test_driver_empty_unit(&test, clang, executable, directory);
+            check_test_driver_integer_overflow(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);
@@ -9255,6 +9282,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_target_feature_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_avx_abi(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
         {

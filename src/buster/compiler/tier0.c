@@ -459,6 +459,13 @@ struct Tier0AsmBody
     const uint32_t* label_records;
     const uint32_t* label_names;
     uint32_t label_count;
+    // An asm goto's body whose exits fall straight into the exit's move into eax, with no store between (#2351): the
+    // record its exits start at, past the template's; 0 for any other body. Its call row's class is I32, and the
+    // statement's dispatch on the exit follows it: SET_LOCAL of a temporary, then for each label l a LOCAL of it, a CONST
+    // of l + 1, an EQ and a BRANCH_TRUE to the label. Where nothing runs after the row (tier0_asm_direct), Tier 0 drops
+    // the exits and the dispatch, and the template's jump to label l (a branch to the exit's record, exits + 2 + 2l)
+    // branches to the label's entry, as clang's callbr does.
+    uint32_t exits;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -3823,6 +3830,9 @@ struct Tier0Entries
     // The labels, a bit per entry (tier0_labels's, or tier0_vector_labels's), for emission's looks at an entry's operands'
     // producers (tier0_int128_product); 0 where a caller of the passes has none.
     const uint64_t* labels;
+    // The asm goto body call rows that branch straight to their labels (tier0_asm_direct, #2351), a bit per entry; 0 for
+    // a function without them.
+    uint64_t* direct;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -6550,7 +6560,8 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         {
             valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
         }
-        valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0));
+        valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0)) &&
+                (body->exits == 0 || (body->exits < body->count && (body->count - body->exits) % 2 == 0 && body->count - body->exits >= 4));
         for (uint32_t k = 0; valid && k < body->label_count; k += 1)
         {
             valid = body->label_records[k] <= body->count;
@@ -6628,14 +6639,29 @@ static __attribute__((noinline)) void tier0_returns_twice_snapshot(const Tier0Fr
     }
 }
 
-// The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
-// each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home.
-static void tier0_emit_call_record(const Tier0Function* function, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
+// Whether call entry i is an asm goto's body that branches straight to its labels (Tier0Entries.direct, #2351).
+static bool tier0_direct(const Tier0Entries* entries, uint32_t i)
 {
+    return entries->direct != 0 && (entries->direct[i >> 6] >> (i & 63) & 1) != 0;
+}
+
+// The records an asm body's call row `i` writes: its own, or a direct one's up to its exits (#2351).
+static uint32_t tier0_body_records(const Tier0Entries* entries, const Tier0AsmBody* body, uint32_t i)
+{
+    return tier0_direct(entries, i) ? body->exits : body->count;
+}
+
+// The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
+// each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home. A direct asm goto's body
+// (#2351) stops at its exits, and its jumps to its labels go to the labels' entries, the dispatch's BRANCH_TRUEs' targets.
+static void tier0_emit_call_record(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t call = (uint32_t)function->values[i];
     const Tier0AsmBody* body = tier0_call_body(function, call);
     if (body != 0)
     {
         const uint32_t first = writer->count;
+        const uint32_t end = tier0_body_records(entries, body, i);
         // Its labels' records (#1839), past the labels of the bodies before it.
         uint32_t label_base = 0;
         for (uint32_t b = 0; writer->asm_labels != 0 && body->label_count != 0 && function->asm_bodies + b != body; b += 1)
@@ -6647,7 +6673,7 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
             writer->asm_labels[label_base + k] = first + body->label_records[k];
         }
         uint32_t branch = 0;
-        for (uint32_t r = 0; r < body->count; r += 1)
+        for (uint32_t r = 0; r < end; r += 1)
         {
             X86Instruction record = body->records[r];
             if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
@@ -6661,8 +6687,11 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
                 // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
                 if (writer->records != 0)
                 {
+                    const uint32_t target = body->targets[branch];
+                    // A direct body's jump to label l: the l-th BRANCH_TRUE of the dispatch, 4 entries each past the SET_LOCAL.
+                    const bool label = end != body->count && target > end;
                     writer->branches[writer->branch_count] = writer->count;
-                    writer->targets[writer->branch_count] = first + body->targets[branch];
+                    writer->targets[writer->branch_count] = label ? entries->positions[function->values[i + 5 + 4 * ((target - end - 2) / 2)]] : first + target;
                 }
                 writer->branch_count += 1;
                 branch += 1;
@@ -6691,19 +6720,25 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
     }
 }
 
-// How many branches tier0_emit_call_record writes for call row `call`: an asm body's own.
-static uint32_t tier0_count_call_branches(const Tier0Function* function, uint32_t call)
+// How many branches tier0_emit_call_record writes for call entry i: an asm body's own, a direct one's before its exits.
+static uint32_t tier0_count_call_branches(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
-    const Tier0AsmBody* body = tier0_call_body(function, call);
-    return body != 0 ? body->branch_count : 0;
+    const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
+    uint32_t count = 0;
+    for (uint32_t b = 0; body != 0 && b < body->branch_count; b += 1)
+    {
+        count += body->branches[b] < tier0_body_records(entries, body, i) ? 1 : 0;
+    }
+    return count;
 }
 
-// How many records tier0_emit_call_record writes for call row `call`, and its references into `references`.
-static uint32_t tier0_count_call_record(const Tier0Function* function, uint32_t call, uint32_t* references)
+// How many records tier0_emit_call_record writes for call entry i, and its references into `references`.
+static uint32_t tier0_count_call_record(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t* references)
 {
+    const uint32_t call = (uint32_t)function->values[i];
     const Tier0AsmBody* body = tier0_call_body(function, call);
     *references += body == 0 && function->call_targets[call] != 0 ? 1 : 0;
-    return body != 0 ? body->count : 1;
+    return body != 0 ? tier0_body_records(entries, body, i) : 1;
 }
 
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
@@ -6849,7 +6884,7 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        tier0_emit_call_record(function, homes, call, writer);
+        tier0_emit_call_record(function, entries, homes, i, writer);
         const uint32_t result = tier0_stack(function->classes[i]);
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
@@ -9089,7 +9124,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        tier0_emit_call_record(function, homes, call, writer);
+        tier0_emit_call_record(function, entries, homes, i, writer);
         const uint32_t result = tier0_stack(function->classes[i]);
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
@@ -9449,7 +9484,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? tier0_count_call_record(function, call, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+    count += !tail ? tier0_count_call_record(function, entries, i, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -9553,7 +9588,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
         count = value == X86_REGISTER_RCX ? 3 : 4;
     }
     // An asm body's own branches (#1839).
-    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, (uint32_t)function->values[i]) : 0;
+    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, entries, i) : 0;
     return count;
 }
 
@@ -10641,11 +10676,11 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
         uint32_t references = tail && !indirect ? 1 : 0;
-        count += !tail ? tier0_count_call_record(function, call, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+        count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         counts->references += references;
-        counts->branches += !tail ? tier0_count_call_branches(function, call) : 0;
+        counts->branches += !tail ? tier0_count_call_branches(function, entries, i) : 0;
     }
     else
     {
@@ -10914,6 +10949,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->snapshot_words = 0;
     entries->snapshot_depths = 0;
     entries->labels = 0;
+    entries->direct = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
@@ -11070,6 +11106,100 @@ static __attribute__((noinline, cold)) bool tier0_push_asm_labels(const Tier0Fun
 // What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
+// Whether asm goto body call entry i (Tier0AsmBody.exits, #2351) may branch straight to its labels: nothing runs after
+// its row (no value under its arguments on any stack, none of them a deep entry's), and the statement's dispatch follows
+// it as the lowering writes it, none of its entries a label.
+static bool tier0_asm_dispatch(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const Tier0AsmBody* body)
+{
+    const uint32_t call = (uint32_t)function->values[i];
+    const uint32_t first = function->call_first[call];
+    uint32_t integer = 0;
+    uint32_t floating = 0;
+    for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+    {
+        const bool is_floating = tier0_class_floating(function->argument_classes[first + a]);
+        integer += is_floating ? 0 : 1;
+        floating += is_floating ? 1 : 0;
+    }
+    const uint32_t labels = (body->count - body->exits - 2) / 2;
+    const uint64_t last = (uint64_t)i + 1 + 4 * (uint64_t)labels;
+    bool valid = function->classes[i] == BUSTER_TYPED_CLASS_I32 && entries->depths[i] == integer && entries->floating_depths[i] == floating &&
+                 (entries->mask_depths == 0 || entries->mask_depths[i] == 0) && (entries->deep == 0 || entries->deep[i] == 0) && last < function->count &&
+                 function->kinds[i + 1] == BUSTER_TYPED_SET_LOCAL && function->classes[i + 1] == BUSTER_TYPED_CLASS_I32;
+    const uint64_t temporary = valid ? function->values[i + 1] : 0;
+    for (uint32_t l = 0; valid && l < labels; l += 1)
+    {
+        const uint32_t e = i + 2 + 4 * l;
+        valid = function->kinds[e] == BUSTER_TYPED_LOCAL && function->values[e] == temporary && function->kinds[e + 1] == BUSTER_TYPED_CONST &&
+                function->values[e + 1] == (uint64_t)l + 1 && function->kinds[e + 2] == BUSTER_TYPED_EQ && function->kinds[e + 3] == BUSTER_TYPED_BRANCH_TRUE &&
+                function->values[e + 3] <= function->count;
+        for (uint32_t k = 0; valid && k < 4; k += 1)
+        {
+            valid = function->classes[e + k] == BUSTER_TYPED_CLASS_I32;
+        }
+    }
+    for (uint32_t e = i + 1; valid && e <= last; e += 1)
+    {
+        valid = !tier0_label(entries->labels, e);
+    }
+    return valid;
+}
+
+// The asm goto bodies that branch straight to their labels (#2351, Tier0AsmBody.exits): each such call row marked in
+// Tier0Entries.direct, and its dispatch absorbed, so that it writes no record on either path. Out of line and cold: few
+// functions have them.
+static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Function* function, Tier0Entries* entries, Arena* scratch)
+{
+    Tier0Error error = TIER0_OK;
+    for (uint32_t i = 0; error == TIER0_OK && i < function->count; i += 1)
+    {
+        const bool row = function->kinds[i] == BUSTER_TYPED_CALL && entries->absorbed[i] == 0 && function->values[i] < function->call_count;
+        const Tier0AsmBody* body = row ? tier0_call_body(function, (uint32_t)function->values[i]) : 0;
+        if (body != 0 && body->exits != 0 && entries->labels != 0 && tier0_asm_dispatch(function, entries, i, body))
+        {
+            const uint64_t words = (uint64_t)function->count / 64 + 1;
+            if (entries->direct == 0)
+            {
+                entries->direct = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words);
+                error = entries->direct != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+                if (error == TIER0_OK)
+                {
+                    memset(entries->direct, 0, words * sizeof(uint64_t));
+                }
+            }
+            if (error == TIER0_OK)
+            {
+                entries->direct[i >> 6] |= 1ull << (i & 63);
+                const uint32_t last = i + 1 + 4 * ((body->count - body->exits - 2) / 2);
+                for (uint32_t e = i + 1; e <= last; e += 1)
+                {
+                    entries->absorbed[e] = 1;
+                    entries->templates[e] = BUSTER_TIER0_ENTRY_ABSORBED;
+                    entries->words[e] = BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES;
+                }
+            }
+        }
+    }
+    return error;
+}
+
+// The references of the direct asm goto bodies' absorbed dispatches (tier0_asm_direct) taken from their exits'
+// temporaries, each the SET_LOCAL's and a LOCAL per label: one no other entry reads then takes no home, nor a
+// callee-saved register's save.
+static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0Function* function, const Tier0Entries* entries, uint32_t* references)
+{
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        if (tier0_direct(entries, i))
+        {
+            const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
+            const uint64_t temporary = function->values[i + 1];
+            const uint32_t taken = 1 + (body->count - body->exits - 2) / 2;
+            references[temporary] -= references[temporary] >= taken ? taken : references[temporary];
+        }
+    }
+}
+
 static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* segments, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code,
                                  bool vector)
 {
@@ -11094,6 +11224,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
     {
         error = TIER0_ERROR_RETURNS_TWICE;
         code->node = held;
+    }
+    if (error == TIER0_OK && unsupported == function->count && function->asm_body_count != 0)
+    {
+        error = tier0_asm_direct(function, entries, scratch);
     }
     // The memory classes' slots, a function with their values' (whose long double result, if one, leaves st0 from slot 0),
     // and the vectors'.
@@ -11129,6 +11263,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         else
         {
             tier0_count_references(function, references);
+        }
+        if (entries->direct != 0)
+        {
+            tier0_direct_references(function, entries, references);
         }
         frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
