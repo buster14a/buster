@@ -809,9 +809,15 @@ static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHo
         X86Instruction record = holes->memory;
         if (holes->compare_immediate)
         {
-            record.form = holes->width == 1 ? X86_FORM_CMP_RM8_IMM8 : holes->width == 2 ? X86_FORM_CMP_RM16_IMM16 :
-                          holes->width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
-            record.immediate = (int32_t)holes->immediate;
+            // The constant at the access's width, sign-extended: a word's, a doubleword's or a quadword's that a signed
+            // byte holds takes the sign-extended imm8 form, 3 bytes shorter (2 for a word, #2600), as the register
+            // comparisons' requests choose it.
+            const uint32_t shift = 64 - holes->width * 8;
+            const int64_t value = (int64_t)(holes->immediate << shift) >> shift;
+            const bool short_immediate = holes->width != 1 && value >= INT8_MIN && value <= INT8_MAX;
+            record.form = holes->width == 1 ? X86_FORM_CMP_RM8_IMM8 : short_immediate ? (holes->width == 2 ? X86_FORM_CMP_RM16_IMM8 : holes->width == 8 ? X86_FORM_CMP_RM64_IMM8 : X86_FORM_CMP_RM32_IMM8) :
+                          holes->width == 2 ? X86_FORM_CMP_RM16_IMM16 : holes->width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
+            record.immediate = short_immediate ? (int32_t)value : (int32_t)holes->immediate;
         }
         else
         {

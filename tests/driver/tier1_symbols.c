@@ -10,7 +10,8 @@
 // the unit doesn't define, nor a thread-local.
 
 // Each width's fixtures, by name and type, and the constant its comparisons take: one that needs the width's immediate
-// (an imm8 for a byte, an imm16 for a word, an imm32 for a doubleword and a quadword).
+// (an imm8 for a byte, an imm16 for a word, an imm32 for a doubleword and a quadword). Each width also compares with -7,
+// which a sign-extended imm8 holds at every width (#2600).
 #define BUSTER_SYMBOLS_WIDTHS(X) \
     X(u8, unsigned char, 0xc8) \
     X(i8, signed char, -3) \
@@ -91,6 +92,10 @@ extern _Thread_local long symbols_oracle_tls;
     __attribute__((noinline)) int symbols_less_##name(type x) \
     { \
         return symbols_record.name < x; \
+    } \
+    __attribute__((noinline)) int symbols_small_##name(void) \
+    { \
+        return symbols_g_##name == (type)-7; \
     }
 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_DEFINE)
 #undef BUSTER_SYMBOLS_DEFINE
@@ -219,7 +224,8 @@ struct SymbolsRecord
     void symbols_store_##name(long value); \
     int symbols_equal_##name(void); \
     long symbols_branch_##name(long x); \
-    int symbols_less_##name(type x);
+    int symbols_less_##name(type x); \
+    int symbols_small_##name(void);
 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_DECLARE)
 #undef BUSTER_SYMBOLS_DECLARE
 #define BUSTER_SYMBOLS_DECLARE_OPERATION(name, operator) \
@@ -299,6 +305,10 @@ int main(void)
             symbols_record.name = stored; \
             valid = symbols_equal_##name() == (stored == (type)(constant)) && valid; \
             valid = symbols_less_##name((type)(constant)) == (stored < (type)(constant)) && symbols_less_##name(member) == (stored < member) && valid; \
+            valid = symbols_small_##name() == (stored == (type)-7) && valid; \
+            symbols_g_##name = (type)-7; \
+            valid = symbols_small_##name() == 1 && valid; \
+            symbols_g_##name = stored; \
         } while (0);
         BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_CHECK)
 #undef BUSTER_SYMBOLS_CHECK
@@ -516,9 +526,9 @@ static bool symbols_shape(const char* path)
             valid = false;
         }
     }
-    // Six functions of each width, two of each operation and the ten others, each seen once.
+    // Seven functions of each width, two of each operation and the ten others, each seen once.
 #define BUSTER_SYMBOLS_COUNT(...) +1
-    const unsigned expected = 6 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 10;
+    const unsigned expected = 7 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 10;
 #undef BUSTER_SYMBOLS_COUNT
     if (functions != expected || direct_references < expected - 3)
     {
