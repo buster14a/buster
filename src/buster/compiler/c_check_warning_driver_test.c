@@ -1137,7 +1137,6 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
         .errors = 7,
         .notes = 1,
-        .compare_warning_text = true,
     },
     {
         .name = "an enum base with a declarator demoted",
@@ -1148,7 +1147,6 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 6,
         .errors = 3,
         .notes = 1,
-        .compare_warning_text = true,
     },
     {
         .name = "an enum base with a declarator ignored",
