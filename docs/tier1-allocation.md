@@ -501,6 +501,21 @@ operand spilled where it entered the loop joined its phi's slot first and kept
 the loop's two phis apart, so that every handler's edge to the latch copied
 slot to slot.
 
+From its merge base `afcb185e`, the tagged edge moves, stores and reloads fell
+from 225.1 M to 210.6 M on speedtest1 and from 542.7 M to 355.5 M on Lua, where
+the moves through r11 halved (191 M to 96 M). On the 9700X, user cycles fell by
+0.73 on speedtest1 over 8 shifts and by 1.02 on Lua over 33 link orders
+(100 ln(head / base); [the record](https://github.com/buster14a/buster-performance/tree/ddb5213da1fce7ac9325afbf6364a797bbc63b5b/docs/measurements/tier1-dominator-places-2553-2026-11-12)).
+Not everywhere: `sqlite3VdbeExec`'s edge traffic rose by 2.1 M though it runs
+fewer instructions, and `yy_reduce` keeps its parameter `yypParser` in `rdi`,
+its incoming register, into its switch's join, which calls
+`yy_find_reduce_action`: every reduction saves and restores it (4.9 M more).
+The preferred problem lets a parameter keep its incoming register on every one
+of its intervals; keeping one that crosses a call in callee-saved registers past
+its definition's interval cost far more (28.5 M instructions on speedtest1,
+269 M on Lua). The dominator analysis costs about 0.6% of sqlite3.c's
+`--tier1 -c` cycles, the whole change 1.0%.
+
 ### The opmask class (#179)
 
 AVX-512's opmask registers are the third class, k0 to k7. Nothing moves a value

@@ -734,6 +734,14 @@ base `6a021550e`, the tagged edge spills, reloads and moves fell from 469 M to
 (100 ln(head / base) of -4.91 and -8.25), head faster at every layout
 ([the record](https://github.com/buster14a/buster-performance/tree/c8cc523034dd4035161800a4d0940e287a8975dc/docs/measurements/tier1-loop-carried-1216-2026-11-09)).
 
+#2553 keeps a value's place along the dominator tree, so that it changes
+register between blocks only where the blocks on its way moved it
+([the allocation guide](tier1-allocation.md)). From its merge base `afcb185e`,
+the tagged edge traffic fell from 225 M to 211 M on speedtest1 and from 543 M
+to 356 M on Lua, and user cycles on the 9700X by 0.73 and 1.02
+(100 ln(head / base)), head slower at 1 of 8 shifts and 7 of 33 link orders
+([the record](https://github.com/buster14a/buster-performance/tree/ddb5213da1fce7ac9325afbf6364a797bbc63b5b/docs/measurements/tier1-dominator-places-2553-2026-11-12)).
+
 At main `c5f0efb2` (2026-11-12) the same measurement gives 1.42 and 1.39 times
 clang -O2's time, and gaps of 1,160 M and 1,780 M instructions; a ladder of
 LLVM's own pieces ranks what is left by time, and the compiler itself is
