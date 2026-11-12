@@ -17,6 +17,7 @@
 #include "ir_vector_split.c"
 #include "ir_truth.c"
 #include "ir_if_convert.c"
+#include "ir_thread.c"
 #include "tier1_schedule_ir.c"
 #include "c_check_tier1_inline.c"
 #include "c_check_tier1_schedule.c"
@@ -381,6 +382,23 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
+        // #2554's truth values' blocks threaded into their predecessors (ir_thread.c), in the same step's arena, before
+        // if-conversion would make some of their phis selects; then the copies' tests of extended comparisons simplified
+        // as the originals were, so that a copied `icmp ne (zext c), 0` is c, the branch's comparison. The result
+        // borrows the input's tables, which stay live until the optimizer copies them.
+        IrThreadResult threaded = { 0 };
+        const IrCheck check = ir_thread(&wide.function, &lane->steps[6], scratch, scalar, &threaded);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        if (stage == CHECK_TIER1_COMPILED && threaded.rounds != 0)
+        {
+            wide.function = threaded.function;
+            ir_truth_simplify(&wide.function, scalar);
+        }
+    }
+    if (stage == CHECK_TIER1_COMPILED)
+    {
         // #1382's bounded, total scalar arms become selects before any retained analysis is built. The result
         // borrows immutable tables from the promoted/wide input; all stay live until the optimizer copies them.
         IrIfConvertResult converted = { 0 };
@@ -415,7 +433,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT;
+        options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY;
         options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);

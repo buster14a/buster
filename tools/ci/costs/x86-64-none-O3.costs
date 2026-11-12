@@ -171,6 +171,7 @@
 #: cpu 45 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 10 0.64 Intel(R) Xeon(R) 6973P-C
 #: cpu 33 0.91 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: unmeasured Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 0.0 Check unity fixture ownership without rebuilding
 155.9 Test the foreign inputs [8 CPUs]
@@ -311,4 +312,5 @@
 0.2 Test scoped name-resolution kernels
 5.8 Test the partial Zen 5 model and instruction harness
 0.6 Test Tier 1 integer truth round trips against native and instruction-shape oracles
+11.6 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 11.6 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes

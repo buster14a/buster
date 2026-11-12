@@ -454,7 +454,7 @@ static void tier1_select_test_scaled_index(Tier1SelectTest* test)
             const uint8_t type = narrow ? IR_I32 : IR_I64;
             const IrSizes sizes =
             {
-                .instruction_count = 3 + 1 + (before || after) + before + after + 1 + narrow + (shared || shared_constant) + (added ? 3 : 1) + (memory ? 3 : 1),
+                .instruction_count = 3 + 1 + (before || after) + before + after + 1 + narrow + (shared || shared_constant) + shared_constant + (added ? 3 : 1) + (memory ? 3 : 1),
                 .block_count = 1,
                 .constant_count = 1 + (before || after),
                 .address_count = added ? 0 : 1,
@@ -508,9 +508,19 @@ static void tier1_select_test_scaled_index(Tier1SelectTest* test)
                     tier1_select_test_node(&function, next, item.shape == TIER1_TEST_INDEX_SEXT ? IR_SEXT : IR_ZEXT, IR_I64, index, BUSTER_IR_NONE, BUSTER_IR_NONE);
                     index = next++;
                 }
-                if (shared || shared_constant)
+                if (shared_constant)
                 {
-                    tier1_select_test_node(&function, next++, IR_STORE, IR_VOID, 0, shared ? index : 3, BUSTER_IR_NONE);
+                    // The constant read as a register: a subtraction's left operand, stored (a store of the constant itself
+                    // takes it as its immediate, #2554).
+                    registers[next] = X86_REGISTER_RAX;
+                    tier1_select_test_node(&function, next, IR_SUB, type, 3, 2, BUSTER_IR_NONE);
+                    next += 1;
+                    tier1_select_test_node(&function, next, IR_STORE, IR_VOID, 0, next - 1, BUSTER_IR_NONE);
+                    next += 1;
+                }
+                if (shared)
+                {
+                    tier1_select_test_node(&function, next++, IR_STORE, IR_VOID, 0, index, BUSTER_IR_NONE);
                 }
                 if (added)
                 {

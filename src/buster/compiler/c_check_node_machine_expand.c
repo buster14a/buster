@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #2524's node machine's X sweep (c_check_node_machine.c has the machine): node_machine_expand walks the records up
-// the postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
+// #2524's node machine's X sweep (c_check_node_machine.c has the machine): node_machine_expand walks the records up the
+// postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
 // check_lower_template_own's, and the logical operators' and the conditional's) and then its conversion's to its target
-// in its context (node_machine_conversion, check_lower_template_conversion's), then its consumer's segment after it where
-// it has one (node_machine_hook) or an update's first row (node_machine_split, node_machine_update_first); an update's
-// second row, its own, by node_machine_update_last; a call's CALL by node_machine_call_own, its row numbered as the
-// lowering numbers it. It
-// reads the records T typed and C classified through the record accessors alone; the tape (NodeMachine's kinds, classes
-// and tape), its labels' entries (label_entries) and the call rows (calls_at, call_records, call_count) are its own.
+// in its context (node_machine_conversion, check_lower_template_conversion's), then its consumer's segment after it
+// where it has one (node_machine_hook) or an update's first row (node_machine_split, node_machine_update_first), both
+// behind one test of its state (node_machine_after_row); an update's second row, its own, by node_machine_update_last;
+// a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It reads the records T typed and
+// C classified through the record accessors alone; the tape (NodeMachine's kinds, classes and tape), its labels'
+// entries (label_entries) and the call rows (calls_at, call_records, call_count) are its own.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 
@@ -372,10 +372,29 @@ static void node_machine_call_own(NodeMachine* machine, uint32_t r)
     node_machine_put(machine, BUSTER_TYPED_CALL, node_machine_record_class(machine, r), row);
 }
 
+// What follows record `r`'s row, where its state `state` has more than BUSTER_NODE_MACHINE_EVALUATED: its consumer's
+// segment (node_machine_hook), or else an update's first row (node_machine_split), which is all an update's destination
+// read by name writes, since it isn't evaluated.
+static NodeMachineRefusal node_machine_after_row(NodeMachine* machine, uint32_t r, uint8_t state)
+{
+    NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+    if ((state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)
+    {
+        node_machine_hook(machine, r, state);
+    }
+    else
+    {
+        refusal = node_machine_split(machine, r);
+    }
+    return refusal;
+}
+
 // X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, after it its
-// consumer's segment where it has one (node_machine_hook) or an update's first row (node_machine_split), and each call's
-// row (NodeMachine.call_records). `object` as in C. The tape holds every row and segment an expression can keep
-// (BUSTER_NODE_MACHINE_TAPE_MOST), so no record tests the room left.
+// consumer's segment where it has one or an update's first row (node_machine_after_row), and each call's row
+// (NodeMachine.call_records). `object` as in C. The tape holds every row and segment an expression can keep
+// (BUSTER_NODE_MACHINE_TAPE_MOST), so no record tests the room left. A record tests its state twice, as before the
+// updates: whether it's evaluated, then whether anything follows (a state past BUSTER_NODE_MACHINE_EVALUATED, which an
+// update's destination read by name has too).
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
@@ -401,24 +420,15 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
             }
             const bool takes = node_machine_conversion(machine, r);
             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
-            if (refusal == NODE_MACHINE_TAKEN && (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)
-            {
-                node_machine_hook(machine, r, state);
-            }
-            else if (refusal == NODE_MACHINE_TAKEN && (state & BUSTER_NODE_MACHINE_SPLIT) != 0)
-            {
-                refusal = node_machine_split(machine, r);
-            }
-            machine->stopped = r;
         }
-        else if (state != 0)
+        if (refusal == NODE_MACHINE_TAKEN && state > BUSTER_NODE_MACHINE_EVALUATED)
         {
-            // An update's destination read by name: its first row alone.
-            refusal = node_machine_split(machine, r);
-            machine->stopped = r;
+            refusal = node_machine_after_row(machine, r, state);
         }
-        r += refusal == NODE_MACHINE_TAKEN;
+        r += 1;
     }
+    // The record X stopped at: the one whose row refused, or else the last, the root, which is evaluated.
+    machine->stopped = r - 1;
     return refusal;
 }
 

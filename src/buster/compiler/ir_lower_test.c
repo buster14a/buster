@@ -3607,6 +3607,84 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// #2574: a direct symbol's address the function takes at least twice is one value, defined in the preheader, which every
+// entry that takes it reads; one taken once, and one reached through its GOT slot, stay where they are. Both lowering
+// paths give the same IR, and the function's result is the same: (s1 - s1) + (s2 - s1), the globals 8 bytes apart.
+static void ir_lower_test_hoisted_symbols(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[] = {
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB,
+        BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t values[] = { 1, 1, 0, 2, 1, 0, 0, 0 };
+    // Without an access column, every symbol direct; with one, symbol 1 direct and then through its GOT slot.
+    static const uint8_t direct[3] = { 0, BUSTER_TIER0_ACCESS_DIRECT, BUSTER_TIER0_ACCESS_DIRECT };
+    static const uint8_t got[3] = { 0, BUSTER_TIER0_ACCESS_GOT, BUSTER_TIER0_ACCESS_DIRECT };
+    const uint8_t* accesses[3] = { 0, direct, got };
+    const char* names[3] = {
+        "a symbol taken three times is one preheader value; one taken once stays in its block",
+        "a direct symbol by its access column is one preheader value",
+        "a symbol reached through its GOT slot stays in its block",
+    };
+    Arena output = arena_reserve(1ull << 24);
+    Arena twin_output = arena_reserve(1ull << 24);
+    Arena scratch = arena_reserve(1ull << 24);
+    Arena execution = arena_reserve(1ull << 24);
+    const bool ready = output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0;
+    Tier0TestData data = { 0 };
+    data.offsets[1] = 8;
+    uint8_t globals[16] = { 0 };
+    for (uint32_t variant = 0; ready && variant < 3; variant += 1)
+    {
+        const Tier0Function source = {
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .count = BUSTER_ARRAY_LENGTH(kinds),
+            .symbol_access = accesses[variant],
+            .symbol_count = accesses[variant] != 0 ? 3 : 0,
+        };
+        IrFunction function = { 0 };
+        ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && tier0_validate_scalar(&source).error == TIER0_OK, "Tier 0 takes the symbols' function", 0, variant);
+        if (ir_lower_test_lower(tally, &source, IR_I64, 4, &output, &twin_output, &scratch, &function, 0, variant))
+        {
+            uint32_t addresses = 0;
+            uint32_t preheader = 0;
+            uint32_t first = 0;
+            bool pairs = true;
+            for (uint32_t i = 0; i < function.instruction_count; i += 1)
+            {
+                if (function.op[i] == IR_SYMBOL_ADDR)
+                {
+                    addresses += 1;
+                    preheader += i < function.block_offsets[1];
+                    first += i < function.block_offsets[1] && function.a[i] == 1;
+                    pairs &= i + 1 < function.instruction_count && function.op[i + 1] == IR_PTRTOINT && function.a[i + 1] == i;
+                }
+            }
+            const bool hoisted = variant != 2;
+            ir_lower_test_expect(tally, pairs && addresses == (hoisted ? 2u : 4u) && preheader == (hoisted ? 1u : 0u) && first == preheader, names[variant], 0, variant);
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 2, &data, globals, 0, 0, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == 8, "the hoisted symbols' function computes the same difference", 0, variant);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&scratch, 0);
+        arena_pop_to(&execution, 0);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
 // The expected results of ir_lower_test_depth_types' functions, by C: f, and g = 100 + f.
 static uint64_t ir_lower_test_depth_types_expected(uint64_t p, bool pending)
 {
@@ -4461,6 +4539,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_copies(&tally);
         ir_lower_test_stack(&tally);
         ir_lower_test_indirect_jump(&tally);
+        ir_lower_test_hoisted_symbols(&tally);
         ir_lower_test_depth_types(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =

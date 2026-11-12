@@ -4,9 +4,9 @@
 #
 # The front end of the CMake build (CMakeLists.txt, CMakePresets.json; docs/commands/build.md has the details):
 #
-#   ./build.sh [build] [--config Debug|Release] [--target TARGET]... [--jobs N] [--verbose]
-#   ./build.sh test [--config Debug|Release] [--jobs N] [-- CTEST_ARGUMENT...]
-#   ./build.sh clean [--config Debug|Release | --all]
+#   ./build.sh [build] [--config Debug|Release|Develop] [--target TARGET]... [--jobs N] [--verbose]
+#   ./build.sh test [--config Debug|Release|Develop] [--jobs N] [-- CTEST_ARGUMENT...]
+#   ./build.sh clean [--config Debug|Release|Develop | --all]
 #   ./build.sh configure
 #   ./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-host-flags | print-output [--config C]
 #   ./build.sh check-call-graph [--config C] [--jobs N]
@@ -17,10 +17,11 @@
 # A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
 # runtime, sanitizer, fuzzing and debug information, only when the settings, PATH or the toolchain changed since it
 # last did (a changed clang starts the tree afresh), then has Ninja build what changed: an unchanged build compiles,
-# links and bakes nothing. It builds Release unless --config says Debug, at most one compile per core of the CPUs it may
-# run on, and when it builds the executable, build/cmake/VARIANT/CONFIG/compiler, it publishes that file as
-# build/compiler (a hard link, the same file) and its configuration's compile commands as build/compile_commands.json,
-# once the build has succeeded. Builds of one tree, and publications, wait for each other.
+# links and bakes nothing. It builds Release unless --config says Debug or Develop (Release's optimization in parts, for
+# the edit loop), at most one compile per core of the CPUs it may run on, and when it builds the executable,
+# build/cmake/VARIANT/CONFIG/compiler, it publishes that file as build/compiler (a hard link, the same file) and its
+# configuration's compile commands as build/compile_commands.json, once the build has succeeded. Builds of one tree,
+# and publications, wait for each other.
 #
 # print-compile-flags, print-sanitizer-flags, print-host-flags and print-sources print expanded arguments and source
 # paths as NUL-delimited argv, without building (cmake/BusterPrint.cmake); consumers read arrays rather than reevaluating
@@ -97,14 +98,15 @@ done
 case "$config" in
     Debug|debug) config=Debug ;;
     Release|release) config=Release ;;
-    *) die "--config must be Debug or Release" ;;
+    Develop|develop) config=Develop ;;
+    *) die "--config must be Debug, Release or Develop" ;;
 esac
 [ -z "$jobs" ] || [[ "$jobs" =~ ^[1-9][0-9]{0,3}$ ]] || die "--jobs must be a positive number"
 # Each command's own options: the others would be ignored silently.
 case "$command" in
     build) [ "${#arguments[@]}" -eq 0 ] || die "build takes no arguments: ${arguments[*]}" ;;
     test) ;;
-    clean) [ "${#arguments[@]}" -eq 0 ] && { [ "$clean_all" = 0 ] || [ "$config_given" = 0 ]; } || die "usage: ./build.sh clean [--config Debug|Release | --all]" ;;
+    clean) [ "${#arguments[@]}" -eq 0 ] && { [ "$clean_all" = 0 ] || [ "$config_given" = 0 ]; } || die "usage: ./build.sh clean [--config Debug|Release|Develop | --all]" ;;
     *) [ "$clean_all" = 0 ] || die "--all is clean's option" ;;
 esac
 case "$command" in
@@ -296,7 +298,7 @@ case "$command" in
 esac
 
 # BUSTER_PGO's tree has the Release configuration alone, which its profile is for.
-configurations="Debug;Release"
+configurations="Debug;Release;Develop"
 if [ "${BUSTER_PGO:-0}" = 1 ]; then
     [ "$config" = Release ] || die "BUSTER_PGO builds the Release configuration alone"
     configurations=Release
@@ -342,7 +344,7 @@ if [ "$command" = clean ]; then
     if [ -d "$tree" ]; then
         exec {publication}> "$root/build/.publish.lock"
         flock "$publication"
-        for configuration in Debug Release; do
+        for configuration in Debug Release Develop; do
             if [ "$config_given" = 0 ] || [ "$config" = "$configuration" ]; then
                 if [ "$root/build/compiler" -ef "$tree/$configuration/compiler" ]; then
                     rm -f -- "$root/build/compiler" "$root/build/compile_commands.json"

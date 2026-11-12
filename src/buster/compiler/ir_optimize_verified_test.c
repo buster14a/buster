@@ -376,7 +376,7 @@ static void ir_verified_tests(IrOptimizeTest* test)
         ir_optimize_test_expect(test, created, "verified handoff: original fixture allocation");
         for (uint32_t path = BUSTER_IR_OPTIMIZE_AUTO; created && path <= BUSTER_IR_OPTIMIZE_SCALAR; path += 1)
         {
-            for (uint32_t passes = 0; passes < 16; passes += 1)
+            for (uint32_t passes = 0; passes < 32; passes += 1)
             {
                 ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, passes, path, false, false);
             }

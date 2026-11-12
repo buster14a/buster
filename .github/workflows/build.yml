@@ -2,8 +2,8 @@ name: Build
 
 # The build's own regressions, on GitHub's runners rather than the 9700X, since they time nothing: fresh, unchanged,
 # edited, failed, interrupted and switched builds, the settings, the presets, the print commands, shifts and lexer
-# variants (tools/ci/build_regression.c, docs/commands/build.md); and build.sh's now() under locales whose decimal
-# point isn't a period (#409).
+# variants, the Develop configuration's parts and determinism (tools/ci/build_regression.c, docs/commands/build.md);
+# and build.sh's now() under locales whose decimal point isn't a period (#409).
 on:
   pull_request:
     paths:
@@ -13,6 +13,7 @@ on:
       - 'cmake/**'
       - tools/ci/build_regression.c
       - 'tools/ci/codegen_fixture/**'
+      - 'tools/codegen/**'
       - 'tools/ci/build_ownership*.h'
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
@@ -31,6 +32,7 @@ on:
       - 'cmake/**'
       - tools/ci/build_regression.c
       - 'tools/ci/codegen_fixture/**'
+      - 'tools/codegen/**'
       - 'tools/ci/build_ownership*.h'
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh

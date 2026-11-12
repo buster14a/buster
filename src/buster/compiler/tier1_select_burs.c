@@ -158,7 +158,8 @@ typedef enum Tier1BursFamily
 } Tier1BursFamily;
 
 // What the plan takes as a root's pattern (tier1_burs_pick): the candidate of `kind`, with LEA_ADD's of a register or of
-// a displacement apart; a load's or a store's walked address where it has one; a conversion's walked copy; a truth
+// a displacement apart; a load's or a store's walked address where it has one, a store's of a register and of its constant
+// as the immediate (#2554) apart; a conversion's walked copy; a truth
 // value's folded comparison; a node's own first candidate; or munch's choice.
 typedef enum Tier1BursAction
 {
@@ -169,6 +170,7 @@ typedef enum Tier1BursAction
     TIER1_BURS_ACTION_LEA_IMMEDIATE,
     TIER1_BURS_ACTION_LOAD,
     TIER1_BURS_ACTION_STORE,
+    TIER1_BURS_ACTION_STORE_IMMEDIATE,
     TIER1_BURS_ACTION_WALKED_COPY,
     TIER1_BURS_ACTION_FOLDED_COMPARE,
     TIER1_BURS_ACTION_PLAIN,
@@ -265,6 +267,7 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_LOAD, 0, { TIER1_BURS_A1, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_LOAD, TIER1_RULE_LOAD },
     { TIER1_BURS_LOADF, TIER1_BURS_FAMILY_LOAD_F, 0, { TIER1_BURS_A1, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_STORE, 0, { TIER1_BURS_A1, TIER1_BURS_REG }, 1, TIER1_BURS_ACTION_STORE, TIER1_RULE_STORE },
+    { TIER1_BURS_STMT, TIER1_BURS_FAMILY_STORE, 0, { TIER1_BURS_A1, TIER1_BURS_IMM }, 1, TIER1_BURS_ACTION_STORE_IMMEDIATE, TIER1_RULE_STORE },
     // Comparisons, their truth values' chains through C's `!= 0` and `== 0` (tier1_select_truth), and the branches that
     // fuse with them; and a zero extension's own move.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ICMP, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_COMPARE },
@@ -1353,7 +1356,10 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
             match = pattern->rule == TIER1_RULE_LOAD_ADDRESS || (pattern->rule == TIER1_RULE_LOAD && chosen == UINT32_MAX);
             break;
         case TIER1_BURS_ACTION_STORE:
-            match = pattern->rule == TIER1_RULE_STORE_ADDRESS || (pattern->rule == TIER1_RULE_STORE && chosen == UINT32_MAX);
+            match = !pattern->compare_immediate && (pattern->rule == TIER1_RULE_STORE_ADDRESS || (pattern->rule == TIER1_RULE_STORE && chosen == UINT32_MAX));
+            break;
+        case TIER1_BURS_ACTION_STORE_IMMEDIATE:
+            match = pattern->compare_immediate && (pattern->rule == TIER1_RULE_STORE_ADDRESS || (pattern->rule == TIER1_RULE_STORE && chosen == UINT32_MAX));
             break;
         case TIER1_BURS_ACTION_WALKED_COPY:
             match = (pattern->rule == TIER1_RULE_COPY || pattern->rule == TIER1_RULE_ADDRESS) && (pattern->fold_count != 0 || chosen == UINT32_MAX);
@@ -1368,7 +1374,8 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
             break;
         }
         // The first match, or for a load, a store and a walked copy, a later walked one over an earlier plain one.
-        const bool walked = rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_WALKED_COPY;
+        const bool walked = rule->action == TIER1_BURS_ACTION_LOAD || rule->action == TIER1_BURS_ACTION_STORE || rule->action == TIER1_BURS_ACTION_STORE_IMMEDIATE ||
+                            rule->action == TIER1_BURS_ACTION_WALKED_COPY;
         chosen = match && (chosen == UINT32_MAX || walked) ? p : chosen;
     }
     *munched = chosen == UINT32_MAX;

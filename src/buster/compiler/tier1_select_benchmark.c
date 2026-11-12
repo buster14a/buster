@@ -39,6 +39,7 @@ struct String8
 #include "buster/compiler/x86_target_forms.c"
 #include "buster/compiler/x86_zen5.c"
 #include "buster/compiler/dataflow.c"
+#include "buster/compiler/dominators.c"
 #include "buster/compiler/c_types.c"
 #include "buster/compiler/calling_convention.c"
 // Tier 0's machine rows are the IR's row calls' (#141, IrFunction.rows), which Tier 1 places as Tier 0 does.
