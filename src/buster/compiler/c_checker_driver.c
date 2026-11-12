@@ -3796,6 +3796,128 @@ static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* 
     return result;
 }
 
+// An overload set's address that matches no candidate (#2384), as clang's assignment diagnostic gives it: the conversion
+// error with '<overloaded function type>' as its source, "incompatible function pointer types ..." where the enable_ifs
+// leave one candidate, whose address clang converts, else "... incompatible type ...", with a note at each candidate, the
+// latest first: one with an enable_if that isn't always true "made ineligible by enable_if" at its declaration's first
+// token; else, at its name, its
+// first difference from the target's function type, clang's HandleFunctionTypeMismatch's: "has different number of
+// parameters (expected N but has M)", "has type mismatch at Nth parameter (expected 'T' but has 'U')", "has different
+// return type ('T' expected but has 'U')", or none ("candidate function"). An initialization's or an assignment's; NULL
+// for any other report.
+static const char* check_driver_overload_address(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, PPOutputDiagnosticNote* notes,
+                                                 Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN);
+    uint32_t source = !applies ? BUSTER_CHECK_NONE : op == CHECK_OP_INITIALIZE ? graph->operand0[node] : graph->operand1[node];
+    source = source < stream->count && graph->ops[source] == CHECK_OP_ADDRESS ? graph->operand0[source] : source;
+    const uint32_t found = source < stream->count ? check_stream_overload_head(stream, source) : 0;
+    // (A plain function's name has a candidate too: only an overloadable one's set is clang's '<overloaded function type>'.)
+    const uint32_t head = found != 0 && found - 1 < graph->overload_candidate_count &&
+                          (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ? found : 0;
+    const TypeId target = head == 0 ? 0 : op == CHECK_OP_INITIALIZE ? graph->types[node] :
+                          graph->operand0[node] < stream->count ? check_stream_type(stream, graph->operand0[node]) : 0;
+    const TypeId pointer = target != 0 ? type_strip_aligned(types, target) : 0;
+    const TypeId expected = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, pointer)) : 0;
+    const bool function = expected != 0 && type_kind(types, expected) == BUSTER_TYPE_KIND_FUNCTION;
+    uint32_t note_token = BUSTER_CHECK_NONE;
+    const char* note = NULL;
+    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, scratch) : NULL;
+    const char* prefix = "incompatible function pointer types ";
+    const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
+    // The target as the words spell it: between the action's words and the source's.
+    const char* action = shaped ? words + strlen(prefix) : NULL;
+    const char* separator = action == NULL ? NULL : op == CHECK_OP_INITIALIZE ? strstr(action, " with an expression of type ") : strstr(action, " from ");
+    const uint64_t skip = op == CHECK_OP_INITIALIZE ? strlen("initializing ") : strlen("assigning to ");
+    const bool spelled = separator != NULL && (uint64_t)(separator - action) > skip;
+    const char* result = NULL;
+    uint32_t note_count = 0;
+    uint32_t eligible = 0;
+    uint32_t seen[BUSTER_CHECK_SEMANTIC_NOTES];
+    uint32_t seen_count = 0;
+    uint32_t steps = 0;
+    for (uint32_t current = spelled ? head - 1 : UINT32_MAX; current < graph->overload_candidate_count && steps < graph->overload_candidate_count && note_count < BUSTER_CHECK_SEMANTIC_NOTES;
+         current = graph->overload_candidates[current].previous, steps += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + current;
+        bool repeated = false;
+        for (uint32_t k = 0; k < seen_count; k += 1)
+        {
+            repeated |= seen[k] == candidate->canonical;
+        }
+        if (repeated)
+        {
+            continue;
+        }
+        seen[seen_count++] = candidate->canonical;
+        const TypeId type = type_strip_aligned(types, candidate->type);
+        uint32_t have = 0;
+        uint32_t want = 0;
+        const TypeId* parameters = type_parameters(types, type, &have);
+        const TypeId* wanted = type_parameters(types, expected, &want);
+        uint32_t mismatch = UINT32_MAX;
+        for (uint32_t k = 0; have == want && mismatch == UINT32_MAX && k < have; k += 1)
+        {
+            mismatch = type_unqualified(type_strip_aligned(types, parameters[k])) != type_unqualified(type_strip_aligned(types, wanted[k])) ? k : mismatch;
+        }
+        const TypeId returned = type_return(types, type);
+        const TypeId wanted_return = type_return(types, expected);
+        const char* text = "candidate function";
+        uint32_t at = candidate->declaration;
+        const CheckConditionDeclaration* conditions = check_condition_find(&graph->conditions, candidate->declaration);
+        eligible += conditions == NULL || !conditions->restricted ? 1u : 0u;
+        if (conditions != NULL && conditions->restricted)
+        {
+            text = "candidate function made ineligible by enable_if";
+            at = check_input_declaration_begin(parser, candidate->declaration);
+        }
+        else if (have != want)
+        {
+            text = check_warning_text(scratch, "candidate function has different number of parameters (expected %u but has %u)", want, have);
+        }
+        else if (mismatch != UINT32_MAX)
+        {
+            const String8 wanted_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, wanted[mismatch], 0);
+            const String8 have_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, parameters[mismatch], 0);
+            const uint32_t ordinal = mismatch + 1;
+            const char* suffix = ordinal % 100 >= 11 && ordinal % 100 <= 13 ? "th" : ordinal % 10 == 1 ? "st" : ordinal % 10 == 2 ? "nd" : ordinal % 10 == 3 ? "rd" : "th";
+            text = check_warning_text(scratch, "candidate function has type mismatch at %u%s parameter (expected %.*s but has %.*s)", ordinal, suffix,
+                                      (int)wanted_text.length, wanted_text.pointer, (int)have_text.length, have_text.pointer);
+        }
+        else if (type_unqualified(type_strip_aligned(types, returned)) != type_unqualified(type_strip_aligned(types, wanted_return)))
+        {
+            const String8 wanted_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, wanted_return, 0);
+            const String8 have_text = check_driver_warning_type(parser, pp, input, types, spell, scratch, returned, 0);
+            text = check_warning_text(scratch, "candidate function has different return type (%.*s expected but has %.*s)", (int)wanted_text.length,
+                                      wanted_text.pointer, (int)have_text.length, have_text.pointer);
+        }
+        check_semantic_add_note(parser, notes, &note_count, at, text);
+    }
+    // With one candidate left by the enable_ifs, clang converts its address, a function pointer's conversion.
+    const bool ineligible = eligible == 1;
+    if (spelled && note_count != 0)
+    {
+        const int length = (int)(separator - action - (int64_t)skip);
+        const char* target_text = action + skip;
+        result = op == CHECK_OP_INITIALIZE ?
+                 (ineligible ? check_warning_text(scratch, "incompatible function pointer types initializing %.*s with an expression of type '<overloaded function type>' "
+                                                           "[-Wincompatible-function-pointer-types]", length, target_text) :
+                               check_warning_text(scratch, "initializing %.*s with an expression of incompatible type '<overloaded function type>'", length, target_text)) :
+                 (ineligible ? check_warning_text(scratch, "incompatible function pointer types assigning to %.*s from '<overloaded function type>' "
+                                                           "[-Wincompatible-function-pointer-types]", length, target_text) :
+                               check_warning_text(scratch, "assigning to %.*s from incompatible type '<overloaded function type>'", length, target_text));
+    }
+    else
+    {
+        memset(notes, 0, sizeof(*notes) * BUSTER_CHECK_SEMANTIC_NOTES);
+    }
+    return result;
+}
+
 // A call's wrong argument count as clang words it (#1860, #1921, Sema::ConvertArgumentsForCall): "too few/too many arguments
 // to function call, expected [at least|at most] N, have M". An ordinary call's count is its callee's type's, with clang's
 // "'h' declared here" note at its declaration where the callee is a function's name (through parentheses and `&`), and
@@ -4457,6 +4579,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // A failed assignment conversion's clang words, with an argument's parameter note (#147).
                     uint32_t conversion_note_token = BUSTER_CHECK_NONE;
                     const char* conversion_note = NULL;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_overload_address(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
+                    }
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,

@@ -846,9 +846,11 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
         const CheckInputAttribute* attribute = attributes->records + i;
         own += (attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) && !attribute->ignored && !attribute->subject_ignored ? 1u : 0u;
     }
-    // #1361's object-size wrappers keep their conditions unevaluated, as before.
-    const bool sized = attributes != NULL && attributes->object_sizes != NULL;
+    // #1361's object-size wrappers in a system header keep their conditions unevaluated, as before; a user's are read as
+    // any other function's (#2147), but a shape the steps don't take is kept and decides nothing.
     const bool system = check_graph_system_token(&input->graph, name);
+    const bool object_sized = attributes != NULL && attributes->object_sizes != NULL;
+    const bool sized = object_sized && system;
     // Its own conditions first, in source order.
     uint32_t* own_indices = own != 0 && !sized ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, own) : NULL;
     input->resource |= own != 0 && !sized && own_indices == NULL;
@@ -861,7 +863,10 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
         {
             CheckCondition condition;
             const CheckInputAttributeRecovery recovery = check_input_attribute_recovery(reader, attributes, attribute);
-            const CheckConditionBuild built = check_condition_build(reader, attributes, attribute, parameters, list, function, name, system, &condition);
+            // (A user's object-size wrapper keeps a shape the steps don't take, a `__builtin_object_size` of its parameter, as
+            // a system header's condition is kept: it decides nothing.)
+            const CheckConditionBuild built = check_condition_build(reader, attributes, attribute, parameters, list, function, name, system || object_sized,
+                                                                    &condition);
             // A system header's condition whose shape the steps don't take is kept and decides nothing.
             if (built == CHECK_CONDITION_UNSUPPORTED)
             {
