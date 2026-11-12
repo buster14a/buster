@@ -7125,6 +7125,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
+#include "c_check_avx_abi_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -9275,6 +9276,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_target_feature_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_avx_abi(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
         {
