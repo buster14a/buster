@@ -4791,6 +4791,16 @@ definition is here", where the error used to read "conflicting declaration":
 - `CHECK_REDECLARATION_KIND`: "redefinition of 'X' as different kind of
   symbol".
 
+A block's object whose earlier declaration in the block has linkage and itself
+none, or the other way around, of a type that merges, takes clang's
+`MergeVarDecl` wording (#2441): "non-extern declaration of 'q' follows extern
+declaration" (`extern int q; int q = 2;`), "extern declaration of 'q' follows
+non-extern declaration", and, where one of them is a block's `static`, "static
+declaration of 'r' follows non-static declaration" or its reverse, each with
+its note. Left: with `__auto_type` (`extern int w; __auto_type w = 2;`),
+clang merges the type only once it is deduced, so its error is the
+non-extern one, where buster still compares the placeholder's type.
+
 Thread-local redeclarations use the same type and linkage precedence (#1784):
 an incompatible object type is reported even when thread-local storage also
 differs, followed by static/non-static linkage conflicts and duplicate local
