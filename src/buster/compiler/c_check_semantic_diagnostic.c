@@ -86,7 +86,8 @@ static bool check_semantic_anonymous_member(const Parser* parser, uint32_t keywo
 // or a union's) open at the token, found by a backward scan that skips each closed bracket's pair.
 static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
-    const bool unnamed = parser->tokens.kinds[token] == PARSE_KIND_STRUCT;
+    // (An unnamed enumeration's keyword too, #2482: `enum (unnamed at f.c:1:2)`.)
+    const bool unnamed = parser->tokens.kinds[token] == PARSE_KIND_STRUCT || parser->tokens.kinds[token] == PARSE_KIND_ENUM;
     uint32_t keyword = token;
     for (uint32_t steps = 0; !unnamed && keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM;
          steps += 1)
@@ -610,13 +611,43 @@ static const char* check_semantic_requirement(const Parser* parser, Preprocessor
         valid = parts[i].length != 0 && parts[i].length < UINT64_MAX - length - 1;
         length += valid ? parts[i].length + 1 : 0;
     }
+    // A record or enumeration a type name defines (`__builtin_offsetof(struct { int a, b; }, b)`) prints as clang's
+    // TypePrinter names it, without its body (#2482): `struct T`, or an unnamed one's `struct (unnamed at f.c:1:2)`
+    // (check_semantic_tag_spelling). Its tokens past the keyword print nothing.
+    uint8_t* hidden = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    valid &= hidden != NULL;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        hidden[i] = 0;
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[first + i];
+        const bool tag = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM;
+        const uint32_t after = tag ? check_input_skip_attributes(parser, first + i + 1, end) : end;
+        const bool named = after < end && parser->tokens.kinds[after] == PARSE_KIND_IDENTIFIER;
+        const uint32_t brace = named ? after + 1 : after;
+        const uint8_t role = brace < end ? parser->tree.roles[brace] : PARSE_ROLE_NONE;
+        const uint32_t close = role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM ? parser->tree.parents[brace] : end;
+        const String8 spelling = close < end ? check_semantic_tag_spelling(parser, pp, named ? after : first + i, scratch) : (String8){ 0 };
+        if (spelling.length != 0)
+        {
+            parts[i] = spelling;
+            length += spelling.length;
+            for (uint32_t k = first + i + 1; k <= close; k += 1)
+            {
+                hidden[k - first] = 1;
+            }
+            i = close - first;
+        }
+    }
     // A cast's type name prints its builtin type as clang's TypePrinter does (#1447, `(unsigned)n`'s `(unsigned int)n`):
     // its run of type keywords becomes the first one's text, and the rest print nothing.
     uint8_t* dropped = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     valid &= dropped != NULL;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        dropped[i] = 0;
+        dropped[i] = hidden[i];
     }
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
@@ -664,7 +695,10 @@ static const char* check_semantic_requirement(const Parser* parser, Preprocessor
         const bool comma = role == PARSE_ROLE_SEPARATOR && check_common_comma_operator(parser, first + i);
         const bool previous_comma = previous == PARSE_ROLE_SEPARATOR && check_common_comma_operator(parser, first + prior);
         const bool separated = previous == PARSE_ROLE_SEPARATOR;
-        if (prior != UINT32_MAX && (check_semantic_binary(role) || check_semantic_binary(previous) || word || separated || comma || previous_comma))
+        // A _Generic association's `:` is followed by a space, as clang's printer writes `int: 1` (#2482); a conditional's
+        // is a binary operator's.
+        const bool associated = prior != UINT32_MAX && parser->tokens.kinds[first + prior] == PARSE_KIND_COLON && !check_semantic_binary(previous);
+        if (prior != UINT32_MAX && (check_semantic_binary(role) || check_semantic_binary(previous) || word || separated || comma || previous_comma || associated))
         {
             result[at++] = ' ';
         }
@@ -693,6 +727,19 @@ static uint32_t check_semantic_bare(const CheckGraph* graph, uint32_t node)
     for (uint32_t steps = 0; result < graph->count && graph->ops[result] == CHECK_OP_CONVERT && steps < graph->count; steps += 1)
     {
         result = graph->operand0[result];
+    }
+    return result;
+}
+
+// A node under its implicit conversions and its selections (_Generic's, __builtin_choose_expr's and __extension__'s
+// SELECT), as clang's IgnoreParenImpCasts looks through them (IgnoreParensSingleStep, #2482): a selected literal is a
+// literal, so `_Generic(x, int: 1) == 2` notes nothing.
+static uint32_t check_semantic_unselected(const CheckGraph* graph, uint32_t node)
+{
+    uint32_t result = check_semantic_bare(graph, node);
+    for (uint32_t steps = 0; result < graph->count && graph->ops[result] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
+    {
+        result = check_semantic_bare(graph, graph->operand0[result]);
     }
     return result;
 }
@@ -1075,6 +1122,25 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
             const uint32_t node = literals[t - begin];
             spelled[t - first] = node < stream->count ? check_semantic_literal_spelling(parser, pp, types, graph, stream, node, scratch) : NULL;
         }
+        // A compound literal's array of unknown size prints its completed type's bound, as clang's printer prints the
+        // literal's type (#2482): `(int[]){1, 2}`'s `(int[2]){1, 2}`. Its type name's first `[]` takes the literal's length.
+        for (uint32_t t = first; spelled != NULL && t < end; t += 1)
+        {
+            const uint32_t close = parser->tree.roles[t] == PARSE_ROLE_OPEN_COMPOUND ? parser->tree.parents[t] : BUSTER_CHECK_NONE;
+            const bool braced = close + 1 < end && parser->tree.roles[close + 1] == PARSE_ROLE_OPEN_COMPOUND_BODY;
+            const uint32_t body = braced ? parser->tree.parents[close + 1] : BUSTER_CHECK_NONE;
+            const uint32_t node = body < end && body >= begin ? literals[body - begin] : BUSTER_CHECK_NONE;
+            const TypeId type = node < stream->count ? type_strip_aligned(types, check_stream_type(stream, node)) : 0;
+            uint32_t bracket = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_ARRAY ? t + 1 : close;
+            while (bracket < close && !(parser->tokens.kinds[bracket] == PARSE_KIND_L_SQUARE && parser->tokens.kinds[bracket + 1] == PARSE_KIND_R_SQUARE))
+            {
+                bracket += 1;
+            }
+            if (bracket < close)
+            {
+                spelled[bracket - first] = check_warning_text(scratch, "[%" PRIu64, types->types.extent[type_resolved_index(types, type)]);
+            }
+        }
         const bool literal = failed < stream->count ? check_semantic_integer_literal(parser, graph, stream, failed) :
                              first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_NUMBER;
         *location = literal ? begin : first;
@@ -1082,8 +1148,8 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
         // The note of the requirement's operands' values: a binary operator's but `||`'s.
         const CheckOp op = !literal && failed < graph->count ? graph->ops[failed] : CHECK_OP_COUNT;
         const bool binary = ((op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_AND) || op == CHECK_OP_COMMA) && graph->tokens[failed] < count;
-        const uint32_t left = binary ? check_semantic_bare(graph, graph->operand0[failed]) : BUSTER_CHECK_NONE;
-        const uint32_t right = binary ? check_semantic_bare(graph, graph->operand1[failed]) : BUSTER_CHECK_NONE;
+        const uint32_t left = binary ? check_semantic_unselected(graph, graph->operand0[failed]) : BUSTER_CHECK_NONE;
+        const uint32_t right = binary ? check_semantic_unselected(graph, graph->operand1[failed]) : BUSTER_CHECK_NONE;
         if (left < stream->count && right < stream->count && (check_semantic_useful(parser, graph, left) || check_semantic_useful(parser, graph, right)))
         {
             const CheckValue values[2] =

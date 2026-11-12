@@ -10554,12 +10554,17 @@ enables, which this checker doesn't all give.
   a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. A read of
   a const object is its completed initializer's value (#2214,
   `check_semantic_operand_value`): `const int k = 0;`'s `k == 45` is
-  `'0 == 45'`, a member's and an element's too. Still
-  separate: a type name's literals print as written (`sizeof(int[0x10])`, clang
-  `int[16]`, and a compound literal's `(int[]){1, 2}`, clang `(int[2])`);
-  `_Generic`'s associations (`int:1`, clang `int: 1`); a record type defined
-  in `__builtin_offsetof` (clang `struct (unnamed at f.c:1:2)`); a complex
-  value's note.
+  `'0 == 45'`, a member's and an element's too. As clang's printer gives them
+  too (#2482): a compound literal's array of unknown size with its completed
+  bound (`(int[]){1, 2}` is `(int[2]){1, 2}`), `_Generic`'s associations as
+  `int: 1`, and a record or enumeration a type name defines by its name
+  without its body (`struct T`, an unnamed one's `struct (unnamed at
+  f.c:1:2)`, `check_semantic_tag_spelling`). A selection (`_Generic`,
+  `__builtin_choose_expr`, `__extension__`) is looked through as clang's
+  IgnoreParenImpCasts does, so a selected literal is a literal and
+  `_Generic(x, int: 1) == 2` notes nothing (`check_semantic_unselected`).
+  Still separate: a type name's literals print as written
+  (`sizeof(int[0x10])`, clang `int[16]`); a complex value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that
