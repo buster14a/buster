@@ -229,6 +229,8 @@ struct CheckAsmName
 typedef struct CheckProgramAsm CheckProgramAsm;
 struct CheckProgramAsm
 {
+    // The statement it plans (CheckInput.asm_statements): its index, but in a target_clones copy's plan (#2247).
+    uint32_t statement;
     CheckAsmPlace* places;
     const char* reason;
     String8* names;
@@ -300,9 +302,14 @@ struct CheckProgramNaked
 typedef struct CheckProgramAsms CheckProgramAsms;
 struct CheckProgramAsms
 {
-    // input->asm_count of them, by statement (0 for a program without asm statements); a statement of no selected body
-    // isn't planned.
+    // plan_count of them (0 for a program without asm statements): input->asm_count by statement, then the target_clones
+    // copies' own (#2247), each copy body's statement s at copy_bases[b] + s less its body's first statement
+    // (copy_firsts[b]; check_program_asm_plan_of), planned for the copy's instruction set. A statement of no selected
+    // body isn't planned.
     CheckProgramAsm* plans;
+    uint32_t plan_count;
+    uint32_t* copy_bases;
+    uint32_t* copy_firsts;
     // By body, for a program with a naked function (0 otherwise): a naked body's code; another body isn't planned.
     CheckProgramNaked* naked;
     // The names the templates define and refer to, each once.
@@ -324,6 +331,15 @@ struct CheckProgramAsms
     CheckProgramStatus status;
     uint32_t token;
 };
+
+// The plan of statement `s` in body `b` (#2247): a target_clones copy's own (CheckProgramAsms.copy_bases), else the
+// statement's; 0 for none.
+static CheckProgramAsm* check_program_asm_plan_of(const CheckProgramAsms* asms, uint32_t b, uint32_t s, uint32_t asm_count)
+{
+    const uint32_t base = asms->copy_bases != 0 ? asms->copy_bases[b] : UINT32_MAX;
+    const uint32_t p = base != UINT32_MAX ? base + (s - asms->copy_firsts[b]) : s;
+    return asms->plans != 0 && s < asm_count && p < asms->plan_count ? asms->plans + p : 0;
+}
 
 // A constraint's first alternative: the general registers it allows (a bit each), whether it allows an XMM register
 // (`fixed_vector` its number plus one where an explicit register variable fixes it, 0 for any), the x87's stack
@@ -1982,48 +1998,6 @@ static void check_asm_unit_number(Arena* output, int64_t value, bool* valid)
     check_asm_unit_bytes(output, digits, (uint64_t)length, valid);
 }
 
-// Whether template `body`, assembled alone (asm_assemble, a template that takes directives), uses statement `statement`'s
-// asm goto labels (`labels` of them, by the names check_asm_substitute printed, their `.L` made `__`) only as a jmp's or a jcc's target: each
-// fixup to one is in the template's code (AsmResult.entry_atom), a rel32 field of a jmp (E9) or a jcc (0F 80 to 8F)
-// without an addend, as the record path takes them (check_program_asm_plan_one's gotos). A label used otherwise (data, a
-// call's target, an addend, a rip-relative address) is refused by name, since the helper's exit isn't the C label.
-static bool check_asm_unit_gotos(const AsmResult* body, uint32_t statement, uint32_t labels)
-{
-    const Link* link = &body->link;
-    bool jumps = true;
-    for (AtomId a = 1; a < link->atoms.count; a += 1)
-    {
-        const uint8_t* bytes = link->atoms.bytes[a];
-        for (uint32_t f = 0; f < link->atoms.fixup_count[a]; f += 1)
-        {
-            const FixupId fixup = link->atoms.fixup_begin[a] + f;
-            const SymbolId target = link->fixups.target[fixup];
-            const NameId name_id = target < link->symbols.count ? link->symbols.name[target] : 0;
-            // The name as the substitution printed it (`.L` for the `__` the caller gave it).
-            char local[64];
-            const uint32_t length = name_id != 0 && name_id < link->names.count && link->names.length[name_id] < sizeof(local) ? link->names.length[name_id] : 0;
-            if (length >= 2)
-            {
-                memcpy(local, link->names.bytes[name_id], length);
-            }
-            const bool renamed = length >= 2 && local[0] == '_' && local[1] == '_';
-            local[0] = '.';
-            local[1] = 'L';
-            if (renamed && check_asm_goto_label((String8){ .pointer = local, .length = length }, statement, labels) != BUSTER_CHECK_NONE)
-            {
-                const uint32_t offset = link->fixups.offset[fixup];
-                const uint8_t kind = link->fixups.kind[fixup];
-                const bool field = a == body->entry_atom && bytes != 0 && (kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_CALL) && link->fixups.addend[fixup] == -4 &&
-                                   offset >= 2 && (uint64_t)offset + 4 <= link->atoms.size[a];
-                const bool jmp = field && bytes[offset - 1] == 0xe9;
-                const bool jcc = field && bytes[offset - 2] == 0x0f && (bytes[offset - 1] & 0xf0) == 0x80;
-                jumps &= jmp || jcc;
-            }
-        }
-    }
-    return jumps;
-}
-
 // Records `records[0, count)` as the bytes they encode, a `.byte` line of them each (check_asm_unit_helper).
 static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool scalar, bool* valid)
 {
@@ -2277,7 +2251,8 @@ static uint32_t check_asm_m64_object(const CheckProgram* program, uint32_t node)
     return object ? at : BUSTER_CHECK_NONE;
 }
 
-// Plans statement `s` (its operands from `operands`, check_asms_run's) into `plan`: its places, and its helper's code
+// Plans statement `s` as plan `p` (its own index, or a target_clones copy's past the statements', #2247, whose %= number
+// and asm goto labels' names it gives) (its operands from `operands`, check_asms_run's) into `plan`: its places, and its helper's code
 // into `helper`, or the reason the lowering refuses it, its template matched against `index`. False only for an arena
 // without room, with both arenas then as they were.
 static uint8_t check_lower_type_class(const TypeTable* types, TypeId type);
@@ -2541,7 +2516,7 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
     return placed;
 }
 
-static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, const CheckAsmCheckedOperand* operands, const X86MatchIndex* index,
+static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, uint32_t p, const CheckAsmCheckedOperand* operands, const X86MatchIndex* index,
                                        const X86Target* instruction_set, bool scalar, CheckProgramAsm* plan, CheckProgramHelper* helper, Arena* output, Arena* scratch)
 {
     (void)scalar;
@@ -2552,7 +2527,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     const uint32_t count = statement->output_count + statement->input_count;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    *plan = (CheckProgramAsm){ .helper = BUSTER_CHECK_NONE, .planned = true };
+    *plan = (CheckProgramAsm){ .statement = s, .helper = BUSTER_CHECK_NONE, .planned = true };
     CheckAsmPlace* places = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckAsmPlace, count) : 0;
     CheckAsmConstraint* constraints = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmConstraint, count) : 0;
     bool valid = count == 0 || (places != 0 && constraints != 0);
@@ -3131,7 +3106,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     String8 text = { 0 };
     if (valid && reason == NULL)
     {
-        reason = check_asm_substitute(statement, places, program->identifiers, s, scratch, &text, &valid);
+        reason = check_asm_substitute(statement, places, program->identifiers, p, scratch, &text, &valid);
     }
     AsmCode code = { 0 };
     AsmResult unit = { 0 };
@@ -3154,7 +3129,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 memcpy(body_source, text.pointer, text.length);
             }
             // An asm goto's labels, which no source defines, as global names of the same length (`__buster_goto_S_L`), so
-            // that the assembler keeps a fixup of each use for check_asm_unit_gotos.
+            // that the template assembles alone; the whole helper defines them at its exits (check_asm_unit_helper).
             const uint64_t prefix = sizeof(BUSTER_CHECK_ASM_GOTO_PREFIX) - 1;
             for (uint64_t at = 0; statement->is_goto && body_source != 0 && at + prefix <= text.length; at += 1)
             {
@@ -3176,11 +3151,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 stack_or_flags |= places[k].kind == BUSTER_CHECK_ASM_X87 || places[k].kind == BUSTER_CHECK_ASM_FLAG;
             }
             const bool entry_code = body.error == NULL && (body.entry_code || stack_or_flags);
-            if (body.error == NULL && statement->is_goto && !check_asm_unit_gotos(&body, s, statement->label_count))
-            {
-                reason = "asm goto labels other than a jmp's or a jcc's target";
-            }
-            else if (body.error != NULL)
+            if (body.error != NULL)
             {
                 // A function's template's CFI (#1848): clang splices it into the function's own frame description at the
                 // template's place, which a helper of its own, with its own unwind entry, can't be.
@@ -3206,7 +3177,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 // frame and operand block around the template. An asm goto's labels are its jumps' targets alone.
                 const uint32_t labels = statement->is_goto ? statement->label_count : 0;
                 arena_pop_to(output, body_mark);
-                unit = reason == NULL ? check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, s, labels, exit, text, index, scalar,
+                unit = reason == NULL ? check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, labels, exit, text, index, scalar,
                                                               output, scratch) :
                                         (AsmResult){ .error = reason };
                 unit_assembled = unit.error == NULL;
@@ -3252,11 +3223,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     CheckAsmGoto* gotos = valid && reason == NULL && statement->is_goto && code.reference_count != 0 ?
                           BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmGoto, code.reference_count) : 0;
     uint32_t goto_count = 0;
+    bool goto_data = false;
     valid = valid && (reason != NULL || !statement->is_goto || code.reference_count == 0 || gotos != 0);
     for (uint32_t r = 0; valid && reason == NULL && statement->is_goto && r < code.reference_count; r += 1)
     {
         const AsmCodeReference* reference = code.references + r;
-        const uint32_t label = check_asm_goto_label(reference->name, s, statement->label_count);
+        const uint32_t label = check_asm_goto_label(reference->name, p, statement->label_count);
         if (label != BUSTER_CHECK_NONE)
         {
             const uint32_t row = code.records[reference->record].form & ~BUSTER_X86_FORM_FIXUP;
@@ -3270,8 +3242,27 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             }
             else
             {
-                reason = "asm goto labels other than a jmp's or a jcc's target";
+                goto_data = true;
             }
+        }
+    }
+    // A label used otherwise (#1845's item 1: data, `.quad %l[x]` in the Linux kernel's __jump_table, a call's target, a
+    // rip-relative address, an addend): the template is assembled whole in the record helper (check_asm_unit_helper), whose
+    // exits are labelled with the names the substitution printed, so that each use is the address of its label's exit, as
+    // clang's is its indirect target's block, which stores the outputs and goes to the label.
+    if (valid && reason == NULL && goto_data)
+    {
+        arena_pop_to(output, code_mark);
+        code = (AsmCode){ 0 };
+        goto_count = 0;
+        unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, statement->label_count, exit, text, index, scalar,
+                                     output, scratch);
+        unit_assembled = unit.error == NULL;
+        reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
+        valid = unit.error == NULL || reason != NULL;
+        for (uint32_t a = 1; unit_assembled && reason == NULL && a < unit.link.atoms.count; a += 1)
+        {
+            reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
         }
     }
     // A template assembled whole takes the record helper's loads and stores (check_asm_unit_helper): the x87's places, a
@@ -3339,7 +3330,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         if (unit_code)
         {
             helper->id = CBUILTIN_NONE;
-            helper->assembly = s + 1;
+            helper->assembly = p + 1;
             helper->parameter_count = block != 0 ? 1 : 0;
             helper->parameter_types[0] = block != 0 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID;
             helper->parameter_types[1] = BUSTER_TYPE_VOID;
@@ -3376,10 +3367,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
         // Its register operands are its call row's arguments (#1839's measurements: a load of the block's slot, which the
-        // lowering stored through a register a moment before, failed store-to-load forwarding once a run), but in a
-        // lowering for Tier 1 (CheckProgramOptions.asm_bodies), whose body call takes the block's address alone and whose
-        // stores into the block are rsp-relative.
-        const bool passed = !program->asm_bodies && check_asm_inline_passes(places, count);
+        // lowering stored through a register a moment before, failed store-to-load forwarding once a run), in a lowering
+        // for Tier 1 (CheckProgramOptions.asm_bodies) too, whose body call takes them past the block's address (#2144,
+        // IrAsmBody.locations).
+        const bool passed = check_asm_inline_passes(places, count);
         uint32_t first = 0;
         bool room = false;
         // An asm goto's (#1839's item 2): the helper's exits in the body, its exit number the call row's result.
@@ -3497,7 +3488,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         }
         plan->label_count = valid ? code.label_count : 0;
         helper->id = CBUILTIN_NONE;
-        helper->assembly = s + 1;
+        helper->assembly = p + 1;
         helper->parameter_count = block != 0 ? 1 : 0;
         helper->parameter_types[0] = block != 0 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID;
         helper->parameter_types[1] = BUSTER_TYPE_VOID;
@@ -3959,7 +3950,7 @@ static String8 check_asm_unit_name(const AsmResult* unit, uint32_t symbol)
 // only for an arena without room.
 static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgramHelpers* helpers, const CheckProgram* program, Arena* output, Arena* scratch)
 {
-    const uint32_t statements = result->plans != 0 ? program->input->asm_count : 0;
+    const uint32_t statements = result->plans != 0 ? result->plan_count : 0;
     const uint32_t bodies = result->naked != 0 ? program->body_count : 0;
     uint64_t total = 0;
     for (uint32_t s = 0; s < statements; s += 1)
@@ -4186,7 +4177,33 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     }
     const CheckAsms* asms = program->asms;
     bool valid = statements == 0 || (asms != 0 && asms->status == CHECK_ASM_OK && input->asm_count != 0);
-    result->plans = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsm, input->asm_count) : 0;
+    // The target_clones copies' plans (#2247), past the statements': each copy body's statements' range, from its first.
+    uint64_t plan_count = statements != 0 ? input->asm_count : 0;
+    bool copied = false;
+    for (uint32_t b = 0; statements != 0 && program->body_options != 0 && b < program->body_count; b += 1)
+    {
+        copied |= program->body_options[b] != 0;
+    }
+    result->copy_bases = valid && copied ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->body_count) : 0;
+    result->copy_firsts = valid && copied ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->body_count) : 0;
+    valid = valid && (!copied || (result->copy_bases != 0 && result->copy_firsts != 0));
+    for (uint32_t b = 0; valid && copied && b < program->body_count; b += 1)
+    {
+        uint32_t low = UINT32_MAX;
+        uint32_t high = 0;
+        for (uint32_t i = 0; program->body_options[b] != 0 && i < program->bodies[b].count; i += 1)
+        {
+            const CheckControl control = program->controls[program->bodies[b].first + i];
+            low = control.kind == CHECK_CONTROL_ASM && control.target < low ? control.target : low;
+            high = control.kind == CHECK_CONTROL_ASM && control.target > high ? control.target : high;
+        }
+        result->copy_bases[b] = low != UINT32_MAX ? (uint32_t)plan_count : UINT32_MAX;
+        result->copy_firsts[b] = low != UINT32_MAX ? low : 0;
+        plan_count += low != UINT32_MAX ? (uint64_t)high - low + 1 : 0;
+    }
+    valid = valid && plan_count < UINT32_MAX;
+    result->plan_count = valid ? (uint32_t)plan_count : 0;
+    result->plans = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsm, plan_count) : 0;
     result->naked = valid && naked_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramNaked, program->body_count) : 0;
     uint32_t* firsts = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->asm_count + 1) : 0;
     CheckProgramHelper* added = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, statements) : 0;
@@ -4210,7 +4227,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     }
     if (valid && statements != 0)
     {
-        memset(result->plans, 0, (uint64_t)input->asm_count * sizeof(CheckProgramAsm));
+        memset(result->plans, 0, (uint64_t)result->plan_count * sizeof(CheckProgramAsm));
         uint64_t first = 0;
         for (uint32_t s = 0; s < input->asm_count; s += 1)
         {
@@ -4237,7 +4254,9 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
         {
             const CheckControl control = program->controls[program->bodies[b].first + i];
             const uint32_t s = control.target;
-            if (control.kind == CHECK_CONTROL_ASM && (s >= input->asm_count || result->plans[s].planned))
+            // A target_clones copy's statement has a plan of its own (#2247).
+            CheckProgramAsm* plan = control.kind == CHECK_CONTROL_ASM ? check_program_asm_plan_of(result, b, s, input->asm_count) : 0;
+            if (control.kind == CHECK_CONTROL_ASM && (plan == 0 || plan->planned))
             {
                 result->status = CHECK_PROGRAM_INVALID;
                 result->token = control.token;
@@ -4251,17 +4270,17 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
                 const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
                 const X86Target* instruction_set = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? &program->target :
                                                    &program->targets[body_target - 1];
-                valid = check_program_asm_plan_one(program, s, asms->operands + firsts[s], index, instruction_set, BUSTER_SCALAR_PATH(scalar), result->plans + s, helper, output,
-                                                   scratch);
-                if (valid && result->plans[s].helper != BUSTER_CHECK_NONE)
+                valid = check_program_asm_plan_one(program, s, (uint32_t)(plan - result->plans), asms->operands + firsts[s], index, instruction_set, BUSTER_SCALAR_PATH(scalar), plan,
+                                                   helper, output, scratch);
+                if (valid && plan->helper != BUSTER_CHECK_NONE)
                 {
-                    result->plans[s].helper = helpers->count + count;
+                    plan->helper = helpers->count + count;
                     count += 1;
                 }
                 result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
                 result->token = valid ? BUSTER_CHECK_NONE : control.token;
-                rows += valid && result->plans[s].row != NULL;
-                bodies += valid && result->plans[s].inlined;
+                rows += valid && plan->row != NULL;
+                bodies += valid && plan->inlined;
             }
         }
         result->row_capacity = rows > result->row_capacity ? rows : result->row_capacity;

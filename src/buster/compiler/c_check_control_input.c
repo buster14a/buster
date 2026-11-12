@@ -3866,7 +3866,9 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 const bool complete = !prefix || (owner < limit && end < limit);
                 if (owner >= count || end >= count)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                    // (Outside any switch: clang's own words, #2406.)
+                    const CheckInputMessage outside = parser->tokens.kinds[token] == PARSE_KIND_DEFAULT ? CHECK_INPUT_DEFAULT_OUTSIDE_SWITCH : CHECK_INPUT_CASE_OUTSIDE_SWITCH;
+                    check_input_report(reader, token, end < count ? outside : CHECK_INPUT_DECLARATION);
                 }
                 else if (complete && !check_input_region_transfer(reader, owner, end))
                 {

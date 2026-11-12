@@ -588,6 +588,30 @@ static void check_program_target_needed(const CheckProgram* program, uint8_t* ne
 // (CheckProgram.clone_symbols): where a group has copies and the program its body, a symbol after the program's for
 // each option but the first and the repeated ones, of the body's object (its declaration's binding), which
 // check_program_target_names names. Returns false where there was no room.
+// The labels of target_clones group `group`'s body whose addresses the program takes (#2247): those with a symbol, in
+// their tokens' order, written to `tokens` where it isn't NULL. Returns their count.
+static uint32_t check_program_target_labels(const CheckProgram* program, const CheckProgramTargetGroup* group, uint32_t* tokens)
+{
+    const Parser* parser = program->parser;
+    uint32_t opening = BUSTER_CHECK_NONE;
+    for (uint32_t b = 0; opening == BUSTER_CHECK_NONE && b < program->body_count; b += 1)
+    {
+        opening = program->bodies[b].object == group->clones ? program->bodies[b].opening : opening;
+    }
+    const uint32_t closing = parser != NULL && opening < parser->tokens.count ? parser->tree.parents[opening] : 0;
+    uint32_t count = 0;
+    for (uint32_t token = opening; closing > opening && closing < parser->tokens.count && token < closing; token += 1)
+    {
+        const bool label = parser->tree.roles[token] == PARSE_ROLE_LABEL && token + 1 < program->object_count && program->object_symbols[token + 1] != 0;
+        if (label && tokens != NULL)
+        {
+            tokens[count] = token;
+        }
+        count += label;
+    }
+    return count;
+}
+
 static bool check_program_target_number(CheckProgram* program, Arena* output)
 {
     const uint32_t count = program->target_version_count + program->target_group_count;
@@ -622,6 +646,42 @@ static bool check_program_target_number(CheckProgram* program, Arena* output)
             extra += own;
         }
     }
+    // The copies' labels whose addresses the program takes (#2247): each option with code but the last one's, a symbol
+    // of its own for each, after the copies'; the last one's code defines the labels' own symbols, which the program's
+    // data reaches, as clang's static data reaches the last clone it emits (in the options' order).
+    uint32_t labels = 0;
+    for (uint32_t g = 0; valid && clone_symbols != NULL && g < program->target_group_count; g += 1)
+    {
+        CheckProgramTargetGroup* group = program->target_groups + g;
+        group->label_count = group->clones != 0 && group->copies && symbols[program->target_version_count + g] != 0 ?
+                             check_program_target_labels(program, group, NULL) : 0;
+        group->label_first = labels;
+        labels += group->label_count;
+    }
+    uint32_t* label_tokens = labels != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, labels) : NULL;
+    SymbolId* label_symbols = labels != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, program->clone_option_count) : NULL;
+    valid = valid && (labels == 0 || (label_tokens != NULL && label_symbols != NULL));
+    for (uint32_t g = 0; valid && labels != 0 && g < program->target_group_count; g += 1)
+    {
+        CheckProgramTargetGroup* group = program->target_groups + g;
+        uint32_t last = group->option_count;
+        for (uint32_t o = 0; group->label_count != 0 && o < group->option_count; o += 1)
+        {
+            last = o == 0 || program->clone_copied[group->clone_first + o] != 0 ? o : last;
+        }
+        if (group->label_count != 0)
+        {
+            (void)check_program_target_labels(program, group, label_tokens + group->label_first);
+        }
+        for (uint32_t o = 0; group->clones != 0 && o < group->option_count; o += 1)
+        {
+            const bool own = group->label_count != 0 && o != last && (o == 0 || program->clone_copied[group->clone_first + o] != 0);
+            label_symbols[group->clone_first + o] = own ? program->symbol_count + 1 + extra : 0;
+            extra += own ? group->label_count : 0;
+        }
+    }
+    program->clone_label_symbols = labels != 0 ? label_symbols : NULL;
+    program->clone_label_tokens = labels != 0 ? label_tokens : NULL;
     uint32_t* objects = valid && extra != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)program->symbol_count + extra) : NULL;
     valid = valid && (extra == 0 || objects != NULL);
     if (valid && extra != 0)
@@ -639,6 +699,12 @@ static bool check_program_target_number(CheckProgram* program, Arena* output)
                 if (symbol != 0)
                 {
                     objects[symbol - 1] = group->body;
+                }
+                // (A copy's label's symbol is the label's object's too: its name is made as the label's, #2247.)
+                const SymbolId label = program->clone_label_symbols != NULL ? program->clone_label_symbols[group->clone_first + o] : 0;
+                for (uint32_t l = 0; label != 0 && l < group->label_count; l += 1)
+                {
+                    objects[label - 1 + l] = program->clone_label_tokens[group->label_first + l] + 1;
                 }
             }
         }
@@ -694,21 +760,14 @@ static CheckProgramTargetOption* check_program_target_options(const CheckProgram
     return options;
 }
 
-// Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): one with inline assembly,
-// whose plans are a body's own (check_program_asm), or a label whose address it may take (&&, its symbol the label's
-// own), which a copy would define again. (A switch's jump tables are each copy's own, check_lower_switch_tables, #2247.)
+// Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): a naked function's, whose
+// templates are its whole code, planned once per body (check_program_asm_plan_naked). (A switch's jump tables are each
+// copy's own, check_lower_switch_tables, and so are its labels' symbols, check_program_target_number, and its asm
+// statements' plans, made for the copy's instruction set, check_program_asm_plan_of, #2247.)
 static bool check_program_target_copy_refused(const CheckProgram* program, uint32_t b)
 {
-    const Parser* parser = program->parser;
     const CheckProgramBody* body = program->bodies + b;
-    const uint32_t closing = parser != NULL && body->opening < parser->tokens.count ? parser->tree.parents[body->opening] : 0;
-    bool refused = parser == NULL || closing <= body->opening || closing >= parser->tokens.count;
-    for (uint32_t token = body->opening; !refused && token < closing; token += 1)
-    {
-        const uint8_t kind = parser->tokens.kinds[token];
-        refused = kind == PARSE_KIND_ASM || (kind == PARSE_KIND_AMPAMP && body->label_count != 0);
-    }
-    return refused;
+    return program->parser == NULL || (program->object_naked != 0 && body->object < program->object_count && program->object_naked[body->object] <= body->declaration);
 }
 
 // target_clones' body copies (#1838), as clang compiles its body once per version, with that version's instruction set:
