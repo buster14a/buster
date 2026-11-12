@@ -7,7 +7,7 @@
 // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N]] [preprocessor options] file...
+//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -1726,8 +1726,9 @@ static void node_census_mark_controls(NodeCensusScratch* s, const CheckProgramBo
 // #2524's step 1, the shadow (--shadow): the node machine (c_check_node_machine.c) run on every expression the census
 // takes, after the pipeline, its records compared with the stream's values and conversions node by node and its tape
 // with the lowering's entries entry by entry, then timed. --scalar types every node by the action, --verify checks T's
-// rows and rules against the action at every node they type, and --passes N times each file's taken expressions N times
-// a sweep set.
+// rows and rules against the action at every node they type, --passes N times each file's taken expressions N times a
+// sweep set, and --repeat N runs each expression's sweeps N times in a row within a pass (the runs after the first find
+// their inputs in the caches).
 
 // One expression the machine took, for the timing passes.
 typedef struct NodeShadowExpression NodeShadowExpression;
@@ -1762,6 +1763,8 @@ struct NodeShadow
     bool scalar;
     bool verify;
     uint32_t passes;
+    // --repeat N: each expression's sweeps N times in a row in the timing passes (1 by default).
+    uint32_t repeat;
     // The expressions the census took and their evaluated nodes, and of them those the machine took.
     uint64_t expressions;
     uint64_t nodes;
@@ -1994,14 +1997,18 @@ static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, ui
     for (uint32_t i = 0; i < shadow->timed_count; i += 1)
     {
         const NodeShadowExpression* expression = shadow->timed + i;
-        NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
-        if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
+        // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
+        for (uint32_t time = 0; time < shadow->repeat; time += 1)
         {
-            refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
-        }
-        if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
-        {
-            node_machine_expand(machine, expression->object);
+            NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
+            if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
+            {
+                refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
+            }
+            if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
+            {
+                node_machine_expand(machine, expression->object);
+            }
         }
     }
 }
@@ -2085,9 +2092,9 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X" };
     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
     {
-        printf("node-shadow: time sweeps=%s passes=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
+        printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
                "ticks=%.1f%s\n",
-               sweep_names[k], shadow->passes, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
+               sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
                (double)shadow->instructions[k] / (double)shadow->timed_nodes, (double)shadow->ticks[k] / (double)shadow->timed_nodes,
                shadow->counted ? "" : " (no cycle counter)");
     }
@@ -2335,7 +2342,7 @@ static int run_node_census(int count, char** arguments)
     uint32_t file_count = 0;
     bool valid = options != 0 && files != 0;
     bool shadowed = false;
-    NodeShadow shadow = { .passes = 5 };
+    NodeShadow shadow = { .passes = 5, .repeat = 1 };
     for (int i = 0; valid && i < count; i += 1)
     {
         if (strcmp(arguments[i], "--list") == 0)
@@ -2361,6 +2368,12 @@ static int run_node_census(int count, char** arguments)
             uint64_t number = 0;
             valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number <= 1000;
             shadow.passes = (uint32_t)number;
+        }
+        else if (strcmp(arguments[i], "--repeat") == 0)
+        {
+            uint64_t number = 0;
+            valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number >= 1 && number <= 16;
+            shadow.repeat = (uint32_t)number;
         }
         else if (strcmp(arguments[i], "--no-default-config") == 0)
         {
@@ -2397,7 +2410,7 @@ static int run_node_census(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N]] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
