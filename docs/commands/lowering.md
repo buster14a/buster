@@ -215,14 +215,22 @@ pipeline made and timed. No compile takes its entries.
   (`node_machine_rows`), the lookups by direct rules that are their actions'
   own steps for the common case, and the rest by the action itself on the
   machine's records. **C** and **X** are the node templates' rules
-  (`c_check_program_templates.c`) read from the records. The machine's set is
-  the census's within the templates': calls, `&&`, `||`, `?:`, the increments
-  and the compound assignments are refused by code.
+  (`c_check_program_templates.c`) read from the records, and
+  `check_lower_logical`'s for `&&`, `||` and `?:`, whose test, branch and jump
+  X writes as a segment after an operand's row. Their labels are numbered from
+  the expression's first, in the order the tasks number them, with each
+  label's place in the tape. The machine's set is the census's within those
+  rules: calls, the increments and the compound assignments are refused by
+  code, and `a ?: b` by its template.
 - **The comparison**, for every expression the machine takes: each record's
   value (every field), its operands' conversions and a member's offset against
   the stream's, and its tape against the lowering's entries that the
   expression's tasks own (the inventory's log), a local's numbered by a map of
-  the body's that must stay one to one.
+  the body's that must stay one to one. A branch's target, an entry after
+  `check_lower_resolve_labels`, is compared by label: the log keeps each pop's
+  next label and each body's labels' entries, so each of the expression's
+  labels must be the lowering's of the same number counted from the
+  expression's first, at the same entry.
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps
@@ -238,7 +246,8 @@ pipeline made and timed. No compile takes its entries.
 The report gives the expressions and evaluated nodes taken, each refusal's
 (shape, code, leaf, context, diagnostic, template, row, root), the operators
 the code and template refusals stopped at, the differences (values, entries,
-twin), T's nodes by row or rule and by the action, by operator, and the times.
+twin), the labels compared, T's nodes by row or rule and by the action, by
+operator, and the times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`

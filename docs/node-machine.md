@@ -700,13 +700,15 @@ takes it.
   checks it.
 - **C and X** are the node templates' rules (#1048, `c_check_program_templates.c`:
   the classification, each node's own entries and its conversion's), read from
-  the records instead of the stream's columns. T keeps each record's operator,
-  operands, class and facts for them, and one word per type of the unit holds
-  its class, facts and kind for every other type's lookup.
+  the records instead of the stream's columns, and `check_lower_logical`'s for
+  `&&`, `||` and `?:` ([below](#the-logical-operators-and-the-conditional-rows-before-and-between-operands)). T
+  keeps each record's operator, operands, class and facts for them, and one word
+  per type of the unit holds its class, facts and kind for every other type's
+  lookup.
 
-The machine's set is the census's within the templates'. It refuses by code
-what the templates don't take: calls, `&&`, `||`, `?:`, the increments, the
-compound assignments. They are the next constructs, one a pull request.
+The machine's set is the census's within those rules. It refuses by code what
+they don't take: calls, the increments, the compound assignments. They are the
+next constructs, one a pull request.
 
 ### What it measured
 
@@ -898,7 +900,10 @@ Each is a measurement that ends the work with a record, as #1048's and
   not all: 2.2% of `sqlite3.c`'s write before or between their operands (`&&`,
   `||`, `?:` and the compound assignments), and the prototype's four runs
   still left 3.3% of the nodes in refused expressions. Each further shape is a
-  row format X has to write without a branch a node, or a refusal.
+  row format X has to write without a branch a node, or a refusal. `&&`, `||`
+  and `?:` take one: a segment after an operand's row, its consumer's test,
+  branch or jump, read from a state bit X already tests
+  ([step 1](#the-logical-operators-and-the-conditional-rows-before-and-between-operands)).
 - **Open:** whether C and X are one sweep; whether the summary node is a leaf
   or a handle; whether the tables are baked from the actions or written by
   hand with the actions as their test; where the pointer-pair memo lives.
