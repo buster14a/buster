@@ -7647,8 +7647,47 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
         const uint8_t* caller = check_driver_function_name(program, parser, pp->table, error->caller, &caller_length);
         const uint8_t* callee = check_driver_function_name(program, parser, pp->table, error->callee, &callee_length);
         const char* feature = predefines_features[error->feature].name;
+        // Where the diagnostic points: the call's beginning, but for a definition's own (#2367).
+        uint32_t location = error->token;
         char message[1024];
-        if (error->builtin != NULL)
+        if (error->abi)
+        {
+            // clang's (warn|err)_avx_calling_convention (#2367): the parameter's declared type where the argument has one,
+            // else the argument's (a variadic one's promoted type), or the callee's declared result type.
+            // A definition's own (checkFunctionABI) is at its parameter's name (an unnamed one's end) or its result's
+            // typedef, else its name.
+            const CheckInput* input = program->input;
+            uint32_t spelling = 0;
+            if (error->abi_definition && error->abi_argument != UINT32_MAX)
+            {
+                // A K&R definition's is its identifier list's name here, not its declaration list's (clang's).
+                const uint32_t place = check_driver_parameter_place(parser, input, error->abi_call, error->abi_argument);
+                location = place < input->token_count ? place : error->abi_call;
+                spelling = place < input->token_count ? check_driver_parameter_spelling(parser, input, place) : 0;
+            }
+            else if (error->abi_argument != UINT32_MAX)
+            {
+                // A variadic argument's own type, with its sugar (the call's argument's).
+                const CheckGraph* graph = &input->graph;
+                spelling = check_input_call_parameter_spelling(parser, input, program->stream, program->types, error->abi_call, error->abi_argument);
+                const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[error->abi_call] : 0;
+                const uint32_t argument = graph->argument_nodes != NULL ? graph->argument_nodes[first + error->abi_argument] : BUSTER_CHECK_NONE;
+                spelling = spelling == 0 && argument < graph->count ? check_input_operand_type_spelling(input, parser, argument) : spelling;
+            }
+            else
+            {
+                const uint32_t declaration = error->abi_definition ? error->abi_call :
+                                             error->callee < program->object_count ? program->object_declarations[error->callee] : BUSTER_CHECK_NONE;
+                uint32_t use = 0;
+                spelling = declaration < input->token_count ? check_input_typedef_use(input, parser, declaration, &use) : 0;
+                location = error->abi_definition ? (spelling != 0 && use < input->token_count ? use : declaration) : location;
+            }
+            CheckWarningSpelling spell = { 0 };
+            const String8 type = check_driver_warning_type(parser, pp, input, program->types, &spell, scratch, error->abi_type, spelling);
+            snprintf(message, sizeof(message), "AVX vector %s of type %.*s without '%s' enabled changes the ABI", error->abi_argument != UINT32_MAX ? "argument" : "return",
+                     (int)type.length, type.pointer, feature);
+        }
+        else if (error->builtin != NULL)
         {
             // An SSE compare's predicate past 7 needs AVX (check_target_feature_predicate), else the builtin's features.
             const char* features = error->predicate ? "avx" : error->builtin->features;
@@ -7677,17 +7716,24 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
             }
             at = original->tree.parents[at];
         }
-        if (error->token < parser->tokens.count)
+        if (error->warning && location < parser->tokens.count)
         {
-            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parser->tokens.sources[error->token], publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
+            // -Wpsabi's (#2367), as the unit's options and pragmas at its token say.
+            check_common_report_published_phase(parser, pp, program->input, location, publication, PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_PSABI, false,
+                                                message, NULL, 0, scratch);
+        }
+        else if (location < parser->tokens.count)
+        {
+            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parser->tokens.sources[location], publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
         }
         else
         {
             check_driver_diagnose(parser, pp, error->token, message);
         }
     }
+    const uint32_t hard = valid ? check_target_feature_hard(errors, count) : 0;
     arena_pop_to(output, mark);
-    return valid && count == 0;
+    return valid && hard == 0;
 }
 
 // The name clang gives an overloadable function's symbol where no asm label renames it, its mangled one

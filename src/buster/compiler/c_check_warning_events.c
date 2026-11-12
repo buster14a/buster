@@ -202,6 +202,9 @@ enum
     // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
     // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
     CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 142,
+    // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
+    // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
+    CHECK_WARNING_ID_PSABI = 143,
     CHECK_WARNING_ID_COUNT,
 };
 

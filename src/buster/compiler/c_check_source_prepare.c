@@ -155,6 +155,8 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
     CheckTargetFeatureError* errors = 0;
     const bool checked = selected && (!request.select || check_program_target_features(&source->selected.program, &pp->options, &pp->options.predefines, scalar,
                                                                                        &path->output_arena, &path->scratch, &errors, &source->target_feature_errors));
+    // The warnings among them (-Wpsabi's, #2367) refuse nothing.
+    source->target_feature_errors = checked ? check_target_feature_hard(errors, source->target_feature_errors) : source->target_feature_errors;
     arena_pop_to(&path->output_arena, mark);
     const bool ready = checked && source->target_feature_errors == 0;
     source->stage = ready ? CHECK_SOURCE_READY : !requested && allocated ? CHECK_SOURCE_OPTIONS : !preprocessed ? CHECK_SOURCE_PREPROCESS :
