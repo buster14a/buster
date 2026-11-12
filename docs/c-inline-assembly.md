@@ -525,10 +525,16 @@ size, as SSE2 is every target's here. The check follows an operand's own
 (`check_asm_operand_checks` without `whole`) and precedes its tie's, and the
 statement's first error alone is given, as clang returns there.
 
+A constraint's or a clobber's error drops its statement, and checking goes on
+past it as clang's `ActOnGCCAsmStmt` returns there (#2369): the error is
+recovered (`check_input_recover_reports` in `check_input_asm_statement`), and
+the statement is no asm statement of the unit's. A later syntax error's
+repaired view keeps it, the statement's `)` being the original's
+(`check_repair_input_report`).
+
 Differences left: a `target` attribute on an earlier declaration alone, not
 the definition, doesn't widen an operand's limit, where clang's
-`getFunctionFeatureMap` reads the inherited attribute; an asm statement's
-constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369); and
+`getFunctionFeatureMap` reads the inherited attribute; and
 clang's "ignored asm label 'X' on automatic variable" warning is missing
 (#2370).
 
@@ -756,9 +762,11 @@ outputs' `setcc` stores, every output's store, the x87 pops and the epilogue.
 An asm goto's labels are its exits' labels there (`.Lbuster_goto_S_L`, the
 names the substitution printed for them), so that the template's jumps reach
 them. The template is first assembled alone with those names made global
-(`__buster_goto_S_L`), and each fixup to one must be a jmp's or a jcc's rel32
-field without an addend in the template's code (`check_asm_unit_gotos`); any
-other use is refused by name, as on the record path. A template of directives
+(`__buster_goto_S_L`). Any use of a label is its exit's address there: a
+jump's, and data's (#1845's item 1: the Linux kernel's `__jump_table` entries,
+`.quad 1b, %l[yes]` and `.long %l[yes] - .`), a rip-relative address's or a
+call's, as clang's use is the address of its `callbr`'s indirect target, the
+block that stores the outputs and goes to the label. A template of directives
 alone with x87 operands or flag outputs has this helper too, as a template of
 no instructions does. A held vector (a vector type in a vector register) is
 refused in a helper, as on the record path. A template with a 32-bit address
@@ -996,8 +1004,12 @@ each label, as clang's code gives it (GCC's since 11). The helper returns the
 number in eax, and the statement's code (`check_lower_asm`) keeps it in a
 temporary and branches to each label whose number it is, falling through on 0.
 A label as anything but a jmp's or a jcc's target (data, a call's target, an
-addend) is refused by name. A template of no instructions never jumps, and has
-no helper.
+addend, a rip-relative address: #1845's item 1) makes the template one
+assembled whole in its helper (`check_asm_unit_helper`), whose exits the uses
+take, as a template that takes directives is; a template's jump through such an
+address (`leaq %l[x](%rip), %rax; jmp *%rax`) runs the label's exit, which
+stores the outputs, as clang's indirect target's block does. A template of no
+instructions never jumps, and has no helper.
 
 Outside `--tier1`, an asm goto is an asm body (#1839's item 2): the same exits
 are the body's records after the template (`check_asm_inline_code`), the
@@ -1075,7 +1087,6 @@ defines, a reference to another template's `.set` symbol).
 
 Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 
-- an asm goto's label as anything but a jmp's or a jcc's target;
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
@@ -1370,8 +1381,6 @@ code's certificate (`--verify`) certifies a function with asm bodies
 
 What the lowering still refuses of what GCC and clang take:
 
-- an asm goto's label as data or a call's target (the Linux kernel's jump
-  tables), whose exits a helper has no address for;
 - a template that returns and has a named label, or keeps its helper for
   another of the reasons above (a reference, a directive), which the helper
   design refuses by name;

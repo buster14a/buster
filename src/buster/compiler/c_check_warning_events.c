@@ -196,9 +196,18 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // An unparenthesized `+` or `-` as a shift's operand (#2264, clang's DiagnoseAdditionInShift): -Wshift-op-parentheses,
+    // on by default, under -Wparentheses.
+    CHECK_WARNING_ID_SHIFT_OP_PARENTHESES = 141,
+    // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
+    // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 142,
+    // A relational comparison whose left operand is one, unparenthesized (#2264, clang's diagnoseChainedComparison):
+    // -Wparentheses', an error by default.
+    CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
     // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
     // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
-    CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 141,
+    CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 144,
     CHECK_WARNING_ID_COUNT,
 };
 
