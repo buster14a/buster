@@ -960,9 +960,10 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
         // The integer elementwise builtins of scalars (#2410): clmul's without PCLMUL and pdep's and pext's without BMI2,
         // which clang's code expands bit by bit (check_lower_scalar_lanes takes them with those instructions), and those of
-        // integers wider than 64 bits.
+        // integers wider than 128 bits, and pdep's, pext's and clmul's of integers wider than 64.
         { "x86-64-v3", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "carry-less multiplication without PCLMUL", 0 },
-        { "znver5", "__int128 tested(__int128 n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
+        { "znver5", "_BitInt(129) tested(_BitInt(129) n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
+        { "znver5", "__int128 tested(__int128 n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars of more than 64 bits", 0 },
         { "x86-64-v2", "unsigned tested(unsigned n){return __builtin_elementwise_pdep(n,n);}", "bit deposits and extractions without BMI2", 0 },
         { "x86-64-v2", "unsigned long tested(unsigned long n){return __builtin_elementwise_pext(n,n);}", "bit deposits and extractions without BMI2", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_floor(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },

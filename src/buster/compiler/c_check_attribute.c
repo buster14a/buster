@@ -2345,6 +2345,27 @@ static uint32_t check_input_attribute_suppress_literal(const Parser* parser, uin
     return token < stop && parser->tokens.kinds[token] == PARSE_KIND_STRING ? BUSTER_CHECK_NONE : token;
 }
 
+// suppress's argument that is no string literal inside parentheses (#2332, `suppress((1))`): after its "expected string
+// literal" at `at`, clang's parser expects the `)` of the innermost there, "expected ')'" noted "to match this '('" at it,
+// a second error of the token. `argument` is the argument's first token.
+static void check_input_attribute_suppress_paren(CheckInputReader* reader, uint32_t argument, uint32_t at)
+{
+    const Parser* parser = reader->parser;
+    if (at > argument && at < parser->tokens.count && parser->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, at, CHECK_INPUT_COUNTED_PAREN);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = at - 1;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
+            reader->output->reports[before].repeated = true;
+            // Published after the token, as the string error before it is (check_input_report_argument).
+            reader->output->reports[before].completion = at + 1 < parser->tokens.count ? at + 1 : 0;
+        }
+    }
+}
+
 // Whether a name is suppress's, as written with its keyword underscores or without.
 static bool check_input_attribute_suppress_name(String8 name)
 {
@@ -2398,7 +2419,12 @@ static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInput
                                                                                          parser->tokens.kinds[first] != PARSE_KIND_STRING))
         {
             const uint32_t at = attribute->kind == CHECK_ATTRIBUTE_SUPPRESS ? check_input_attribute_suppress_literal(parser, first, end) : first;
+            const uint32_t before = reader->output->report_count;
             check_input_attribute_argument_error(reader, attributes, attribute, at, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            if (attribute->kind == CHECK_ATTRIBUTE_SUPPRESS && reader->output->report_count > before)
+            {
+                check_input_attribute_suppress_paren(reader, first, at);
+            }
             result = BUSTER_CHECK_PARSED_ERROR;
         }
         else if (unsure || (string && !literal))
@@ -3096,6 +3122,7 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         const CheckInputAttribute item = { .first = name, .name_token = name, .name = parser->tokens.names[name], .end = items_end };
                         const uint32_t at = suppress ? check_input_attribute_suppress_literal(parser, argument, stop) : argument;
                         check_input_attribute_argument_error(reader, &holder, &item, at, CHECK_ARGUMENT_STRING_LITERAL, 0);
+                        check_input_attribute_suppress_paren(reader, suppress ? argument : at, at);
                         valid = false;
                     }
                     else if (undeclared != BUSTER_CHECK_NONE)
@@ -4134,6 +4161,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         const bool suppress = check_input_attribute_suppress_name(name);
         uint32_t literal = BUSTER_CHECK_NONE;
+        uint32_t literal_argument = BUSTER_CHECK_NONE;
         uint32_t index = 0;
         for (uint32_t argument = attribute.argument_first; read != NULL && literal == BUSTER_CHECK_NONE && !escaped && argument < attribute.argument_end; index += 1)
         {
@@ -4151,11 +4179,17 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // suppress's through parentheses (check_input_attribute_suppress_literal).
             const uint32_t suppressed = suppress && stop != argument ? check_input_attribute_suppress_literal(parser, argument, stop) : argument;
             literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? suppressed : BUSTER_CHECK_NONE;
+            literal_argument = argument;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
         {
+            const uint32_t before = reader->output->report_count;
             check_input_attribute_argument_error(reader, attributes, &attribute, literal, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            if (suppress && reader->output->report_count > before)
+            {
+                check_input_attribute_suppress_paren(reader, literal_argument, literal);
+            }
             valid = false;
         }
         // The parser recognizes a definition's suffix before Sema processes its attributes: its warning holds even
@@ -4785,6 +4819,22 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             }
             const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
+            if (valid && standard && parser->language.standard < 2023)
+            {
+                // Before C23, the list is an extension clang's parser warns of as it reads it, once whichever reading reaches it.
+                const CheckWarningEvent extension =
+                {
+                    .id = CHECK_WARNING_ID_C23_ATTRIBUTES,
+                    .kind = CHECK_WARNING_EVENT_C23_ATTRIBUTES,
+                    .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                    .token = first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = first + 1,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_once(reader, &extension);
+            }
             if (valid && (place == BUSTER_CHECK_PLACE_QUALIFIERS || place == BUSTER_CHECK_PLACE_GROUP))
             {
                 // clang's declarator parser rejects a C23 list after a pointer's qualifiers, or at a group's start
