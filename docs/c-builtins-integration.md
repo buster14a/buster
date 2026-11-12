@@ -1722,8 +1722,19 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   const objects' constant initializers wherever the expression holds them
   (`const int c = 3;` makes `__builtin_align_up(x, c + 0)` an error), must be at
   least 1, at most 2 to the source's width less 1 (a pointer's 64), and a power
-  of 2, in that order; 1 draws clang's `-Wtautological-compare`, which the
-  checker records but doesn't report. The checker's runtime view of the argument
+  of 2, in that order, each error in clang's words at the alignment as clang's
+  getExprLoc places it, a binary operator's at its operator (#2221,
+  `check_semantic_alignment`): "requested alignment must be 1 or greater",
+  "requested alignment must be N or smaller" (N in decimal, past 128 bits
+  too) and "requested alignment is not a power of 2". A source of another type
+  is "operand of type 'T' where arithmetic or pointer type is required", with
+  a floating one's or a function pointer's note, and an alignment of no
+  integer type "used type 'T' where integer is required". An alignment of 1
+  draws clang's `-Wtautological-compare` at the alignment, unevaluated
+  operands' too (`check_input_alignment_one`): "aligning a value to 1 byte is
+  a no-op", or is_aligned's "the result of checking whether a value is aligned
+  to 1 byte is always true", but not where the source's own type is refused.
+  The checker's runtime view of the argument
   reads no const object, so the source adapter evaluates it as a constant
   context would (`check_input_misc_evidence`), and the call's checks and
   folds take that value from its evidence (`CheckBuiltinCall.alignment_evaluated`)
