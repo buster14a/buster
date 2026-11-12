@@ -3485,9 +3485,16 @@ What the lowering covers past scalars (#145's programs):
       the labels' own symbols, which the program's data reaches: clang's
       block-scope static `static void* t[] = { &&a };` holds the last clone's
       label addresses, since that clone is emitted last.
-    - A body with inline assembly is still compiled once, with the unit's
-      features. Its versions' names are symbols at that one code: those
-      plans are a body's own. A group with a reference, or a
+    - Each copy plans its asm statements for its own instruction set, as
+      clang's clones assemble each template again (#2247): a copy body's
+      statements have plans of their own past the statements'
+      (`CheckProgramAsms.copy_bases`, `check_program_asm_plan_of`), each
+      naming its statement (`CheckProgramAsm.statement`), whose index gives
+      `%=` its number and an asm goto's local labels and a helper's symbol
+      their names, so that the copies' differ. A label a template defines by
+      name is defined once per copy, a duplicate refused as in clang. A naked
+      function's body is still compiled once (`check_program_target_copy_refused`):
+      its templates are its whole code. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -3529,10 +3536,9 @@ What the lowering covers past scalars (#145's programs):
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
     resolver's result is named among clang's versions' distinct addresses.
-  - *Differences from clang's code.* A `target_clones` body with inline
-    assembly, a `switch` or an address-taken label is compiled once, with the
-    unit's features, where clang compiles a copy per version (each is valid
-    there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
+  - *Differences from clang's code.* A naked `target_clones` body is
+    compiled once, with the unit's features, where clang compiles a copy per
+    version (each is valid there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
     resolver is `.text`'s, not a COMDAT section's. Its
     unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
     its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again

@@ -560,6 +560,10 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) int k(int x) { switch (x) { case 0: return 3; case 1: return 5; "
         "case 2: return 7; case 3: return 11; case 5: return 13; default: return x; } }\n"
         "int call_k(int x) { switch (x) { case 1: return k(0); case 2: return k(1); case 3: return k(5); case 4: return k(9); default: return k(x); } }\n"
+        // A body with inline assembly (#2247): each copy's statements planned for its own instruction set, an asm goto's
+        // exits among them.
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) int m(int x) { int y; __asm__(\"imull $3, %1, %0\" : \"=r\"(y) : \"r\"(x)); "
+        "__asm__ goto(\"testl %0, %0\\n\\tjs %l[negative]\" : : \"r\"(x) : \"cc\" : negative); return y; negative: return -y; }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
@@ -582,14 +586,17 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "int w0(int) __asm__(\"w.avx2.0\");\nint w2(int) __asm__(\"w.sse4.2.2\");\nint w3(int) __asm__(\"w.default.3\");\n"
         "long j1(int) __asm__(\"j.sse4.2.1\");\nlong j2(int) __asm__(\"j.default.2\");\n"
         "int k1(int) __asm__(\"k.sse4.2.1\");\nint k2(int) __asm__(\"k.default.2\");\n"
-        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#define j1 j\n#define j2 j\n#define k1 k\n#define k2 k\n#endif\n"
+        "int m1(int) __asm__(\"m.sse4.2.1\");\nint m2(int) __asm__(\"m.default.2\");\n"
+        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#define j1 j\n#define j2 j\n#define k1 k\n#define k2 k\n#define m1 m\n#define m2 m\n#endif\n"
         "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long j(int x);\n"
         "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) int k(int x);\nint call_k(int x);\n"
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) int m(int x);\n"
         "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\nint (*address_d)(int) = d;\n"
         "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9),\n"
         "    w(2), w0(3), w2(4), w3(5));\n"
         "    for (int x = -2; x < 3; x += 1) { printf(\" %ld%ld%ld\", j(x), j1(x), j2(x)); }\n"
-        "    for (int x = -1; x < 7; x += 1) { printf(\" %d:%d,%d,%d,%d\", x, k(x), k1(x), k2(x), call_k(x)); }\n    printf(\"\\n\");\n"
+        "    for (int x = -1; x < 7; x += 1) { printf(\" %d:%d,%d,%d,%d\", x, k(x), k1(x), k2(x), call_k(x)); }\n"
+        "    for (int x = -3; x < 4; x += 1) { printf(\" %d,%d,%d\", m(x), m1(x), m2(x)); }\n    printf(\"\\n\");\n"
         "    return 0; }\n";
     char sources[2][PATH_MAX];
     char objects[2][3][PATH_MAX];

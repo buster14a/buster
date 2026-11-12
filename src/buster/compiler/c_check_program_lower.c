@@ -15553,7 +15553,9 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     const CheckInput* input = program->input;
     const TypeTable* types = program->types;
     const CheckProgramAsms* asms = &writer->output->asms;
-    const CheckProgramAsm* plan = asms->plans != 0 && control.target < input->asm_count ? asms->plans + control.target : 0;
+    // A target_clones copy's statement is planned for the copy (#2247, check_program_asm_plan_of).
+    const uint32_t b = writer->body != NULL ? (uint32_t)(writer->body - program->bodies) : 0;
+    const CheckProgramAsm* plan = writer->body != NULL ? check_program_asm_plan_of(asms, b, control.target, input->asm_count) : 0;
     const CheckInputAsm* statement = plan != 0 ? input->asm_statements + control.target : 0;
     const uint32_t count = statement != 0 ? statement->output_count + statement->input_count : 0;
     if (plan == 0 || !plan->planned)
