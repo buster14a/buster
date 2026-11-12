@@ -3509,9 +3509,13 @@ spellings alone would miss this change (#272).
   (poisoning an existing macro, a character constant too long for its type)
   `[-Werror]` where promoted. `#warning` before C23 is also clang's
   "#warning is a C23 extension" (`-Wpedantic`), and in C23
-  `-Wpre-c23-compat`'s. Not given yet (#2222): `-Wgnu-line-marker`, whose
-  place clang reads under the numbering before the marker, `#ident`'s
-  `-Wpedantic`, and `-Wempty-translation-unit`. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  `-Wpre-c23-compat`'s. A parsed unit without a token is clang's
+  "ISO C requires a translation unit to contain at least one declaration"
+  (`-Wempty-translation-unit`, an extension off by default, #2222,
+  `pp_diagnose_empty_unit`), at the main file's end, which clang's lexer puts
+  at a final newline; `-E` gives none, as clang's parser alone does. Not given
+  yet (#2222): `-Wgnu-line-marker`, whose place clang reads under the
+  numbering before the marker, and `#ident`'s `-Wpedantic`. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error.
