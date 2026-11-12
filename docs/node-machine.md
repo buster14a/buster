@@ -1,25 +1,28 @@
 # The node machine: one visit per expression node (#2524): design
 
 Status: design only. Nothing below is implemented, and its gains are estimates
-that its first two steps exist to confirm or refute. It is
+that its first two steps exist to confirm or refute; a prototype of its three
+sweeps has been run over the compile's real nodes
+([below](#what-a-prototype-of-the-sweeps-measured)). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design: the change that the measurements below rank first for one core. The
 issue is [#2524](https://github.com/buster14a/buster/issues/2524). The names of
 existing code are main's at `d96b2e73`, and every figure not attributed
 otherwise is that revision's on the 9700X (CPU 2, under the lock), from
-[the measurement record](https://github.com/buster14a/buster-performance/tree/cf44ba7a6a5058921026f3d46e0fa2be8468eb49/docs/measurements/one-core-design-672-2026-11-12).
+[the measurement record](https://github.com/buster14a/buster-performance/tree/5318c1ea0e3a39f22f01b2bcb837db112c2a8fa7/docs/measurements/one-core-design-672-2026-11-12).
 
 **In one paragraph.** `-c sqlite3.c` spends 87% of its user cycles on function
 bodies, and most of that, 70% of the whole compile's, in the checker's stages
 between the parser and Tier 0: about 1,600 cycles and 3,250 instructions for
 each expression node, which five stages visit in turn, each with its own
-dispatch and its own unit-sized record of the node. The node machine reads a full expression, and
-later a whole body, from the parser's tree and writes Tier 0's typed entries
-in one visit per node, on records that stay in the first-level cache. What it
-takes, the stages between don't see. Today's pipeline is its exact twin, its
-oracle, and the path for everything it doesn't take. Expected on
-`-c sqlite3.c`: about 1.3 times faster with full expressions taken, 1.6 with
-whole bodies, 2.0 once those bodies stop using the reader's token columns.
+dispatch and its own unit-sized record of the node. The node machine reads a
+full expression, and later a whole body, from the parser's tree and writes
+Tier 0's typed entries in one visit per node, on records that stay in the
+first-level cache. What it takes, the stages between don't see. Today's
+pipeline is its exact twin, its oracle, and the path for everything it doesn't
+take. Expected on `-c sqlite3.c`: about 1.3 times faster with full expressions
+taken, 1.6 with whole bodies, 2.0 once those bodies stop using the reader's
+token columns.
 
 ## The problem
 
@@ -316,12 +319,15 @@ entries.
 ### C and X: contexts and expansion
 
 C walks the records from the root down. A node's row of
-`context[code][operand][standing]` gives each operand its context and
-`convert`; its own template is `template[code][context][class…]`, the
-inventory's deterministic key with its facts read from the record beside it
-instead of from the stream's columns and the type table. C also counts: each
-node's entries, the calls, labels and temporaries under it, so that a call's
-row is numbered in the tasks' preorder.
+`context[code][operand][the operand's code and standing]` gives each operand
+its context and `convert`: the operand's own code is in the key because a
+discard's cast to void gives a comma the discard itself and any other operand
+a conversion to void (the prototype below: 30,375 operands of `sqlite3.c`'s
+casts are undecided without it, none with it). The node's own template is
+`template[code][context][class…]`, the inventory's deterministic key with its
+facts read from the record beside it instead of from the stream's columns and
+the type table. C also counts: each node's entries, the calls, labels and
+temporaries under it, so that a call's row is numbered in the tasks' preorder.
 
 X writes each node's row with three stores, whatever its length, and advances
 by its count: 8 bytes of kinds from the table; 8 bytes of classes by one byte
@@ -434,13 +440,75 @@ T and C stay one node at a time, and this is why:
   first-level loads a cycle. #1201's vector classification ran 430
   instructions with 9 gathers for 16 nodes and was slower than its scalar
   twin on the 9700X; `parse_tree_columns` is scalar for the same reason.
-- **The budget leaves little to win.** T and C are estimated at about 40
-  cycles a node, of the 1,600 a node costs now.
+- **The budget leaves little to win.** T and C cost 48 cycles a node in the
+  prototype below, with hashed tables, of the 1,600 a node costs now.
 
 What makes the ordered part cheap is that its loads are of records written a
 few nodes ago. If T becomes the limit, the lever is several statements'
 sweeps interleaved step by step, since statements between two declarations
 are independent of each other: more chains at once, not wider vectors.
+
+### What a prototype of the sweeps measured
+
+The sweeps were run over the compile's real nodes before anything is built.
+The lowering's inventory (`measure-lowering-templates`), patched to dump every
+evaluated node of every lowered body with the lowering's own key for it and
+the entries its task wrote, feeds a prototype that makes T's, C's and X's
+decisions from tables alone, an expression's tree at a time, and compares the
+entries it writes with the stream's (the record's section 9; `sweeps.c`
+there). It is not the machine. It binds no name, reads no type table and
+tests nothing for diagnostics: a leaf's facts, those of a cast, a member, a
+call, a subscript and a dereference, a call's operands' targets and every
+entry's value are given to it. Its tables are learned from the unit and
+hashed, not baked and indexed. A key that two nodes answer differently
+refuses its nodes' expressions, as does a node whose entries its templates
+(16 entries in four runs of at most 8) can't hold.
+
+| | `sqlite3.c` | musl, 1,336 units |
+| --- | ---: | ---: |
+| evaluated nodes, in full expressions | 266,707 in 52,368 | 131,092 in 26,451 |
+| leaves; typed by the table; typed by a lookup | 42%; 22%; 36% | 44%; 28%; 28% |
+| T's keys, in conflict | 3,075, 0 | 2,835, 0 |
+| C's keys, in conflict | 9,742, 0 | 9,476, 14 |
+| template keys, in conflict | 2,400, 3 | 2,396, 4 |
+| nodes in taken expressions | 96.5% | 88.2% |
+| emitted entries that differ from the stream's | 0 of 346,998 | 0 of 154,132 |
+| cycles, instructions, mispredicted branches a node | 99.7, 264, 1.16 | 100.6, 268, 1.16 |
+
+- **The tables decide what the design asks of them.** For every operator
+  whose type isn't a lookup's, the operands' facts decide the node's: no key
+  in conflict in either corpus, and one corpus's tables answer the other's
+  nodes without an error wherever they know the key (51,514 and 27,324
+  nodes). The lowering's key, rebuilt from the sweeps' state alone, is the
+  lowering's own for every node, and every taken expression's entries are the
+  stream's.
+- **T is mostly lookups.** 42% of `sqlite3.c`'s evaluated nodes are leaves,
+  and 36% are casts (37,534 of the 39,998 to void: the discards), member
+  accesses, calls, subscripts and dereferences, whose type a declaration or
+  the type table gives. `scalar`'s rows type 22%. So T's cost is the binding
+  answers and the type table's reads, which today's rules make too, more than
+  its transitions.
+- **Five keys' entries aren't the key's to decide** in the two corpora: an
+  aggregate's assignment (two keys), an atomic builtin's class and, in musl,
+  a complex local's conversion and a local array's value (`LOCAL_ADDRESS` for
+  1,152 nodes, `LOCAL` for 47). A bit-field's store has two sequences for a
+  key too. These refuse, or get the fact they lack.
+- **What the prototype refuses is its templates' shape first**: rows of more
+  than 8 entries (post-increments, bit-field stores and reads, `va_arg`: 2.4%
+  of `sqlite3.c`'s nodes are in such expressions) and entries written inside
+  an operand's (compound assignments and increments: 0.9%). The machine's rows
+  need both shapes or leave them to the tasks.
+- **Learned tables are not this design's.** With the other corpus's tables
+  the prototype takes 59% of `sqlite3.c`'s nodes and 42% of musl's, and
+  `sqlite3.c`'s tables give musl 23 wrong entries, all the array's key's,
+  whose second answer `sqlite3.c` never shows. That is why the tables are
+  baked from the rules over every key and the pipeline stays as their check.
+- **The cost.** 99.7 cycles, 264 instructions and 1.16 mispredicted branches
+  a node on the 9700X (99.5 to 101.7 over three runs): 16 for T, 32 for C, 37
+  for the template's choice and 21 for the expansion when each runs over the
+  whole unit, which costs 7% more than an expression at a time and mispredicts
+  half as much again. That is 47 cycles a body token, with the lookups given
+  and nothing vector yet, against the 752 the stages spend.
 
 ## The steps and their gates
 
@@ -450,7 +518,7 @@ by a compile unless its gate holds. `--scalar` keeps today's path throughout.
 | step | what is built | gate |
 | --- | --- | --- |
 | 0. Census | `measure-node-machine`: the pipeline as it is, with the machine's set and its silence tests evaluated on the finished graph for every full expression; counts by reason of refusal, per expression and per body, as `measure-lowering-templates` counts. No machine. | The set takes expressions holding at least 85% of `sqlite3.c`'s evaluated nodes and 75% of Lua's and musl's, and the silence tests refuse under 3% of the nodes. |
-| 1. Shadow | The tables, baked, and the three sweeps, run after the pipeline on every root, compared with it and timed (`--time-stages` rows). No compile takes it. | No difference on the corpora, with `-g` too. T, C and X together at most 120 cycles a taken node in the real compile. |
+| 1. Shadow | The tables, baked, and the three sweeps, run after the pipeline on every root, compared with it and timed (`--time-stages` rows). No compile takes it. | No difference on the corpora, with `-g` too. T, C and X together at most 120 cycles a taken node in the real compile (the prototype's are 103, with its lookups given and its tables hashed). |
 | 2. Full expressions | Summary nodes, side records, the splice; the stages' walks read them. | `-c sqlite3.c` at least 1.2 times faster across placements (expected 1.3), both paths' objects and diagnostics the same on every corpus, no unit of musl or Lua slower by more than 1%. |
 | 3. Whole bodies | Statements, controls, labels, the return flow and the unused and uninitialized events by the machine, for a body whose every expression and statement it takes: `check_program`, the selection's walk and the lowering skip such a body, as they skip a body `-flazy-system-headers` deferred. A body not taken whole keeps step 2's expressions. | At least 1.35 times cumulative (expected 1.6). |
 | 4. Bodies without the token columns | Scopes and local declarations by the machine, with file-scope names through `c_environment_lookup` at the body's opening. The order is the deferred reader's: the top level first with every body cut out (`check_deferred_cut`), then each body by the machine, and a body it refuses by the reader's walks, as a deferred body is read today. A taken body touches none of the reader's token columns. | At least 1.6 times cumulative (expected 2.0); peak RSS under 150 MB. |
@@ -462,7 +530,9 @@ with calls and `&&`, `||` and `?:`, 67.0%; with bit-fields, 92.4%; with
 75.0% and 80.7%, the rest complex, atomic and vector values and compound
 literals). Step 2 takes expressions, not bodies, so it gains from the first
 day's coverage: 69% of the statements' expressions are already whole under the
-narrowest set. Step 3 needs the body whole, and `sqlite3.c`'s ten largest
+narrowest set, and the prototype's tables, which have calls, selections and
+conversions, take expressions holding 96.5% of the nodes before any test for
+diagnostics. Step 3 needs the body whole, and `sqlite3.c`'s ten largest
 bodies hold 15.5% of its body tokens, so its set has to reach what those hold:
 `goto` and labels (in bodies with 27% of the body tokens), `switch` (20%),
 brace initializers (18.5%), `static` locals (15.5%).
@@ -496,12 +566,17 @@ step 4's columns, each at its coverage).
   for a taken body (about 165), and **step 4** the reader's walks and passes
   over its tokens (about 180, with `memset`'s share), for about 20 and 40
   more of the machine.
-- **The machine's cost** is the estimate that matters most and is the least
-  measured: 60 to 150 cycles a body token against today's 752. Its references
-  are the emission, which expands a template an entry with registers and
-  frames and encodes it for 76, the typed stream's validation, a stack of
-  classes over every entry, for 9, and tcc's whole parse and code generation
-  for 131 a token.
+- **The machine's cost** is the estimate that matters most: 60 to 150 cycles
+  a body token against today's 752. Its sweeps are measured in the prototype
+  at 47, with hashed tables and the lookups given, so the expected case's 55
+  leaves 8 for the lookups, the records and the silence tests: a first
+  machine is likelier between the expected and the conservative cases. The
+  gain depends little on it. With 90% of the nodes in taken expressions,
+  step 2 gives 1.34 times at 55 cycles a body token, 1.29 at 90 and 1.22 at
+  150. The other references are the emission, which expands a template an
+  entry with registers and frames and encodes it for 76, the typed stream's
+  validation, a stack of classes over every entry, for 9, and tcc's whole
+  parse and code generation for 131 a token.
 - **Memory.** A taken body leaves no graph, stream or program rows; after step
   4, no token columns either. The bodies hold 144 MB of the 228.5 MB peak, 85
   MB of it the reader's.
@@ -518,8 +593,10 @@ step 4's columns, each at its coverage).
   1.2.
 - **The shadow (step 1)** measures the sweeps above 250 cycles a taken node,
   or finds keys whose rows aren't deterministic beyond the few the inventory
-  names (the aggregate copies by size, an unsigned division by a power of
-  two): the tables then don't hold a node's treatment.
+  and the prototype name (an aggregate's copy, an unsigned division by a
+  power of two, a bit-field's store, an atomic builtin's class, a complex
+  value's conversion, musl's array locals): the tables then don't hold a
+  node's treatment.
 - **Step 2's compile** gains less than the stages' removed work predicts: the
   cost was then not the visits, and steps 3 and 4 shouldn't start.
 
@@ -553,6 +630,11 @@ Each is a measurement that ends the work with a record, as #1048's and
   writes only its own tapes and the summary nodes of its own body's range, so
   it runs on a lane as the coded walk does; steps 3 and 4 make a body's
   compile independent of the unit's columns, which is #672's windows.
+- **The rows' shape.** A row of 8 entries after the operands holds most nodes,
+  not all: 2.2% of `sqlite3.c`'s write before or between their operands (`&&`,
+  `||`, `?:` and the compound assignments), and the prototype's four runs
+  still left 3.3% of the nodes in refused expressions. Each further shape is a
+  row format X has to write without a branch a node, or a refusal.
 - **Open:** whether C and X are one sweep; whether the summary node is a leaf
   or a handle; whether the tables are baked from the actions or written by
   hand with the actions as their test; where the pointer-pair memo lives.
