@@ -331,12 +331,18 @@ typedef enum Tier1SelectRule
 // into the vector class's scratch register (vextracti64x4, vextracti32x4, then vpshufd 0x4e and, of doublewords, 0xb1),
 // then the operation of both halves into the destination.
 #define BUSTER_TIER1_VECTOR_REDUCE 24
+// A select of an operation where its mask is set (#1840, tier1_select_masked_binary): `vselect m, op(a, b), w` of an
+// operation whose only use the select is, at the select's lanes, as one EVEX instruction under the mask. `condition` 0
+// for a BINARY (`operation` its BUSTER_TIER1_VECTOR_*) and 1 for a LANE_OP (`operation` the IR's flags), values[0] and
+// values[1] its operands, values[2] the mask and values[3] the passthrough w, which the destination takes first unless
+// it holds it; none where w is a zero vector, the zeroing form.
+#define BUSTER_TIER1_VECTOR_MASKED_BINARY 25
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
-#define BUSTER_TIER1_VECTOR_FROUND 25
+#define BUSTER_TIER1_VECTOR_FROUND 26
 // A truncating conversion of values[0]'s lane 0 into the general destination (#1840): `immediate` the IR's flags, one
 // record of ir_simd_cvtt_forms'.
-#define BUSTER_TIER1_VECTOR_CVTT 26
+#define BUSTER_TIER1_VECTOR_CVTT 27
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -691,6 +697,10 @@ struct Tier1SelectHoles
     uint8_t left;
     uint8_t right;
     uint8_t third;
+    // A masked operation's passthrough (BUSTER_TIER1_VECTOR_MASKED_BINARY, #1840), values[3]'s register, and whether it has
+    // one: none is the zeroing form.
+    uint8_t fourth;
+    bool has_fourth;
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
@@ -1304,6 +1314,14 @@ static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_
 // The conversions' and the scalar shifts' forms (#1840), shared with the decoder.
 #include "buster/compiler/ir_simd_convert_forms.c"
 
+// A masked operation's form (BUSTER_TIER1_VECTOR_MASKED_BINARY): a LANE_OP's (`lane_op`, `operation` the IR's flags) or a
+// BINARY's EVEX form at its lanes and `width`.
+static uint16_t tier1_select_masked_form(bool lane_op, uint32_t operation, uint32_t lane, uint32_t width)
+{
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    return lane_op ? (uint16_t)ir_simd_lane_op_forms[(operation >> 2) & 7][operation & 3][at] : tier1_select_lane_form(operation, lane, width, BUSTER_TIER1_ENCODING_EVEX);
+}
+
 // A shift by a scalar count (#1840, BUSTER_TIER1_VECTOR_SHIFT), from the forms the decoder admits
 // (ir_simd_convert_forms.c's ir_simd_shift_forms): a constant count by the immediate form, of the source (rm) into the
 // destination (vvvv), any count of 255 or more 255, past every lane's bits, which gives the same 0 or sign; any other
@@ -1515,6 +1533,37 @@ static void tier1_select_compress(Tier1SelectRecords* result, const Tier1SelectH
         .rm = expand ? source : x,
         .mode = BUSTER_X86_REGISTER_DIRECT,
         .decorations = (uint8_t)(holes->right & BUSTER_X86_DECORATION_MASK),
+    };
+    tier1_select_append(result, record);
+}
+
+// A masked operation (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): the operation's EVEX form under the mask's k register,
+// merging into the destination, which takes the passthrough first unless it holds it (the vector class's scratch register
+// keeping an operand that move would overwrite), or zeroing where it has none.
+static void tier1_select_masked_binary(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t width = holes->width;
+    const uint8_t x = destination & 15;
+    uint8_t left = holes->left & 15;
+    uint8_t right = holes->right & 15;
+    const uint8_t passthrough = holes->fourth & 15;
+    if (holes->has_fourth && x != passthrough)
+    {
+        if (x == left || x == right)
+        {
+            tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, x, width, BUSTER_TIER1_ENCODING_EVEX));
+            left = x == left ? (uint8_t)BUSTER_TIER1_SELECT_FLOAT_SCRATCH : left;
+            right = x == right ? (uint8_t)BUSTER_TIER1_SELECT_FLOAT_SCRATCH : right;
+        }
+        tier1_select_append(result, tier1_select_class_move(x, passthrough, width, BUSTER_TIER1_ENCODING_EVEX));
+    }
+    const X86Instruction record = {
+        .form = tier1_select_masked_form(holes->condition != 0, (uint32_t)holes->operation, holes->source_width, width),
+        .reg = x,
+        .vvvv = left,
+        .rm = right,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .decorations = (uint8_t)((holes->third & BUSTER_X86_DECORATION_MASK) | (holes->has_fourth ? 0 : BUSTER_X86_DECORATION_ZEROING)),
     };
     tier1_select_append(result, record);
 }
@@ -2252,6 +2301,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_mask_vector(&result, holes);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_MASKED_BINARY)
+        {
+            tier1_select_masked_binary(&result, holes, destination);
+        }
         else if (kind == BUSTER_TIER1_VECTOR_PERMUTE2)
         {
             tier1_select_permute2(&result, holes, destination);
@@ -2873,11 +2926,15 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // frame object the address walk reached, whose offset the consumer adds to the
 // displacement at emission (tier1_emit_cfg.c): the base value is then BUSTER_IR_NONE, and no register is read for it.
 // The original function stays immutable.
+#define BUSTER_TIER1_SELECT_VALUES 4
+
 typedef struct Tier1SelectPattern Tier1SelectPattern;
 struct Tier1SelectPattern
 {
     uint64_t immediate;
-    uint32_t values[3];
+    // Its values: up to three for most rules, and a fourth for a masked operation's merge (BUSTER_TIER1_VECTOR_MASKED_BINARY,
+    // #1840), BUSTER_TIER1_SELECT_VALUES in all.
+    uint32_t values[BUSTER_TIER1_SELECT_VALUES];
     int32_t displacement;
     uint32_t stack_object;
     uint8_t rule;
@@ -4298,7 +4355,7 @@ static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, 
 static inline __attribute__((always_inline)) uint32_t tier1_select_pattern_cost(const Tier1SelectForest* forest, uint32_t node, const Tier1SelectPattern* pattern)
 {
     uint32_t cost = pattern->intrinsic_cost;
-    for (uint32_t operand = 0; operand < 3; operand += 1)
+    for (uint32_t operand = 0; operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
     {
         const uint32_t value = pattern->values[operand];
         bool repeated = false;
@@ -4705,7 +4762,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     Tier1SelectCandidates candidates = {0};
     Tier1SelectPattern base =
     {
-        .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
+        .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
         .stack_object = BUSTER_IR_NONE,
         .operation = (uint8_t)tier1_select_operation(op),
         .width = (uint8_t)(sign_storage && !sign_result ? 8 : width),
@@ -5016,6 +5073,39 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 expand.values[0] = a;
                 expand.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, expand);
+            }
+            // A select of an operation whose only use it is (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): a BINARY's but the
+            // bitwise ones (whose forms' masks have a bit per dword or qword, not per lane) or a LANE_OP's, at the select's
+            // lanes, whose EVEX form takes a writemask, and zeroing where w is a zero vector. It folds the operation.
+            const uint32_t lane = function->flags[node];
+            const uint32_t inner = tier1_select_tree_child(forest, node, b) ? function->op[b] : IR_OP_COUNT;
+            const bool lane_op = inner == IR_INTRINSIC && function->c[b] == BUSTER_IR_INTRINSIC_LANE_OP && lane < IR_SIMD_LANE_COUNT &&
+                                 ir_intrinsic_lanes[function->flags[b] & 3] == lane;
+            const bool binary = (inner == IR_ADD || inner == IR_SUB || inner == IR_MUL || inner == IR_SHL || inner == IR_LSHR || inner == IR_ASHR ||
+                                 (inner >= IR_FADD && inner <= IR_FDIV)) && function->flags[b] == lane;
+            const uint32_t operation = lane_op ? function->flags[b] : inner == IR_ADD ? BUSTER_TIER1_VECTOR_ADD : inner == IR_SUB ? BUSTER_TIER1_VECTOR_SUB :
+                                       inner == IR_MUL ? BUSTER_TIER1_VECTOR_MUL : inner == IR_SHL ? BUSTER_TIER1_VECTOR_SHL :
+                                       inner == IR_LSHR ? BUSTER_TIER1_VECTOR_LSHR : inner == IR_ASHR ? BUSTER_TIER1_VECTOR_ASHR :
+                                       BUSTER_TIER1_VECTOR_FADD + (uint32_t)(inner - IR_FADD);
+            const uint32_t form = lane_op || binary ? tier1_select_masked_form(lane_op, operation, lane, vector_width) : X86_FORM_NONE;
+            const uint8_t evex = form != X86_FORM_NONE ? x86_form_description(form)->evex : 0;
+            const bool zeroing = tier1_select_vector_fill(function, c, vector_width) == 0;
+            if ((evex & BUSTER_X86_EVEX_MASK) != 0 && (!zeroing || (evex & BUSTER_X86_EVEX_ZEROING) != 0))
+            {
+                Tier1SelectPattern masked = base;
+                masked.rule = TIER1_RULE_VECTOR;
+                masked.width = (uint8_t)vector_width;
+                masked.scale = BUSTER_TIER1_VECTOR_MASKED_BINARY;
+                masked.operation = (uint8_t)operation;
+                masked.condition = lane_op ? 1 : 0;
+                masked.source_width = (uint8_t)lane;
+                masked.values[0] = function->a[b];
+                masked.values[1] = function->b[b];
+                masked.values[2] = a;
+                masked.values[3] = zeroing ? BUSTER_IR_NONE : c;
+                masked.intrinsic_cost = 1;
+                tier1_select_fold(forest, node, b, &masked);
+                tier1_select_add_candidate(forest, node, &candidates, masked);
             }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
@@ -6363,7 +6453,7 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
             pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
         }
     }
-    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < 3; operand += 1)
+    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
     {
         const uint32_t value = pattern->values[operand];
         if (value != BUSTER_IR_NONE)
@@ -6499,7 +6589,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
-        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : 3;
+        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : BUSTER_TIER1_SELECT_VALUES;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), and its use counts, but
         // nothing folds into a phi, so its depth doesn't order the phi's choice. Its own loop leaves the others' as it was.
@@ -6637,7 +6727,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             tier1_burs_rules_scalar(count, classes, states, rules);
         }
         const Tier1SelectPattern none = {
-            .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
+            .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
             .stack_object = BUSTER_IR_NONE,
         };
         for (uint32_t node = 0; node < count; node += 1)
@@ -6734,7 +6824,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 }
                 else
                 {
-                    for (uint32_t operand = 0; operand < 3; operand += 1)
+                    for (uint32_t operand = 0; operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
                     {
                         if (pattern->values[operand] != BUSTER_IR_NONE)
                         {
@@ -6811,6 +6901,8 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .left = pattern->values[0] == BUSTER_IR_NONE ? 0 : registers[pattern->values[0]],
         .right = pattern->values[1] == BUSTER_IR_NONE ? 0 : registers[pattern->values[1]],
         .third = pattern->values[2] == BUSTER_IR_NONE ? 0 : registers[pattern->values[2]],
+        .fourth = pattern->values[3] == BUSTER_IR_NONE ? 0 : registers[pattern->values[3]],
+        .has_fourth = pattern->values[3] != BUSTER_IR_NONE,
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
@@ -6947,7 +7039,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             const IrFunction* function = plan->function;
             const Tier1SelectPattern* pattern = &plan->patterns[node];
             bool allocated = function->type[node] == IR_VOID || tier1_select_register_allowed(registers[node]);
-            for (uint32_t p = 0; p < 3; p += 1)
+            for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_VALUES; p += 1)
             {
                 const uint32_t value = pattern->values[p];
                 allocated &= value == BUSTER_IR_NONE || tier1_select_register_allowed(registers[value]);

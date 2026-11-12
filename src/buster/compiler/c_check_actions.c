@@ -299,6 +299,11 @@ typedef enum CheckDiagnostic
     // A signed _BitInt past 128 bits as one of mul_overflow's operands or its destination (#1447): clang's
     // "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits", at that argument.
     CHECK_DIAG_OVERFLOW_BIT_INT,
+    // A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete there (#1842's 3d,
+    // clang's BoundsSafetyCheckUseOfCountAttrPtr and its assignment's check): "cannot use 'b->p' with '__counted_by'
+    // attributed type ...", at the member's expression, or at an assignment to it "cannot assign to 'B::p' ...", worded
+    // with its two notes by c_check_semantic_diagnostic.c (check_graph_counted_uses).
+    CHECK_DIAG_COUNTED_INCOMPLETE,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
@@ -317,6 +322,9 @@ typedef enum CheckDiagnostic
 // GCC's cast to a union (#2301, clang's CK_ToUnion): the conversion's type is the member the operand initializes, the
 // first of the operand's unqualified type, and the cast's value is a union whose first bytes are that member's.
 #define BUSTER_CHECK_CONVERT_TO_UNION 0x400u
+// No conversion: a builtin's argument that didn't convert to its parameter, the conversion's type (#2460,
+// check_builtin_misc_convert), for the error's words (check_driver_builtin_conversion). Only a unit in error has one.
+#define BUSTER_CHECK_CONVERT_FAILED 0x800u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
 #define CHECK_WARNING_GNU_CONSTANT 0x02u

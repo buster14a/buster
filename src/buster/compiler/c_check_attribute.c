@@ -3885,7 +3885,8 @@ struct CheckInputAttributeRecovery
 
 // Whether an attribute's error is one clang's handleDeclAttribute gives and then returns from without adding the attribute,
 // which leaves the declaration valid: its arguments' (their values, counts, strings and parameter indices), its subject's,
-// a mutual exclusion's and x86's interrupt handler's (#1447); and a vector type's element or size, which clang's
+// a mutual exclusion's, x86's interrupt handler's (#1447), and an alias's or ifunc's on a definition (#2449: handleAliasAttr
+// and handleIFuncAttr return, the declaration staying a valid definition); and a vector type's element or size, which clang's
 // HandleVectorSizeAttr and HandleNeonVectorTypeAttr give and then leave the type as it was (check_input_attribute_type).
 // Others stop the reader as before: an undeclared name's, a pragma's, conflicting calling conventions' (a type's, which
 // clang makes invalid) and a list's place (its parser's).
@@ -3897,7 +3898,10 @@ static bool check_input_attribute_recoverable(const CheckInputReport* report)
                            message == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS || message == CHECK_INPUT_ATTRIBUTE_EXCLUSION ||
                            message == CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING || message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                            message == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL || message == CHECK_INPUT_ATTRIBUTE_TYPES ||
-                           message == CHECK_INPUT_INTERRUPT_HANDLER;
+                           message == CHECK_INPUT_INTERRUPT_HANDLER ||
+                           // (Not beside a multiversioning attribute, whose check after it still names the alias: its report
+                           // is ordered after the function's name then, check_input_attribute_definition.)
+                           ((message == CHECK_INPUT_ALIAS_DEFINITION || message == CHECK_INPUT_IFUNC_DEFINITION) && report->sort == 0);
     const bool vector = message == CHECK_INPUT_VECTOR_ELEMENT || message == CHECK_INPUT_VECTOR_BIT_INT || message == CHECK_INPUT_VECTOR_CONSTANT ||
                         message == CHECK_INPUT_VECTOR_NEGATIVE || message == CHECK_INPUT_VECTOR_TOO_LARGE || message == CHECK_INPUT_VECTOR_ZERO ||
                         message == CHECK_INPUT_VECTOR_MULTIPLE;
@@ -4819,6 +4823,22 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             }
             const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
+            if (valid && standard && parser->language.standard < 2023)
+            {
+                // Before C23, the list is an extension clang's parser warns of as it reads it, once whichever reading reaches it.
+                const CheckWarningEvent extension =
+                {
+                    .id = CHECK_WARNING_ID_C23_ATTRIBUTES,
+                    .kind = CHECK_WARNING_EVENT_C23_ATTRIBUTES,
+                    .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                    .token = first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = first + 1,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_once(reader, &extension);
+            }
             if (valid && (place == BUSTER_CHECK_PLACE_QUALIFIERS || place == BUSTER_CHECK_PLACE_GROUP))
             {
                 // clang's declarator parser rejects a C23 list after a pointer's qualifiers, or at a group's start

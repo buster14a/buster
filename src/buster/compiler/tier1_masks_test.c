@@ -234,6 +234,9 @@ struct Tier1MasksFixture
     // Comparisons into a mask under another mask as their writemask (#1847, tier1_select_masked_compare): how many of
     // its records are a vpcmp or a vcmpp with an opmask decoration, by either path. Checked where it isn't 0.
     uint32_t masked_compares;
+    // Operations under a mask as a select's true arm (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): how many of its records
+    // are an arithmetic one with an opmask decoration (no compare, blend or move), by either path. Checked where it isn't 0.
+    uint32_t masked_operations;
     // A row of AVX512-FP16's (#1283's review): its forms are test->fp16's, and it runs natively only where the host has
     // AVX512-FP16 (not the 9700X's Zen 5).
     bool fp16;
@@ -1177,6 +1180,56 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "  %30 = ret.void\n"
                 "}\n",
         .masked_compares = 3,
+    },
+    // Selects of an operation (#1840, tier1_select_masked_binary): each its operation's one record under the mask, merged
+    // into the false arm's register or zeroing where that is a zero vector; with the false arm either operand of the
+    // operation (the destination's move of it first keeps the other in the scratch register); of a lane operation and of
+    // floats; and an operation the function stores as well, which stays its own record and the select a vpblendmd.
+    {
+        .name = "masked operations: a select of an operation, as the operation under the mask",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v8i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=32\n"
+                "  %3 = load.v8i32 %2 align=1\n"
+                "  %4 = address.ptr %0 offset=64\n"
+                "  %5 = load.v8i32 %4 align=1\n"
+                "  %6 = address.ptr %0 offset=96\n"
+                "  %7 = load.m8 %6 align=1\n"
+                "  %8 = address.ptr %0 offset=104\n"
+                "  %9 = load.v4i32 %8 align=1\n"
+                "  %10 = address.ptr %0 offset=120\n"
+                "  %11 = load.v4i32 %10 align=1\n"
+                "  %12 = add.v8i32 %1, %3\n"
+                "  %13 = vselect.v8i32 %7, %12, %5\n"
+                "  %14 = address.ptr %0 offset=128\n"
+                "  %15 = store.void %14, %13 align=1\n"
+                "  %16 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
+                "  %17 = sub.v8i32 %1, %3\n"
+                "  %18 = vselect.v8i32 %7, %17, %16\n"
+                "  %19 = address.ptr %0 offset=160\n"
+                "  %20 = store.void %19, %18 align=1\n"
+                "  %21 = intrinsic.v8i32 %1, %3 lane_op 2\n"
+                "  %22 = vselect.v8i32 %7, %21, %1\n"
+                "  %23 = address.ptr %0 offset=192\n"
+                "  %24 = store.void %23, %22 align=1\n"
+                "  %25 = mul.v8i32 %5, %3\n"
+                "  %26 = vselect.v8i32 %7, %25, %3\n"
+                "  %27 = address.ptr %0 offset=224\n"
+                "  %28 = store.void %27, %26 align=1\n"
+                "  %29 = fmul.v4f32 %9, %11\n"
+                "  %30 = vselect.v4f32 %7, %29, %11\n"
+                "  %31 = store.void %0, %30 align=1\n"
+                "  %32 = add.v8i32 %1, %5\n"
+                "  %33 = vselect.v8i32 %7, %32, %3\n"
+                "  %34 = address.ptr %0 offset=16\n"
+                "  %35 = store.void %34, %33 align=1\n"
+                "  %36 = address.ptr %0 offset=48\n"
+                "  %37 = store.void %36, %32 align=1\n"
+                "  %38 = ret.void\n"
+                "}\n",
+        .masked_operations = 5,
     },
     // The IR's lanes (#141's element types), at each width: 8-, 16- and 64-bit integers' arithmetic, products and shifts
     // by each lane's count (masked to twice the lane's bits, so that half shift past it), floats' and doubles'
@@ -3957,6 +4010,20 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         if (fixture->masked_compares != 0 && !tier1_masks_test_expect(test, masked_compares == fixture->masked_compares, "a comparison ANDed with a mask is one compare under it as its writemask"))
         {
             printf("test-tier1-masks: %s, %s path: %u masked comparisons (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_compares, fixture->masked_compares);
+        }
+        // The masked operations' records (#1840): an arithmetic record under a writemask.
+        uint32_t masked_operations = 0;
+        for (uint32_t r = 0; fixture->masked_operations != 0 && r < emitted.code.count; r += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[r];
+            const char* mnemonic = x86_form_description(record->form)->mnemonic;
+            const bool other = strncmp(mnemonic, "vpcmp", 5) == 0 || strncmp(mnemonic, "vcmpp", 5) == 0 || strncmp(mnemonic, "vpblendm", 8) == 0 ||
+                               strncmp(mnemonic, "vmov", 4) == 0 || mnemonic[0] == 'k';
+            masked_operations += !other && (record->decorations & BUSTER_X86_DECORATION_MASK) != 0 ? 1 : 0;
+        }
+        if (fixture->masked_operations != 0 && !tier1_masks_test_expect(test, masked_operations == fixture->masked_operations, "a select of an operation is the operation under its mask"))
+        {
+            printf("test-tier1-masks: %s, %s path: %u masked operations (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_operations, fixture->masked_operations);
         }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
