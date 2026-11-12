@@ -5837,6 +5837,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                                           check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           (warning & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                           check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning, scratch) :
+                                          warning == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                          check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
