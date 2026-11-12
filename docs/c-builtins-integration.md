@@ -2678,10 +2678,12 @@ features. Their prototypes are clang's metadata's:
   share: the call copies the slots below its arguments into a snapshot of its
   own and back after it (`tier0_returns_twice_snapshot`, #1843), 8 bytes at a
   time through the x87 stack's FILD and FISTP, which keep every bit pattern and
-  touch no register the call's moves hold. A mask on the mask stack, or any
-  value of a function with deep entries, is still refused by name
-  (`tier0_returns_twice_saves`). C's contexts for setjmp (a condition, compared
-  with a constant) hold none. Ordinary Tier 1
+  touch no register the call's moves hold. The snapshot also takes the mask
+  slots below the call (the masks it saves from their registers and those past
+  them, #2465), and a deep call's integer and floating values below its
+  arguments in their deep slots, which other deep entries share; so no value
+  held across such a call is refused. C's contexts for setjmp (a condition,
+  compared with a constant) hold none. Ordinary Tier 1
   leaves such a function to Tier 0.
   longjmp's second argument must be a constant 1, wherever the call is, with
   clang's two errors at the call (`check_input_longjmp_argument`).
