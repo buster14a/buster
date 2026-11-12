@@ -10399,14 +10399,22 @@ candidate matches, initialized or assigned, is clang's error with
 types ..." where the enable_ifs leave one candidate, and a note at each
 candidate, the latest first: "made ineligible by enable_if", "has different
 number of parameters", "has type mismatch at Nth parameter", "has different
-return type", or none (`check_driver_overload_address`).
+return type", or none (`check_driver_overload_address`). Returned or passed,
+it is clang's "returning '<overloaded function type>' from a function with
+incompatible result type 'T'" at the operand, or "passing '<overloaded
+function type>' to parameter of incompatible type 'T'" at the argument with
+"passing argument to parameter 'x' here", neither with candidate notes
+(#2480, `check_driver_overload_operand`). An incompatible pointer argument
+is a viable C overloading conversion (`CHECK_OVERLOAD_BAD_POINTER`), and the
+call's conversion error then names the selected candidate's parameter, not
+the latest declaration's (`h(ip)` of `h(long *)` and `h(struct T)`: clang's
+"incompatible pointer types passing 'int *' to parameter of type 'long *'"
+at `h(long *)`'s `a`, #2480).
 
-What isn't clang's yet: an overload set's address returned or passed has
-the conversion error of its latest candidate's type, where clang's is
-"returning/passing '<overloaded function type>' ..."; an incompatible
-pointer argument makes a candidate not viable here, where clang's C
-overloading takes it with its warning (`h(ip)` of `h(long *)` and
-`h(struct T)` picks `h(long *)` there);
+What isn't clang's yet: a typedef that names a parameter of a function
+pointer's type (`void (*fp)(GP)`) prints without its name in the passing
+error, as the type table keeps no sugar there; where an enable_if restricts
+a candidate, a returned or passed set keeps the other words;
 a `volatile` parameter's read as a comma's left operand in a condition gets
 `-Wunused-value`, which clang doesn't give a volatile read; the condition shapes
 above; `-Wint-to-pointer-cast` and its relatives in a condition, which this
