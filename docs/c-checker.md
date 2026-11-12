@@ -4507,6 +4507,17 @@ take clang's words and places:
   binary expression". Other failures keep the generic error. A bound's
   failure before its first undeclared name is reported with it, in source
   order.
+- **A member access** whose base is no structure or union, anywhere else
+  (#2288, `check_semantic_constraint`'s member branch): clang's "member
+  reference base type 'int' is not a structure or union" at the operator,
+  with the operand's type as written for `.` (`'myint' (aka 'int')`) and the
+  pointee for `->`; `.` of a pointer to a record is "member reference type
+  'struct S *' is a pointer; did you mean to use '->'?" there, and `->` of no
+  pointer is "member reference type 'int' is not a pointer" at the member's
+  name. Clang goes on reading `.` of a pointer as `->`, so a member that
+  pointer's record lacks adds its "no member named" there; buster's
+  expression stays invalid and gives only the first. `->`'s pointee type
+  prints as its canonical type, not its typedef's.
 
 Each of these now makes its declaration invalid, as clang's does, and the
 reader goes on (below); a typedef's and a parameter's in clang's own ways. The semantic-recovery
