@@ -492,6 +492,9 @@ struct NodeCensusScratch
     uint32_t* local_objects;
     uint32_t* local_stamps;
     uint32_t body_stamp;
+    // The current expression's temporaries' locals, by their number on the tape, and how many it has met.
+    uint32_t* temporary_locals;
+    uint32_t temporary_count;
 };
 
 static double node_census_share(uint64_t part, uint64_t whole)
@@ -1818,13 +1821,28 @@ static bool node_shadow_local_kind(uint8_t kind)
 }
 
 // Whether the tape's local `object` is the stream's local `local` in the current body: the first time either is met it is
-// the other's, and every later time it must be.
+// the other's, and every later time it must be. A temporary of the expression's (BUSTER_NODE_MACHINE_TEMPORARY, numbered in
+// the order the tape first names them) is a local the body hasn't met, the first time, and that local every later time.
 static bool node_shadow_same_local(NodeCensusScratch* s, uint64_t object, uint64_t local)
 {
     const uint32_t stamp = s->body_stamp;
-    const bool fits = object < s->program->object_count && local < s->function->local_count;
+    const bool temporary = (object & BUSTER_NODE_MACHINE_TEMPORARY) != 0;
+    const uint64_t number = object & ~BUSTER_NODE_MACHINE_TEMPORARY;
+    const bool fits = (temporary ? number <= s->temporary_count && number < BUSTER_NODE_MACHINE_MOST : object < s->program->object_count) && local < s->function->local_count;
     bool same = fits;
-    if (fits && s->object_stamps[object] != stamp && s->local_stamps[local] != stamp)
+    if (fits && temporary && number == s->temporary_count)
+    {
+        same = s->local_stamps[local] != stamp;
+        s->local_stamps[local] = stamp;
+        s->local_objects[local] = UINT32_MAX;
+        s->temporary_locals[number] = (uint32_t)local;
+        s->temporary_count += 1;
+    }
+    else if (fits && temporary)
+    {
+        same = s->temporary_locals[number] == local;
+    }
+    else if (fits && s->object_stamps[object] != stamp && s->local_stamps[local] != stamp)
     {
         s->object_stamps[object] = stamp;
         s->object_locals[object] = (uint32_t)local;
@@ -1920,6 +1938,7 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
     bool same = true;
     uint64_t base = UINT64_MAX;
     bool inside = e < function->count;
+    s->temporary_count = 0;
     while (inside)
     {
         const uint32_t owner = s->owners[e];
@@ -2306,10 +2325,12 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
             s.object_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, objects);
             s.local_objects = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
             s.local_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+            s.temporary_locals = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
             shadow->timed_capacity = (uint32_t)(owners.count < UINT32_MAX ? owners.count : UINT32_MAX);
             shadow->timed = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeShadowExpression, (uint64_t)shadow->timed_capacity + 1);
             shadow->timed_count = 0;
-            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && shadow->timed != NULL &&
+            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL &&
+                   shadow->timed != NULL &&
                    node_machine_begin(&machine, &selected.program, shadow->scalar, shadow->verify, &scratch);
             if (room)
             {

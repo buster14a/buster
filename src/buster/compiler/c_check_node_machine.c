@@ -34,8 +34,17 @@
 // The set is the census's (c_check_node_census.c) and, within it, the templates' and check_lower_logical's: a value read,
 // an address, a folded constant, `&x`, `*p`, a member, a cast, a conversion, the unary and binary scalar operators, a
 // pointer plus an integer, a subscript, the comma, `&&`, `||`, `?:` and an assignment to a local, a global or an address,
-// each of a scalar class I8 to F64 (a conditional's of void too); and a plain call (below). The increments and the
-// compound assignments are not yet the machine's: it refuses them.
+// each of a scalar class I8 to F64 (a conditional's of void too); a plain call (below); and the lowering's updates
+// (check_lower_update): `++x`, `--x`, `x++`, `x--` and the compound assignments, of a local, a global or an address, of
+// the same classes, but a bit-field's.
+//
+// An update (docs/node-machine.md, "Increments and compound assignments") writes two rows: its first after its
+// destination's entries (the old value read, by name or through the destination's kept address, and converted to its
+// computation's type; BUSTER_NODE_MACHINE_SPLIT), and its second, its own, after its value's (the operation, the
+// conversion back and the store). C keeps its plan (NodeMachineUpdate), which X reads at both. A postfix one through an
+// address keeps the address and the old value in two temporaries, each its number in the expression on the tape
+// (BUSTER_NODE_MACHINE_TEMPORARY), which step 2's splice numbers as check_lower_temporary does. T types it by
+// check_action_update's steps (node_machine_update_rule, node_machine_update_pointer_rule), the action its twin.
 //
 // A call (docs/node-machine.md, "T: bind and type"): T types it by its callee's prototype, each argument converted as an
 // assignment converts it and a variadic one by the default promotions (node_machine_call_rule, the action its twin), and
@@ -70,6 +79,15 @@
 #define BUSTER_NODE_MACHINE_ROW_MOST 8u
 // The most entries a segment after a record's row writes (node_machine_hook): a test of its value and a branch.
 #define BUSTER_NODE_MACHINE_HOOK_MOST 4u
+// The most entries one row writes before X tests it against BUSTER_NODE_MACHINE_ROW_MOST and refuses it (12: a record's
+// own 8 and its conversion's 4).
+#define BUSTER_NODE_MACHINE_RECORD_MOST 32u
+// The tape's entries: every row and segment an expression can keep, and the row that X refuses. A record ends its own
+// row and at most one segment after it: a consumer's (BUSTER_NODE_MACHINE_HOOK_MOST) or an update's first row (an
+// update and its destination are two records, so at most half the records have one).
+#define BUSTER_NODE_MACHINE_TAPE_MOST                                                                                            \
+    (BUSTER_NODE_MACHINE_MOST * (BUSTER_NODE_MACHINE_ROW_MOST + BUSTER_NODE_MACHINE_HOOK_MOST) + BUSTER_NODE_MACHINE_MOST / 2u * BUSTER_NODE_MACHINE_ROW_MOST + \
+     BUSTER_NODE_MACHINE_RECORD_MOST)
 // A record's state in C: reached and evaluated by its consumer's template.
 #define BUSTER_NODE_MACHINE_EVALUATED 0x01u
 // Its consumer's entries follow its row (NodeMachine.hooks): a logical operator's or a conditional's test of its
@@ -77,6 +95,12 @@
 #define BUSTER_NODE_MACHINE_AFTER_CONDITION 0x02u
 // A conditional's jump from the end of its first arm to its end, and its second arm's label.
 #define BUSTER_NODE_MACHINE_AFTER_ARM 0x04u
+// An update's destination, after whose entries (none, for a local's or a global's by name) the update's first row goes
+// (node_machine_record_update).
+#define BUSTER_NODE_MACHINE_SPLIT 0x08u
+// A temporary's entry on the tape (an update's of an address, after its postfix): its number among the expression's
+// temporaries, in the order X makes them, with this bit. The lowering's are locals it adds (check_lower_temporary).
+#define BUSTER_NODE_MACHINE_TEMPORARY (UINT64_C(1) << 63)
 
 // A type's word's flags (NodeMachine.type_words): no aligned typedef's wrapper (type_strip_aligned is the type itself), and
 // type_is_valid.
@@ -108,10 +132,14 @@ typedef enum NodeMachineTemplate
     NODE_MACHINE_TEMPLATE_SECOND,
     // A plain call: its CALL (node_machine_call_own).
     NODE_MACHINE_TEMPLATE_CALL,
+    // An update (check_lower_update's): its second row (node_machine_update_last); its plan is node_machine_record_update.
+    NODE_MACHINE_TEMPLATE_UPDATE,
 } NodeMachineTemplate;
 
-// A call's template (node_machine_record_template), the machine's own, past #1048's CheckLowerTemplate values.
+// A call's and an update's templates (node_machine_record_template), the machine's own, past #1048's CheckLowerTemplate
+// values.
 #define BUSTER_NODE_MACHINE_TEMPLATE_CALL ((CheckLowerTemplate)NODE_MACHINE_TEMPLATE_CALL)
+#define BUSTER_NODE_MACHINE_TEMPLATE_UPDATE ((CheckLowerTemplate)NODE_MACHINE_TEMPLATE_UPDATE)
 
 // Why the machine refuses an expression: the first sweep's reason that stopped it.
 typedef enum NodeMachineRefusal
@@ -119,7 +147,7 @@ typedef enum NodeMachineRefusal
     NODE_MACHINE_TAKEN,
     // Its nodes aren't one range of the graph with every operand inside it, or past BUSTER_NODE_MACHINE_MOST.
     NODE_MACHINE_REFUSED_SHAPE,
-    // An operator without a code of the machine's (an increment, a compound assignment, a builtin...).
+    // An operator without a code of the machine's (a builtin, a statement expression...).
     NODE_MACHINE_REFUSED_CODE,
     // A leaf it doesn't take: an overload set's, an invalid type's, a variable-length array's.
     NODE_MACHINE_REFUSED_LEAF,
@@ -214,6 +242,35 @@ struct NodeMachineColumns
     uint8_t call_depths_stagger[BUSTER_NODE_MACHINE_STAGGER];
 };
 
+// An update's plan (`++x`, `--x`, `x++`, `x--` or `x op= y`), check_lower_update's choices read from the records: its
+// destination's type (the lvalue's), its computation's (its operand 0's conversion, which check_lower_update converts
+// the old value through) and operand 1's target (its conversion's type, or long for a pointer's); a direct update's
+// local (its object) or global (its symbol), its read's and its store's kinds; and the constant its operation takes in
+// place of operand 1, an increment's one or an unsigned power of two's count or mask. The updates' functions are out of
+// line: about one evaluated node in forty is an update, and the sweeps' loops stay as they are for the others.
+typedef struct NodeMachineUpdate NodeMachineUpdate;
+struct NodeMachineUpdate
+{
+    uint64_t destination;
+    uint64_t constant;
+    uint64_t stride;
+    TypeId stored;
+    TypeId calculated;
+    TypeId right;
+    uint8_t stored_class;
+    uint8_t calculated_class;
+    uint8_t computing;
+    uint8_t kind;
+    uint8_t get;
+    uint8_t store;
+    bool increment;
+    bool postfix;
+    bool subtract;
+    bool pointer;
+    bool power;
+    bool direct;
+};
+
 // The machine's state: the unit's, set once a file (node_machine_begin), and the current expression's records and tape.
 typedef struct NodeMachine NodeMachine;
 struct NodeMachine
@@ -279,9 +336,15 @@ struct NodeMachine
     uint32_t* stack;
     uint32_t label_count;
     uint32_t classified;
-    // X's tape: the expression's entries, a local's holding its object, a branch's its label and a call's its row relative
-    // to the expression's first; each label's entry, its place in the tape; per record, the evaluated calls before it in
-    // postorder; and per row, its call's record, `call_count` rows.
+    // For an update and its destination (BUSTER_NODE_MACHINE_SPLIT), its plan among the expression's `update_count`
+    // `updates` (node_machine_record_update).
+    uint32_t* consumers;
+    NodeMachineUpdate* updates;
+    uint32_t update_count;
+    // X's tape, BUSTER_NODE_MACHINE_TAPE_MOST entries: the expression's entries, a local's holding its object, a branch's
+    // its label, a call's its row relative to the expression's first and a temporary its number (`temporary_count` of
+    // them); each label's entry, its place in the tape; per record, the evaluated calls before it in postorder; and per
+    // row, its call's record, `call_count` rows.
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* tape;
@@ -290,6 +353,7 @@ struct NodeMachine
     uint32_t* calls_at;
     uint32_t* call_records;
     uint32_t call_count;
+    uint32_t temporary_count;
     // The record T, C or X stopped at, for a refusal's report.
     uint32_t stopped;
 };
@@ -315,8 +379,7 @@ static void* node_machine_column(Arena* arena, uint64_t count, uint64_t bytes, u
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
-    // Each record's row, and the segment one record's row may have after it.
-    const uint32_t entries = BUSTER_NODE_MACHINE_MOST * (BUSTER_NODE_MACHINE_ROW_MOST + BUSTER_NODE_MACHINE_HOOK_MOST);
+    const uint32_t entries = BUSTER_NODE_MACHINE_TAPE_MOST;
     *machine = (NodeMachine){
         .program = program,
         .types = (TypeTable*)program->types,
@@ -345,10 +408,13 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
     machine->verified = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
     machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
+    machine->consumers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+    machine->updates = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineUpdate, most / 2);
     const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
                       machine->calls_at != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
-                      machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL;
+                      machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
+                      machine->updates != NULL;
     if (room)
     {
         (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
@@ -629,6 +695,12 @@ static inline uint32_t node_machine_record_label_base(const NodeMachine* machine
     return machine->columns->label_bases[r];
 }
 
+// An update's plan, at the update's record and at its destination's (BUSTER_NODE_MACHINE_SPLIT).
+static inline const NodeMachineUpdate* node_machine_record_update(const NodeMachine* machine, uint32_t r)
+{
+    return machine->updates + machine->consumers[r];
+}
+
 // C's writes: the first `count` records not evaluated, then a record evaluated, its context, its target and its template;
 // an evaluated record's consumer `consumer` whose segment `hook` follows its row; and a labeled record's first label.
 static inline void node_machine_records_set_unevaluated(NodeMachine* machine, uint32_t count)
@@ -670,6 +742,15 @@ static inline void node_machine_record_set_label_base(NodeMachine* machine, uint
 static inline void node_machine_record_set_call_depth(NodeMachine* machine, uint32_t r, uint32_t depth)
 {
     machine->columns->call_depths[r] = depth;
+}
+
+// Update record `r`'s plan, the expression's `k`th, and its destination `destination`'s: the update's first row follows
+// the destination's entries.
+static inline void node_machine_record_set_update(NodeMachine* machine, uint32_t r, uint32_t destination, uint32_t k)
+{
+    machine->columns->states[destination] |= BUSTER_NODE_MACHINE_SPLIT;
+    machine->consumers[destination] = k;
+    machine->consumers[r] = k;
 }
 
 // Whether `object` is a local of the function: an object without a symbol (a parameter's, an automatic object's), which

@@ -5,7 +5,9 @@
 // the postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
 // check_lower_template_own's, and the logical operators' and the conditional's) and then its conversion's to its target
 // in its context (node_machine_conversion, check_lower_template_conversion's), then its consumer's segment after it where
-// it has one (node_machine_hook); a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It
+// it has one (node_machine_hook) or an update's first row (node_machine_split, node_machine_update_first); an update's
+// second row, its own, by node_machine_update_last; a call's CALL by node_machine_call_own, its row numbered as the
+// lowering numbers it. It
 // reads the records T typed and C classified through the record accessors alone; the tape (NodeMachine's kinds, classes
 // and tape), its labels' entries (label_entries) and the call rows (calls_at, call_records, call_count) are its own.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
@@ -59,7 +61,10 @@ static void node_machine_address(NodeMachine* machine, uint32_t object, int64_t 
     }
 }
 
-// Record `r`'s own entries by its template (check_lower_template_own's), after its operands'. `object` as in C.
+static void node_machine_update_last(NodeMachine* machine, const NodeMachineUpdate* update);
+
+// Record `r`'s own entries by its template (check_lower_template_own's), after its operands', or an update's second row.
+// `object` as in C.
 static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
 {
     const CheckProgram* program = machine->program;
@@ -184,20 +189,21 @@ static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
     {
         node_machine_put(machine, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, node_machine_record_type(machine, r)));
     }
+    else if (kind == BUSTER_NODE_MACHINE_TEMPLATE_UPDATE)
+    {
+        node_machine_update_last(machine, node_machine_record_update(machine, r));
+    }
 }
 
-// Record `r`'s conversion's entries, from its type to its target in its context (check_lower_template_conversion's):
-// whether the templates take it.
-static bool node_machine_conversion(NodeMachine* machine, uint32_t r)
+// The entries of a conversion from `from` (its facts `from_facts`, its class on the stack `source`) to `to`
+// (check_lower_template_conversion's, which are check_lower_conversion's for the classes it takes): whether the templates
+// take it. Inlined into X's loop: the updates' rows, its other callers, would leave it a call of its own at every node.
+static inline __attribute__((always_inline)) bool node_machine_convert(NodeMachine* machine, TypeId from, uint8_t from_facts, uint8_t source, TypeId to)
 {
-    const TypeId from = node_machine_record_type(machine, r);
-    const TypeId to = node_machine_record_target(machine, r);
     bool takes = true;
-    if (node_machine_record_context(machine, r) == 0 && to != 0 && from != to)
+    if (to != 0 && from != to)
     {
-        const uint8_t from_facts = node_machine_record_facts(machine, r);
         const uint8_t to_facts = node_machine_facts(machine, to);
-        const uint8_t source = node_machine_record_class(machine, r);
         const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
         // check_lower_conversion_empty: the same class, neither a _BitInt nor complex, nor a conversion to bool.
         const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
@@ -239,6 +245,99 @@ static bool node_machine_conversion(NodeMachine* machine, uint32_t r)
     return takes;
 }
 
+// Record `r`'s conversion's entries, from its type to its target in its context: whether the templates take it.
+static inline __attribute__((always_inline)) bool node_machine_conversion(NodeMachine* machine, uint32_t r)
+{
+    return node_machine_record_context(machine, r) != 0 ||
+           node_machine_convert(machine, node_machine_record_type(machine, r), node_machine_record_facts(machine, r), node_machine_record_class(machine, r),
+                                node_machine_record_target(machine, r));
+}
+
+
+// An update's first row, after its destination's entries (check_lower_update's up to operand 1's): the old value read by
+// name, or through the address its destination left (kept for the store, or for a postfix one in a temporary, with the
+// old value in another), and converted to its computation's type and class. Whether the templates take the conversion.
+static __attribute__((noinline)) bool node_machine_update_first(NodeMachine* machine, const NodeMachineUpdate* update)
+{
+    const uint8_t class = update->stored_class;
+    const uint64_t access = check_lower_access_value(machine->types, class, update->stored);
+    if (update->direct)
+    {
+        node_machine_put(machine, update->get, class, update->destination);
+        if (update->postfix)
+        {
+            node_machine_put(machine, BUSTER_TYPED_DUP, class, 0);
+        }
+    }
+    else if (!update->postfix)
+    {
+        node_machine_put(machine, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
+        node_machine_put(machine, BUSTER_TYPED_LOAD, class, access);
+    }
+    else
+    {
+        const uint64_t address = BUSTER_NODE_MACHINE_TEMPORARY | machine->temporary_count;
+        const uint64_t old = BUSTER_NODE_MACHINE_TEMPORARY | (machine->temporary_count + 1);
+        machine->temporary_count += 2;
+        node_machine_put(machine, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        node_machine_put(machine, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        node_machine_put(machine, BUSTER_TYPED_LOAD, class, access);
+        node_machine_put(machine, BUSTER_TYPED_STORE_LOCAL, class, old);
+        node_machine_put(machine, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+        node_machine_put(machine, BUSTER_TYPED_LOCAL, class, old);
+    }
+    const bool takes = node_machine_convert(machine, update->stored, node_machine_facts(machine, update->stored), class, update->calculated);
+    if (update->computing != update->calculated_class && !update->pointer)
+    {
+        node_machine_put(machine, BUSTER_TYPED_CONVERT, update->computing, 0);
+    }
+    return takes;
+}
+
+// An update's own row, after operand 1's entries (none for an increment or an unsigned power of two): the operation, the
+// result converted back to the destination's type, and the store, by name or through the kept address. The conversion
+// takes, as the plan's classes are I8 to F64 and neither complex nor an aggregate.
+static __attribute__((noinline)) void node_machine_update_last(NodeMachine* machine, const NodeMachineUpdate* update)
+{
+    const uint8_t class = update->stored_class;
+    if (update->pointer)
+    {
+        if (update->increment)
+        {
+            node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1);
+        }
+        if (update->subtract)
+        {
+            node_machine_put(machine, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        node_machine_put(machine, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, update->stride);
+    }
+    else
+    {
+        if (update->increment || update->power)
+        {
+            node_machine_put(machine, BUSTER_TYPED_CONST, update->computing, update->constant);
+        }
+        else if (update->computing != update->calculated_class && update->kind != BUSTER_TYPED_SHL && update->kind != BUSTER_TYPED_SHR)
+        {
+            node_machine_put(machine, BUSTER_TYPED_CONVERT, update->computing, 0);
+        }
+        node_machine_put(machine, update->kind, update->computing, 0);
+    }
+    node_machine_convert(machine, update->calculated, node_machine_facts(machine, update->calculated), update->calculated_class, update->stored);
+    node_machine_put(machine, update->store, class, update->direct ? update->destination : check_lower_access_value(machine->types, class, update->stored));
+}
+
+
+// X's update's first row after record `r`, its destination's own (none for one read by name): at most
+// BUSTER_NODE_MACHINE_ROW_MOST entries.
+static NodeMachineRefusal node_machine_split(NodeMachine* machine, uint32_t r)
+{
+    const uint32_t before = machine->entry_count;
+    const bool takes = node_machine_update_first(machine, node_machine_record_update(machine, r));
+    return !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+}
+
 // The segment of record `r`'s consumer after `r`'s row (`state`, its state, says which): a logical operator's or a
 // conditional's test of its condition and branch to its alternate, past its second operand or first arm (a `||`'s where
 // the condition holds, the others' where it doesn't); or a conditional's jump from its first arm to its end, then its
@@ -274,14 +373,16 @@ static void node_machine_call_own(NodeMachine* machine, uint32_t r)
 }
 
 // X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, after it its
-// consumer's segment where it has one (node_machine_hook), and each call's row (NodeMachine.call_records). `object` as in
-// C.
+// consumer's segment where it has one (node_machine_hook) or an update's first row (node_machine_split), and each call's
+// row (NodeMachine.call_records). `object` as in C. The tape holds every row and segment an expression can keep
+// (BUSTER_NODE_MACHINE_TAPE_MOST), so no record tests the room left.
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
     const uint32_t count = machine->count;
     machine->entry_count = 0;
     machine->call_count = 0;
+    machine->temporary_count = 0;
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < count)
     {
@@ -304,6 +405,16 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
             {
                 node_machine_hook(machine, r, state);
             }
+            else if (refusal == NODE_MACHINE_TAKEN && (state & BUSTER_NODE_MACHINE_SPLIT) != 0)
+            {
+                refusal = node_machine_split(machine, r);
+            }
+            machine->stopped = r;
+        }
+        else if (state != 0)
+        {
+            // An update's destination read by name: its first row alone.
+            refusal = node_machine_split(machine, r);
             machine->stopped = r;
         }
         r += refusal == NODE_MACHINE_TAKEN;
