@@ -785,6 +785,13 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
     {
         check_input_report(reader, failed, CHECK_INPUT_DECLARATION);
     }
+    else if (!valid && input->report_count == reports + 1 &&
+             (input->reports[reports].message == CHECK_INPUT_ASM_CONSTRAINT || input->reports[reports].message == CHECK_INPUT_REGISTER_NAME))
+    {
+        // clang's Sema error of a constraint or a clobber (#2369): ActOnGCCAsmStmt drops the statement and checking goes on
+        // past it, so the error is recovered and the statement is no asm statement of the unit's.
+        check_input_recover_reports(reader, reports);
+    }
     arena_pop_to(reader->scratch, scratch_mark);
 }
 
@@ -1065,6 +1072,31 @@ static void check_input_asm_labels(CheckInputReader* reader)
     for (uint32_t a = 0; a < attributed_count && !input->resource; a += 1)
     {
         const uint32_t token = attributed[a];
+        // An object in a body of automatic storage, not `register` (#2370): clang's Sema ignores its label with "ignored asm
+        // label 'X' on automatic variable", in no group, at the label's string, as it declares the object. A static or
+        // extern one has static storage; a typedef's or a function's label is not an object's.
+        const uint8_t bits = token < input->token_count ? input->declaration_bits[token] : 0;
+        const bool automatic = reader->parser->tree.depths[token] != 0 && reader->declaration_kinds[token] == C_BINDING_OBJECT &&
+                               (bits & (BUSTER_CHECK_BITS_REGISTER | BUSTER_CHECK_BITS_STATIC)) == 0 && check_input_linkage(input->declaration_bits, token) == 0;
+        const CheckInputAttributes* automatic_attributes = automatic ? check_input_attributes_at(input, token) : NULL;
+        for (uint32_t i = 0; automatic_attributes != NULL && token < reader->expression_limit && i < automatic_attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = automatic_attributes->records + i;
+            if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->end <= reader->expression_limit)
+            {
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_ASM_LABEL_ON_AUTO,
+                    .kind = CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
+                    .token = attribute->argument_first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = attribute->argument_first,
+                    .payload = { .token = attribute->argument_first },
+                };
+                check_input_warning_event(reader, &event, NULL, 0);
+            }
+        }
         // (In a body: a file-scope declaration's tokens are at depth 0.)
         const bool local = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) && reader->parser->tree.depths[token] != 0;
         const CheckInputAttributes* attributes = local ? check_input_attributes_at(input, token) : NULL;

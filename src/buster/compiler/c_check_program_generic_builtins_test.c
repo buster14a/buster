@@ -823,6 +823,23 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "T(struct A v[3]);T(struct A v[2][3]);T(struct G v);T(struct H v);T(struct I v);T(struct I v[2]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
         "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
         "generic-clear-padding", clang);
+    // __builtin_clear_padding of arrays whose types carry sugar (#1842's 1b), which clang's walk keeps as they are: a
+    // typedef's array, typeof's, a pointer declared with parentheses (`(*p)[2]`, a parameter's too, through `*pp`), a
+    // typedef of such a pointer, an array of a typedef's array, a subscript into one, and a member of a typedef's array, whose
+    // record's other padding is cleared; an array of a typedef's struct is cleared.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "struct S{char c;int i;};typedef struct S A[2];typedef struct S TS;typedef struct S (*PA)[2];typedef A *PTA;struct M{A a;char z;int y;};\n"
+        "struct Q{struct M2{A a;char z;}m;int k;};\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define T(decl,arg) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(arg);bytes((const void*)&v,sizeof v);}while(0)\n"
+        "static void param(struct S (*p)[2],struct S b[2][2],A *q){__builtin_clear_padding(p);__builtin_clear_padding(b);__builtin_clear_padding(q);}\n"
+        "int tested(int n){h=(unsigned)n;T(struct S v[2],&v);T(A v,&v);T(TS v[2],&v);T(struct S v[2];struct S (*p)[2]=&v,p);T(struct S v[2];__typeof__(v) *q=&v,q);\n"
+        "T(struct S v[2];__typeof__(struct S[2]) *q=&v,q);T(struct M v,&v);T(struct Q v,&v);T(A v[2],&v);T(A v[3],&v[1]);T(struct S v[3][2],&v[1]);\n"
+        "T(struct S v[2];PA p=&v,p);T(A v;PTA p=&v,p);T(struct S v[2];struct S (*p)[2]=&v;struct S (**pp)[2]=&p,*pp);T(struct S v[2];struct S ((*p))[2]=&v,p);\n"
+        "struct S b[2];struct S d[2][2];A a;memset(b,0xff,sizeof b);memset(d,0xff,sizeof d);memset(a,0xff,sizeof a);param(&b,d,&a);bytes(b,sizeof b);bytes(d,sizeof d);bytes(a,sizeof a);\n"
+        "return (int)(h^(h>>32));}\n",
+        "generic-clear-padding-sugar", clang);
     // __builtin_clear_padding of a type nested 90 levels (#1842), past the walk's first room, whose stack grows: before, past
     // 64 levels it was refused, and its frame written past the stack.
     check_test_program_source(test,

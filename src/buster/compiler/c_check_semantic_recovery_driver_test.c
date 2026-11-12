@@ -487,6 +487,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void g(int x, char *y) { enum Y { B, C }; enum Y { B, D }; int v = B; (void)x; (void)y; (void)v; }\n"
         "int k(void) { enum W { P, Q }; enum W { P, R }; enum W { P, S }; return P; }\n"
         "int z = undeclared;\n",
+        // An unnamed member record that is a struct in one definition and a union in the other (#1826): clang's error is
+        // the inner record's, "'' is a struct here" at the earlier one, without the outer member's notes; nested too.
+        "/* gnu23 only */\nstruct S { struct { int a; } *p; };\nstruct S { union { int a; } *p; };\n"
+        "struct U { union { int a; } *p; int z; };\nstruct U { struct { int a; } *p; int z; };\n"
+        "struct V { int k; struct { union { int a; } *q; } *p; };\nstruct V { int k; struct { struct { int a; } *q; } *p; };\nint use = undeclared;\n",
+        // A member record that is an incompatible redefinition itself, behind _Atomic, const, pointers and arrays (#1826):
+        // the outer error's note spells it an int in its place (`_Atomic(int) *`), and the inner record is found past the
+        // qualifier that heads its subtree.
+        "/* gnu23 only */\nstruct S { _Atomic struct T { int a; } *p; };\nstruct S { _Atomic struct T { long a; } *p; };\n"
+        "struct W { const struct X { int a; } * volatile p[3]; };\nstruct W { const struct X { long a; } * volatile p[3]; };\n"
+        "struct Y { _Atomic struct { int a; } *p; };\nstruct Y { _Atomic union { int a; } *p; };\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
@@ -779,6 +790,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // A member access whose base is no structure or union (#2288): clang's "member reference base type ... is not a
+        // structure or union" at the operator, the type as written for `.`; `.` of a pointer to one is "is a pointer; did you
+        // mean to use '->'?" there, and `->` of no pointer "member reference type ... is not a pointer" at the member's name.
+        "typedef int myint;\nstruct S { int a; } s, *sp;\nunion U { int u; } uu;\nint z = sizeof(((int *)0)->a);\n"
+        "int f(int x, int *p, double d, myint m)\n{\n    int unused;\n    x = p->a + (1, 2);\n    d.re = 1;\n    uu.v = 2;\n"
+        "    return x.a + sp.a + x->b + sizeof(d.k) + m.c + s.zz + sp->yy;\n}\nint g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
+        // Any name that stays undeclared before an operand (#2255): clang's "use of undeclared identifier", its expression
+        // invalid and its rest skipped as a keyword's typo's is, and the unit goes on. Before C23, `u8'a'` is the name `u8`
+        // and a character constant.
+        "/* gnu17 only */\n_Static_assert(u8'a' == 0, \"20\");\n_Static_assert('a' == 0, \"next\");\nint x = u8'b';\n"
+        "int f(void) { int y = u8'c'; return y + u8 'd' + 1; }\nint z = 1 / 0;\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        "int x = nosuch 5;\nint f(int a) { return (zzz a) + 1; }\nvoid h(int a) { a = yyy \"s\" + 2; www 1, a; }\n_Static_assert(0, \"after\");\n"
+        "int y = 1 / 0;\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
         // A block item's GNU attributes before a name that a correction takes as a value (#1447, check_driver_typo_tail):
         // clang's typo error, then "expected identifier or '('" there, the item skipped; the body's unused variable is quiet.
         "int counter;\nvoid f(int n)\n{\n    int value;\n    __attribute__((unused)) valu = 1;\n"
@@ -935,6 +959,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int a[-1]; int a[2]; float a;\nstruct S s1; int s1; float s1;\nstatic void v; int v;\nint f(void)[3]; int f(void); float f(int);\n"
         "int u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
         "int f(void)[3]; int f(void); float f(int);\nint u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
+        // A function's redefinition is clang's invalid declaration, kept in its chain (#2362): reported once, a third or
+        // a later declaration quiet, of any type, and so are its uses, a block's extern one's too; its body's errors and
+        // another kind's redeclaration (noted at it) are still reported.
+        "int g(void) { return 1; }\nint g(void) { return 2; }\nint g(void) { return 3; }\nlong g(void);\nint h(void) { return g(1); }\n"
+        "int k(void) { extern int g(void); return g(2); }\nint (*p)(int) = g;\nint y(void) { int unused; return undeclared; }\n",
+        "static int g(int a) { return 1; }\nstatic int g(int a) { return undeclared; }\nint g;\nint h(void) { return g(); }\n",
         // Another kind of entity's redeclaration after an invalid one is still clang's "redefinition of 'a' as different
         // kind of symbol" (review on #1884): an object after a function, a function after an object, and a typedef after
         // either.
