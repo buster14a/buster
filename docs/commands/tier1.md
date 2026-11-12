@@ -30,9 +30,13 @@ requirements. [Command index](README.md).
   `test-tier1-select` checks guard-page boundaries, predicates, address aliases
   and access-order refusals; `test-tier1-emit` checks frame-object comparisons,
   realignment and fused branches. Every other function, general CFGs with loops and phis, goes
-  through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
+  through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it, its plain and
+  callee-saved-preferring problems in one call (#2538, `tier1_emit_cfg_one_call`;
+  `--verify` compares the order before, `tier1_emit_cfg_two_calls`), and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. A straight line whose allocation can't place a value (an evicted
+  edge's stub. The preference's crossing test counts the calls before each
+  position with a vector prefix sum, which `test-tier1-emit` checks against its
+  scalar twin. A straight line whose allocation can't place a value (an evicted
   parameter whose incoming register another operand holds) goes through the CFG
   consumer too. The 128-bit integers are split into 64-bit halves before the
   optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
