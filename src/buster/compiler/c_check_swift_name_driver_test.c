@@ -7,7 +7,11 @@
 // prototypes or not, with their parameters' counts, getters, setters, subscripts, contexts and inits, and on variables,
 // tags, members, typedefs, enumerators and labels; swift_error's conventions, error parameters (the first struct bridged to
 // NSError, check_input_swift_cf_error) and result types (check_input_attribute_swift_error). (A first argument of no
-// identifier of swift_error, on which clang 23 crashes, is refused by name and has no fixture.)
+// identifier of swift_error, on which clang 23 crashes, is refused by name and has no fixture. Nor does a function of no
+// prototype under swift_error run in C17: clang's error-parameter walk casts its type to a prototype's
+// (getFunctionOrMethodNumParams) and reads a parameter count that type never set, so its answer is whatever memory held:
+// none of the parameters as a fresh clang process, a crash in the clang server that reuses its memory. In C23, where ()
+// is a prototype, it runs.)
 
 static void check_test_driver_swift_names(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -114,27 +118,32 @@ static void check_test_driver_swift_names(CheckTest* test, const char* clang, co
     {
         const char* text = units[unit % BUSTER_ARRAY_LENGTH(units)];
         char* standard = (char*)standards[unit / BUSTER_ARRAY_LENGTH(units)];
-        const bool made = parse_test_write(source, text, strlen(text));
-        char* arguments[] = { (char*)clang, standard, "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
-        char* expected = NULL;
-        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
-        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
-        char description[4096];
-        snprintf(description, sizeof(description), "swift names %u: clang's lines read", unit);
-        check_test_expect(test, made && lines, description);
-        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        // swift_error on a function of no prototype, as C17 has f14 (see above): clang's answer is undefined.
+        const bool defined = strcmp(standard, "-std=gnu17") != 0 || strstr(text, "f14()") == NULL;
+        if (defined)
         {
-            arguments[0] = (char*)executable;
-            arguments[5] = scalar != 0 ? "--scalar" : NULL;
-            char* actual = NULL;
-            const int status = check_test_driver_spawn(arguments, &actual);
-            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
-            snprintf(description, sizeof(description), "swift names %u (%s %s), %s: status %d (clang %d), lines\n%s(clang\n%s)", unit, standard, text,
-                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
-            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
-            free(actual);
+            const bool made = parse_test_write(source, text, strlen(text));
+            char* arguments[] = { (char*)clang, standard, "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+            char* expected = NULL;
+            const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+            const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+            char description[4096];
+            snprintf(description, sizeof(description), "swift names %u: clang's lines read", unit);
+            check_test_expect(test, made && lines, description);
+            for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+            {
+                arguments[0] = (char*)executable;
+                arguments[5] = scalar != 0 ? "--scalar" : NULL;
+                char* actual = NULL;
+                const int status = check_test_driver_spawn(arguments, &actual);
+                const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+                snprintf(description, sizeof(description), "swift names %u (%s %s), %s: status %d (clang %d), lines\n%s(clang\n%s)", unit, standard, text,
+                         scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+                check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+                free(actual);
+            }
+            free(expected);
         }
-        free(expected);
     }
     free(expected_lines);
     free(actual_lines);

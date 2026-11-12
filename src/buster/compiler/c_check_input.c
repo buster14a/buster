@@ -937,6 +937,13 @@ struct CheckInput
     // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
     uint32_t* corrected_tokens;
     uint32_t corrected_count;
+    // The parameters' unknown type names whose typo's search suggested a type (#1447, check_input_parameter_typo), in
+    // source order: each one's token, its suggestion's detail (CHECK_TYPO_PARAMETER with a keyword's index + 1) and its
+    // typedef's declaration token + 1 (or 0), for the driver to read the unit again with (check_driver_typo_edits).
+    uint32_t* parameter_typo_tokens;
+    uint32_t* parameter_typo_details;
+    uint32_t* parameter_typo_types;
+    uint32_t parameter_typo_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
     uint8_t implicit_builtin_diagnostic;
@@ -5400,6 +5407,25 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
 // although the parser's ordinary postorder puts their nodes after those declarators.
 static void check_input_constant_failure_report(CheckInputReader* reader, const CheckConstantFailure* failure, uint32_t first, uint32_t fallback);
 
+static void check_typo_parameter(CheckInputReader* reader, uint32_t token, uint32_t name);
+
+// A parameter's `int` at `token` that a recovery view put in for an unknown type name (check_prefix_make), whose source
+// spelling is still the name (#1447): where the typo's search suggests a type, clang's parser reads the parameter with
+// it, so the input lists it (CheckInput.parameter_typo_tokens) for the driver to read the unit again with the type in its
+// tokens (check_driver_typo_edits). It reports nothing itself. Not on a lane or by a deferred reader, which read no
+// recovery view.
+static void check_input_parameter_typo(CheckInputReader* reader, uint32_t token)
+{
+    const PPTokens* output = reader->pp != NULL ? &reader->pp->output : NULL;
+    const uint32_t source = reader->parser->tokens.sources[token];
+    const bool spelled = output != NULL && source < output->count && output->kinds[source] == C_TOKEN_RAW_IDENTIFIER;
+    const uint32_t name = spelled ? output->values[source] : 0;
+    if (spelled && !reader->lane && reader->deferred == NULL && !reader->output->resource)
+    {
+        check_typo_parameter(reader, token, name);
+    }
+}
+
 static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline,
                                     bool parameter)
 {
@@ -5445,6 +5471,14 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     CheckInputAttributes* attributes = 0;
     *is_typedef = false;
     *is_inline = false;
+    for (uint32_t t = first; __builtin_expect(parameter && parser->recovered_parameter_types, 0) && t < end && parser->tree.roles[t] == PARSE_ROLE_SPECIFIER; t += 1)
+    {
+        // (Before a job's specifiers, which may have read past the `int`.)
+        if (parser->tokens.kinds[t] == PARSE_KIND_TYPE && parser->tokens.names[t] == C_NAME_INT)
+        {
+            check_input_parameter_typo(reader, t);
+        }
+    }
     if (job != 0 && job->ready)
     {
         i = job->keyword;
@@ -6913,6 +6947,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     }
     CheckInputAttributes parsed = { 0 };
     bool valid = check_input_attributes(reader, cursor, end, &parsed);
+    // (Whether an attribute was dropped for an undeclared name in its arguments, #2251.)
+    bool names_dropped = false;
     for (uint32_t i = 0; valid && i < parsed.count; i += 1)
     {
         CheckInputAttribute* attribute = &parsed.records[i];
@@ -6926,7 +6962,30 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                  attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
         if (expressions && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS)
         {
+            const uint32_t reported = reader->output->report_count;
+            const CheckInputAttributeError error_before = parsed.error;
+            const uint32_t error_first_before = parsed.error_first;
+            const uint32_t error_end_before = parsed.error_end;
             valid = check_input_attribute_expressions(reader, &parsed, attribute);
+            // An argument's name that names nothing (#2251): clang's parser drops the attribute after its "use of undeclared
+            // identifier" and the declaration goes on, with the list's other attributes.
+            bool undeclared = !valid && !reader->output->resource && reader->output->report_count > reported;
+            for (uint32_t r = reported; undeclared && r < reader->output->report_count; r += 1)
+            {
+                undeclared = reader->output->reports[r].message == CHECK_INPUT_UNDECLARED;
+            }
+            if (undeclared && check_input_recover_reports(reader, reported))
+            {
+                names_dropped = true;
+                parsed.error = error_before;
+                parsed.error_first = error_first_before;
+                parsed.error_end = error_end_before;
+                memmove(parsed.records + i, parsed.records + i + 1, (uint64_t)(parsed.count - i - 1) * sizeof(CheckInputAttribute));
+                parsed.count -= 1;
+                i -= 1;
+                valid = true;
+                continue;
+            }
             if (!valid)
             {
                 break;
@@ -7165,10 +7224,12 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             valid = true;
         }
     }
-    CheckInputAttributes* combined = valid ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
-    reader->output->resource |= valid && combined == 0;
-    valid &= combined != 0;
-    if (valid)
+    // (A list whose every attribute was dropped adds nothing, #2251.)
+    const bool emptied = valid && parsed.count == 0 && parsed.repeats == NULL && names_dropped;
+    CheckInputAttributes* combined = valid && !emptied ? arena_push(reader->arena, sizeof(CheckInputAttributes), 8) : 0;
+    reader->output->resource |= valid && !emptied && combined == 0;
+    valid &= emptied || combined != 0;
+    if (valid && !emptied)
     {
         const CheckInputAttributes empty = { 0 };
         valid = check_input_attribute_merge(reader, *attributes != 0 ? *attributes : &empty, &parsed, combined);
