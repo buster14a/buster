@@ -382,11 +382,22 @@ is `+avx2`, `"arch=X"` X's CPU, `"default"` the unit's). Its errors come once fo
 each copy clang emits: each distinct version, a repeated one once
 (`check_target_feature_clone_count`). So `target_clones("avx2", "default")`
 calling an AVX2 `always_inline` function passes, and its `default` copy, whose
-instruction set lacks the callee's, is then refused by name where it reaches a
-builtin it can't lower. Clang compiles that copy with an out-of-line call of the
-intrinsic, through a mismatched vector ABI. Such a call's wide vector arguments
-and results take the AVX calling-convention check below, against the same first
-version's features.
+instruction set lacks the callee's, calls the intrinsic out of line, as clang's
+does, through a mismatched vector ABI. A 256-bit builtin in the body itself (a
+macro intrinsic's: `_mm256_extract_epi32`, `_mm256_shuffle_epi32`,
+`_mm256_permute2x128_si256`) runs in a copy without AVX or AVX2 on its vector's
+16-byte halves, as LLVM's type legalization splits it (#2426,
+`check_lower_x86_split`, `check_x86_splits`): an in-lane operation's 128-bit
+builtin on each half at that half's immediate, `vec_ext`'s and `vec_set`'s on
+the index's half, and the lane and quarter moves (`vextractf128`,
+`vinsertf128`, `vperm2f128`, `vpermq`, `vpermpd`) as moves of the halves and
+quarters. A builtin whose 128-bit form the copy can't lower either stays
+refused by name: at the x86-64 baseline, those of SSE3 to SSE4.1 and AVX that
+have no SSE2 form here (`palignr`, the blends, `round`, `dpps`, `mpsadbw`,
+`pextrb`, `pinsrb`, `pinsrd`, `pinsrq`, `vpermilpd`, and compares by predicates
+past 7), which LLVM expands into SSE2 sequences (#1834).
+Such a call's wide vector arguments and results take the AVX calling-convention
+check below, against the same first version's features.
 
 The same pass gives clang's AVX calling-convention diagnostics (#2367,
 `X86_64TargetCodeGenInfo::checkFunctionCallABI` and `checkFunctionABI`), in a
