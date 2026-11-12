@@ -201,9 +201,33 @@ written first. [The design](../node-machine.md)'s
 ### The shadow (step 1)
 
 `./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
-is step 1: the machine itself (`c_check_node_machine.c`), run after the
-pipeline on every full expression the census takes, compared with what the
-pipeline made and timed. No compile takes its entries.
+is step 1: the machine itself, run after the pipeline on every full expression
+the census takes, compared with what the pipeline made and timed. No compile
+takes its entries.
+
+- **Its files:** `c_check_node_machine.c` is its state, its records'
+  accessors, `node_machine_begin` and `node_machine_run`; then one file a
+  sweep, T `c_check_node_machine_type.c`, C `c_check_node_machine_contexts.c`
+  and X `c_check_node_machine_expand.c`, which `main.c` includes after it in
+  the checker unit, before `baked.c`. C and X read a record only through the
+  accessors (`node_machine_record_*`, below), so that a new record layout
+  changes the machine's file and T alone.
+- **The record accessors,** each `(machine, r)` and one load or store today:
+  - what T wrote: `_op`, `_left`, `_right` (operand records, `UINT32_MAX` for
+    none), `_type`, `_category`, `_flags`, `_constant_kind`, `_integer` (the
+    low 64 bits), `_floating`, `_object`, `_offset`, `_fault`, `_overloaded`,
+    `_facts`, `_class`, `_converted(machine, r, k)`,
+    `_conversion_flags(machine, r, k)` and `_member_offset`;
+  - C's own: `_evaluated`, `_context`, `_target` and `_template`, written by
+    `node_machine_records_set_unevaluated(machine, count)` and
+    `node_machine_record_set_evaluated`, `_set_context`, `_set_target` and
+    `_set_template`.
+
+  They cost nothing on the 9700X: T's code is the same, C runs the same
+  instructions a node and X ten fewer ([the design](../node-machine.md#step-1-the-shadow)).
+  C reads the comma's and a store's type before it evaluates their operands:
+  after `node_machine_evaluate`, a call, an accessor would load its column's
+  pointer again.
 
 - **Its records** are the expression's graph nodes: one range of them and the
   root, which the reader may make later (a condition's wrapper follows the

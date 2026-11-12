@@ -1,0 +1,298 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// #2524's node machine's C sweep (c_check_node_machine.c has the machine): node_machine_contexts walks the records
+// down from the root and gives each evaluated one its template in its context (node_machine_classify, #1048's
+// check_lower_template_classify rules read from the records), and its evaluated operands their contexts and targets
+// (node_machine_evaluate). It reads the records T typed through the record accessors alone, and writes its own columns
+// through them.
+#ifndef BUSTER_C_CHECK_NODE_MACHINE_CONTEXTS_INCLUDED
+#define BUSTER_C_CHECK_NODE_MACHINE_CONTEXTS_INCLUDED
+
+// Whether record `r`'s constant's entries are a template's (check_lower_template_constant_takes).
+static bool node_machine_constant_takes(const NodeMachine* machine, uint32_t r)
+{
+    const TypeId type = node_machine_record_type(machine, r);
+    const uint8_t class = node_machine_class(machine, type);
+    const uint8_t facts = node_machine_facts(machine, type);
+    const CheckConstantKind constant_kind = node_machine_record_constant_kind(machine, r);
+    bool takes = false;
+    if (constant_kind == CHECK_CONSTANT_ADDRESS)
+    {
+        takes = node_machine_address_takes(machine, node_machine_record_object(machine, r));
+    }
+    else if ((facts & (BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_AGGREGATE)) == 0)
+    {
+        takes = (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64) ||
+                (constant_kind == CHECK_CONSTANT_FLOATING && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64));
+    }
+    return takes;
+}
+
+// The child's context as the tasks give it (check_lower_template_child_context): `address`, or discarded where the target
+// is void and the child is a store of an aggregate, a bit-field's assignment or update, or a comma.
+static uint8_t node_machine_child_context(const NodeMachine* machine, uint32_t child, bool address, TypeId target)
+{
+    uint8_t context = address ? BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS : 0;
+    if (!address && target == BUSTER_TYPE_VOID)
+    {
+        const CheckOp op = node_machine_record_op(machine, child);
+        const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
+        const uint32_t destination = node_machine_record_left(machine, child);
+        const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && destination < child &&
+                               (node_machine_record_flags(machine, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
+        context = (store && (node_machine_record_facts(machine, child) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0) || bit_field || op == CHECK_OP_COMMA ? BUSTER_CHECK_LOWER_TEMPLATE_DISCARD : 0;
+    }
+    return context;
+}
+
+// Record `child` evaluated by its consumer with `address` and `target`.
+static void node_machine_evaluate(NodeMachine* machine, uint32_t child, bool address, TypeId target)
+{
+    node_machine_record_set_evaluated(machine, child);
+    node_machine_record_set_context(machine, child, node_machine_child_context(machine, child, address, target));
+    node_machine_record_set_target(machine, child, target);
+}
+
+// Whether the unsigned division or remainder at record `r` is by a constant power of two, which the tasks write as a
+// shift or a mask (check_lower_unsigned_power): the templates leave such a node to the tasks.
+static bool node_machine_unsigned_power(const NodeMachine* machine, uint32_t r, uint8_t class, uint8_t binary)
+{
+    bool replace = false;
+    const uint32_t b = node_machine_record_right(machine, r);
+    const TypeId converted = node_machine_record_converted(machine, r, 1);
+    if ((binary == BUSTER_TYPED_DIV || binary == BUSTER_TYPED_MOD) && (class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_U64) && b < r &&
+        (node_machine_facts(machine, converted) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0)
+    {
+        const TypeId type = node_machine_record_type(machine, b);
+        const CheckOp op = node_machine_record_op(machine, b);
+        const uint8_t source_class = node_machine_class(machine, type);
+        const bool plain_integer = source_class >= BUSTER_TYPED_CLASS_I8 && source_class <= BUSTER_TYPED_CLASS_U64 &&
+                                   (node_machine_facts(machine, type) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0;
+        uint64_t bits = node_machine_record_integer(machine, b);
+        if (plain_integer && source_class <= BUSTER_TYPED_CLASS_U32)
+        {
+            const uint32_t width = 8u << ((source_class - 1) / 2);
+            const uint64_t mask = (UINT64_C(1) << width) - 1;
+            bits &= mask;
+            bits |= (source_class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+        }
+        const uint64_t divisor = class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)bits : bits;
+        replace = plain_integer && node_machine_record_constant_kind(machine, b) == CHECK_CONSTANT_INTEGER && node_machine_record_fault(machine, b) == CHECK_FAULT_NONE &&
+                  node_machine_record_category(machine, b) == CHECK_RVALUE && !node_machine_record_overloaded(machine, b) &&
+                  (node_machine_record_flags(machine, b) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && op != CHECK_OP_STATEMENT_VALUE &&
+                  op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY && divisor != 0 && (divisor & (divisor - 1)) == 0;
+    }
+    return replace;
+}
+
+// C's classification of record `r` in its context: its template, with its evaluated operands given their contexts and
+// targets (check_lower_template_classify's rules, from the records), or CHECK_LOWER_TEMPLATE_NONE. `object` is the
+// object a root INITIALIZE initializes.
+static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object)
+{
+    const CheckProgram* program = machine->program;
+    const TypeTable* types = machine->types;
+    const CheckOp op = node_machine_record_op(machine, r);
+    const uint8_t context = node_machine_record_context(machine, r);
+    const bool address = (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0;
+    const bool discard = (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) != 0;
+    const uint32_t a = node_machine_record_left(machine, r);
+    const uint32_t b = node_machine_record_right(machine, r);
+    const TypeId type_a = node_machine_record_converted(machine, r, 0);
+    const TypeId type_b = node_machine_record_converted(machine, r, 1);
+    const uint8_t facts = node_machine_record_facts(machine, r);
+    const bool aggregate = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
+    const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
+    const uint8_t class = node_machine_record_class(machine, r);
+    const bool constant = node_machine_record_constant_kind(machine, r) != CHECK_CONSTANT_NONE && node_machine_record_fault(machine, r) == CHECK_FAULT_NONE &&
+                          (node_machine_record_flags(machine, r) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+    const uint32_t known_object = node_machine_record_object(machine, r);
+    const bool known = known_object != 0 && known_object < program->object_count;
+    const bool arithmetic = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_SUBSCRIPT;
+    const bool left_pointer = arithmetic && (node_machine_facts(machine, type_a) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
+    const bool right_pointer = arithmetic && (node_machine_facts(machine, type_b) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
+    const bool pointers = left_pointer || right_pointer;
+    const bool scalar_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64;
+    CheckLowerTemplate kind = CHECK_LOWER_TEMPLATE_NONE;
+    if (node_machine_record_overloaded(machine, r) || (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) != 0 ||
+        (op == CHECK_OP_CAST && (node_machine_record_conversion_flags(machine, r, 0) & BUSTER_CHECK_CONVERT_TO_UNION) != 0))
+    {
+    }
+    else if (op == CHECK_OP_VALUE && known && check_input_bit(program->input->declaration_bits, known_object - 1, BUSTER_CHECK_BITS_COMPOUND) &&
+             !check_input_bit(program->input->declaration_bits, known_object - 1, BUSTER_CHECK_BITS_STATIC))
+    {
+    }
+    else if (!address && node_machine_record_category(machine, r) == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
+    {
+    }
+    else if (constant && op != CHECK_OP_INITIALIZE &&
+             ((node_machine_record_category(machine, r) == CHECK_RVALUE && !address) ||
+              ((address || address_value) && node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_ADDRESS)))
+    {
+        kind = discard || node_machine_constant_takes(machine, r) ? CHECK_LOWER_TEMPLATE_CONSTANT : CHECK_LOWER_TEMPLATE_NONE;
+    }
+    else if (op == CHECK_OP_VALUE)
+    {
+        if (node_machine_record_type(machine, r) == BUSTER_TYPE_VOID)
+        {
+            kind = CHECK_LOWER_TEMPLATE_VOID;
+        }
+        else if (address || address_value)
+        {
+            kind = node_machine_address_takes(machine, known_object) ? CHECK_LOWER_TEMPLATE_ADDRESS : CHECK_LOWER_TEMPLATE_NONE;
+        }
+        else if (node_machine_record_category(machine, r) == CHECK_LVALUE && known && scalar_class && !aggregate)
+        {
+            kind = node_machine_local(machine, known_object) ? CHECK_LOWER_TEMPLATE_LOCAL : CHECK_LOWER_TEMPLATE_GLOBAL;
+        }
+    }
+    else if (op == CHECK_OP_SELECT)
+    {
+        kind = CHECK_LOWER_TEMPLATE_PASS;
+        node_machine_evaluate(machine, a, address, 0);
+    }
+    else if (op == CHECK_OP_ADDRESS)
+    {
+        kind = CHECK_LOWER_TEMPLATE_PASS;
+        node_machine_evaluate(machine, a, true, 0);
+    }
+    else if (op == CHECK_OP_DEREFERENCE)
+    {
+        kind = aggregate || address || address_value || scalar_class ? CHECK_LOWER_TEMPLATE_DEREFERENCE : CHECK_LOWER_TEMPLATE_NONE;
+        node_machine_evaluate(machine, a, false, type_a);
+    }
+    else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+    {
+        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : node_machine_record_type(machine, a);
+        const uint8_t record_kind = check_action_kind(types, record);
+        const bool bit_field = (node_machine_record_flags(machine, r) & BUSTER_CHECK_BIT_FIELD) != 0;
+        const bool loads = !address && !address_value;
+        if ((record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) && !bit_field && node_machine_record_member_offset(machine, r) % 8 == 0 &&
+            (!loads || scalar_class))
+        {
+            kind = CHECK_LOWER_TEMPLATE_MEMBER;
+            node_machine_evaluate(machine, a, op == CHECK_OP_MEMBER, type_a);
+        }
+    }
+    else if (arithmetic && (node_machine_record_flags(machine, r) & BUSTER_CHECK_VECTOR_ELEMENT) == 0 && left_pointer && !right_pointer &&
+             check_action_pointer_stride(types, type_a) != 0 && (op != CHECK_OP_SUBSCRIPT || address || address_value || scalar_class))
+    {
+        kind = CHECK_LOWER_TEMPLATE_POINTER;
+        node_machine_evaluate(machine, a, false, type_a);
+        node_machine_evaluate(machine, b, false, BUSTER_TYPE_LONG);
+    }
+    else if (op == CHECK_OP_SUBSCRIPT || aggregate || !scalar_class)
+    {
+        if ((op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE) && class != UINT8_MAX && class < BUSTER_TYPED_CLASS_VECTOR)
+        {
+            kind = CHECK_LOWER_TEMPLATE_PASS;
+            node_machine_evaluate(machine, a, false, node_machine_record_type(machine, r));
+        }
+    }
+    else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
+    {
+        kind = CHECK_LOWER_TEMPLATE_PASS;
+        node_machine_evaluate(machine, a, false, node_machine_record_type(machine, r));
+    }
+    else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
+    {
+        kind = CHECK_LOWER_TEMPLATE_UNARY;
+        node_machine_evaluate(machine, a, false, type_a);
+    }
+    else if (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION)
+    {
+        const uint8_t operand_class = node_machine_class(machine, type_a);
+        if (!node_machine_aggregate(machine, type_a) && operand_class < BUSTER_TYPED_CLASS_VECTOR && operand_class != BUSTER_TYPED_CLASS_VOID)
+        {
+            kind = CHECK_LOWER_TEMPLATE_TRUTH;
+            node_machine_evaluate(machine, a, false, type_a);
+        }
+    }
+    else if (op == CHECK_OP_COMMA)
+    {
+        // The record's type, read before its operands are evaluated: after node_machine_evaluate, a call, its column's
+        // pointer would be loaded again.
+        const TypeId type = node_machine_record_type(machine, r);
+        kind = CHECK_LOWER_TEMPLATE_PASS;
+        node_machine_evaluate(machine, a, false, BUSTER_TYPE_VOID);
+        node_machine_evaluate(machine, b, address, discard ? BUSTER_TYPE_VOID : type);
+    }
+    else if ((op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT) && (node_machine_record_flags(machine, r) & BUSTER_CHECK_VECTOR_ELEMENT) == 0 && !pointers)
+    {
+        const uint8_t class_a = node_machine_class(machine, type_a);
+        const uint8_t class_b = node_machine_class(machine, type_b);
+        if (class_a >= BUSTER_TYPED_CLASS_I8 && class_a <= BUSTER_TYPED_CLASS_F64 && class_b >= BUSTER_TYPED_CLASS_I8 && class_b <= BUSTER_TYPED_CLASS_F64)
+        {
+            kind = CHECK_LOWER_TEMPLATE_BINARY;
+            node_machine_evaluate(machine, a, false, type_a);
+            node_machine_evaluate(machine, b, false, type_b);
+        }
+    }
+    else if (check_lower_binary(op) != BUSTER_TYPED_NONE && op < CHECK_OP_PRE_INCREMENT && !arithmetic)
+    {
+        const uint8_t class_a = node_machine_class(machine, type_a);
+        const uint8_t class_b = node_machine_class(machine, type_b);
+        const bool power = node_machine_unsigned_power(machine, r, class, check_lower_binary(op));
+        if (class_a >= BUSTER_TYPED_CLASS_I8 && class_a <= BUSTER_TYPED_CLASS_F64 && class_b >= BUSTER_TYPED_CLASS_I8 && class_b <= BUSTER_TYPED_CLASS_F64 &&
+            !node_machine_aggregate(machine, type_a) && !power)
+        {
+            kind = CHECK_LOWER_TEMPLATE_BINARY;
+            node_machine_evaluate(machine, a, false, type_a);
+            node_machine_evaluate(machine, b, false, type_b);
+        }
+    }
+    else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE)
+    {
+        const uint32_t destination_facts = a < r ? node_machine_facts(machine, node_machine_record_type(machine, a)) : 0;
+        const bool bit_field = op == CHECK_OP_ASSIGN && a < r && (node_machine_record_flags(machine, a) & BUSTER_CHECK_BIT_FIELD) != 0;
+        if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
+        {
+            const uint32_t target = op == CHECK_OP_INITIALIZE ? object :
+                                    a < r && node_machine_record_op(machine, a) == CHECK_OP_VALUE ? node_machine_record_object(machine, a) : 0;
+            const bool named = target != 0 && target < program->object_count;
+            if (named)
+            {
+                kind = node_machine_local(machine, target) ? CHECK_LOWER_TEMPLATE_STORE_LOCAL : CHECK_LOWER_TEMPLATE_STORE_GLOBAL;
+                node_machine_evaluate(machine, op == CHECK_OP_INITIALIZE ? a : b, false, node_machine_record_type(machine, r));
+            }
+            else if (op == CHECK_OP_ASSIGN)
+            {
+                // As the comma's: the record's type before its operands are evaluated.
+                const TypeId type = node_machine_record_type(machine, r);
+                kind = CHECK_LOWER_TEMPLATE_STORE;
+                node_machine_evaluate(machine, a, true, 0);
+                node_machine_evaluate(machine, b, false, type);
+            }
+        }
+    }
+    return kind;
+}
+
+// C: every evaluated record's template and its operands' contexts and targets, down from the root, which its consumer
+// evaluates with `context` and converts to `target`; `object` is what a root INITIALIZE initializes.
+static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object)
+{
+    NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+    const uint32_t count = machine->count;
+    node_machine_records_set_unevaluated(machine, count);
+    const uint32_t root = count - 1;
+    node_machine_record_set_evaluated(machine, root);
+    node_machine_record_set_context(machine, root, context);
+    node_machine_record_set_target(machine, root, target);
+    uint32_t r = count;
+    while (refusal == NODE_MACHINE_TAKEN && r != 0)
+    {
+        r -= 1;
+        if (node_machine_record_evaluated(machine, r))
+        {
+            const CheckLowerTemplate kind = node_machine_classify(machine, r, r == root ? object : 0);
+            node_machine_record_set_template(machine, r, kind);
+            refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;
+            machine->stopped = r;
+        }
+    }
+    return refusal;
+}
+
+#endif

@@ -653,7 +653,8 @@ the graph's operators and operands after the graph run:
 ## Step 1: the shadow
 
 `measure-node-machine --shadow` ([the guide](commands/lowering.md#the-shadow-step-1))
-is step 1. The machine is `c_check_node_machine.c` and the shadow is
+is step 1. The machine is `c_check_node_machine.c`, with one file a sweep
+(`_type.c`, `_contexts.c`, `_expand.c`), and the shadow is
 `c_check_node_census.c`'s. The machine runs after the pipeline on every full
 expression the census takes. Each record it makes is compared with the stream's
 node, its tape with the lowering's entries, and its sweeps are timed. No compile
