@@ -220,9 +220,12 @@ enum
     // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
     // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
     CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 149,
+    // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
+    // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
+    CHECK_WARNING_ID_PSABI = 150,
     // A local variable only set (#2409, clang's DiagnoseUnusedButSetDecl): -Wunused-but-set-variable, -Wunused's, -Wall's.
     // Its event is an UNUSED_VARIABLE one whose payload.data is 1.
-    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 150,
+    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 151,
     CHECK_WARNING_ID_COUNT,
 };
 
