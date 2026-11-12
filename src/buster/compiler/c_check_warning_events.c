@@ -220,6 +220,9 @@ enum
     // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
     // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
     CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 149,
+    // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
+    // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
+    CHECK_WARNING_ID_PSABI = 150,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -717,6 +720,8 @@ struct CheckWarningEvent
     uint32_t completion_kind;
     // Parser token for AT_TOKEN/AFTER_DELIMITER; NO_SOURCE for TU_END. Attached notes inherit this completion.
     uint32_t completion;
+    // A kind's extra datum, in what was the padding before suborder: an -Winteger-overflow MESSAGE's result's high half.
+    uint32_t detail;
     // Optional order inside a completed construct, independent of its source location and publication boundary.
     uint64_t suborder;
     CheckWarningPayload payload;

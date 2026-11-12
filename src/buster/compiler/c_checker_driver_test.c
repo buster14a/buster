@@ -5885,6 +5885,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                                           check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning, &located, scratch) :
                                           (warning & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                           check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning, scratch) :
+                                          warning == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                          check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
@@ -7123,6 +7125,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
+#include "c_check_avx_abi_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -8252,6 +8255,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_ident_driver_test.c"
 #include "c_check_c23_attributes_driver_test.c"
 #include "c_check_empty_unit_driver_test.c"
+#include "c_check_integer_overflow_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
@@ -9204,6 +9208,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_ident(&test, clang, executable, directory);
             check_test_driver_c23_attributes(&test, clang, executable, directory);
             check_test_driver_empty_unit(&test, clang, executable, directory);
+            check_test_driver_integer_overflow(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);
@@ -9271,6 +9276,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_target_feature_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_avx_abi(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
         {
