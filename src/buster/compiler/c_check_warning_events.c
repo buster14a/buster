@@ -551,6 +551,9 @@ typedef enum CheckWarningEventKind
     // An asm label on a block-scope object of automatic storage, not `register` (#2370, check_input_asm_labels): at the
     // label's first string token, payload.token that token.
     CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
+    // A division or remainder by a constant zero in a counted_by family's argument (#1842, check_input_counted_division),
+    // at its operator: payload.data 0 for "division by zero is undefined", 1 for "remainder by zero is undefined".
+    CHECK_WARNING_EVENT_DIVISION_BY_ZERO,
     // An alignment builtin's alignment of 1 (#2221, check_input_alignment_one), at the alignment: its description's words.
     CHECK_WARNING_EVENT_ALIGNMENT_ONE,
     // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
