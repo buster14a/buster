@@ -2351,7 +2351,10 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
         const uint32_t x = values[0];
         for (uint32_t i = lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
-            CheckLowerSequence sequence = { 0 };
+            // Its entries are written before they are read (check_lower_sequence_push reads `count` of them): only the count
+            // is cleared, not the 1024 entries' storage.
+            CheckLowerSequence sequence;
+            sequence.count = 0;
             CheckLowerSequence* q = &sequence;
             if (builtin == CBUILTIN_ELEMENTWISE_ADD_SAT || builtin == CBUILTIN_ELEMENTWISE_SUB_SAT || builtin == CBUILTIN_ELEMENTWISE_ABS ||
                 builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_ELEMENTWISE_MIN)
@@ -2514,7 +2517,8 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
                 if (double_wide)
                 {
                     // Its bits past the width cleared: shifted up and back (no CONST of 128 bits).
-                    CheckLowerSequence mask = { 0 };
+                    CheckLowerSequence mask;
+                    mask.count = 0;
                     check_lower_sequence_kept(&mask, class, bits, width);
                     check_lower_sequence_push(writer, &mask);
                 }
