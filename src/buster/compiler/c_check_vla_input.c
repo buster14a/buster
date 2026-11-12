@@ -904,6 +904,11 @@ static void check_input_report_indirect_jump(CheckInputReader* reader, uint32_t 
         input->reports[before].detail = typedef_name ? 3u : modified ? 1u : 2u;
     }
     check_input_jump_completion(reader, before);
+    // (It stops nothing, as a switch's doesn't: the goto's operand stays a use of its variable.)
+    if (input->report_count > before)
+    {
+        check_input_recover_reports(reader, before);
+    }
 }
 
 // The scopes a jump mustn't enter (clang's JumpScopeChecker): a variably modified declaration's, and a cleanup's

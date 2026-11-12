@@ -7816,7 +7816,7 @@ in no scope (`check_driver_error_scoped`). A computed goto's and an asm goto's
 error that enters such a scope takes clang's two notes: "possible target of
 indirect goto statement" (or "… asm goto statement") at the first label whose
 scope it enters, then the bypassed declaration's (`check_input_report_indirect_jump`).
-One that only leaves a cleanup's scope has no note yet. A jump's report stops
+One that only leaves a cleanup's scope has no note yet. Every jump's report stops
 nothing: it is recovered (`check_input_recover_reports`), as clang checks the
 body whole before it reports its jumps, and a case the switch may not jump to is
 still the switch's case, whose value is checked. So the errors in the body
