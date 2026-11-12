@@ -325,6 +325,8 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = NODE_CENSUS_WARNING_EVENTS,
     [CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_ASSIGN_ENUM] = NODE_CENSUS_WARNING_TESTED,
+    // Its comparisons are the tautological test's: a constant outside its other operand's range (#2218).
+    [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -505,7 +507,8 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
                     check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE, false);
     policy.null_dereference = check_common_enabled(pp, input, CHECK_WARNING_ID_NULL_DEREFERENCE, false);
     policy.array_bounds = check_common_enabled(pp, input, CHECK_WARNING_ID_ARRAY_BOUNDS, false);
-    policy.tautological = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false);
+    policy.tautological = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false) ||
+                          check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE, false);
     policy.non_literal_null = check_common_enabled(pp, input, CHECK_WARNING_ID_NON_LITERAL_NULL, false);
     policy.parentheses = check_common_enabled(pp, input, CHECK_WARNING_ID_PARENTHESES, false);
     policy.logical_not = check_common_enabled(pp, input, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false);

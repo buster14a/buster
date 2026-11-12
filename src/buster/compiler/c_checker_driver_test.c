@@ -8261,6 +8261,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_integer_overflow_driver_test.c"
 #include "c_check_gnu_empty_struct_driver_test.c"
 #include "c_check_unused_but_set_driver_test.c"
+#include "c_check_out_of_range_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
@@ -9225,6 +9226,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_integer_overflow(&test, clang, executable, directory);
             check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
             check_test_driver_unused_but_set(&test, clang, executable, directory);
+            check_test_driver_out_of_range(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);

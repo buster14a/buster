@@ -238,6 +238,8 @@ enum
     // A function's label that no goto and no address names (#2264, clang's DiagnoseUnusedDecl of a LabelDecl):
     // -Wunused-label, under -Wunused and so -Wmost and -Wall.
     CHECK_WARNING_ID_UNUSED_LABEL = 155,
+    // clang's -Wtautological-constant-out-of-range-compare (#2218), on by default, in -Wtautological-constant-compare.
+    CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 156,
     CHECK_WARNING_ID_COUNT,
 };
 

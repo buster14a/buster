@@ -6255,7 +6255,30 @@ default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 boolean or enumeration type in either order, "adding 'T' to a string does not
 append to the string" at the `+` with its note, T the operand's type as
 written (a typedef's, `__size_t`'s sugar), given as the `+` is built; a `+`
-whose neighbor is no string literal is passed at once. Left: where a C23
+whose neighbor is no string literal is passed at once.
+`-Wtautological-constant-out-of-range-compare` (#2218, on by default, in
+`-Wtautological-constant-compare` and `-Wtautological-compare`,
+`check_common_out_of_range`) is clang's `CheckTautologicalComparison`'s out-of-range
+half: an integer constant expression on exactly one side of a comparison, outside
+the other operand's range promoted to the comparison's type (`PromotedRange`, a
+wrapped signed range's gap included), gives "result of comparison of constant V
+with expression of type 'T' is always true" (or false) at the operator, V as the
+comparison's type holds it (an enumerator's `'A' (V)`, past 128 bits
+`check_wide_text`'s digits), T the operand's type as written; a `_Bool` and a
+known boolean (`!`, a comparison, `&&`, `||`) range over 0 and 1, the latter as
+"boolean expression". It is a runtime warning, queued as a division's, not
+given in a constant context. An always true or false comparison gives no
+`-Wsign-compare`, as `AnalyzeComparison` returns first. Both follow clang's
+`AnalyzeImplicitConversions` order through a full expression
+(`check_common_sign_scan`): a comparison before its operands, a comparison's, an
+assignment's and a conditional's operands left to right, any other node's right
+to left. Left: the operand's range is its type's, not clang's tighter range of
+its value (`GetExprRange`: a bit-field's width, `x & 0xff`, a sum's extra bit),
+so those comparisons give nothing; the in-range half
+(`-Wtautological-constant-compare`'s `_Bool` comparisons, the off-by-default
+type-limit and unsigned-zero comparisons) isn't given; and a constant compared
+in a type past 128 bits gives it only where that type is the constant's and the
+comparison signed. Left: where a C23
 `u8"ab" + 1` is returned as a `const char *`, its `-Wpointer-sign` comes
 first, which clang gives after. A conditional's
 `-Wpointer-type-mismatch` and `-Wconditional-type-mismatch` (#2292,
@@ -6671,7 +6694,17 @@ The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
 only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
 where the command line or a source pragma may enable them: the comparison bit
-for `-Wsign-compare`, a plain `x = y` for `-Wself-assign`, and the
+for `-Wsign-compare` (and, while `-Wtautological-constant-out-of-range-compare`
+is on and `-Wsign-compare` off, only for a comparison whose constant is out of
+the other operand's range, `check_common_range_out`: the reach scan's 16-node
+operator blocks (`check_common_next_reach_op`) compress their comparisons
+into a list, and its batches of 16 (`check_common_range_lanes`) gather the
+operands' value flags, types, operators and payload values, testing only the
+lanes of a comparison one of whose operands is an integer constant expression,
+where the other one, if only one is, is neither an `int` or `long` class
+builtin that covers the constant's type nor a narrow builtin compared with an
+`int` or `unsigned` constant in its range, but for a boolean operator's; the
+scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
 an analysis whose diagnostics are ignored. The token passes find their roles
 and kinds 64 tokens at a time, the node passes their operators 16 nodes at a

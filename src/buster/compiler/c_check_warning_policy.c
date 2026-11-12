@@ -74,7 +74,10 @@ static bool check_warning_option(uint32_t id, String8 option)
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
     // -Wint-in-bool-context, -Wtautological-compare (with -Wtautological-constant-compare under it), diagnose_if's
     // -Wuser-defined-warnings (#1447) and -Wmultichar (#1970) are -Wmost's.
+    // -Wtautological-constant-compare holds -Wtautological-constant-out-of-range-compare (#2218).
+    matches |= id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE && check_diagnostic_option(option, "-Wtautological-compare");
     const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE ||
+                      id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
                       id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS || id == CHECK_WARNING_ID_USER_DEFINED_WARNINGS || id == CHECK_WARNING_ID_MULTICHAR;
     matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     // -Wconstant-conversion holds -Wbitfield-constant-conversion, which holds -Wsingle-bit-bitfield-constant-conversion;
