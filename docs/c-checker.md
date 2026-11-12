@@ -6301,8 +6301,9 @@ A block's own `static`, `register` and automatic objects can be unused. A
 variable with an applied `cleanup` attribute is used, as clang treats it,
 since its cleanup takes its address (#1881); one ignored at file scope can still
 be unused. `-Wunused-label` (#2264, under `-Wunused`, so `-Wmost` and `-Wall`)
-is a label no goto or `&&` address names (`check_input_unused_labels`, from
-the controls' label table), at its name, or a local label's at its
+is a label no goto, `&&` address or asm goto names (`check_input_unused_labels`,
+from the controls' label table; an asm goto's label resolves in its scope, a
+local label's included, as a goto's name does), at its name, or a local label's at its
 `__label__` list's name; `unused` or `maybe_unused` on it marks it used.
 Clang's labels are the function body's scope's declarations, which it warns of
 sorted by place as it pops that scope: a body's unused labels and unused

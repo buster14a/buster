@@ -1374,6 +1374,8 @@ static uint32_t check_input_label_name(const CheckInputReader* reader, uint32_t 
     return attributed ? entry - 1 : child;
 }
 
+static uint32_t check_input_asm_goto_label(const CheckInput* input, uint32_t keyword, uint32_t index);
+
 // A label table entry's mark that a goto or an address found it (#2264, -Wunused-label), above its token plus one.
 #define BUSTER_CHECK_LABEL_USED 0x80000000u
 
@@ -3838,6 +3840,24 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     }
                 }
             }
+            else if (kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) != 0)
+            {
+                // An asm goto's labels are uses too (#2264): a local label's takes its scope here, as a goto's name does.
+                uint32_t name = BUSTER_CHECK_NONE;
+                for (uint32_t l = 0; (name = check_input_asm_goto_label(reader->output, token, l)) < count; l += 1)
+                {
+                    const uint32_t local = parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? check_input_local_label(reader, &locals, parser->tokens.names[name]) :
+                                                                                                  BUSTER_CHECK_NONE;
+                    if (local != BUSTER_CHECK_NONE)
+                    {
+                        locals.scopes[name] = locals.tokens[local] + 1;
+                    }
+                    else
+                    {
+                        check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, name, body);
+                    }
+                }
+            }
             else if ((kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
             {
                 check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, token, body);
@@ -3906,6 +3926,20 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
             const uint8_t kind = parser->tokens.kinds[token];
             const bool jump = kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0;
             const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
+            // An asm goto's labels are used as a goto's are (#2264, -Wunused-label); check_input_asm_finish checks its targets.
+            uint32_t asm_label = BUSTER_CHECK_NONE;
+            for (uint32_t l = 0; kind == PARSE_KIND_GOTO && !jump && (asm_label = check_input_asm_goto_label(reader->output, token, l)) < count; l += 1)
+            {
+                const uint32_t target = parser->tokens.kinds[asm_label] == PARSE_KIND_IDENTIFIER ?
+                    check_input_find_label(reader, &locals, labels, capacity, check_input_label_scope(reader, &locals, asm_label), parser->tokens.names[asm_label]) :
+                    BUSTER_CHECK_NONE;
+                const uint64_t slot = target < count && parser->tree.roles[target] == PARSE_ROLE_LABEL ? check_input_label_slot(reader, &locals, labels, capacity, target) :
+                                                                                                         capacity;
+                if (slot < capacity)
+                {
+                    labels[slot] |= BUSTER_CHECK_LABEL_USED;
+                }
+            }
             if (jump && check_input_indirect_goto(parser, token))
             {
                 // goto *expression: its labels are every one whose address its function takes (check_input_indirect_gotos).

@@ -62,6 +62,17 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_label_fixtures
         .errors = 1,
         .notes = 1,
     },
+    {
+        // An asm goto's labels are used as a goto's are: the function's, and a local label its block's list declares,
+        // not one of the same name in another scope.
+        .name = "labels an asm goto names",
+        .source = "void f(void) { asm goto(\"\" :::: l2, l4); l2: ; l4: ; l5: ; }\n"
+                  "void g(void) { { __label__ l; asm goto(\"\" :::: l); l: ; } }\n"
+                  "void h(void) { { __label__ m; m: ; } asm goto(\"\" :::: m); m: ; }\n"
+                  "void q(void) { { __label__ z; z: ; } { __label__ z; asm goto(\"\" :::: z); z: ; } }\n",
+        .options = { "-Wall" },
+        .warnings = 3,
+    },
 };
 
 static void check_test_driver_unused_labels(CheckTest* test, const char* clang, const char* executable, const char* directory)
