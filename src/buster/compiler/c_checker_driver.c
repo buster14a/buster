@@ -95,6 +95,7 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_ADDRESS_SPACE_OVERLAP: result = "pointers to non-overlapping address spaces"; break;
         case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_OVERFLOW_BIT_INT: result = "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits"; break;
+        case CHECK_DIAG_COUNTED_INCOMPLETE: result = "cannot use a '__counted_by' attributed pointer whose pointee type is incomplete"; break;
         case CHECK_DIAG_NONE: break;
     }
     return result;
@@ -134,6 +135,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_ASM_LABEL_CONFLICT: result = "conflicting asm label"; break;
+        case CHECK_INPUT_THREAD_NON_GLOBAL: result = "'_Thread_local' variables must have global storage"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
         case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
@@ -809,6 +811,7 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 0 ?
            "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]" :
            report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 1 ? "a type specifier is required for all declarations" :
+           report->message == CHECK_INPUT_THREAD_NON_GLOBAL && report->detail == 1 ? "'__thread' variables must have global storage" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
@@ -2096,10 +2099,33 @@ static uint64_t check_driver_first_error(const Parser* original, const Preproces
 // its AnalysisBasedWarnings::IssueWarnings, at the body's end, where -Wreturn-type's place is, then finds an uncompilable
 // error, builds no CFG and gives no analysis warning (-Wreturn-type, -Wuninitialized), but every runtime-behavior one the
 // body queued (#1447's semantic recovery, phase 3, check_common_flush).
-static bool check_driver_body_flushed(const Parser* original, Preprocessor* pp, uint32_t close, uint64_t first_error)
+// A repaired view's CheckCommonView: its closers that are the original's own (the same kind at the same place) run to
+// `closed`.
+static CheckCommonView check_driver_common_view(const CheckRepair* repair, const Parser* original)
 {
+    const Parser* view = &repair->parser;
+    uint32_t closed = repair->original_end;
+    while (closed < view->tokens.count && closed < original->tokens.count && view->tokens.kinds[closed] == original->tokens.kinds[closed] &&
+           (view->tokens.kinds[closed] == PARSE_KIND_R_BRACE || view->tokens.kinds[closed] == PARSE_KIND_SEMI))
+    {
+        closed += 1;
+    }
+    const CheckCommonView result = {
+        .complete = repair->warning_complete,
+        .original = original,
+        .count = view->tokens.count,
+        .end = repair->original_end,
+        .closed = closed,
+    };
+    return result;
+}
+
+static bool check_driver_body_flushed(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t close, uint64_t first_error)
+{
+    // (A repaired view's synthetic closer ends a body the parse error ended: CheckCommonView.)
+    const bool synthetic = check_common_view_synthetic(parser, close);
     const uint32_t publication = check_driver_publication_position(original, pp, close + 1u, pp->output.count);
-    return (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN >= first_error;
+    return synthetic || (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN >= first_error;
 }
 
 // The tokens of the program's bodies clang ends after the unit's first error (check_driver_body_flushed), from each one's
@@ -2114,7 +2140,7 @@ static const uint8_t* check_driver_flushed_bodies(const Parser* parser, const Pa
     {
         const uint32_t opening = program->bodies[b].opening;
         const uint32_t close = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
-        if (close < parser->tokens.count && close > opening && check_driver_body_flushed(original, pp, close, first_error))
+        if (close < parser->tokens.count && close > opening && check_driver_body_flushed(parser, original, pp, close, first_error))
         {
             if (flushed == NULL)
             {
@@ -2140,8 +2166,10 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
     {
         const CheckProgramBody* body = program->bodies + b;
         const uint32_t token = parser->tree.parents[body->opening];
+        // (Not a repaired view's synthetic closer's: its body is the one the parse error ended, CheckCommonView.)
+        const bool synthetic = check_common_view_synthetic(parser, token);
         // A cpu_dispatch function's body may fall off its end (#1447: clang's CheckFallThroughForBody permits it).
-        if (body->return_warning != 0 && token < parser->tokens.count &&
+        if (body->return_warning != 0 && token < parser->tokens.count && !synthetic &&
             (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)) &&
             check_cpu_dispatch_kind(check_input_attributes_at(program->input, body->declaration)) != CHECK_CPU_DISPATCH_DISPATCH)
         {
@@ -2684,6 +2712,66 @@ static const char* check_driver_shift_message(const Parser* parser, Preprocessor
     return result;
 }
 
+// A folded -Winteger-overflow as clang's HandleOverflow words it (#2217): "overflow in expression; result is V with type
+// 'T'", V the wrapped result GNU folding keeps on the node (check_wide_text's digits at any width), grouped by three
+// with ' as APInt::toString's InsertSeparators does for radix 10. A node the stream doesn't hold keeps the generic text.
+static const char* check_driver_overflow_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                 const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, Arena* scratch)
+{
+    const char* result = check_diagnostic_message(CHECK_WARNING_INTEGER_OVERFLOW);
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool folded = types != NULL && stream != NULL && stream->graph != NULL && node < stream->count &&
+                        check_stream_constant_kind(stream, node) == CHECK_CONSTANT_INTEGER;
+    CheckValue value = folded ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    // The constant reader's (an enumerator's, a file-scope bound's): its overflow's event keeps a result up to 64 bits
+    // wide (check_input_warning_add_value). The last one at the token is the final reading's.
+    for (uint32_t i = 0; !folded && types != NULL && i < input->warning_events.count; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + i;
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_INTEGER_OVERFLOW && event->token == token &&
+            event->payload.first_type != 0)
+        {
+            value = (CheckValue){
+                .type = event->payload.first_type,
+                .constant_kind = CHECK_CONSTANT_INTEGER,
+                .integer = (unsigned __int128)((uint64_t)event->detail << 32 | event->payload.name),
+            };
+        }
+    }
+    const char* digits = value.type != 0 ? check_wide_text(types, &value, scratch) : NULL;
+    const uint64_t length = digits != NULL ? strlen(digits) : 0;
+    const uint64_t sign = length != 0 && digits[0] == '-';
+    const uint64_t significant = length - sign;
+    const uint64_t separators = significant != 0 ? (significant - 1) / 3 : 0;
+    char* grouped = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, length + separators + 1) : NULL;
+    // The result's type keeps an operand's typedef when only that operand has it (UsualArithmeticConversions' converted
+    // side); two operands of the type take their common sugar, which this leaves canonical.
+    const CheckGraph* graph = folded ? stream->graph : NULL;
+    const uint32_t left = graph != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t right = graph != NULL ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    const bool left_kept = left < stream->count && check_stream_type(stream, left) == value.type;
+    const bool right_kept = right < stream->count && check_stream_type(stream, right) == value.type;
+    const uint32_t spelling = left_kept && !right_kept ? check_input_operand_type_spelling(input, parser, left) :
+                              right_kept && !left_kept ? check_input_operand_type_spelling(input, parser, right) : 0;
+    const String8 name = grouped != NULL ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling) : (String8){ 0 };
+    if (name.length != 0)
+    {
+        uint64_t written = 0;
+        for (uint64_t i = 0; i < length; i += 1)
+        {
+            const uint64_t left = length - i;
+            const bool separate = i > sign && left % 3 == 0;
+            grouped[written] = '\'';
+            written += separate;
+            grouped[written] = digits[i];
+            written += 1;
+        }
+        grouped[written] = 0;
+        result = check_warning_text(scratch, "overflow in expression; result is %s with type %.*s", grouped, (int)name.length, name.pointer);
+    }
+    return result;
+}
+
 // A legacy warning's command-line and source policy: the same sparse group mapping the event warnings use, so
 // -Wno-NAME, -Werror=NAME and -Wno-everything reach the dense warning bits too.
 static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
@@ -2824,14 +2912,18 @@ static bool check_driver_in_body(const Parser* parser, uint32_t token)
 }
 
 // Whether a recovered report is one whose declaration stays valid (#1835): a dropped attribute's
-// (check_input_attribute_recoverable) or a dropped specifier's (check_input_specifiers_recover). A rejected unit's rounds
-// read past it (check_driver_rejected_common).
+// (check_input_attribute_recoverable, and an undeclared name's in its argument, CheckInputReport.attribute_name), a
+// dropped specifier's (check_input_specifiers_recover) or a misplaced attribute list's that the tag's declaration reads
+// past (#2468: `struct U [[gnu::aligned(8)]] { … }`), whose declaration a later constant may read. A rejected unit's
+// rounds read past it (check_driver_rejected_common).
 static bool check_driver_report_keeps_valid(const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
     const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
                            message == CHECK_INPUT_SPECIFIER_COMPLEX;
-    return report->recovered && (specifier || check_input_attribute_recoverable(report));
+    const bool list = message == CHECK_INPUT_ATTRIBUTE_LIST_PLACE;
+    const bool name = message == CHECK_INPUT_UNDECLARED && report->attribute_name;
+    return report->recovered && (specifier || list || name || check_input_attribute_recoverable(report));
 }
 
 // Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is one the
@@ -3063,10 +3155,13 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                         const uint32_t index = check_diagnostic_warning_index(warning);
                         if (source.length != 0 && target.length != 0 && (note_token == BUSTER_CHECK_NONE || note != NULL))
                         {
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_notes_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, notes, note != NULL,
                                 "passing %.*s to parameter of type %.*s %s [%s%s]", (int)source.length, source.pointer, (int)target.length, target.pointer,
                                 check_driver_pointer_wording(types, warning, nested, conversion.type, value.type),
                                 severity >= CHECK_WARNING_ERROR ? "-Werror," : "", check_warning_descriptions[index].option);
+                            // In argument order among the call's failed conversions' errors, which complete with it (#2481).
+                            pp_diagnostic_suborder(pp, previous, (uint64_t)parser->tokens.sources[located] + 1u);
                         }
                         else
                         {
@@ -3607,7 +3702,7 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
 // fix-it its last words (check_driver_conversion_hint). NULL for any other report, which the generic message keeps.
 static const char* check_driver_conversion_error(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, uint32_t* note_token,
-                                                 const char** note, Arena* scratch)
+                                                 const char** note, uint32_t* argument, Arena* scratch)
 {
     const CheckGraph* graph = stream->graph;
     const uint32_t node = report->node;
@@ -3636,6 +3731,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
+    *argument = BUSTER_CHECK_NONE;
     if (applies && op == CHECK_OP_INITIALIZE)
     {
         source = graph->operand0[node];
@@ -3677,14 +3773,25 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         // (check_driver_parameter_source).
         const uint32_t index = argument_index - 1;
         source = graph->argument_nodes[graph->argument_offsets[node] + index];
+        *argument = source;
         const uint32_t callee = graph->operand0[node];
-        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        // An overloadable call's selected candidate (#2480): C overloading takes an incompatible pointer argument as a
+        // conversion, whose error then names that candidate's parameter, not the latest declaration's.
+        const CheckOverloadEffect* chosen = NULL;
+        for (uint32_t k = 0; k < stream->overload_count && chosen == NULL; k += 1)
+        {
+            chosen = stream->overloads[k].node == node && stream->overloads[k].selected.status == CHECK_OVERLOAD_OK && stream->overloads[k].selected.type != 0 ?
+                     stream->overloads + k : NULL;
+        }
+        TypeId function = chosen != NULL ? type_strip_aligned(types, chosen->selected.type) :
+                          callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
         function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
         uint32_t parameter_count = 0;
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
         const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = chosen != NULL ? chosen->selected.declaration :
+                                     name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
         const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE && declaration < input->token_count &&
                             input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
         // A pointer parameter's note is where the declarator reader puts it (check_driver_parameter_source), any other's at
@@ -3796,6 +3903,38 @@ static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* 
     return result;
 }
 
+// A library or GNU builtin's argument that doesn't convert to its parameter (#2460): the conversion's words as an ordinary
+// call's argument's (check_driver_conversion_words), at the argument's first token, with no parameter's note, which clang
+// gives only where a declaration names the parameter. The parameter is what check_builtin_misc_convert recorded in the
+// failed argument's conversion (its type, BUSTER_CHECK_CONVERT_FAILED). NULL for another report.
+static const char* check_driver_builtin_conversion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                   CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && node < stream->count &&
+                           graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] != CBUILTIN_DUMP_STRUCT && graph->argument_counts != NULL &&
+                           graph->argument_offsets != NULL && stream->argument_conversions != NULL;
+    const uint32_t operand = candidate ? stream->diagnostic_operands[node] : 0;
+    const uint32_t count = candidate ? graph->argument_counts[node] : 0;
+    const char* result = NULL;
+    if (operand < count)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        const CheckConversion conversion = stream->argument_conversions[offset + operand];
+        const uint32_t source = graph->argument_nodes[offset + operand];
+        const char* words = conversion.flags == BUSTER_CHECK_CONVERT_FAILED && conversion.type != 0 ?
+                            check_driver_conversion_words(parser, pp, input, stream, types, spell, source, conversion.type, 0, 0, BUSTER_CHECK_NONE,
+                                                          BUSTER_CHECK_NONE, 3, scratch) : NULL;
+        if (words != NULL)
+        {
+            result = words;
+            *located = check_semantic_argument_begin(parser, graph, node, operand);
+        }
+    }
+    return result;
+}
+
 // An overload set's address that matches no candidate (#2384), as clang's assignment diagnostic gives it: the conversion
 // error with '<overloaded function type>' as its source, "incompatible function pointer types ..." where the enable_ifs
 // leave one candidate, whose address clang converts, else "... incompatible type ...", with a note at each candidate, the
@@ -3826,7 +3965,9 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     const bool function = expected != 0 && type_kind(types, expected) == BUSTER_TYPE_KIND_FUNCTION;
     uint32_t note_token = BUSTER_CHECK_NONE;
     const char* note = NULL;
-    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, scratch) : NULL;
+    uint32_t argument = BUSTER_CHECK_NONE;
+    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument, scratch) :
+                                   NULL;
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
     // The target as the words spell it: between the action's words and the source's.
@@ -3914,6 +4055,94 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     else
     {
         memset(notes, 0, sizeof(*notes) * BUSTER_CHECK_SEMANTIC_NOTES);
+    }
+    return result;
+}
+
+// An overloadable set's address returned or passed that matches no candidate (#2480), as clang's assignment diagnostic
+// gives it with the set as its source: "returning '<overloaded function type>' from a function with incompatible result
+// type 'T'" at the operand, and "passing '<overloaded function type>' to parameter of incompatible type 'T'" at the
+// argument with "passing argument to parameter 'x' here" (or "... parameter here") at a named callee's parameter, neither
+// with candidate notes. A call's argument is the first that is such a set (`f` or `&f`). Where an enable_if restricts a
+// candidate (whose address clang may convert alone) it leaves the report to the other words. NULL for any other report.
+static const char* check_driver_overload_operand(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, uint32_t* note_token,
+                                                 const char** note, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const uint32_t token = report->token;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE;
+    const bool returning = applies && op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
+    const bool calling = applies && op == CHECK_OP_CALL && graph->argument_counts != NULL && graph->argument_offsets != NULL;
+    // The operand: the return's, or the call's first argument that is an overloadable set.
+    uint32_t operand = returning ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    uint32_t index = BUSTER_CHECK_NONE;
+    uint32_t head = 0;
+    const uint32_t count = calling ? graph->argument_counts[node] : returning ? 1 : 0;
+    for (uint32_t i = 0; head == 0 && i < count; i += 1)
+    {
+        const uint32_t at = calling ? graph->argument_nodes[graph->argument_offsets[node] + i] : operand;
+        const uint32_t named = at < stream->count && graph->ops[at] == CHECK_OP_ADDRESS ? graph->operand0[at] : at;
+        const uint32_t found = named < stream->count ? check_stream_overload_head(stream, named) : 0;
+        head = found != 0 && found - 1 < graph->overload_candidate_count && (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ?
+               found : 0;
+        operand = head != 0 ? at : operand;
+        index = head != 0 ? i : index;
+    }
+    // (Candidates that an enable_if restricts are the other words'.)
+    bool restricted = false;
+    uint32_t steps = 0;
+    for (uint32_t current = head != 0 ? head - 1 : UINT32_MAX; current < graph->overload_candidate_count && steps < graph->overload_candidate_count;
+         current = graph->overload_candidates[current].previous, steps += 1)
+    {
+        const CheckConditionDeclaration* conditions = check_condition_find(&graph->conditions, graph->overload_candidates[current].declaration);
+        restricted |= conditions != NULL && conditions->restricted;
+    }
+    TypeId target = 0;
+    uint32_t target_spelling = 0;
+    uint32_t parameter = BUSTER_CHECK_NONE;
+    if (head != 0 && !restricted && returning)
+    {
+        const uint32_t function = check_semantic_function(parser, input, token);
+        target = graph->types[node];
+        target_spelling = function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
+    }
+    else if (head != 0 && !restricted && calling)
+    {
+        const uint32_t callee = graph->operand0[node];
+        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        uint32_t parameter_count = 0;
+        const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
+        target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+        const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE && declaration < input->token_count &&
+                            input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        parameter = direct && target != 0 ? check_driver_parameter_source(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
+        target_spelling = parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
+    }
+    const String8 spelled = target != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling) : (String8){ 0 };
+    const char* result = NULL;
+    if (spelled.length != 0 && operand < stream->count)
+    {
+        result = returning ? check_warning_text(scratch, "returning '<overloaded function type>' from a function with incompatible result type %.*s",
+                                                (int)spelled.length, spelled.pointer) :
+                             check_warning_text(scratch, "passing '<overloaded function type>' to parameter of incompatible type %.*s", (int)spelled.length,
+                                                spelled.pointer);
+        *located = check_warning_graph_first(graph, parser, operand);
+        if (parameter < input->token_count)
+        {
+            const bool named = parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER && input->declarations[parameter] == parameter &&
+                               input->declaration_kinds[parameter] == C_BINDING_OBJECT;
+            const uint32_t identifier = named ? parser->tokens.names[parameter] : 0;
+            *note_token = parameter;
+            *note = named ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
+                                               intern_bytes(pp->table, identifier)) : "passing argument to parameter here";
+        }
     }
     return result;
 }
@@ -4405,6 +4634,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                               check_driver_pointer_conversion_message(parser, pp, input, stream, types, &spell, token, warning_flag, &located, scratch) :
                                               (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0 ?
                                               check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
+                                              warning_flag == CHECK_WARNING_INTEGER_OVERFLOW ?
+                                              check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                               check_diagnostic_message(warning_flag);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                         const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
@@ -4572,6 +4803,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
                     }
+                    bool builtin_converted = false;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_builtin_conversion(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, scratch);
+                        builtin_converted = x86_message != NULL;
+                    }
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_dump_struct(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
@@ -4579,15 +4816,26 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // A failed assignment conversion's clang words, with an argument's parameter note (#147).
                     uint32_t conversion_note_token = BUSTER_CHECK_NONE;
                     const char* conversion_note = NULL;
+                    // A call's failed argument's (#2481): clang converts a call's arguments in order, once they are all
+                    // built, each one's warnings and errors alike, so its error is published with the call's conversion
+                    // warnings, at the call's token (check_driver_pointer_arguments), in its argument's place among them.
+                    uint32_t conversion_argument = BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_overload_address(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
                     }
                     if (x86_message == NULL && phase == 1)
                     {
-                        x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
+                        x86_message = check_driver_overload_operand(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
                                                                     &conversion_note_token, &conversion_note, scratch);
                     }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
+                                                                    &conversion_note_token, &conversion_note, &conversion_argument, scratch);
+                    }
+                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ?
+                                                    check_warning_graph_first(stream->graph, parser, conversion_argument) : BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
@@ -4605,7 +4853,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     else if (source != BUSTER_CHECK_NONE)
                     {
                         const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                        uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
+                        uint32_t publication = argument_first < count ? check_driver_publication_position(parser, pp, stream->graph->tokens[node], publication_end) :
+                                               completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
                         // An alias or ifunc definition's error is clang's after the multiversioning error at the
                         // function's name, though its location is its earlier attribute (#839).
                         if (phase == 0 && input->reports[index].sort != 0)
@@ -5144,6 +5393,29 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             arena_pop_to(scratch, type_mark);
                         }
+                        else if (phase == 0 && (kind == CHECK_INPUT_JUMP_INDIRECT || kind == CHECK_INPUT_JUMP_ASM) &&
+                                 input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count &&
+                                 input->reports[index].subject != 0 && input->reports[index].subject <= count)
+                        {
+                            // A computed goto's or an asm goto's (#1942): the label it may go to, then the declaration whose
+                            // scope that enters, as clang's jump scope checker notes them.
+                            const uint32_t detail = input->reports[index].detail;
+                            const bool asm_goto = kind == CHECK_INPUT_JUMP_ASM;
+                            const PPOutputDiagnosticNote notes[2] = {
+                                {
+                                    .token = parser->tokens.sources[input->reports[index].subject - 1],
+                                    .message = asm_goto ? "possible target of asm goto statement" : "possible target of indirect goto statement",
+                                },
+                                {
+                                    .token = parser->tokens.sources[input->reports[index].note_token],
+                                    .message = detail == 3 ? "jump bypasses initialization of VLA typedef" :
+                                               detail == 2 ? "jump bypasses initialization of variable with __attribute__((cleanup))" :
+                                                             "jump bypasses initialization of variable length array",
+                                },
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, 2, "cannot jump from this %s statement to one of its possible targets",
+                                                       asm_goto ? "asm goto" : "indirect goto");
+                        }
                         else if (phase == 0 && (kind == CHECK_INPUT_JUMP_GOTO || kind == CHECK_INPUT_JUMP_SWITCH) &&
                                  input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count)
                         {
@@ -5401,7 +5673,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && token < count &&
                                  (((kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) &&
-                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_AUTO_TYPE_EXTERN) ||
+                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_NON_EXTERN) ||
                                   (kind == CHECK_INPUT_ENUMERATOR_REDEFINITION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)))
                         {
                             const CheckInputReport* conflict = input->reports + index;
@@ -5834,6 +6106,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
                                                         check_semantic_note_count(x86_note), "%s", x86_message);
+                            // CFString's argument that doesn't convert is no ordinary literal either: clang's CheckObjCString
+                            // adds its own error after the conversion's (#2460).
+                            if (builtin_converted && stream->graph->members[stream->reports[index].node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, "CFString literal is not a string constant");
+                            }
                         }
                         else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
                                  input->reports[index].note_token < count)
@@ -5854,7 +6132,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
                         }
-                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder : 0);
+                        pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
+                                                             argument_first < count ? (uint64_t)parser->tokens.sources[argument_first] + 1u : 0);
                     }
                     else
                     {
@@ -7014,6 +7293,98 @@ static uint32_t check_driver_prototype_scope(const Parser* parser, uint32_t toke
     return list;
 }
 
+// Whether a declaration the first reading bound at `declaration` is one an edited view changed (#2120): its tokens, or its
+// initializer's, hold a part left out, or its name's other declarations (a function's) are left out.
+static bool check_driver_rejected_changed(const Parser* parser, const CheckInput* input, const uint8_t* edits, uint32_t declaration)
+{
+    const uint32_t count = parser->tokens.count;
+    bool changed = declaration < count && edits[declaration] != CHECK_DRIVER_EDIT_KEEP;
+    // Its statement, where it is one of a body's: the nearest terminator, not past its body or block.
+    uint32_t statement = declaration;
+    for (uint32_t steps = 0; !changed && statement < count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[statement];
+        statement = role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK ? BUSTER_CHECK_NONE : parser->tree.parents[statement];
+    }
+    const uint32_t first = !changed && statement < count ? check_driver_subtree_start(parser, 0, statement) : BUSTER_CHECK_NONE;
+    for (uint32_t at = first; !changed && statement < count && at <= statement; at += 1)
+    {
+        changed = edits[at] != CHECK_DRIVER_EDIT_KEEP;
+    }
+    const uint32_t name = declaration < count ? parser->tokens.names[declaration] : 0;
+    for (uint32_t at = 0; !changed && declaration < count && at < count; at += 1)
+    {
+        changed = edits[at] != CHECK_DRIVER_EDIT_KEEP && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name &&
+                  input->declarations[at] == at;
+    }
+    return changed;
+}
+
+// Whether a reader's report is one clang makes of the whole function at its end (#2120): its labels' (each undeclared one
+// once, at its first use), its jumps', and its analysis' (a misplaced fallthrough, which runs only in a body without an
+// earlier error). A view that leaves out a part of the body changes them.
+static bool check_driver_rejected_function_wide(CheckInputMessage message)
+{
+    return message == CHECK_INPUT_FALLTHROUGH_PLACEMENT || message == CHECK_INPUT_LABEL_UNDECLARED || message == CHECK_INPUT_LABEL_REDEFINITION ||
+           message == CHECK_INPUT_LABEL_AMBIGUOUS || (message >= CHECK_INPUT_JUMP_GOTO && message <= CHECK_INPUT_JUMP_ASM);
+}
+
+// Whether an edited view's reading's error at the unit's `token` is the unit's own (#2120), which the next round leaves out
+// in turn, where a view's reading's errors may be the view's own otherwise. It is where the statement that holds it (the
+// nearest terminator, condition or for header) is kept whole, with no cast of the view's, and names no declaration the view
+// changed, and the view leaves out no tag's definition or label, whose later uses its reading would read differently.
+// Nor does it hold a known error (`errors`), which the reading may find at another of its tokens; nor, for an error clang
+// makes of the whole function (`analysed`, check_driver_rejected_function_wide), does its body. So a body's later errors
+// past a declaration's error (`typeof(k()) u;`, whose uses the view leaves out too) are given,
+// and a statement expression's left-out last statement, which makes its value void, gives no error of the view's.
+static bool check_driver_rejected_trusted(const Parser* parser, const CheckInput* input, const uint8_t* edits, const uint8_t* casts, const uint32_t* errors,
+                                          uint32_t error_count, uint32_t token, bool analysed)
+{
+    const uint32_t count = parser->tokens.count;
+    bool trusted = token < count && input->declarations != NULL;
+    // An error clang makes of the whole function (check_driver_rejected_function_wide): not in a body that holds a known
+    // one, a part of which the view left out.
+    uint32_t body = analysed ? token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; body < count && parser->tree.roles[body] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        body = parser->tree.parents[body];
+    }
+    const uint32_t opened = body < count ? check_driver_subtree_start(parser, 0, body) : body;
+    for (uint32_t e = 0; trusted && analysed && e < error_count; e += 1)
+    {
+        trusted = body < count && (errors[e] < opened || errors[e] > body);
+    }
+    for (uint32_t at = 0; trusted && at < count; at += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        trusted = edits[at] == CHECK_DRIVER_EDIT_KEEP ||
+                  (role != PARSE_ROLE_OPEN_STRUCT && role != PARSE_ROLE_OPEN_ENUM && role != PARSE_ROLE_LABEL);
+    }
+    uint32_t statement = token;
+    for (uint32_t steps = 0; trusted && statement < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[statement];
+        const bool found = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR;
+        trusted = role != PARSE_ROLE_CLOSE_BODY && role != PARSE_ROLE_CLOSE_BLOCK;
+        steps = found ? count : steps;
+        statement = found ? statement : parser->tree.parents[statement];
+    }
+    trusted = trusted && statement < count;
+    const uint32_t first = trusted ? check_driver_subtree_start(parser, 0, statement) : statement;
+    for (uint32_t at = first; trusted && at <= statement; at += 1)
+    {
+        const uint32_t declaration = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER ? input->declarations[at] : BUSTER_CHECK_NONE;
+        trusted = edits[at] == CHECK_DRIVER_EDIT_KEEP && (casts == NULL || casts[at] == 0) &&
+                  (declaration >= count || !check_driver_rejected_changed(parser, input, edits, declaration));
+    }
+    // Nor does the statement hold a known error (an error the first reading found at another of its tokens).
+    for (uint32_t e = 0; trusted && e < error_count; e += 1)
+    {
+        trusted = errors[e] < first || errors[e] > statement;
+    }
+    return trusted;
+}
+
 // Whether an error's token is among the unit's known ones.
 static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
 {
@@ -7051,6 +7422,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     // The view, where an error's part is left out; its mask is the bodies', each brace with the token before it.
     CheckDriverRejectedView view = { 0 };
     const bool viewed = edited && check_driver_rejected_view(&view, unit, edits, casts, arena, scratch);
+    // A repaired view's reading (CheckCommonView): its tokens are the view's through the edits.
+    const CheckCommonView unit_view = check_common_view;
+    check_common_view.to_unit = viewed && unit_view.complete != NULL ? view.to_original : NULL;
     uint8_t* view_mask = viewed ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)view.parser.tokens.count + 1) : NULL;
     bool valid = !edited || view_mask != NULL;
     // What the reading leaves out, in the unit's tokens: the bodies it masks and the parts its view drops.
@@ -7179,12 +7553,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     const bool checked = valid && !errored_reading && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
     errored_reading = valid && (errored_reading || (!checked && program.status == CHECK_PROGRAM_INVALID));
     valid = valid && (errored_reading || checked);
-    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own.)
-    if (errored_reading && edited && !whole)
-    {
-        valid = false;
-    }
-    else if (errored_reading)
+    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own, and
+    // only those check_driver_rejected_trusted finds the unit's are, #2120.)
+    const bool trusting = errored_reading && edited && !whole;
+    if (errored_reading)
     {
         // The reading's errors the unit's earlier ones don't hold, published as the first reading's are: its reader's and
         // its graph's reports, and its controls' constraints, each in clang's words, in source order.
@@ -7211,8 +7583,12 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
             const bool literal = phase == 0 && at < count && at >= unit_stop &&
                                  (input.reports[index].message == CHECK_INPUT_LITERAL || input.reports[index].message == CHECK_INPUT_WIDE_LITERAL);
-            const bool fresh = at < count && !literal && !check_driver_rejected_known(errors, error_count, at) &&
-                               !check_driver_rejected_known(found, *found_count, at) && (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
+            // (Not a repaired view's error at its synthetic or incomplete statements', which may be the view's: CheckCommonView.)
+            const bool fresh = at < count && !literal && check_common_view_keeps(parser, token) && !check_driver_rejected_known(errors, error_count, at) &&
+                               !check_driver_rejected_known(found, *found_count, at) &&
+                               (trusting ? check_driver_rejected_trusted(unit, first_input, edits, casts, errors, error_count, at,
+                                                                         phase == 0 && check_driver_rejected_function_wide(input.reports[index].message)) :
+                                           !edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
             valid = !fresh || *found_count < found_capacity;
             if (fresh && valid)
             {
@@ -7355,8 +7731,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                 }
                 arena_pop_to(scratch, scopes_mark);
             }
-            // (Past `stop` the first reading published none of its events.)
-            if (!errored && (!known_event || events->events[i].token >= stop))
+            // (Past `stop` the first reading published none of its events.) Not at a repaired view's synthetic or incomplete
+            // statements' tokens (CheckCommonView).
+            if (!errored && (!known_event || events->events[i].token >= stop) && check_common_view_keeps(parser, event_token))
             {
                 missing[selected.count++] = events->events[i];
             }
@@ -7369,8 +7746,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     }
     arena_pop_to(scratch, events_mark);
     // Where a reader's error stopped the first reading's walk (`stop`), the second's reports and warnings from there on,
-    // which are its warnings alone: it has no error.
-    if (valid && stop < view_count)
+    // which are its warnings alone: it has no error. (Not a repaired view's, whose reports' whitelist is the view's own
+    // tokens': check_repair_input_report.)
+    if (valid && stop < view_count && unit_view.complete == NULL)
     {
         check_driver_reports_from(parser, original, pp, publication_end, &input, &stream, &types, NULL, NULL, NULL, 0, NULL, 0, false, NULL, stop, scratch);
     }
@@ -7396,6 +7774,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         arena_pop_to(scratch, flushed_mark);
         round = CHECK_DRIVER_ROUND_DONE;
     }
+    check_common_view = unit_view;
     arena_release(&type_arena);
     arena_release(&index_arena);
     return round;
@@ -7899,8 +8278,47 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
         const uint8_t* caller = check_driver_function_name(program, parser, pp->table, error->caller, &caller_length);
         const uint8_t* callee = check_driver_function_name(program, parser, pp->table, error->callee, &callee_length);
         const char* feature = predefines_features[error->feature].name;
+        // Where the diagnostic points: the call's beginning, but for a definition's own (#2367).
+        uint32_t location = error->token;
         char message[1024];
-        if (error->builtin != NULL)
+        if (error->abi)
+        {
+            // clang's (warn|err)_avx_calling_convention (#2367): the parameter's declared type where the argument has one,
+            // else the argument's (a variadic one's promoted type), or the callee's declared result type.
+            // A definition's own (checkFunctionABI) is at its parameter's name (an unnamed one's end) or its result's
+            // typedef, else its name.
+            const CheckInput* input = program->input;
+            uint32_t spelling = 0;
+            if (error->abi_definition && error->abi_argument != UINT32_MAX)
+            {
+                // A K&R definition's is its identifier list's name here, not its declaration list's (clang's).
+                const uint32_t place = check_driver_parameter_place(parser, input, error->abi_call, error->abi_argument);
+                location = place < input->token_count ? place : error->abi_call;
+                spelling = place < input->token_count ? check_driver_parameter_spelling(parser, input, place) : 0;
+            }
+            else if (error->abi_argument != UINT32_MAX)
+            {
+                // A variadic argument's own type, with its sugar (the call's argument's).
+                const CheckGraph* graph = &input->graph;
+                spelling = check_input_call_parameter_spelling(parser, input, program->stream, program->types, error->abi_call, error->abi_argument);
+                const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[error->abi_call] : 0;
+                const uint32_t argument = graph->argument_nodes != NULL ? graph->argument_nodes[first + error->abi_argument] : BUSTER_CHECK_NONE;
+                spelling = spelling == 0 && argument < graph->count ? check_input_operand_type_spelling(input, parser, argument) : spelling;
+            }
+            else
+            {
+                const uint32_t declaration = error->abi_definition ? error->abi_call :
+                                             error->callee < program->object_count ? program->object_declarations[error->callee] : BUSTER_CHECK_NONE;
+                uint32_t use = 0;
+                spelling = declaration < input->token_count ? check_input_typedef_use(input, parser, declaration, &use) : 0;
+                location = error->abi_definition ? (spelling != 0 && use < input->token_count ? use : declaration) : location;
+            }
+            CheckWarningSpelling spell = { 0 };
+            const String8 type = check_driver_warning_type(parser, pp, input, program->types, &spell, scratch, error->abi_type, spelling);
+            snprintf(message, sizeof(message), "AVX vector %s of type %.*s without '%s' enabled changes the ABI", error->abi_argument != UINT32_MAX ? "argument" : "return",
+                     (int)type.length, type.pointer, feature);
+        }
+        else if (error->builtin != NULL)
         {
             // An SSE compare's predicate past 7 needs AVX (check_target_feature_predicate), else the builtin's features.
             const char* features = error->predicate ? "avx" : error->builtin->features;
@@ -7929,17 +8347,24 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
             }
             at = original->tree.parents[at];
         }
-        if (error->token < parser->tokens.count)
+        if (error->warning && location < parser->tokens.count)
         {
-            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parser->tokens.sources[error->token], publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
+            // -Wpsabi's (#2367), as the unit's options and pragmas at its token say.
+            check_common_report_published_phase(parser, pp, program->input, location, publication, PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_PSABI, false,
+                                                message, NULL, 0, scratch);
+        }
+        else if (location < parser->tokens.count)
+        {
+            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parser->tokens.sources[location], publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
         }
         else
         {
             check_driver_diagnose(parser, pp, error->token, message);
         }
     }
+    const uint32_t hard = valid ? check_target_feature_hard(errors, count) : 0;
     arena_pop_to(output, mark);
-    return valid && count == 0;
+    return valid && hard == 0;
 }
 
 // The name clang gives an overloadable function's symbol where no asm label renames it, its mangled one
@@ -10080,6 +10505,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             pp->fatal = false;
             ready = true;
         }
+        if (ready && pp->output.count == 0)
+        {
+            pp_diagnose_empty_unit(pp);
+        }
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         check_clock_tokens(stage_clock, pp->output.count);
@@ -10138,6 +10567,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // Only complete earlier declarations survive this view. Its checking suppresses obligations
                     // that belong to the full translation-unit end; the original parser rejection stays final.
                     checking = &prefix.parser;
+                    prefix.parser.prefix_view = true;
                     prefix_only = true;
                     ready = true;
                 }
@@ -10262,6 +10692,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     else if (check_prefix_make(&prefix, recovered, arena, scratch) == CHECK_PREFIX_READY)
                     {
                         checking = &prefix.parser;
+                        prefix.parser.prefix_view = true;
                     }
                     else
                     {
@@ -10681,8 +11112,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // The identifiers, the target and the predefines are the unit's preprocessor's, as every client's
                     // program takes them (check_request_program_options, #1057).
                     const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
-                        .initializers = &initializers,
-                        .asms = &asms,
+                        .initializers = repairing ? NULL : &initializers,
+                        .asms = repairing ? NULL : &asms,
                         .prepared_data = result == 0 && (emit_object || link) && !prefix_only ? &data : NULL,
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
@@ -10702,8 +11133,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
                     // parser, where a prefix's or a repair's is a view of its own).
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && !repairing && (!prefix_only || checking == recovered) &&
-                         (pp->errors != 0 || publication_errors || input.recovered_valid) && !pp->diagnostic_collection_failed && !pp->history_failed);
+                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing) &&
+                         (pp->errors != 0 || publication_errors || input.recovered_valid || repairing) && !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
                     if (program_diagnostics && result != 0 && input.visibility_error)
@@ -10718,7 +11149,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // gives them (#1447), among the unit's errors, which the reports below publish, so that the unit's warnings
                     // leave out what clang's do after them (check_driver_rejected_warnings).
                     CheckProgramDiagnostic control = { 0 };
-                    if (program_diagnostics && !program_checked)
+                    // (Not a repaired view's: its program's failure may be its synthetic closers', and its own diagnosis found
+                    // none of the view's original statements' above.)
+                    if (program_diagnostics && !program_checked && !repairing)
                     {
                         const bool listed = program.status == CHECK_PROGRAM_INVALID &&
                                             check_program_diagnose_all(&control, program_input, &stream, checking, &types, BUSTER_CHECK_NONE, output_arena, scratch) &&
@@ -10786,6 +11219,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     if (program_checked)
                     {
+                        // A repaired view's warnings, at its complete original statements alone (CheckCommonView, #2406).
+                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
@@ -10802,13 +11237,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             // -w spares the common checks that are errors by default (#2264): a chained comparison's.
                             check_common_chained_comparisons(checking, pp, &input, scratch);
                         }
+                        check_common_view = (CheckCommonView){ 0 };
                     }
-                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered) && !repairing && !pp->fatal &&
+                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered || repairing) && !pp->fatal &&
                              !pp->diagnostic_collection_failed && !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
                     {
                         // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
                         // graph's and its other errors' tokens, and its program's. A parse a resume read whole (#147) is
                         // one too: its checking is the recovered parser, where a prefix's or a repair's is a view of its own.
+                        // A repair's is read too, at its complete original statements alone (CheckCommonView, #2431).
                         // Under -w too (#2162): its rounds' readings find the errors past a reader's error that ended its walk,
                         // which clang gives, where -w's policy leaves out every warning they publish.
                         const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;
@@ -10885,12 +11322,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
+                            // A repaired view's, at its complete original statements alone (CheckCommonView, #2431).
+                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
                             check_driver_rejected_common(checking, recovered, pp, &input, &types, error_tokens, error_count, sites, site_count, nonconstant, scalar,
                                                          return_warning, baseline,
                                                          &shift_warnings,
                                                          &input.warning_events, &stream.warning_events,
                                                          input.walk_end != 0 && input.diagnostic_limits == NULL ? input.walk_end : tokens, publication_end, arena,
                                                          scratch);
+                            check_common_view = (CheckCommonView){ 0 };
                         }
                     }
                     // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs

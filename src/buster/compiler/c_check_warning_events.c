@@ -215,8 +215,22 @@ enum
     // A cast of a struct or a union to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar):
     // -Wpedantic's own, off by default.
     CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 147,
+    // A C23 attribute list before C23 (#2409): -Wc23-extensions' clang extension, off by default, -pedantic's.
+    CHECK_WARNING_ID_C23_ATTRIBUTES = 148,
+    // An enum's fixed underlying type in a declaration that isn't its own alone (#2213, clang's ParseEnumSpecifier,
+    // ext_enum_base_in_type_specifier): -Welaborated-enum-base, an error by default (BUSTER_CHECK_WARNING_DEFAULT_ERROR).
+    CHECK_WARNING_ID_ELABORATED_ENUM_BASE = 149,
+    // A direct call's vector argument or result wider than 128 bits where neither the caller nor the callee has the AVX
+    // feature that passes it (#2367, clang's warn_avx_calling_convention): -Wpsabi, on by default, at -c alone.
+    CHECK_WARNING_ID_PSABI = 150,
+    // A struct or union without named members (#2409, clang's ext_empty_struct_union and ext_no_named_members_in_struct_union):
+    // -Wgnu-empty-struct, off by default, -pedantic's.
+    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 151,
+    // A local variable only set (#2409, clang's DiagnoseUnusedButSetDecl): -Wunused-but-set-variable, -Wunused's, -Wall's.
+    // Its event is an UNUSED_VARIABLE one whose payload.data is 1.
+    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 152,
     // clang's -Wtautological-constant-out-of-range-compare (#2218), on by default, in -Wtautological-constant-compare.
-    CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 148,
+    CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 153,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -495,6 +509,13 @@ typedef enum CheckWarningEventKind
     // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
     // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
     CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
+    // A C23 attribute list before C23 (#2409, CHECK_WARNING_ID_C23_ATTRIBUTES): -Wc23-extensions' "[[]] attributes are a
+    // C23 extension", at its first `[`, as clang's parser gives it (ext_c_attributes).
+    CHECK_WARNING_EVENT_C23_ATTRIBUTES,
+    // A struct's or union's definition without named members (#2409), at its keyword: payload.data's bit 0 a union's, bit 1
+    // one with members (unnamed bit-fields), "struct without named members is a GNU extension", else "empty struct is a GNU
+    // extension".
+    CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT,
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
@@ -541,11 +562,16 @@ typedef enum CheckWarningEventKind
     // An asm label on a block-scope object of automatic storage, not `register` (#2370, check_input_asm_labels): at the
     // label's first string token, payload.token that token.
     CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
+    // A division or remainder by a constant zero in a counted_by family's argument (#1842, check_input_counted_division),
+    // at its operator: payload.data 0 for "division by zero is undefined", 1 for "remainder by zero is undefined".
+    CHECK_WARNING_EVENT_DIVISION_BY_ZERO,
     // An alignment builtin's alignment of 1 (#2221, check_input_alignment_one), at the alignment: its description's words.
     CHECK_WARNING_EVENT_ALIGNMENT_ONE,
     // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
     // cast's type, payload.name its spelling.
     CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
+    // An enum's fixed underlying type in a declaration with a declarator (#2213), at its `:`: its description's words.
+    CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -667,6 +693,9 @@ typedef enum CheckWarningUnitEnd
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
 // `#pragma pack`, `#pragma options align` or `#pragma align` warning, whose payload.name is its CheckPackMessage).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
+// An error by default, clang's DefaultError (#2213: -Welaborated-enum-base), which -Wno-error=NAME demotes to a warning;
+// its flag has no "-Werror," while it is one.
+#define BUSTER_CHECK_WARNING_DEFAULT_ERROR 0x40u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
 // warning group's index in pp_features_warning plus one, 0 for none.
@@ -703,6 +732,8 @@ struct CheckWarningEvent
     uint32_t completion_kind;
     // Parser token for AT_TOKEN/AFTER_DELIMITER; NO_SOURCE for TU_END. Attached notes inherit this completion.
     uint32_t completion;
+    // A kind's extra datum, in what was the padding before suborder: an -Winteger-overflow MESSAGE's result's high half.
+    uint32_t detail;
     // Optional order inside a completed construct, independent of its source location and publication boundary.
     uint64_t suborder;
     CheckWarningPayload payload;
@@ -757,9 +788,11 @@ static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
     const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA | BUSTER_CHECK_WARNING_PACK_PRAGMA;
     const uint32_t payload = flags & histories;
-    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
+    return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED |
+                      BUSTER_CHECK_WARNING_DEFAULT_ERROR)) == 0 &&
            (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && (payload & (payload - 1)) == 0 &&
-           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
+           ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE) &&
+           ((flags & BUSTER_CHECK_WARNING_DEFAULT_ERROR) == 0 || (flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0);
 }
 
 static uint32_t check_warning_capacity(uint32_t capacity, uint32_t needed)

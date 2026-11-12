@@ -1262,6 +1262,293 @@ static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's reductions are C's");
 }
 
+// The lanes' unary operations (#1840): both verifiers admit lane_unary exactly where its operand is of its type and its
+// flags a population count of any lanes, or a leading zero count or conflicts of doublewords or quadwords, for every
+// flags byte at each width; and the model gives C's counts and conflicts of each lane on random vectors whose lanes
+// repeat.
+static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x6a09e667bb67ae85);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType vector = (IrType)(IR_V4I32 + width);
+                const IrType source = other == 0 ? vector : (IrType)(IR_V4I32 + (width + 1) % 3);
+                const bool admitted = other == 0 && (flags >> 2) <= 2 && ((flags >> 2) == 0 || (flags & 3) >= 2);
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "lane unary verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_UNDEF, source, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, vector, 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_UNARY);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[1] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a lane's unary operation is admitted exactly at its lanes and operation, of its type");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * (4 + 2 + 2), "lane unary operations are admitted at every width, lanes and operation");
+    // The model against C's counts and conflicts, lane by lane.
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 8 * 4; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t pick = (trial / 3) % 8;
+        const uint32_t operation = pick < 4 ? 0 : pick < 6 ? 1 : 2;
+        const uint32_t size = pick < 4 ? pick : 2 + pick % 2;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const uint32_t lanes = bytes / element;
+        IrSimdValue a = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+        }
+        // Repeated lanes for the conflicts, zeros and narrow values for the counts.
+        uint8_t* raw = (uint8_t*)a.words;
+        for (uint32_t lane = 1; lane < lanes; lane += 1)
+        {
+            const uint64_t random = ir_test_random(&state);
+            if ((random & 3) == 0)
+            {
+                memcpy(raw + lane * element, raw + (random >> 8) % lane * element, element);
+            }
+            else if ((random & 3) == 1)
+            {
+                memset(raw + lane * element, 0, element);
+                raw[lane * element] = (uint8_t)(random >> 8);
+            }
+        }
+        IrSimdValue expected = {0};
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            uint64_t x = 0;
+            memcpy(&x, raw + lane * element, element);
+            uint64_t value = 0;
+            for (uint32_t bit = 0; bit < element * 8; bit += 1)
+            {
+                value += operation == 0 ? (x >> bit) & 1 : 0;
+            }
+            for (uint32_t bit = element * 8; operation == 1 && bit > 0 && ((x >> (bit - 1)) & 1) == 0; bit -= 1)
+            {
+                value += 1;
+            }
+            for (uint32_t below = 0; operation == 2 && below < lane; below += 1)
+            {
+                uint64_t y = 0;
+                memcpy(&y, raw + below * element, element);
+                value |= (uint64_t)(x == y) << below;
+            }
+            memcpy((uint8_t*)expected.words + lane * element, &value, element);
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &a, 0, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_LANE_UNARY, .result = shape, .operands = { shape, IR_SIMD_NONE, IR_SIMD_NONE }, .index = (uint8_t)(size | operation << 2) };
+        IrSimdValue got = {0};
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && memcmp(&got, &expected, sizeof(got)) == 0;
+    }
+    ir_test_expect(test, exact, "the model's lane counts and conflicts are C's");
+}
+
+// C's operation of two lanes in the rounding mode the flags name (#1840's fround), by host_fesetround and volatile
+// operands, the oracle of the model's MXCSR rounding: the arithmetic happens between the volatile loads and the volatile
+// store, which no call reorders.
+static uint64_t ir_test_fround_oracle(uint32_t flags, uint64_t a, uint64_t b)
+{
+    static const int modes[4] = { FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO };
+    const int saved = host_fegetround();
+    uint64_t result = 0;
+    host_fesetround(modes[(flags >> 3) & 3]);
+    if ((flags & 4) == 0)
+    {
+        volatile float x = 0;
+        volatile float y = 0;
+        volatile float z = 0;
+        const uint32_t xa = (uint32_t)a;
+        const uint32_t yb = (uint32_t)b;
+        memcpy((void*)&x, &xa, sizeof(xa));
+        memcpy((void*)&y, &yb, sizeof(yb));
+        const uint32_t operation = flags & 3;
+        z = operation == 0 ? x + y : operation == 1 ? x - y : operation == 2 ? x * y : x / y;
+        uint32_t word = 0;
+        memcpy(&word, (const void*)&z, sizeof(word));
+        result = word;
+    }
+    else
+    {
+        volatile double x = 0;
+        volatile double y = 0;
+        volatile double z = 0;
+        memcpy((void*)&x, &a, sizeof(a));
+        memcpy((void*)&y, &b, sizeof(b));
+        const uint32_t operation = flags & 3;
+        z = operation == 0 ? x + y : operation == 1 ? x - y : operation == 2 ? x * y : x / y;
+        memcpy(&result, (const void*)&z, sizeof(result));
+    }
+    host_fesetround(saved);
+    return result;
+}
+
+// The truncating conversions of lane 0 (#1840): both verifiers admit cvtt exactly of a V4I32 into the I32 or I64 its
+// flags' bit 1 names, at every flags byte; and the model gives x86's result, C's truncation where the range holds it
+// and the smallest integer for NaNs, infinities and values past the range, at the range's edges both sides.
+static void ir_test_cvtts(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    static const IrType sources[3] = { IR_V4I32, IR_V8I32, IR_F64 };
+    static const IrType results[3] = { IR_I32, IR_I64, IR_I16 };
+    uint32_t admitted_count = 0;
+    for (uint32_t flags = 0; flags < 256; flags += 1)
+    {
+        for (uint32_t source = 0; source < 3; source += 1)
+        {
+            for (uint32_t result = 0; result < 3; result += 1)
+            {
+                const bool admitted = flags <= 3 && source == 0 && result == ((flags & 2) != 0 ? 1u : 0u);
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "cvtt verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_UNDEF, sources[source], BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, results[result], 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_CVTT);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[1] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a truncating conversion is admitted exactly of a V4I32 into its flags' integer");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 4, "cvtt is admitted at each lane and result");
+    static const double values[] = { 0.0, -0.0, 0.5, -0.99, 1.75, -1.75, 2147483647.0, 2147483647.5, 2147483648.0, -2147483648.0, -2147483648.75, -2147483649.0,
+                                     0x1p62, 0x1.fffffffffffffp62, 0x1p63, -0x1p63, -0x1.0000000000001p63, 1e300, -1e300, INFINITY, -INFINITY, NAN };
+    bool exact = true;
+    for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(values); v += 1)
+    {
+        for (uint32_t flags = 0; flags < 4; flags += 1)
+        {
+            const bool wide = (flags & 2) != 0;
+            const bool is_double = (flags & 1) != 0;
+            const double x = is_double ? values[v] : (double)(float)values[v];
+            IrSimdValue a = {0};
+            if (is_double)
+            {
+                memcpy(&a.words[0], &x, sizeof(x));
+            }
+            else
+            {
+                const float single = (float)x;
+                uint32_t word = 0;
+                memcpy(&word, &single, sizeof(word));
+                a.words[0] = word;
+            }
+            // x86's integer indefinite past the range, written out with long double bounds.
+            const long double limit = wide ? 0x1p63L : 0x1p31L;
+            const bool fits = x == x && (long double)x > -limit - 1.0L && (long double)x < limit;
+            const uint64_t wanted = !fits ? (wide ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)) : wide ? (uint64_t)(int64_t)x : (uint64_t)(uint32_t)(int32_t)x;
+            const IrSimdValue* operands[3] = { &a, 0, 0 };
+            const IrSimdAction action = { .operation = IR_SIMD_CVTT, .result = IR_SIMD_NONE, .operands = { IR_SIMD_V4I32, IR_SIMD_NONE, IR_SIMD_NONE }, .index = (uint8_t)flags };
+            IrSimdValue got = {0};
+            exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && got.words[0] == wanted;
+        }
+    }
+    ir_test_expect(test, exact, "the model's truncating conversions are x86's");
+}
+
+// The floating operations at their own rounding (#1840): both verifiers admit fround exactly of two 64-byte vectors of its
+// type at every flags byte below 32; and the model gives C's operation in each rounding mode (ir_test_fround_oracle) on
+// lanes chosen so that the modes differ (random fractions, ties, overflow, underflow, zeros, infinities and NaNs), and
+// leaves MXCSR as it was.
+static void ir_test_frounds(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x510e527f9b05688c);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType vector = (IrType)(IR_V4I32 + width);
+                const bool admitted = width == 2 && other == 0 && flags < 32;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "fround verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 4;
+                ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, other == 0 ? vector : IR_V8I32, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_INTRINSIC, vector, 0, 1, BUSTER_IR_INTRINSIC_FROUND);
+                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[2] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a floating operation at its own rounding is admitted exactly of two 64-byte vectors");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 32, "fround is admitted at every operation, lanes and rounding");
+    static const uint64_t specials[2][8] = {
+        { 0, UINT64_C(0x80000000), UINT64_C(0x7f800000), UINT64_C(0xff800000), UINT64_C(0x7fc00001), UINT64_C(0x7f7fffff), UINT64_C(0x00000001), UINT64_C(0x3f800000) },
+        { 0, UINT64_C(0x8000000000000000), UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000), UINT64_C(0x7ff8000000000001), UINT64_C(0x7fefffffffffffff),
+          UINT64_C(0x0000000000000001), UINT64_C(0x3ff0000000000000) },
+    };
+    bool exact = true;
+    bool kept = true;
+    for (uint32_t trial = 0; trial < 32 * 8; trial += 1)
+    {
+        const uint32_t flags = trial % 32;
+        const uint32_t lane_bits = (flags & 4) != 0 ? 64 : 32;
+        IrSimdValue a = {0};
+        IrSimdValue b = {0};
+        for (uint32_t lane = 0; lane < 512 / lane_bits; lane += 1)
+        {
+            const uint64_t random = ir_test_random(&state);
+            const uint64_t x = (random & 7) == 0 ? specials[lane_bits == 64][(random >> 3) & 7] : ir_test_random(&state);
+            const uint64_t y = (random & 0x38) == 0 ? specials[lane_bits == 64][(random >> 6) & 7] : (random & 0x1c0) == 0 ? x : ir_test_random(&state);
+            ir_simd_lane_write(&a, lane_bits, lane, lane_bits == 64 ? x : x & UINT32_MAX);
+            ir_simd_lane_write(&b, lane_bits, lane, lane_bits == 64 ? y : y & UINT32_MAX);
+        }
+        const IrSimdValue* operands[3] = { &a, &b, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_FROUND, .result = IR_SIMD_V16I32, .operands = { IR_SIMD_V16I32, IR_SIMD_V16I32, IR_SIMD_NONE }, .index = (uint8_t)flags };
+        IrSimdValue got = {0};
+        uint32_t before = 0;
+        uint32_t after = 0;
+        __asm__ volatile("stmxcsr %0" : "=m"(before) : : "memory");
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got);
+        __asm__ volatile("stmxcsr %0" : "=m"(after) : : "memory");
+        kept = kept && before == after;
+        for (uint32_t lane = 0; exact && lane < 512 / lane_bits; lane += 1)
+        {
+            exact = ir_simd_lane_read(&got, lane_bits, lane) == ir_test_fround_oracle(flags, ir_simd_lane_read(&a, lane_bits, lane), ir_simd_lane_read(&b, lane_bits, lane));
+        }
+    }
+    ir_test_expect(test, exact, "the model's floating operations at their own rounding are C's in that rounding mode");
+    ir_test_expect(test, kept, "the model leaves MXCSR, its flags among it, as it was");
+}
+
 // The masked loads and stores (#1840): both verifiers admit them exactly where their flags are integer lanes (0 to 3),
 // whose mask is the load's b or the store's c, the address a ptr, the passthrough or the stored vector a vector (a load's
 // of its type) and the alignment's log2 at most 31; the float lanes, an invalid lane, another mask, a vector address and
@@ -1576,6 +1863,9 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_masked_memory(test, output, scratch);
     ir_test_lane_moves(test, output, scratch);
     ir_test_reductions(test, output, scratch);
+    ir_test_lane_unaries(test, output, scratch);
+    ir_test_frounds(test, output, scratch);
+    ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);

@@ -656,10 +656,10 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
     bool saw = false;
     bool valid = true;
     bool reading = true;
-    // A list that doesn't combine is read again without the specifier clang's DeclSpec drops (#1447, review on #1820:
+    // A list that doesn't combine is read again without the specifiers clang's DeclSpec drops (#1447, review on #1820:
     // `typeof(_Complex _Bool)`), every _Complex for a _Complex's, as check_input_specifiers recovers it.
-    uint32_t skip = BUSTER_CHECK_NONE;
-    bool skip_complex = false;
+    CheckDeclspecDrops drops;
+    bool skipping = false;
     bool attempt = true;
     while (attempt)
     {
@@ -683,7 +683,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             const uint32_t name = parser->tokens.names[i];
             const uint8_t kind = parser->tokens.kinds[i];
             bool consumed = true;
-            if (i == skip || (skip_complex && check_declspec_complex_name(name)))
+            if (skipping && check_declspec_dropped(parser, &drops, i))
             {
                 // (Dropped.)
             }
@@ -854,15 +854,14 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
             base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
         }
-        const uint32_t dropped = !valid && skip == BUSTER_CHECK_NONE && saw ? check_input_specifiers_dropped(parser, *cursor, end) : BUSTER_CHECK_NONE;
-        attempt = dropped != BUSTER_CHECK_NONE;
-        skip = attempt ? dropped : skip;
-        skip_complex = attempt && check_declspec_complex_name(parser->tokens.names[dropped]);
-        if (!attempt && valid && skip != BUSTER_CHECK_NONE)
+        attempt = !valid && !skipping && saw && check_input_specifiers_dropped(parser, *cursor, end, false, &drops);
+        const bool reread = skipping;
+        skipping |= attempt;
+        if (!attempt && valid && reread)
         {
             // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
             const uint32_t count = reader->output->report_count;
-            check_input_report_specifiers(reader, *cursor, end, *cursor);
+            check_input_report_specifiers(reader, *cursor, end, *cursor, true);
             valid = reader->output->report_count != count && check_input_recover_reports(reader, count);
         }
     }
@@ -2398,7 +2397,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                 };
                 CheckActionResult checked;
                 check_action_scalar(reader->types, &action, &checked);
-                check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
+                check_input_warning_add_value(reader, action.node, checked.warnings, action.context.source_position, &checked.value);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE && (checked.value.flags & BUSTER_CHECK_BIT_FIELD) == 0 && checked.value.offset >= 0;
                 valid &= (uint64_t)checked.value.offset <= UINT64_MAX - number;
@@ -2926,7 +2925,7 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
-        check_input_warning_add_at(input->reader, action->node, checked.warnings, action->context.source_position);
+        check_input_warning_add_value(input->reader, action->node, checked.warnings, action->context.source_position, &checked.value);
     }
     *value = checked.value;
     return checked.diagnostic == CHECK_DIAG_NONE;
@@ -3576,7 +3575,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                                                   action.operands + 1, begin, reader->ends[source] + 1, action.context.source_position);
                     }
                 }
-                check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
+                check_input_warning_add_value(reader, action.node, checked.warnings, action.context.source_position, &checked.value);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
@@ -3822,7 +3821,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 }
                 arena_pop_to(reader->scratch, mark);
             }
-            check_input_warning_add_at(reader, action.node, checked.warnings, action.context.source_position);
+            check_input_warning_add_value(reader, action.node, checked.warnings, action.context.source_position, &checked.value);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             if (valid && check_sparse_wide_present(reader->output->noderef_types))

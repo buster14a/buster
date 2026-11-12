@@ -3510,9 +3510,20 @@ spellings alone would miss this change (#272).
   `[-Werror]` where promoted. `#warning` before C23 is also clang's
   "#warning is a C23 extension" (`-Wpedantic`), and in C23
   `-Wpre-c23-compat`'s. `#ident` and `#sccs` are clang's "#ident is a
-  language extension" (`-Wpedantic`, #2222), at the directive's name. Not
-  given yet (#2222): `-Wgnu-line-marker`, whose place clang reads under the
-  numbering before the marker, and `-Wempty-translation-unit`. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  language extension" (`-Wpedantic`, #2222), at the directive's name. A parsed
+  unit without a token is clang's "ISO C requires a translation unit to contain
+  at least one declaration" (`-Wempty-translation-unit`, an extension off by
+  default, #2222, `pp_diagnose_empty_unit`), at the main file's end, which
+  clang's lexer puts at a final newline; `-E` gives none, as clang's parser
+  alone does. A `#define`'s or `#undef`'s name reserved in every context
+  (`__x`, `_X`) is clang's "macro name is a reserved identifier"
+  (`-Wreserved-macro-identifier`, off by default, in `-Wreserved-identifier`,
+  #2222, `pp_reserved_macro_name`, `CheckMacroName`'s) at the name, before the
+  directive's other warnings, but for a `#define` of a feature-test macro
+  clang's `isFeatureTestMacro` lists (`_GNU_SOURCE`, `_POSIX_C_SOURCE`,
+  `__STDC_FORMAT_MACROS`, …) and for the predefines' and the command line's
+  definitions. Not given yet (#2222): `-Wgnu-line-marker`, whose place clang
+  reads under the numbering before the marker, and `-Wunused-macros`. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error.

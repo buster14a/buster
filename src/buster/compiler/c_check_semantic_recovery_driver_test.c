@@ -53,6 +53,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "__attribute__((patchable_function_entry(3, 4), patchable_function_entry(1, 9))) void h(void) {}\n"
         "__attribute__((patchable_function_entry(1, 2))) void p(void), q(void);\n"
         "int use(void) { f(); g(); h(); p(); q(); return 0; }\n",
+        // A block's thread-local object without static or extern (#2420): clang's "'_Thread_local' variables must have global
+        // storage" at the keyword ('__thread' for GNU's, '_Thread_local' for C23's thread_local), and the reading goes on.
+        "void c(void) { _Thread_local int z; __thread int w = 1; (void)z; (void)w; int u = undeclared; }\n"
+        "void d(void) { static _Thread_local int s; extern _Thread_local int e; (void)s; (void)e; }\n"
+        "void k(int p) { for (_Thread_local int i = 0; i < 1; i++) {} }\n"
+        "void m(void) { _Thread_local int q __asm__(\"q\"); thread_local int t; }\n",
         // Each of the attribute errors' passes: an item's reading (a string's), its arguments' values, its subject, its
         // function type's and its place on a definition; the declarations stay usable.
         "__attribute__((section(1))) int a1;\n"
@@ -228,6 +234,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // A unit with a parse error, checked as the prefix of complete declarations before it, whose reader recovers from
+        // a missing name as a whole unit's does (#1799, Parser.prefix_view): the graph's errors past the name are clang's,
+        // and an unsized array's list error gives way to its initializer's own.
+        "int c = undecl_n, x = 1, y = x();\nunknown_type z;\n",
+        "int c = undecl_n;\nint y = 3 + (void)0;\nunknown_type z;\n",
+        "int c = undecl_n, d[] = 1 + (void)0;\nunknown_type z;\n",
+        "int c = undecl_n;\nint f(int);\nint y = f(1, 2);\nunknown_type z;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its
@@ -668,6 +681,50 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
         "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
         "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
+        // Several errors in one list (#1820 (c)): each specifier whose slot is taken is an error at it and dropped, the
+        // list going on, then its end's in DeclSpec::Finish's order (a sign, then a width, then _Complex), each recovered.
+        "int float char x;\nint a1 = u1;\n_Complex _Bool int y;\nint a2 = u2;\n_Complex _Bool _Atomic _Bool y2;\nint a3 = u3;\n"
+        "long long long long w;\nint a4 = u4;\nsigned unsigned float v;\nint a5 = u5;\nunsigned long float double d;\nint a6 = u6;\n"
+        "unsigned unsigned float uu;\nint a7 = u7;\nlong double long double ldd;\nint a8 = u8;\n",
+        // The same in the operand readers' type names, a parameter, a body, a cast, sizeof, _Alignof and members.
+        "typeof(unsigned unsigned float) q1;\nint b1 = v1;\ntypeof(int float char) q2;\nint b2 = v2;\n"
+        "enum F : long long long long { B };\nint b4 = v4;\n_Atomic(unsigned long float double) q3;\nint b5 = v5;\n"
+        "int f(int float char p, long long long long q) { short long char z = 1;\n"
+        "  return (int)(unsigned signed float)p + q + z + sizeof(signed unsigned double); }\n"
+        "struct T { long long long long m; int float char n; _Complex _Bool int k; } t;\nint b6 = v6;\n"
+        "int g(void) { return _Alignof(_Complex _Bool int) + sizeof(typeof(unsigned float double)); }\nint b9 = v9;\n",
+        // A second type of no keyword, dropped with its group (a _BitInt's, an _Atomic's, a tag's, a typeof's), a sign
+        // repeated after the type, and a repeated _Complex dropped beside a conflict.
+        "int _BitInt(8) x;\nint a1 = u1;\nint struct S2 { int m; } w2;\nstruct S2 s2;\nint a3 = u3;\n"
+        "int typeof(int) _Atomic(int) unsigned unsigned v;\nint a4 = u4;\n_Complex _Complex int _Bool cb;\nint a5 = u5;\n"
+        "unsigned float unsigned y;\nint a6 = u6;\nint _Atomic(int) z;\nint a7 = u7;\n"
+        "void f(void) { int float char x; char *p = &x; int typeof(long) y; p = &y; }\n",
+        // A block's object with linkage beside one without (#2441): clang's extern, non-extern, static and non-static
+        // wordings and notes, then the unit goes on.
+        "void a(void) { int q; extern int q; }\n"
+        "void b(void) { static int r; extern int r; }\n"
+        "void c(void) { extern int s; static int s; }\n"
+        "void d(void) { extern int t; int t; }\n"
+        "void e(void) { extern int u; extern float u; }\n"
+        "void f(void) { extern int v; float v; }\n"
+        "void g(void) { extern int q; int q = 2; }\n"
+        "void h(void) { extern int r; static int r; }\n"
+        "int s;\n"
+        "void k(void) { extern int s; int s; (void)s; }\n"
+        "int z = undeclared;\n",
+        // A definition that is also an alias or ifunc (#2449): clang's handler drops the attribute, and the declaration stays a
+        // valid definition, its later uses quiet.
+        "int x __attribute__((alias(\"y\")));\n"
+        "int y;\n"
+        "int use(void) { return x + y; }\n"
+        "int z = undeclared;\n"
+        "void *r(void) { return 0; }\n"
+        "int h(void) __attribute__((ifunc(\"r\"))) { return 3; }\n"
+        "int k(void) { return h() + x + nope; }\n"
+        "extern int w __attribute__((alias(\"y\"))) = 4;\n"
+        "int m(void) { return w + nope2; }\n"
+        "static int s __attribute__((alias(\"y\")));\n"
+        "int n(void) { return s; }\n",
         // A recovered error in a definition's head, a specifier's or an attribute's, and then errors that stop the reader
         // (#1835): the later bodies keep their warnings, and the definitions' own bodies theirs, since clang gives those
         // errors before the body opens its scope; a body with an error of its own loses its unused variables.
@@ -1018,6 +1075,14 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int h(void) { int unused; return 0; }\nvoid k(void) { int m = X; }\n",
         "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nint g(void) { return Z; }\nint h(void) { int unused; return X; }\n"
         "struct Z { int a; };\nint i(void) { int u2; return 0; }\n",
+        // A deprecated declaration's uses before a parse error (#2202): the view of the unit that the error leaves (a
+        // prefix, a repair) gives their -Wdeprecated-declarations, with the attribute's message and the note: an object's,
+        // a function's, a typedef's and a tag's, at file scope and in bodies.
+        "int w __attribute__((deprecated)); int v = w; int z = ;\n",
+        "int w __attribute__((deprecated)); int f(void) { return w; } int z = ;\n",
+        "int w __attribute__((deprecated(\"old\"))); void g(int) __attribute__((deprecated));\nint f(void) { g(w); return w; }\nvoid h(void) { g(1);\n",
+        "typedef int T __attribute__((deprecated));\nstruct S { int m; } __attribute__((deprecated));\nT t; struct S s;\nint f(void) { T x = 1; return x + t; }\n"
+        "int z = ;\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
