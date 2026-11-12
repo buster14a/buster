@@ -794,8 +794,15 @@ records (borrowed from the producer, `Tier0AsmBody`'s), its own branches and the
 targets relative to its first record (a target may be the body's end), and the
 registers it writes (`touched`, rax to r15 in bits 0 to 15 and xmm0 to xmm15 in 16
 to 31). Its records address the statement's operand block through
-`BUSTER_TIER0_ASM_BLOCK`'s base; the block is the call's one argument, a `ptr`
-that is the block local's `stack_addr` (a body that reads no block has none).
+`BUSTER_TIER0_ASM_BLOCK`'s base; the block is the call's first argument, a
+`ptr` that is the block local's `stack_addr` (a body that reads no block has
+none). The statement's register operands follow it (#2144): one argument per
+operand its records read in a register when they start (`IrAsmBody.passed`), a
+narrow integer extended as a call's argument is, each with its register in
+`IrAsmBody.locations` (Tier 0's call row's `AbiLocation`s: a general register's
+number, or `BUSTER_ABI_REGISTER_VECTOR | n` for xmm n), as Tier 0's call row
+passes them (`CheckProgramAsm.inline_passed`), so that they need no round trip
+through the block. `ir_asm_body_block` names the block argument.
 
 So every pass takes a body call as an unknown callee's of that pointer: the block
 escapes into it (neither SSA promotion nor SROA's `flagged` mode makes its slot
@@ -805,7 +812,8 @@ read and write. The inliner copies a callee's bodies with it (appended to the
 caller's, `IrCall.body` rebased), its block argument the rebased slot's address,
 as a row call's row is copied. The verifier checks a body call's descriptor
 against its body (`ir_body_call_valid`): within the column, of no row, void, one
-`ptr` argument or none, and the branch columns in order within the records.
+`ptr` argument or none, then a register operand's per location, each in
+registers, and the branch columns in order within the records.
 
 The text form has no syntax for a body: the printer writes `asm #k(...)` and a
 line per body (`asm #k records=<count> branches=<count> touched=<mask>`) for

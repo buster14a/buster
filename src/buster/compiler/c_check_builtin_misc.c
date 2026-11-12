@@ -60,6 +60,8 @@ typedef enum CheckBuiltinMiscConstraint
     CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT,
     CHECK_BUILTIN_MISC_CONSTRAINT_RANGE,
     CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT,
+    // An alignment builtin's alignment below 1 (#2221): RANGE is then its alignment past the source's maximum.
+    CHECK_BUILTIN_MISC_CONSTRAINT_MINIMUM,
 } CheckBuiltinMiscConstraint;
 
 typedef struct CheckBuiltinMiscAction CheckBuiltinMiscAction;
@@ -538,7 +540,7 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
         // and a power of 2, in clang's order.
         if (shaped && (negative || zero || significant > width || (significant == width && !power)))
         {
-            output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
+            output->constraint = negative || zero ? CHECK_BUILTIN_MISC_CONSTRAINT_MINIMUM : CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
         }
         else if (shaped && !power)
