@@ -1989,6 +1989,56 @@ static void ir_simd_typed_test_lane_moves(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the front end's one-lane moves and movemasks decode to the IR's lane_extract, lane_insert and movemask\n", decoded_rows);
 }
 
+// The floating operations at their own rounding (#1840): vaddps to vdivpd with embedded rounding, each rounding
+// (tier1_masks_test_fround_row), decode as the IR's fround of their operation, lanes and rounding, written out, at
+// exactly AVX512F; refused without it and under 6 changes.
+static void ir_simd_typed_test_frounds(IrTestTally* tally)
+{
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t flags = 0; tables && flags < 32; flags += 1)
+    {
+        const Tier0Operation row = tier1_masks_test_fround_row(flags);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        char description[160];
+        snprintf(description, sizeof(description), "fround 0x%x: the IR's fround at exactly AVX512F", flags);
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.fround && decoded.immediate == flags && !decoded.lane_op &&
+                        decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.required_features == BUSTER_X86_FEATURE(AVX512F);
+        ir_test_expect(tally, ok, description);
+        decoded_rows += ok;
+        IrSimdTypedOperation without;
+        memset(&without, 0x5a, sizeof(without));
+        ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&row, all & ~BUSTER_X86_FEATURE(AVX512F), &without), &without),
+                       "a floating operation at its own rounding without AVX512F is no fround");
+        for (uint32_t m = 0; m < 6; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* record = &changed.records[0];
+            switch (m)
+            {
+            case 0: record->decorations |= BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: record->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: record->vvvv = BUSTER_TIER0_ROLE_VECTOR(1); break;
+            case 3: changed.operand_bytes[1] = 32; break;
+            case 4:
+                changed.records[1] = changed.records[0];
+                changed.record_count = 2;
+                break;
+            case 5: record->form = X86_FORM_VADDPS_Z_Z_ZM512; break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && !decoded.fround), "a changed floating operation's row is not the IR's fround");
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 32, "every floating operation at its own rounding decodes");
+    printf("  IR SIMD rows: %u floating operations with embedded rounding decode to the IR's fround\n", decoded_rows);
+}
+
 // The AES rounds (#1840): vaesenc and vaesenclast, EVEX at each width and VEX at 16 and 32 bytes, VECTOR(0) the state
 // and VECTOR(1) the round key, decode as the IR's aes of their round at exactly their form's features; refused without
 // VAES and under 4 changes.
@@ -2259,6 +2309,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_compresses(tally);
     ir_simd_typed_test_masked_memory(tally);
     ir_simd_typed_test_lane_moves(tally);
+    ir_simd_typed_test_frounds(tally);
     ir_simd_typed_test_aes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);

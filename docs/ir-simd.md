@@ -1355,6 +1355,63 @@ The tests:
   `_mm*_movemask_*` and `_mm_cvtsi128_si*`, compiled by `--tier1
   -march=x86-64-v4`, matches clang's output; its 17 machine rows are all gone.
 
+## Floating operations at their own rounding (#1840)
+
+One more binary `intrinsic` kind, `fround` (`BUSTER_IR_INTRINSIC_FROUND`), is
+a floating operation of two 64-byte vectors' lanes at a rounding of its own,
+its exceptions suppressed:
+
+```text
+%3 = intrinsic.v16i32 %2, %1 fround 13
+```
+
+- **Operands:** a and b are of the result's type, which is `v16i32`: AVX-512
+  embeds a rounding in its 64-byte register forms alone.
+- **Flags:** the operation in bits 0 and 1 (`a + b`, `a - b`, `a * b`,
+  `a / b`), the lanes in bit 2 (floats, doubles) and the rounding in bits 3 and
+  4 (to nearest, down, up, toward zero: EVEX's and MXCSR's order).
+- **Semantics:** each lane is x86's packed operation's in that rounding,
+  whatever MXCSR holds, and sets none of its flags. So the kind reads no
+  floating environment.
+- **Model:** `IR_SIMD_FROUND` (`ir_simd_float_rounded`) runs the host's scalar
+  SSE instruction (`addss` to `divsd`) with MXCSR's rounding set to the flags',
+  then restores MXCSR and its flags. That is the lane exactly as the packed form
+  computes it, NaNs included; the compiler runs on x86-64 alone.
+- **Passes:** SCCP folds two constant vectors by the model. GVN and LICM take it
+  as pure and total, since it reads no MXCSR and writes none of it.
+
+**Decoder** (`ir_simd_typed_fround`): the builtins' `_mm512_add_round_ps` to
+`_mm512_div_round_pd` with `_MM_FROUND_NO_EXC` and a direction are one record of
+`ir_simd_fround_forms`' `_ER` form, VECTOR(0) in vvvv and VECTOR(1) in rm into
+VECTOR(0), its decorations the rounding alone. With `_MM_FROUND_CUR_DIRECTION`
+they are the ordinary forms, the IR's `fadd` to `fdiv`.
+
+**Tier 1** selects the same record (`BUSTER_TIER1_VECTOR_FROUND`), the rounding
+in its decorations. Seven of the eight `_ER` forms had no Zen 5 row; they were
+measured on the 9700X (see below).
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against main (`2331a9be`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 15 | 15 |
+| `main_unit_backend.c` | 193 | 177 |
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `fround` exactly of two 64-byte vectors
+  of its type at every flags byte below 32. The model is checked against C's
+  operation in that rounding mode (`host_fesetround`, volatile operands) on
+  random lanes, ties, overflow, underflow, zeros, infinities and NaNs, and
+  leaves MXCSR as it was.
+- **`test-ir-parse`:** `tests/ir/fround.ir` round-trips.
+- **`test-ir-simd`:** the 32 rows (4 operations, 2 lane sizes, 4 roundings)
+  decode at exactly AVX512F, refused without it and under 6 changes.
+- **`test-tier1-masks`:** the 32 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C in each rounding
+  mode, so that the processor checks the model.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

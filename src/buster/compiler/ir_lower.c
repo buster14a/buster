@@ -792,6 +792,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_AES, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->fround)
+    {
+        // A floating operation at its own rounding (#1840): its operation, lanes and rounding in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_FROUND, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
     else if (operation->lane_move != 0)
     {
         // One lane of a vector or its lanes' sign bits (#1840), its flags the lane: an extraction's I32 or I64 narrowed to

@@ -248,4 +248,14 @@ static const uint16_t ir_simd_movemask_forms[4][2] = {
 static const uint16_t ir_simd_part_extract_forms[2] = { X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 };
 static const uint16_t ir_simd_part_insert_forms[2] = { X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8 };
 
+// The floating operations at their own rounding (#1840, BUSTER_IR_INTRINSIC_FROUND), by the operation (add, sub, mul,
+// div) and the lanes (floats, doubles): the 64-byte register forms with embedded rounding, the first operand in vvvv,
+// the second in rm and the rounding in the decorations' bits (BUSTER_X86_DECORATION_ROUNDING).
+static const uint16_t ir_simd_fround_forms[4][2] = {
+    { X86_FORM_VADDPS_Z_Z_Z_ER, X86_FORM_VADDPD_Z_Z_Z_ER },
+    { X86_FORM_VSUBPS_Z_Z_Z_ER, X86_FORM_VSUBPD_Z_Z_Z_ER },
+    { X86_FORM_VMULPS_Z_Z_Z_ER, X86_FORM_VMULPD_Z_Z_Z_ER },
+    { X86_FORM_VDIVPS_Z_Z_Z_ER, X86_FORM_VDIVPD_Z_Z_Z_ER },
+};
+
 #endif

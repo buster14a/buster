@@ -104,6 +104,9 @@ typedef enum IrSimdOperation
     IR_SIMD_LANE_EXTRACT,
     IR_SIMD_LANE_INSERT,
     IR_SIMD_MOVEMASK,
+    // A floating operation of each lane at its own rounding, its exceptions suppressed (#1840, ir.c's
+    // BUSTER_IR_INTRINSIC_FROUND), the action's `index` the IR's flags (ir_simd_float_rounded).
+    IR_SIMD_FROUND,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -250,7 +253,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT ||
                           action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
                           action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
-                          action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK);
+                          action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
+                          action->operation == IR_SIMD_FROUND);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -298,6 +302,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                 valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
                         (uint32_t)(action->index >> 2) < ir_simd_bits(type) / (8u << (action->index & 3));
                 break;
+            case IR_SIMD_FROUND: valid = valid && type == IR_SIMD_V16I32 && a == type && b == type && c == IR_SIMD_NONE && action->index < 32; break;
             case IR_SIMD_MOVEMASK:
                 valid = valid && type == IR_SIMD_NONE && ir_simd_vector(a) && ir_simd_bits(a) <= 256 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3 &&
                         action->index != 1;
@@ -456,6 +461,54 @@ static uint64_t ir_simd_float_operation(IrSimdOperation operation, uint64_t a, u
         const double y = ir_simd_float_value(b, 64);
         const double z = operation == IR_SIMD_FADD ? x + y : operation == IR_SIMD_FSUB ? x - y : operation == IR_SIMD_FMUL ? x * y : x / y;
         memcpy(&result, &z, sizeof(result));
+    }
+    return result;
+}
+
+// A floating lane's operation at a rounding of its own (#1840, IR_SIMD_FROUND): the flags' operation (a + b, a - b,
+// a * b, a / b) of `a` and `b`, floats or doubles by bit 2, by the host's scalar SSE instruction with MXCSR's rounding
+// the flags' bits 3 and 4 (nearest, down, up, toward zero), which is x86's lane as the packed form with embedded
+// rounding computes it, NaNs and all; MXCSR is restored after it, its flags with it, as {sae} raises none.
+static uint64_t ir_simd_float_rounded(uint32_t flags, uint64_t a, uint64_t b)
+{
+    uint32_t saved = 0;
+    __asm__ volatile("stmxcsr %0" : "=m"(saved) : : "memory");
+    const uint32_t rounded = (saved & ~UINT32_C(0x6000)) | ((flags >> 3) & 3) << 13;
+    const uint32_t operation = flags & 3;
+    uint64_t result = 0;
+    if ((flags & 4) == 0)
+    {
+        float x = 0;
+        float y = 0;
+        const uint32_t xa = (uint32_t)a;
+        const uint32_t yb = (uint32_t)b;
+        memcpy(&x, &xa, sizeof(x));
+        memcpy(&y, &yb, sizeof(y));
+        switch (operation)
+        {
+            case 0: __asm__ volatile("ldmxcsr %2\n\taddss %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+            case 1: __asm__ volatile("ldmxcsr %2\n\tsubss %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+            case 2: __asm__ volatile("ldmxcsr %2\n\tmulss %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+            default: __asm__ volatile("ldmxcsr %2\n\tdivss %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+        }
+        uint32_t word = 0;
+        memcpy(&word, &x, sizeof(word));
+        result = word;
+    }
+    else
+    {
+        double x = 0;
+        double y = 0;
+        memcpy(&x, &a, sizeof(x));
+        memcpy(&y, &b, sizeof(y));
+        switch (operation)
+        {
+            case 0: __asm__ volatile("ldmxcsr %2\n\taddsd %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+            case 1: __asm__ volatile("ldmxcsr %2\n\tsubsd %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+            case 2: __asm__ volatile("ldmxcsr %2\n\tmulsd %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+            default: __asm__ volatile("ldmxcsr %2\n\tdivsd %1, %0\n\tldmxcsr %3" : "+x"(x) : "x"(y), "m"(rounded), "m"(saved) : "memory"); break;
+        }
+        memcpy(&result, &x, sizeof(result));
     }
     return result;
 }
@@ -735,6 +788,16 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
         {
             staged = *values[0];
             ir_simd_lane_write(&staged, lane_bits, lane, lane_bits == 64 ? values[1]->words[0] : values[1]->words[0] & ((UINT64_C(1) << lane_bits) - 1));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_FROUND)
+    {
+        // Each lane by ir_simd_float_rounded.
+        const uint32_t lane_bits = (action->index & 4) != 0 ? 64 : 32;
+        for (uint32_t lane = 0; lane < 512 / lane_bits; lane += 1)
+        {
+            const uint64_t z = ir_simd_float_rounded(action->index, ir_simd_lane_read(values[0], lane_bits, lane), ir_simd_lane_read(values[1], lane_bits, lane));
+            ir_simd_lane_write(&staged, lane_bits, lane, z);
         }
     }
     else if (valid && action->operation == IR_SIMD_MOVEMASK)
