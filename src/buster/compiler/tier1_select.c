@@ -2883,22 +2883,32 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     }
     else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE)
     {
-        // A floating value to an unsigned I64 (#141), the source x unchanged: d = trunc(x), and where x is 2^63 or more,
-        // whose d is then 2^63 (the conversion's out-of-range result), 2^63 | trunc(x - 2^63), computed as the negation of
-        // trunc(2^63 - x) (truncation is symmetric), 2^63 in the vector class's scratch register from the scratch one.
+        // A floating value x to an unsigned I64 (#141), x unchanged, raising the floating exceptions C's conversion raises
+        // and no others (#2562): one truncation, of x where it is below 2^63 or unordered, else of x / 2, whose result is
+        // then doubled. x / 2 is x's bits less one in its exponent's lowest bit, exact for x at 2^63 or more, and
+        // truncating it raises invalid exactly where x is past U64's range (2^64 or more, or infinite). ucomis* of x with
+        // 2^63 (the vector class's scratch register's, from the scratch one) sets the flags, which no record after it
+        // writes: cmovb keeps x's own bits, movq or movd, cvtts*2si and lea leave them, and cmovae takes the double. No
+        // floating arithmetic runs, so the truncation's are the only flags: a subtraction of 2^63 from x would raise
+        // inexact below it, and a second truncation invalid (#2562's spurious flags, and SIGFPE with invalid unmasked).
         const uint8_t x = holes->left & 15;
         const uint8_t xs = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        const uint8_t d = holes->destination;
         const uint32_t source_width = holes->source_width;
+        const uint32_t bits_width = source_width == 8 ? 8 : 4;
         const Tier1SelectFloatForms* forms = tier1_select_float_forms(source_width);
-        records[count++] = tier1_select_register_record(forms->to_integer[1], holes->destination, x);
-        records[count++] = tier1_select_constant_move(source_width == 8 ? 8 : 4, scratch, source_width == 8 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x5f000000));
+        records[count++] = tier1_select_constant_move(bits_width, scratch, source_width == 8 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x5f000000));
         records[count++] = tier1_select_register_record(forms->from_general, xs, scratch);
-        records[count++] = tier1_select_register_record(forms->arithmetic[1], xs, x);
-        records[count++] = tier1_select_register_record(forms->to_integer[1], scratch, xs);
-        records[count++] = (X86Instruction){ .form = X86_FORM_NEG_RM64, .rm = scratch };
-        records[count++] = tier1_select_register_record(X86_FORM_OR_R64_RM64, scratch, holes->destination);
-        records[count++] = tier1_select_register_record(X86_FORM_TEST_RM64_R64, holes->destination, holes->destination);
-        records[count++] = tier1_select_register_record(X86_FORM_CMOVS_R64_RM64, holes->destination, scratch);
+        records[count++] = tier1_select_register_record(forms->to_general, x, d);
+        // Minus the exponent's lowest bit (1 << 52 or 1 << 23), added at 64 bits: an F32's sum's low 32 bits are its own.
+        records[count++] = tier1_select_constant_move(bits_width, scratch, source_width == 8 ? UINT64_C(0xfff0000000000000) : UINT64_C(0xff800000));
+        records[count++] = tier1_select_register_record(X86_FORM_ADD_R64_RM64, scratch, d);
+        records[count++] = tier1_select_register_record(forms->compare, x, xs);
+        records[count++] = tier1_select_register_record(X86_FORM_CMOVB_R64_RM64, scratch, d);
+        records[count++] = tier1_select_register_record(forms->from_general, xs, scratch);
+        records[count++] = tier1_select_register_record(forms->to_integer[1], d, xs);
+        records[count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = scratch, .rm = d, .index = d, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) };
+        records[count++] = tier1_select_register_record(X86_FORM_CMOVAE_R64_RM64, d, scratch);
     }
     return count;
 }

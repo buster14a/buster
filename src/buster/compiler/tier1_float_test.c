@@ -22,11 +22,21 @@
 //   a block assigns on one path only and reads on that path, as promotion leaves it after the block's lifetime start.
 //   The CFG consumer moves nothing for an undefined operand, and the code computes C's result.
 //
+// - tier1_float_unsigned_texts are the conversions between an unsigned I64 and the floating classes, each of its
+//   parameter (TIER1_RULE_FLOAT_CONVERT_WIDE), run on Tier 0's named values (tier0_test.c's tier0_test_unsigned_*, at
+//   2^53, 2^63 and 2^64's edges) under each of MXCSR's rounding modes. Each call must give C's result and raise the
+//   invalid and inexact flags C's conversion raises, no others (#2562), as tier0_test_unsigned_oracle computes them
+//   under FENV_ACCESS; and every conversion to an unsigned I64 must run with invalid unmasked, in a child of its own,
+//   where a spurious invalid would raise SIGFPE.
+//
 // The code runs in a bounded child (tier1_float_tests).
 
 #define BUSTER_TIER1_FLOAT_SAMPLES 24u
 #define BUSTER_TIER1_FLOAT_OUT_BYTES 160u
 #define BUSTER_TIER1_FLOAT_ELEMENTS 16u
+// Fixtures 0 to 2 are the mixed, loop and undefined operands' ones, then one per unsigned signature (tier0_test.c's order).
+#define BUSTER_TIER1_FLOAT_UNSIGNED_FIRST 3u
+#define BUSTER_TIER1_FLOAT_FIXTURES (BUSTER_TIER1_FLOAT_UNSIGNED_FIRST + 4u)
 
 // Whether any C callee found the stack misaligned at its call (tier1_stack_check_alignment's test).
 static volatile uint32_t tier1_float_misaligned;
@@ -516,13 +526,121 @@ static bool tier1_float_same(double left, double right)
     return memcmp(&left, &right, sizeof(left)) == 0;
 }
 
-// One compile of fixture 0 (mixed) or 1 (the loop), by one path and one set of options, run on the samples.
+// The unsigned I64's conversions, each of its parameter, in tier0_test_unsigned_names' order: to double, to float, from
+// double and from float (fixtures BUSTER_TIER1_FLOAT_UNSIGNED_FIRST on).
+static const char* const tier1_float_unsigned_texts[4] = {
+    "function (i64) -> f64 {\nb0:\n  %0 = param.i64 0\n  %1 = uitofp.f64 %0\n  %2 = ret.void %1\n}\n",
+    "function (i64) -> f32 {\nb0:\n  %0 = param.i64 0\n  %1 = uitofp.f32 %0\n  %2 = ret.void %1\n}\n",
+    "function (f64) -> i64 {\nb0:\n  %0 = param.f64 0\n  %1 = fptoui.i64 %0\n  %2 = ret.void %1\n}\n",
+    "function (f32) -> i64 {\nb0:\n  %0 = param.f32 0\n  %1 = fptoui.i64 %0\n  %2 = ret.void %1\n}\n",
+};
+
+// Signature `signature`'s conversion at `code` of Tier 0's named value v: its result's bits. No floating operation but
+// the call's own, so the flags after it are the conversion's.
+static __attribute__((noinline, no_sanitize("function"))) uint64_t tier1_float_call_unsigned(const void* code, uint32_t signature, uint32_t v)
+{
+    uint64_t bits = 0;
+    if (signature == 0)
+    {
+        double (*function)(uint64_t) = 0;
+        memcpy(&function, &code, sizeof(function));
+        const double d = function(tier0_test_unsigned_integers[v]);
+        memcpy(&bits, &d, sizeof(d));
+    }
+    else if (signature == 1)
+    {
+        float (*function)(uint64_t) = 0;
+        memcpy(&function, &code, sizeof(function));
+        const float f = function(tier0_test_unsigned_integers[v]);
+        uint32_t low = 0;
+        memcpy(&low, &f, sizeof(f));
+        bits = low;
+    }
+    else if (signature == 2)
+    {
+        uint64_t (*function)(double) = 0;
+        memcpy(&function, &code, sizeof(function));
+        bits = function(tier0_test_unsigned_doubles[v]);
+    }
+    else
+    {
+        uint64_t (*function)(float) = 0;
+        memcpy(&function, &code, sizeof(function));
+        bits = function(tier0_test_unsigned_floats[v]);
+    }
+    return bits;
+}
+
+// An unsigned signature's code on every named value under every rounding mode, each call's result and flags against C's
+// conversion's under the same mode (#2562); then, for a conversion to an unsigned I64, every value again with invalid
+// unmasked, in a child, which a spurious invalid would stop by SIGFPE. MXCSR is put back after each call.
+static void tier1_float_unsigned_run(Tier1EmitTest* test, const void* code, uint32_t signature, bool vector, bool rematerialize, uint32_t vector_mask, bool keep_pointer)
+{
+    static const char* const modes[BUSTER_TIER0_TEST_UNSIGNED_MODES] = { "to nearest", "down", "up", "toward zero" };
+    const uint32_t csr = _mm_getcsr();
+    for (uint32_t mode = 0; mode < BUSTER_TIER0_TEST_UNSIGNED_MODES; mode += 1)
+    {
+        for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+        {
+            const uint32_t environment = (csr & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_ROUND_MASK)) | mode << 13;
+            _mm_setcsr(environment);
+            const uint64_t seen = tier1_float_call_unsigned(code, signature, v);
+            const uint32_t flags = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
+            _mm_setcsr(environment);
+            uint64_t expected = 0;
+            const uint32_t oracle = tier0_test_unsigned_oracle(signature, tier0_test_unsigned_integers[v], tier0_test_unsigned_doubles[v], tier0_test_unsigned_floats[v], &expected);
+            _mm_setcsr(csr);
+            const bool same = seen == expected && flags == oracle;
+            if (!same && test->failures < 20)
+            {
+                fprintf(stderr, "  float unsigned %s vector=%u remat=%u mask=%x pointer=%u rounding %s: value %u gave 0x%016" PRIx64 " flags 0x%02x, C's 0x%016" PRIx64 " flags 0x%02x\n",
+                        tier0_test_unsigned_names[signature], vector, rematerialize, vector_mask, keep_pointer, modes[mode], v, seen, flags, expected, oracle);
+            }
+            tier1_emit_test_expect(test, same, "an unsigned I64's conversion gives C's result and raises C's invalid and inexact flags, no others");
+        }
+    }
+    if (tier0_test_unsigned_to[signature] == BUSTER_TYPED_CLASS_U64)
+    {
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            alarm(10);
+            _mm_setcsr(csr & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_MASK_INVALID));
+            for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
+            {
+                tier1_float_call_unsigned(code, signature, v);
+            }
+            _exit(0);
+        }
+        int status = 0;
+        pid_t waited = -1;
+        if (child > 0)
+        {
+            do
+            {
+                waited = waitpid(child, &status, 0);
+            } while (waited < 0 && errno == EINTR);
+        }
+        const bool ran = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (!ran && test->failures < 20)
+        {
+            fprintf(stderr, "  float unsigned %s vector=%u remat=%u mask=%x pointer=%u with invalid unmasked: status %d%s\n", tier0_test_unsigned_names[signature], vector, rematerialize,
+                    vector_mask, keep_pointer, status, WIFSIGNALED(status) && WTERMSIG(status) == SIGFPE ? " (SIGFPE)" : "");
+        }
+        tier1_emit_test_expect(test, ran, "a conversion to an unsigned I64 of a value in its range raises no invalid, which runs unmasked");
+    }
+}
+
+// One compile of a fixture (0 mixed, 1 the loop, 2 undefined operands, then the unsigned conversions), by one path and
+// one set of options, run on the samples, or for an unsigned conversion on Tier 0's named values.
 static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t vector_mask, bool keep_pointer)
 {
     IrFunction function;
-    const String8 undefined = { .pointer = (char*)tier1_float_undefined_text, .length = sizeof(tier1_float_undefined_text) - 1 };
+    const bool conversion = fixture >= BUSTER_TIER1_FLOAT_UNSIGNED_FIRST;
+    const char* text = conversion ? tier1_float_unsigned_texts[fixture - BUSTER_TIER1_FLOAT_UNSIGNED_FIRST] : tier1_float_undefined_text;
+    const String8 parsed = { .pointer = (char*)text, .length = strlen(text) };
     const bool created = fixture == 0 ? tier1_float_mixed_function(&test->input, &function) : fixture == 1 ? tier1_float_loop_function(&test->input, &function) :
-                                                                                            ir_parse(undefined, &test->input, &test->scratch, &function).error == IR_PARSE_OK;
+                                                                                            ir_parse(parsed, &test->input, &test->scratch, &function).error == IR_PARSE_OK;
     const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the floating fixture is valid IR");
     IrDominance dominance;
@@ -578,7 +696,8 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
             uint64_t random = UINT64_C(0x6a09e667f3bcc908) ^ ((uint64_t)vector_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ (keep_pointer ? 4 : 0) ^ ((uint64_t)fixture << 40);
-            for (uint32_t sample = 0; sample < BUSTER_TIER1_FLOAT_SAMPLES; sample += 1)
+            const uint32_t samples = conversion ? 0 : BUSTER_TIER1_FLOAT_SAMPLES;
+            for (uint32_t sample = 0; sample < samples; sample += 1)
             {
                 if (fixture == 0)
                 {
@@ -647,6 +766,10 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
                     tier1_emit_test_expect(test, tier1_float_same(oracle, got), "floating phis, branches, calls and their saves give C's result, bit for bit");
                 }
             }
+            if (conversion)
+            {
+                tier1_float_unsigned_run(test, executable, fixture - BUSTER_TIER1_FLOAT_UNSIGNED_FIRST, vector, rematerialize, vector_mask, keep_pointer);
+            }
             tier1_emit_test_expect(test, tier1_float_misaligned == 0, "every call keeps the stack 16 bytes aligned");
         }
         if (executable != MAP_FAILED)
@@ -664,10 +787,11 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->terms = 0;
     test->width = 8;
     test->selects = false;
-    for (uint32_t fixture = 0; fixture < 3; fixture += 1)
+    for (uint32_t fixture = 0; fixture < BUSTER_TIER1_FLOAT_FIXTURES; fixture += 1)
     {
         // Few xmm registers: the mixed fixture's eight parameters, which their definitions take at once, and one more;
-        // the loop's three, which its variadic call's doubles take at once (and the undefined operands' fixture's too).
+        // the loop's three, which its variadic call's doubles take at once (and the undefined operands' and the unsigned
+        // conversions' fixtures' too).
         // The other values go to their slots, and those live across a call too.
         const uint32_t few = fixture == 0 ? 0x1ffu : 0x7u;
         for (uint32_t variant = 0; variant < 16; variant += 1)
