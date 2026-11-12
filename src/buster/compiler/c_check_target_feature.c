@@ -1479,7 +1479,7 @@ static void check_target_feature_switch(CheckX86DiagnosticWalk* walk, CheckTarge
     unsigned __int128 value = 0;
     // A label inside the selector's expression keeps clang's ConstantFoldsToSimpleInteger from folding it: the
     // switch's cases all emit, as an unknown one's do.
-    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value) &&
+    const bool known = check_program_case_value(program, node, check_stream_type(program->stream, node), &value, NULL) &&
                        !(node < program->input->graph.count && emission->node_labeled[node] != 0);
     while (next < walk->body->count && controls[next].kind == CHECK_CONTROL_CASE)
     {

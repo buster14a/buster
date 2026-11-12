@@ -4027,7 +4027,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             // A label whose address the program takes (GNU C's &&label): a place in its function's code, defined below.
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", object);
+            // (A target_clones copy's of the label, #2247, by its own symbol.)
+            const bool copied = program->object_symbols[object] != s + 1;
+            const int length = copied ? snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u_%u", object, s + 1) :
+                                        snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
             flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
         }

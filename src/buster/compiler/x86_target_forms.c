@@ -40,8 +40,8 @@ _Static_assert(X86_FEATURE_AES + 6 < 30 && X86_FEATURE_PCLMUL > X86_FEATURE_AES 
 // inclusions derive both counts from the canonical rows below and reject a stale interface at compile time.
 enum
 {
-    BUSTER_X86_TARGET_CLASSIFIED_COUNT = 4448,
-    BUSTER_X86_TARGET_COMPACT_COUNT = 4227
+    BUSTER_X86_TARGET_CLASSIFIED_COUNT = 4605,
+    BUSTER_X86_TARGET_COMPACT_COUNT = 4384
 };
 _Static_assert(X86_FORM_COUNT <= UINT16_MAX, "classified form index fits its stored width");
 _Static_assert(BUSTER_X86_TARGET_CLASSIFIED_COUNT <= UINT16_MAX && BUSTER_X86_TARGET_CLASSIFIED_COUNT <= X86_FORM_COUNT, "classified slot fits the inverse map");
