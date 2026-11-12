@@ -169,7 +169,8 @@ static void restore(void)
     {
         if (develop_saved[i])
         {
-            char command[2 * PATH_MAX];
+            // Room for the whole array of copies' names, which is what GCC's -Wformat-truncation bounds an element by.
+            char command[sizeof(develop_copies) + PATH_MAX];
             snprintf(command, sizeof(command), "cp '%s' '%s'", develop_copies[i], develop_edited[i]);
             develop_saved[i] = system(command) != 0;
         }
