@@ -995,9 +995,9 @@ static bool node_machine_memo_kind(uint8_t kind)
 }
 
 // Whether an integer constant of an integer type takes, for a parameter of type `parameter` (0: a variadic one), the
-// answer any value of its type takes, its conversion folding it without changing what check_action_inherit reads: an
-// integer, an enumeration, a float, a double or a long double parameter, or the promotions. A pointer's isn't: a null
-// pointer constant converts to it and another integer doesn't; nor a half-precision type's, whose fold can fault.
+// answer any integer constant of its type takes, its conversion folding it without changing what check_action_inherit
+// reads: an integer, an enumeration, a float, a double or a long double parameter, or the promotions. A pointer's isn't: a
+// null pointer constant converts to it and another integer doesn't; nor a half-precision type's, whose fold can fault.
 static bool node_machine_memo_integers(const NodeMachine* machine, TypeId parameter)
 {
     const TypeId destination = parameter != 0 ? type_unqualified(type_strip_aligned(machine->types, parameter)) : BUSTER_TYPE_INT;
@@ -1010,14 +1010,14 @@ static bool node_machine_memo_integers(const NodeMachine* machine, TypeId parame
 // memo (NodeMachine.argument_memo): node_machine_argument's answer, its exact twin, into `conversion`, and the flags and
 // fault of its converted value that check_action_inherit reads added to the call's value `value`. Whether it took it.
 //
-// Where the record's value has no constant but an address, none of BUSTER_NODE_MACHINE_MEMO_FLAGS and isn't an
-// enumeration's lvalue (whose completeness at the node the rule asks), the rule reads of it only its type, whether it is
-// an lvalue and the type table: check_action_null is its type's alone, and no conversion folds. Those three are the key,
-// and a miss runs the rule and keeps its answer. A hit inherits the record's value itself where its kind and the
-// conversion's are node_machine_memo_kind's, an array's or a function's (which decay to a pointer, changing no inherited
-// flag), and else takes the rule again. An integer constant (an rvalue of an integer type) takes the same answer where
-// node_machine_memo_integers says so, and the rule otherwise, without keeping its answer. Any other argument takes the
-// rule.
+// The key is the record's type, its standing (an lvalue, an integer constant, or neither) and the parameter's type. Where
+// the record's value has no constant but an address, none of BUSTER_NODE_MACHINE_MEMO_FLAGS and isn't an enumeration's
+// lvalue (whose completeness at the node the rule asks), the rule reads of it only its type, whether it is an lvalue and
+// the type table: check_action_null is its type's alone, and no conversion folds. Its answer is then the key's, and a hit
+// answers where the conversion changes nothing that check_action_inherit reads (where the record's kind and the
+// conversion's are node_machine_memo_kind's, an array's or a function's, which decay to a pointer), inheriting the
+// record's value itself. An integer constant (an rvalue of an integer type) is a key of its own, whose hit answers where
+// node_machine_memo_integers says so. A miss runs the rule and keeps its answer; any other argument takes the rule.
 static bool node_machine_argument_memo(NodeMachine* machine, uint32_t a, uint32_t node, TypeId parameter, CheckValue* value, CheckConversion* conversion)
 {
     const CheckValue* operand = machine->values + a;
@@ -1026,17 +1026,14 @@ static bool node_machine_argument_memo(NodeMachine* machine, uint32_t a, uint32_
     const bool integer = operand->constant_kind == CHECK_CONSTANT_INTEGER;
     const bool constant = operand->constant_kind == CHECK_CONSTANT_NONE || operand->constant_kind == CHECK_CONSTANT_ADDRESS || (integer && !lvalue && kind == BUSTER_TYPE_KIND_INTEGER);
     const bool eligible = constant && (operand->flags & BUSTER_NODE_MACHINE_MEMO_FLAGS) == 0 && !(lvalue && kind == BUSTER_TYPE_KIND_ENUM);
-    const uint8_t standing = BUSTER_NODE_MACHINE_MEMO_FILLED | (lvalue ? BUSTER_NODE_MACHINE_MEMO_LVALUE : 0);
+    const uint8_t standing = BUSTER_NODE_MACHINE_MEMO_FILLED | (lvalue ? BUSTER_NODE_MACHINE_MEMO_LVALUE : 0) | (integer ? BUSTER_NODE_MACHINE_MEMO_INTEGER : 0);
     const uint32_t slot = ((operand->type ^ parameter * 0x85ebca77u ^ standing) * 0x9e3779b1u) >> (32 - BUSTER_NODE_MACHINE_MEMO_BITS);
     NodeMachineMemo* entry = machine->argument_memo + slot;
     const bool matched = eligible && entry->source == operand->type && entry->parameter == parameter && entry->standing == standing;
-    const uint8_t needed = integer ? BUSTER_NODE_MACHINE_MEMO_INTEGERS : 0;
-    const uint8_t answer = entry->answer;
-    const bool taken_answer = (answer & BUSTER_NODE_MACHINE_MEMO_TAKEN) != 0;
     bool taken = false;
-    if (matched && (answer & needed) == needed && (!taken_answer || (answer & BUSTER_NODE_MACHINE_MEMO_SAME) != 0))
+    if (matched && (entry->answer & BUSTER_NODE_MACHINE_MEMO_ANSWERS) != 0)
     {
-        taken = taken_answer;
+        taken = (entry->answer & BUSTER_NODE_MACHINE_MEMO_TAKEN) != 0;
         *conversion = (CheckConversion){ .type = entry->converted, .flags = entry->flags };
         if (taken)
         {
@@ -1051,20 +1048,19 @@ static bool node_machine_argument_memo(NodeMachine* machine, uint32_t a, uint32_
         {
             check_action_inherit(value, &argument);
         }
-        const bool integers = eligible && !matched && node_machine_memo_integers(machine, parameter);
-        const bool fill = eligible && !matched && (!integer || integers);
+        const bool fill = eligible && !matched;
         if (fill)
         {
-            const bool same = taken && (node_machine_memo_kind(kind) || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION) &&
-                              node_machine_memo_kind(check_action_kind(machine->types, conversion->type));
+            const bool same = !taken || ((node_machine_memo_kind(kind) || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION) &&
+                                         node_machine_memo_kind(check_action_kind(machine->types, conversion->type)));
+            const bool answers = same && (!integer || node_machine_memo_integers(machine, parameter));
             *entry = (NodeMachineMemo){
                 .source = operand->type,
                 .parameter = parameter,
                 .converted = conversion->type,
                 .flags = (uint16_t)conversion->flags,
                 .standing = standing,
-                .answer = (uint8_t)((taken ? BUSTER_NODE_MACHINE_MEMO_TAKEN : 0) | (same ? BUSTER_NODE_MACHINE_MEMO_SAME : 0) |
-                                    (integers ? BUSTER_NODE_MACHINE_MEMO_INTEGERS : 0)),
+                .answer = (uint8_t)((taken ? BUSTER_NODE_MACHINE_MEMO_TAKEN : 0) | (answers ? BUSTER_NODE_MACHINE_MEMO_ANSWERS : 0)),
             };
         }
         machine->memo_fills += fill;

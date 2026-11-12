@@ -79,19 +79,18 @@
 // of types (docs/node-machine.md, "Calls").
 #define BUSTER_NODE_MACHINE_MEMO_BITS 10u
 #define BUSTER_NODE_MACHINE_MEMO_ENTRIES (1u << BUSTER_NODE_MACHINE_MEMO_BITS)
-// An entry's standing: filled, and its key's record an lvalue.
+// An entry's standing, part of its key: filled, and its key's record an lvalue or an integer constant.
 #define BUSTER_NODE_MACHINE_MEMO_FILLED 0x80u
 #define BUSTER_NODE_MACHINE_MEMO_LVALUE 0x01u
-// What an entry answers (node_machine_argument_memo): node_machine_argument took the key's arguments (else it refused
-// them); their conversion changes nothing that check_action_inherit reads of them, so that a hit inherits the record's
-// value itself (else the rule takes them each time); and an integer constant of the key takes the same answer.
+#define BUSTER_NODE_MACHINE_MEMO_INTEGER 0x02u
+// What an entry answers (node_machine_argument_memo): whether node_machine_argument took the key's arguments (else it
+// refused them), and whether a hit answers for it (else the rule takes the key's arguments each time).
 #define BUSTER_NODE_MACHINE_MEMO_TAKEN 0x01u
-#define BUSTER_NODE_MACHINE_MEMO_SAME 0x02u
-#define BUSTER_NODE_MACHINE_MEMO_INTEGERS 0x04u
+#define BUSTER_NODE_MACHINE_MEMO_ANSWERS 0x02u
 
-// One entry of the argument memo (node_machine_argument_memo): its key, an argument's record's type, whether the record is
-// an lvalue and its parameter's type (0 for a variadic argument), and node_machine_argument's answer for the key, with the
-// argument's conversion where it took it.
+// One entry of the argument memo (node_machine_argument_memo): its key, an argument's record's type, its standing and its
+// parameter's type (0 for a variadic argument), and node_machine_argument's answer for the key, with the argument's
+// conversion where it took it.
 typedef struct NodeMachineMemo NodeMachineMemo;
 struct NodeMachineMemo
 {
