@@ -790,6 +790,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // An undeclared name in an attribute's argument (#2251): clang's error at it, after which its parser drops the
+        // attribute, the list's others stand, and the declaration and the unit go on: a generic attribute's, a known one's
+        // expression (aligned, alloc_size, cleanup), a member's and a block-scope declarator's; a library function's name
+        // is still declared implicitly there.
+        "void *a1(void *d) __attribute__((diagnose_as_builtin(nosuch, 1)));\nvoid *p = memset;\n"
+        "int g(int) __attribute__((alloc_size(nosuch), unused));\nint v __attribute__((aligned(zzz))), w __attribute__((aligned(8)));\n"
+        "void h(void) __attribute__((cleanup(qq)));\nstruct S { int m __attribute__((aligned(yyy))); int n; } s;\n"
+        "void k(void) { int l __attribute__((aligned(xxx))) = 1; int unused; (void)l; }\nint y = 1/0;\n"
+        "int f(void) { return undeclared_fn(1); }\n",
         // Statement checks in clang's words (#2406): a `case` or a `default` outside any switch at its keyword; a subscript of
         // a function's pointer at that operand, the pointee's typedef as written; and of neither an array, a pointer nor a
         // vector at its `[`.

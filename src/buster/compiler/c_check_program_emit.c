@@ -637,7 +637,7 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
     }
     // An asm statement placed in its caller (#1059, #1839): its X86 entry or its asm body, once per statement as its
     // helper's call would be.
-    for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < program->input->asm_count; s += 1)
+    for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < lowered->asms.plan_count; s += 1)
     {
         report->direct[CHECK_PROGRAM_HELPER_ASM] += lowered->asms.plans[s].planned && (lowered->asms.plans[s].row != 0 || lowered->asms.plans[s].inlined);
     }
@@ -3898,9 +3898,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint64_t unit_names = 0;
     uint64_t unit_fixups = 0;
     uint64_t unit_wide = 0;
-    for (uint32_t s = 0; valid && s < program->input->asm_count; s += 1)
+    for (uint32_t s = 0; valid && asms->plans != 0 && s < asms->plan_count; s += 1)
     {
-        const CheckProgramAsm* plan = asms->plans != 0 ? asms->plans + s : 0;
+        const CheckProgramAsm* plan = asms->plans + s;
         if (plan != 0 && plan->unit_assembled)
         {
             unit_atoms += plan->unit.link.atoms.count != 0 ? plan->unit.link.atoms.count - 1 : 0;
@@ -4388,7 +4388,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
     }
     // The templates of alignment and section directives alone: their data atoms and labels, without a helper to call.
-    for (uint32_t s = 0; valid && asms->plans != 0 && s < program->input->asm_count; s += 1)
+    for (uint32_t s = 0; valid && asms->plans != 0 && s < asms->plan_count; s += 1)
     {
         const CheckProgramAsm* plan = asms->plans + s;
         if (plan->unit_assembled && plan->helper == BUSTER_CHECK_NONE)

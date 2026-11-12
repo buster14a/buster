@@ -3499,9 +3499,16 @@ What the lowering covers past scalars (#145's programs):
       the labels' own symbols, which the program's data reaches: clang's
       block-scope static `static void* t[] = { &&a };` holds the last clone's
       label addresses, since that clone is emitted last.
-    - A body with inline assembly is still compiled once, with the unit's
-      features. Its versions' names are symbols at that one code: those
-      plans are a body's own. A group with a reference, or a
+    - Each copy plans its asm statements for its own instruction set, as
+      clang's clones assemble each template again (#2247): a copy body's
+      statements have plans of their own past the statements'
+      (`CheckProgramAsms.copy_bases`, `check_program_asm_plan_of`), each
+      naming its statement (`CheckProgramAsm.statement`), whose index gives
+      `%=` its number and an asm goto's local labels and a helper's symbol
+      their names, so that the copies' differ. A label a template defines by
+      name is defined once per copy, a duplicate refused as in clang. A naked
+      function's body is still compiled once (`check_program_target_copy_refused`):
+      its templates are its whole code. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -3543,10 +3550,9 @@ What the lowering covers past scalars (#145's programs):
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
     resolver's result is named among clang's versions' distinct addresses.
-  - *Differences from clang's code.* A `target_clones` body with inline
-    assembly, a `switch` or an address-taken label is compiled once, with the
-    unit's features, where clang compiles a copy per version (each is valid
-    there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
+  - *Differences from clang's code.* A naked `target_clones` body is
+    compiled once, with the unit's features, where clang compiles a copy per
+    version (each is valid there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
     resolver is `.text`'s, not a COMDAT section's. Its
     unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
     its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again
@@ -8156,7 +8162,15 @@ change, it refused such a declaration by name.
   because there exists no call expression inside the statement"; a `nomerge`
   of arguments, clang's "'nomerge' attribute takes no arguments"; and
   `suppress`'s arguments, string literals through parentheses
-  (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`). The calls
+  (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
+  inside them (`suppress((1))`, #2332) is the string error, then the parser's
+  "expected ')'" at the same token, noted "to match this '('" at the innermost
+  `(` (`check_input_attribute_suppress_paren`). Not yet clang's: arguments
+  clang's parser itself rejects (`suppress("a",)`, `suppress("a" x)`), after
+  whose first error clang's parser goes on and buster's parser stops; and an
+  implicit int's declaration after a statement's attributes (`__attribute__((unused))
+  (x)++;`), whose redeclaration errors and `-Wignored-attributes` warning
+  clang's Sema gives after the parser's errors, which stop buster (#2332). The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
@@ -8911,7 +8925,17 @@ arguments against the function. The checker now gives these as clang does.
   one being declared), a struct's earlier member, or a function
   declarator's own parameter; one that names nothing is clang's "use of
   undeclared identifier", before any of the declaration's attributes is
-  applied. Then, after their subjects and counts (with the handlers' "at
+  applied, after which clang's parser drops that attribute and the
+  declaration goes on with its others (#2251, `check_input_names_drop`): so
+  does a name in a generic attribute's expression or in a known attribute's
+  argument expressions (`aligned(zzz)`, `alloc_size(nosuch)`,
+  `check_input_read_attributes`). A name that clang's search corrects
+  (`aligned(alignedy)` near a variable `alignedx`) still gets no suggestion
+  and no "'aligned' attribute requires integer constant" after it; and a
+  later warning of the unit's file scope can be dropped where a dropped
+  attribute's declarator group is read again by a constant (`int v
+  __attribute__((aligned(zzz))), w;` then `_Static_assert(_Alignof(w) == 8,
+  "")`). Then, after their subjects and counts (with the handlers' "at
   least 1 argument"): `capability`'s name a string literal; a trylock's
   first argument an int or a bool; a lock function's integer literal
   argument an index of its function's parameters, with clang's "out of
@@ -10168,12 +10192,17 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   a builtin's call) is "not yet supported" in user code; in a system header
   the condition is kept and decides nothing, as #1361's fortify wrappers had
   it. A function declaration with a `pass_object_size` parameter (#1361's
-  object-size wrappers, `CheckInputAttributes.object_sizes`) doesn't read its
-  conditions at all, whatever their shape and wherever it is: none is built,
-  checked or kept (`check_input_conditions`), so in user code clang's
-  diagnostics of them are missing, an undeclared name's error and a
-  condition's warning or error at a use or a call alike
-  ([#2147](https://github.com/buster14a/buster/issues/2147)).
+  object-size wrappers, `CheckInputAttributes.object_sizes`) in a system
+  header doesn't read its conditions at all, whatever their shape: none is
+  built, checked or kept (`check_input_conditions`), as glibc's fortify
+  wrappers need. A user's reads them as any other function's (#2147): an
+  undeclared name is clang's error, and the conditions decide at uses and
+  calls, overloads and addresses; a shape the steps don't take (a
+  `__builtin_object_size` of the parameter) is kept and decides nothing, as
+  a system header's is, where clang's warns at a call that overflows. Still
+  apart: clang disables an inherited `enable_if` that names a parameter at
+  every call of a redeclaration (its condition's parameters aren't the
+  redeclaration's), which this checker evaluates.
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
@@ -10327,13 +10356,27 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
 
-What isn't clang's yet: an overload call whose candidates fail by an
-argument's conversion has the checker's error, not clang's "no known
-conversion" notes ([#2384](https://github.com/buster14a/buster/issues/2384));
+An overload call's candidate that fails by an argument's conversion has
+clang's note "candidate function not viable: no known conversion from 'A' to
+'P' for Nth argument", at its first such argument, with clang's fix-it words
+("; take the address of the argument with &", "; dereference the argument
+with *"), these candidates first in display order (#2384,
+`CheckOverloadExplained.argument`). An overload set's address that no
+candidate matches, initialized or assigned, is clang's error with
+'<overloaded function type>' as its source, "incompatible function pointer
+types ..." where the enable_ifs leave one candidate, and a note at each
+candidate, the latest first: "made ineligible by enable_if", "has different
+number of parameters", "has type mismatch at Nth parameter", "has different
+return type", or none (`check_driver_overload_address`).
+
+What isn't clang's yet: an overload set's address returned or passed has
+the conversion error of its latest candidate's type, where clang's is
+"returning/passing '<overloaded function type>' ..."; an incompatible
+pointer argument makes a candidate not viable here, where clang's C
+overloading takes it with its warning (`h(ip)` of `h(long *)` and
+`h(struct T)` picks `h(long *)` there);
 a `volatile` parameter's read as a comma's left operand in a condition gets
-`-Wunused-value`, which clang doesn't give a volatile read; an overload set's address that no candidate matches has
-the checker's error, not clang's "<overloaded function type>" with its
-candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
+`-Wunused-value`, which clang doesn't give a volatile read; the condition shapes
 above; `-Wint-to-pointer-cast` and its relatives in a condition, which this
 checker doesn't give anywhere yet
 ([#1943](https://github.com/buster14a/buster/issues/1943)); the comma warnings of a static assertion's
