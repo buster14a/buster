@@ -859,9 +859,9 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // bytes, whose naked function has a label another template takes the address of, and whose template calls libc's puts
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
-// A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
-// review): a deep expression's, in its depth's slot, which later expressions share. Both paths refuse it by name, and
-// compile a long double held across setjmp, whose slot the call snapshots (#1843), and a function with no value held.
+// A value held across a call in a function that calls __builtin_setjmp, which a longjmp's resumption must find: a deep
+// expression's, in its depth's slot, which later expressions share, and which the call snapshots (#2465); a long double's,
+// whose slot the call snapshots (#1843); and a function with no value held. Both paths compile all three.
 static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
 {
     static const char* const sources[3] = {
@@ -886,11 +886,9 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
             char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
             char* text = NULL;
             const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-            const bool refused = status == 1 && text != NULL &&
-                                 strstr(text, "unsupported: a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp") != NULL;
             const bool compiled = status == 0;
-            check_test_expect(test, s == 0 ? refused : compiled,
-                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp is refused by name" : "the same, scalar")
+            check_test_expect(test, compiled,
+                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp compiles" : "the same, scalar")
                               : s == 1 ? (path == 0 ? "a long double held across __builtin_setjmp compiles" : "the same, scalar")
                                        : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
             free(text);
