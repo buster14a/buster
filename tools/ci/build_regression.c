@@ -2494,14 +2494,19 @@ static void check_develop(void)
     {
         fail("a function appended to c_checker_driver_test.c optimized %u parts, not 1", occurrences(build_log, "Optimizing and generating"));
     }
-    if (utimensat(AT_FDCWD, "src/buster/compiler/host_isa.h", 0, 0) != 0)
+    const char* const header = "src/buster/compiler/host_isa.h";
+    const struct stat header_status = status_of(header);
+    if (utimensat(AT_FDCWD, header, 0, 0) != 0)
     {
         fail("can't update host_isa.h's time");
     }
     BUILD("--config", "Develop");
-    if (occurrences(build_log, "Optimizing and generating") != 0 || occurrences(build_log, "Linking") != 0)
+    // Every unit that reads the header compiles again; the split ones' parts come out the same, so none is optimized
+    // or joined again (the units Develop compiles whole relink the executable).
+    if (occurrences(build_log, "Optimizing and generating") != 0 || occurrences(build_log, "Combining") != 0 ||
+        occurrences(build_log, "Partitioning main_unit_checker's IR before the optimizer") != 1)
     {
-        fail("a header's time alone optimized %u parts or linked again", occurrences(build_log, "Optimizing and generating"));
+        fail("a header's time alone optimized %u parts or joined a unit's again", occurrences(build_log, "Optimizing and generating"));
     }
     char incremental[PATH_MAX];
     snprintf(incremental, sizeof(incremental), "%s/develop-incremental", work);
@@ -2522,6 +2527,11 @@ static void check_develop(void)
 
     // The sources as they were, their times with them, so that Release's objects stay current; Develop's, built from
     // the edits, go.
+    const struct timespec header_times[2] = { header_status.st_atim, header_status.st_mtim };
+    if (utimensat(AT_FDCWD, header, header_times, 0) != 0)
+    {
+        fail("can't restore host_isa.h's time");
+    }
     for (uint32_t i = 0; i < BUSTER_REGRESSION_DEVELOP_EDITS; i += 1)
     {
         char* put_back[] = { "cp", "-p", develop_copies[i], (char*)develop_edited[i], 0 };
