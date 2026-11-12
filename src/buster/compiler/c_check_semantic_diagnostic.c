@@ -1770,13 +1770,44 @@ static bool check_semantic_overload_before(const TypeTable* types, const CheckOv
            left->failure != right->failure ? left->failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS : located;
 }
 
+// clang's fix-it words of a candidate's argument `node` of type `source` that converts to no `target` (#2384,
+// ConversionFixItGenerator in an overload's note): a pointer whose pointee is the target's type, "; dereference the
+// argument with *" ("; remove &" of an `&x`); an lvalue of no pointer type where the target is a pointer to an object,
+// "; take the address of the argument with &" ("; remove *" of a `*p`); else none.
+static const char* check_semantic_overload_hint(const TypeTable* types, const CheckStream* stream, uint32_t node, TypeId source, TypeId target)
+{
+    const CheckGraph* graph = stream->graph;
+    const TypeId from = type_strip_aligned(types, source);
+    const TypeId to = type_strip_aligned(types, target);
+    uint32_t written = node;
+    for (uint32_t steps = 0; written < graph->count && steps < graph->count && graph->ops[written] == CHECK_OP_VALUE && graph->operand0[written] < graph->count;
+         steps += 1)
+    {
+        written = graph->operand0[written];
+    }
+    const CheckOp op = written < graph->count ? graph->ops[written] : CHECK_OP_COUNT;
+    const bool pointer = type_kind(types, from) == BUSTER_TYPE_KIND_POINTER;
+    const char* result = "";
+    if (pointer && type_unqualified(type_strip_aligned(types, type_element(types, from))) == type_unqualified(to))
+    {
+        result = op == CHECK_OP_ADDRESS ? "; remove &" : "; dereference the argument with *";
+    }
+    else if (!pointer && type_kind(types, to) == BUSTER_TYPE_KIND_POINTER && node < stream->count && check_stream_category(stream, node) == CHECK_LVALUE &&
+             type_kind(types, type_strip_aligned(types, type_element(types, to))) != BUSTER_TYPE_KIND_FUNCTION)
+    {
+        result = op == CHECK_OP_DEREFERENCE ? "; remove *" : "; take the address of the argument with &";
+    }
+    return result;
+}
+
 // A call of an overload set that no candidate is viable for, or several are (#1447): clang's "no matching function for
 // call to 'f'" with each candidate's note, or "call to 'f' is ambiguous" with its best's ("candidate function"), at the
-// callee's name. The candidates' outcomes are the selection's again (check_overload_explain). NULL, and the checker's own
-// error, where a candidate failed by an argument's conversion (clang's "no known conversion" notes) or the notes are
-// more than the report holds.
+// callee's name. The candidates' outcomes are the selection's again (check_overload_explain), a candidate that failed by
+// an argument's conversion with clang's "no known conversion" note (#2384). NULL, and the checker's own error, where the
+// notes are more than the report holds.
 static const char* check_semantic_overload_call(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count, Arena* scratch)
+                                                CheckWarningSpelling* spell, uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count,
+                                                Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     uint32_t low = 0;
@@ -1826,7 +1857,7 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     {
         const uint8_t failure = explained[i].failure;
         renderable = ambiguous || failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS || failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS ||
-                     failure == CHECK_OVERLOAD_FAILURE_DISABLED;
+                     failure == CHECK_OVERLOAD_FAILURE_DISABLED || (failure == CHECK_OVERLOAD_FAILURE_CONVERSION && explained[i].argument < argument_count);
         // (An ambiguous call's notes are its best's alone, which are listed first.)
         explained[shown] = explained[i];
         shown += !ambiguous || explained[i].best ? 1u : 0u;
@@ -1854,6 +1885,29 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
             const String8 message = check_warning_strings_value(parser, pp, input->conditions[explained[i].condition].message, scratch);
             text = message.length != 0 ? check_warning_text(scratch, "candidate disabled: %.*s", (int)message.length, message.pointer) :
                                          "candidate disabled: <no message provided>";
+        }
+        else if (!ambiguous && explained[i].failure == CHECK_OVERLOAD_FAILURE_CONVERSION)
+        {
+            // clang's DiagnoseBadConversion (#2384): "no known conversion from 'A' to 'P' for Nth argument", the argument's type
+            // after its lvalue conversion, the parameter's, the argument's ordinal, with clang's fix-it words where the
+            // argument's address or its pointee would convert (check_semantic_overload_hint).
+            const uint32_t index = explained[i].argument;
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + index];
+            uint32_t parameter_count = 0;
+            const TypeId* parameters = type_parameters(types, type_strip_aligned(types, candidate->type), &parameter_count);
+            const TypeId parameter = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+            const TypeId value = check_semantic_value_type(types, check_stream_type(stream, argument), false);
+            const String8 from = value != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value,
+                                                                        check_semantic_operand_spelling(parser, input, stream, types, argument)) :
+                                              (String8){ "", 0 };
+            const String8 to = parameter != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, parameter, 0) : (String8){ "", 0 };
+            const uint32_t ordinal = index + 1;
+            const char* suffix = ordinal % 100 >= 11 && ordinal % 100 <= 13 ? "th" : ordinal % 10 == 1 ? "st" : ordinal % 10 == 2 ? "nd" : ordinal % 10 == 3 ? "rd" : "th";
+            const char* hint = parameter != 0 ? check_semantic_overload_hint(types, stream, argument, value, parameter) : "";
+            text = from.length != 0 && to.length != 0 ?
+                   check_warning_text(scratch, "candidate function not viable: no known conversion from %.*s to %.*s for %u%s argument%s", (int)from.length,
+                                      from.pointer, (int)to.length, to.pointer, ordinal, suffix, hint) : NULL;
+            renderable = text != NULL;
         }
         else if (!ambiguous)
         {
@@ -1884,6 +1938,140 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
         result = ambiguous ? check_warning_text(scratch, "call to '%.*s' is ambiguous", (int)called.length, called.pointer) :
                              check_warning_text(scratch, "no matching function for call to '%.*s'", (int)called.length, called.pointer);
     }
+    return result;
+}
+
+// An alignment builtin's argument as clang's getExprLoc places its error (#2221): a binary operator's at the operator,
+// any other's at its first token, a parenthesized one's `(` included.
+static uint32_t check_semantic_alignment_place(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument)
+{
+    uint32_t first = graph->argument_tokens[graph->argument_offsets[node] + argument];
+    const uint32_t value = graph->argument_nodes[graph->argument_offsets[node] + argument];
+    const uint32_t token = value < graph->count ? graph->tokens[value] : first;
+    while (first > 0 && first < parser->tokens.count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN &&
+           parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first - 1] > token)
+    {
+        first -= 1;
+    }
+    const bool binary = token < parser->tokens.count && check_semantic_binary(parser->tree.roles[token]);
+    const bool grouped = first < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.roles[first] == PARSE_ROLE_OPEN_GROUP &&
+                         parser->tree.parents[first] > token;
+    return binary && !grouped ? token : first;
+}
+
+// The decimal digits of 2^exponent, in `scratch` (or null): its limbs, divided by 10^19 until none is left, the
+// remainders the digits' groups.
+static const char* check_semantic_power_text(uint32_t exponent, Arena* scratch)
+{
+    const uint32_t limbs = exponent / 64 + 1;
+    const uint64_t digits = (uint64_t)exponent * 30103u / 100000u + 2u;
+    uint64_t* value = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, limbs);
+    uint64_t* groups = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, digits / 19 + 2);
+    char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, digits + 20);
+    if (value != NULL && groups != NULL && text != NULL)
+    {
+        for (uint32_t i = 0; i < limbs; i += 1)
+        {
+            value[i] = 0;
+        }
+        value[exponent / 64] = UINT64_C(1) << (exponent % 64);
+        uint32_t top = limbs;
+        uint32_t group_count = 0;
+        while (top != 0)
+        {
+            unsigned __int128 remainder = 0;
+            for (uint32_t i = top; i > 0; i -= 1)
+            {
+                const unsigned __int128 current = remainder << 64 | value[i - 1];
+                value[i - 1] = (uint64_t)(current / UINT64_C(10000000000000000000));
+                remainder = current % UINT64_C(10000000000000000000);
+            }
+            groups[group_count] = (uint64_t)remainder;
+            group_count += 1;
+            while (top != 0 && value[top - 1] == 0)
+            {
+                top -= 1;
+            }
+        }
+        int at = snprintf(text, digits + 20, "%" PRIu64, groups[group_count - 1]);
+        for (uint32_t g = group_count - 1; g > 0 && at > 0; g -= 1)
+        {
+            at += snprintf(text + at, digits + 20 - (uint64_t)at, "%019" PRIu64, groups[g - 1]);
+        }
+    }
+    return value != NULL && groups != NULL ? text : NULL;
+}
+
+// An alignment builtin's errors (#2221) as clang's SemaBuiltinAlignment words them: a source of no integer or pointer
+// type, "operand of type 'T' where arithmetic or pointer type is required" (a floating one's note "floating point types are
+// not allowed here", a function pointer's "function pointers are not allowed here"); an alignment of no integer type,
+// "used type 'T' where integer is required"; and its constant checks (check_builtin_misc_align's constraint): "requested
+// alignment must be 1 or greater", "requested alignment must be N or smaller" (N 2 to the source's width less 1, a
+// pointer's 64) and "requested alignment is not a power of 2", each at its argument. NULL for another report.
+static const char* check_semantic_alignment(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                            const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, PPOutputDiagnosticNote* note,
+                                            uint32_t* note_count, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = report->node;
+    const char* result = NULL;
+    CheckBuiltinMiscConstraint constraint = CHECK_BUILTIN_MISC_CONSTRAINT_NONE;
+    for (uint32_t i = 0; i < stream->misc_count; i += 1)
+    {
+        constraint = stream->misc[i].node == node ? stream->misc[i].constraint : constraint;
+    }
+    const uint32_t source = graph->argument_nodes[graph->argument_offsets[node]];
+    const uint32_t alignment = graph->argument_nodes[graph->argument_offsets[node] + 1];
+    const TypeId source_type = source < stream->count ? check_stream_type(stream, source) : 0;
+    const TypeId bare = type_unqualified(type_strip_aligned(types, source_type));
+    const uint8_t kind = source_type != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const uint32_t argument = report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED ? 0 : 1;
+    if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && source_type != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, source_type,
+                                                       check_semantic_operand_spelling(parser, input, stream, types, source));
+        result = type.length != 0 ? check_warning_text(scratch, "operand of type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer) : NULL;
+        const bool floating = kind == BUSTER_TYPE_KIND_FLOATING;
+        const bool function = kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_strip_aligned(types, type_element(types, bare))) == BUSTER_TYPE_KIND_FUNCTION;
+        if (result != NULL && (floating || function))
+        {
+            check_semantic_add_note(parser, note, note_count, check_semantic_alignment_place(parser, graph, node, 0),
+                                    floating ? "floating point types are not allowed here" : "function pointers are not allowed here");
+        }
+    }
+    else if (report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED && alignment < stream->count)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, alignment),
+                                                       check_semantic_operand_spelling(parser, input, stream, types, alignment));
+        result = type.length != 0 ? check_warning_text(scratch, "used type %.*s where integer is required", (int)type.length, type.pointer) : NULL;
+    }
+    else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && constraint == CHECK_BUILTIN_MISC_CONSTRAINT_MINIMUM)
+    {
+        result = "requested alignment must be 1 or greater";
+    }
+    else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && constraint == CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT)
+    {
+        result = "requested alignment is not a power of 2";
+    }
+    else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && constraint == CHECK_BUILTIN_MISC_CONSTRAINT_RANGE)
+    {
+        // The source's width: a pointer's 64, an integer's (a _BitInt's past 128 bits too).
+        uint32_t width = 64;
+        uint64_t bits = 64;
+        bool is_signed = false;
+        if (kind != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(kind) && check_action_integer_type(types, bare, &width, &is_signed))
+        {
+            bits = width;
+        }
+        else if (kind == BUSTER_TYPE_KIND_BIT_INT)
+        {
+            uint64_t rank = 0;
+            type_integer_properties(types, bare, &rank, &bits, &is_signed);
+        }
+        const char* maximum = check_semantic_power_text(bits != 0 ? (uint32_t)bits - 1 : 0, scratch);
+        result = maximum != NULL ? check_warning_text(scratch, "requested alignment must be %s or smaller", maximum) : NULL;
+    }
+    *location = result != NULL ? check_semantic_alignment_place(parser, graph, node, argument) : report->token;
     return result;
 }
 
@@ -1964,7 +2152,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     // A call of an overload set none or several of whose candidates are viable (#1447), whose text is clang's where its
     // notes can be.
     const char* overloaded = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CALL && graph->overload_count != 0 ?
-                             check_semantic_overload_call(parser, pp, input, stream, types, node, location, note, &note_count, scratch) : NULL;
+                             check_semantic_overload_call(parser, pp, input, stream, types, spell, node, location, note, &note_count, scratch) : NULL;
     if (overloaded != NULL)
     {
         result = overloaded;
@@ -1990,6 +2178,13 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     {
         const char* refused = check_semantic_clear_padding(parser, pp, input, stream, types, report, spell, location, note, scratch);
         result = refused != NULL ? refused : result;
+    }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->argument_counts[node] == 2 &&
+             (graph->members[node] == CBUILTIN_ALIGN_UP || graph->members[node] == CBUILTIN_ALIGN_DOWN || graph->members[node] == CBUILTIN_IS_ALIGNED) &&
+             (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED || report->diagnostic == CHECK_DIAG_INCOMPATIBLE))
+    {
+        const char* aligned = check_semantic_alignment(parser, pp, input, stream, types, report, spell, location, note, &note_count, scratch);
+        result = aligned != NULL ? aligned : result;
     }
     else if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
