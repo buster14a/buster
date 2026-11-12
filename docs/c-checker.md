@@ -45,7 +45,7 @@ and enum switches, with Clang's messages, places, notes and
 `-Wno-error=` forms promote them. The remaining gaps are the full
 `-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
 computed `case` expressions in `-Wswitch`, and several rarer
-`-Wparentheses`/`-Wreturn-stack-address` shapes and `-Wunused-but-set-variable`,
+`-Wparentheses`/`-Wreturn-stack-address` shapes,
 so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
 their boundaries and their differential tests are described in "Common
 warnings (#823)" below; the remaining work stays tracked in
@@ -6227,7 +6227,16 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+them. `-Wunused-but-set-variable` (#2409, in `-Wunused` and `-Wall`) is an
+unused variable's event of `payload.data` 1, "variable 'x' set but not used",
+given with them at its scope's end, in their order: a local's, a static
+local's too, whose every use only sets it, as clang's `RefsMinusAssignments`
+counts them (`check_input_discarded_set`): the bare left operand of an
+assignment, a compound assignment, an increment or a decrement that is an
+expression statement (not a statement expression's last), a `for` header's
+first or third clause, or a comma's left operand; a volatile variable's
+compound assignment and step read it. A parameter's is
+`-Wunused-but-set-parameter`'s (the `-Wuninitialized` pass's). `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
 const object without an initializer, at its name, with its type as declared.
 - **Automatic storage:**
   - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an

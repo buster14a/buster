@@ -226,6 +226,9 @@ enum
     // A struct or union without named members (#2409, clang's ext_empty_struct_union and ext_no_named_members_in_struct_union):
     // -Wgnu-empty-struct, off by default, -pedantic's.
     CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 151,
+    // A local variable only set (#2409, clang's DiagnoseUnusedButSetDecl): -Wunused-but-set-variable, -Wunused's, -Wall's.
+    // Its event is an UNUSED_VARIABLE one whose payload.data is 1.
+    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 152,
     CHECK_WARNING_ID_COUNT,
 };
 

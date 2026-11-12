@@ -200,6 +200,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
                                                 "declaration; missing list of enumerators?" },
     [CHECK_WARNING_ID_PSABI] = { "-Wpsabi", NULL, "AVX vector argument of type T without 'avx' enabled changes the ABI" },
     [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = { "-Wgnu-empty-struct", "-Wgnu", "empty struct is a GNU extension" },
+    [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = { "-Wunused-but-set-variable", "-Wunused", "variable set but not used" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

@@ -2574,7 +2574,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;
         case CHECK_WARNING_EVENT_UNUSED_VARIABLE:
-            result = check_warning_text(scratch, "unused variable '%.*s'", (int)name.length, name.pointer);
+            result = check_warning_text(scratch, payload->data != 0 ? "variable '%.*s' set but not used" : "unused variable '%.*s'", (int)name.length,
+                                        name.pointer);
             break;
         case CHECK_WARNING_EVENT_UNUSED_FUNCTION:
             result = check_warning_text(scratch, "unused function '%.*s'", (int)name.length, name.pointer);
