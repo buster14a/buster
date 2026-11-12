@@ -5365,7 +5365,7 @@ Left as they were:
   ("invalid or unsupported declaration"); so does a declaration's identifier
   list (`int b(voi);`, clang's "a parameter list without types is only
   allowed in a function definition"), which ends the reading before a later
-  parameter's search.
+  parameter's search (#2498).
 - A statement start's correction whose statement then fails to parse in a way
   no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
   & 1`) ends the checking of its body there, as other such parse errors do;
