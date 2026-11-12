@@ -362,6 +362,10 @@ targets as it does today.
   bit-fields).
 - **Per unit:** only the pointer-pair memo and the member lookup's own index,
   both of which exist.
+- **They need a cheap key.** A table is cheaper than the branches it replaces
+  only where its key is a few bytes the record already holds. Step 1 measured
+  C's and X's tables on whole values as records, and lost to the branches
+  ([below](#the-baked-tables-measured)).
 
 ### Silence
 
@@ -805,6 +809,9 @@ sweeps' IPC. The levers, in order:
 1. **The design's 28-byte records** in place of whole values, with the leaf's
    class and standing read once from its declaration, as step 2 reads them.
 2. **The context and template tables baked** in place of C's and X's branches.
+   Measured on today's records, they cost more than the branches
+   ([below](#the-baked-tables-measured)): they wait for the first lever's
+   records to carry what C's key reads.
 
 Coverage comes after: calls first ([below](#calls)).
 
@@ -883,8 +890,8 @@ placement's 3%:
   53.3), which was then left out.
 
 C's most sampled instruction is still its branch on whether a record is
-evaluated. The levers for the cost are the ones above, the records and the
-baked tables, not this code. `-c sqlite3.c` is unchanged: 123.978 ms against
+evaluated. The lever for the cost is the records above, not this code; the
+baked tables wait for them ([below](#the-baked-tables-measured)). `-c sqlite3.c` is unchanged: 123.978 ms against
 main's 123.923, user cycles +0.02%, 5,323 more instructions (the inventory's
 log's test, once a body).
 
@@ -1003,6 +1010,59 @@ on `sqlite3.c`, against the split's 171.0 and 659.9. The nodes calls add cost
 
 `-c sqlite3.c` is unchanged: 124.1 ms against 124.0 ms, with the same
 instructions.
+
+### The baked tables, measured
+
+The second lever was built and measured on today's records, a whole 96-byte
+`CheckValue` each. With those records, **neither table beats the branches it
+replaces.** Every variant was exact: its entries were the lowering's, and
+`--verify` compared it with the branches, its twin, on every expression. None
+merged. The variants are kept as diffs in
+[the record](https://github.com/buster14a/buster-performance/tree/f942b79e49e55c1d92beabcbc91623443c20032f/docs/measurements/node-machine-baked-tables-2524-2026-11-12),
+each against its base: main `0af27a30`, and the split's head `27ee009a`.
+
+- **C by tables.** Each record's facts go into a word, and a per-operator
+  mask's `pext` indexes a baked table of rows: the template, the operands'
+  contexts and targets, and X's row.
+- **X by rows.** Each record's row is written by three stores of eight entries:
+  its kinds; its classes, a byte shuffle; its values, a permute. Its conversion's
+  row is baked by running the twin's `node_machine_conversion` at every key.
+
+In instructions a taken node on `sqlite3.c`, the least of 11 passes, on the
+9700X:
+
+| | C | X |
+| --- | ---: | ---: |
+| the branches (main; the split) | 189.0 | 112.8; 102.8 |
+| C and X by tables, C choosing X's rows (4 variants) | 436.4 to 647.7 | 54.8 to 65.4 |
+| X by rows choosing its own, C's branches unchanged (3 variants) | 189.1 | 124.2 to 138.4 |
+
+- **C's cost is its key, not its lookup.** The table reads about 25 bits a
+  record: from its value, its type and its operands' types. Each bit is a load
+  or two and a compare, and together they cost more than the branches they
+  replace, which mispredict 0.19 times a node. Three remedies narrowed the gap
+  without closing it:
+  - a pass that reads each record's context-free facts before the walk;
+  - the columns copied into locals against `-fno-strict-aliasing`'s reloads;
+  - fewer bits a record.
+- **X's rows win only where C has chosen them.** Choosing a record's row reads
+  what the branches read, and costs about what they cost. The three stores save
+  little at 1.28 entries a node.
+
+**What would make them pay:** a key of a few byte loads. C's rows read about 11
+context-free facts of a record, beside its class and its type's facts:
+- its category;
+- its constant's kind, where it is pure;
+- its object's kind (none, a local, a global, past the unit's, a compound
+  literal that isn't static);
+- an overload set, a nonzero offset, the type exactly `void`.
+
+The 28-byte records ([#2580](https://github.com/buster14a/buster/pull/2580))
+carry the category, the constant's kind and a nonzero offset in their standing
+byte. The rest would take a second byte, written where T writes a value. With
+it, C's row is one lookup on (code, context, standing, class), and X's row is
+C's choice at no extra cost. The record is the baseline that version has to
+beat.
 
 ## Expected gains
 
