@@ -1982,48 +1982,6 @@ static void check_asm_unit_number(Arena* output, int64_t value, bool* valid)
     check_asm_unit_bytes(output, digits, (uint64_t)length, valid);
 }
 
-// Whether template `body`, assembled alone (asm_assemble, a template that takes directives), uses statement `statement`'s
-// asm goto labels (`labels` of them, by the names check_asm_substitute printed, their `.L` made `__`) only as a jmp's or a jcc's target: each
-// fixup to one is in the template's code (AsmResult.entry_atom), a rel32 field of a jmp (E9) or a jcc (0F 80 to 8F)
-// without an addend, as the record path takes them (check_program_asm_plan_one's gotos). A label used otherwise (data, a
-// call's target, an addend, a rip-relative address) is refused by name, since the helper's exit isn't the C label.
-static bool check_asm_unit_gotos(const AsmResult* body, uint32_t statement, uint32_t labels)
-{
-    const Link* link = &body->link;
-    bool jumps = true;
-    for (AtomId a = 1; a < link->atoms.count; a += 1)
-    {
-        const uint8_t* bytes = link->atoms.bytes[a];
-        for (uint32_t f = 0; f < link->atoms.fixup_count[a]; f += 1)
-        {
-            const FixupId fixup = link->atoms.fixup_begin[a] + f;
-            const SymbolId target = link->fixups.target[fixup];
-            const NameId name_id = target < link->symbols.count ? link->symbols.name[target] : 0;
-            // The name as the substitution printed it (`.L` for the `__` the caller gave it).
-            char local[64];
-            const uint32_t length = name_id != 0 && name_id < link->names.count && link->names.length[name_id] < sizeof(local) ? link->names.length[name_id] : 0;
-            if (length >= 2)
-            {
-                memcpy(local, link->names.bytes[name_id], length);
-            }
-            const bool renamed = length >= 2 && local[0] == '_' && local[1] == '_';
-            local[0] = '.';
-            local[1] = 'L';
-            if (renamed && check_asm_goto_label((String8){ .pointer = local, .length = length }, statement, labels) != BUSTER_CHECK_NONE)
-            {
-                const uint32_t offset = link->fixups.offset[fixup];
-                const uint8_t kind = link->fixups.kind[fixup];
-                const bool field = a == body->entry_atom && bytes != 0 && (kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_CALL) && link->fixups.addend[fixup] == -4 &&
-                                   offset >= 2 && (uint64_t)offset + 4 <= link->atoms.size[a];
-                const bool jmp = field && bytes[offset - 1] == 0xe9;
-                const bool jcc = field && bytes[offset - 2] == 0x0f && (bytes[offset - 1] & 0xf0) == 0x80;
-                jumps &= jmp || jcc;
-            }
-        }
-    }
-    return jumps;
-}
-
 // Records `records[0, count)` as the bytes they encode, a `.byte` line of them each (check_asm_unit_helper).
 static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool scalar, bool* valid)
 {
@@ -3154,7 +3112,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 memcpy(body_source, text.pointer, text.length);
             }
             // An asm goto's labels, which no source defines, as global names of the same length (`__buster_goto_S_L`), so
-            // that the assembler keeps a fixup of each use for check_asm_unit_gotos.
+            // that the template assembles alone; the whole helper defines them at its exits (check_asm_unit_helper).
             const uint64_t prefix = sizeof(BUSTER_CHECK_ASM_GOTO_PREFIX) - 1;
             for (uint64_t at = 0; statement->is_goto && body_source != 0 && at + prefix <= text.length; at += 1)
             {
@@ -3176,11 +3134,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 stack_or_flags |= places[k].kind == BUSTER_CHECK_ASM_X87 || places[k].kind == BUSTER_CHECK_ASM_FLAG;
             }
             const bool entry_code = body.error == NULL && (body.entry_code || stack_or_flags);
-            if (body.error == NULL && statement->is_goto && !check_asm_unit_gotos(&body, s, statement->label_count))
-            {
-                reason = "asm goto labels other than a jmp's or a jcc's target";
-            }
-            else if (body.error != NULL)
+            if (body.error != NULL)
             {
                 // A function's template's CFI (#1848): clang splices it into the function's own frame description at the
                 // template's place, which a helper of its own, with its own unwind entry, can't be.
@@ -3252,6 +3206,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     CheckAsmGoto* gotos = valid && reason == NULL && statement->is_goto && code.reference_count != 0 ?
                           BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmGoto, code.reference_count) : 0;
     uint32_t goto_count = 0;
+    bool goto_data = false;
     valid = valid && (reason != NULL || !statement->is_goto || code.reference_count == 0 || gotos != 0);
     for (uint32_t r = 0; valid && reason == NULL && statement->is_goto && r < code.reference_count; r += 1)
     {
@@ -3270,8 +3225,27 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             }
             else
             {
-                reason = "asm goto labels other than a jmp's or a jcc's target";
+                goto_data = true;
             }
+        }
+    }
+    // A label used otherwise (#1845's item 1: data, `.quad %l[x]` in the Linux kernel's __jump_table, a call's target, a
+    // rip-relative address, an addend): the template is assembled whole in the record helper (check_asm_unit_helper), whose
+    // exits are labelled with the names the substitution printed, so that each use is the address of its label's exit, as
+    // clang's is its indirect target's block, which stores the outputs and goes to the label.
+    if (valid && reason == NULL && goto_data)
+    {
+        arena_pop_to(output, code_mark);
+        code = (AsmCode){ 0 };
+        goto_count = 0;
+        unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, s, statement->label_count, exit, text, index, scalar,
+                                     output, scratch);
+        unit_assembled = unit.error == NULL;
+        reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
+        valid = unit.error == NULL || reason != NULL;
+        for (uint32_t a = 1; unit_assembled && reason == NULL && a < unit.link.atoms.count; a += 1)
+        {
+            reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
         }
     }
     // A template assembled whole takes the record helper's loads and stores (check_asm_unit_helper): the x87's places, a
