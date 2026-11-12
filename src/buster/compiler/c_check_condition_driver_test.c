@@ -901,6 +901,25 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .notes = 16,
     },
     {
+        // Returned or passed (#2480, check_driver_overload_operand): '<overloaded function type>' as the source, with a
+        // parameter's note where the callee's declaration names it, and no candidate notes; and an incompatible pointer
+        // argument a viable conversion, whose error names the selected candidate's parameter.
+        .name = "an overload set's address returned or passed, and an incompatible pointer argument",
+        .source = "#define OV __attribute__((overloadable))\n"
+                  "int f(double a) OV;\n"
+                  "int f(char a) OV;\n"
+                  "void take(int (*)(int));\n"
+                  "void take2(int (*q)(int), int);\n"
+                  "int (*ret(void))(int) { return f; }\n"
+                  "void g(void) { take(f); take2(&f, 1); }\n"
+                  "struct T { int y; };\n"
+                  "int h(long *a) OV;\n"
+                  "int h(struct T t) OV;\n"
+                  "void k(int *ip) { h(ip); }\n",
+        .errors = 4,
+        .notes = 3,
+    },
+    {
         .name = "an overload set's address with one candidate the enable_ifs leave",
         .source = "long fc(char*);\n"
                   "int (*p)(int) = fc;\n"
