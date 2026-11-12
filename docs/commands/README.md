@@ -92,6 +92,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-tier1-frame, test-tier1-frame-execution, measure-frames` | `tier1_frame.c`, `frame_measure.c` | [tier1-frame](tier1-frame.md) |
 | `test-tier1-schedule, benchmark-tier1-schedule, --tier1-schedule` | `tier1_schedule.c`, `c_check_tier1_schedule.c`, `tier1_schedule_ir.c` | [tier1-schedule](tier1-schedule.md) |
 | `test-check-units, benchmark-check-units` | `c_checker_units.c` | [translation-units](translation-units.md) |
+| `measure-attested` | `c_check_attested.c` | [translation-units](translation-units.md#attested-declarations-census-2531) |
 | `test-types, benchmark-types` | `c_types.c` | [types](types.md) |
 | `test-unwind, benchmark-unwind` | `unwind_tier0.c` | [unwind](unwind.md) |
 | `disassemble, test-x86-disassembler` | `x86_64_disassembler.c` | [x86-disassembler](x86-disassembler.md) |
@@ -164,6 +165,7 @@ The original section titles are retained in their owning guides.
 - [Deferred function bodies](deferred.md#deferred-function-bodies).
 - [Function lanes](function-lanes.md#function-lanes).
 - [Translation units](translation-units.md#translation-units).
+- [Attested declarations' census (#2531)](translation-units.md#attested-declarations-census-2531).
 - [Selective lowering](lowering.md#selective-lowering).
 - [Node templates (#1048)](lowering.md#node-templates-1048).
 - [Node machine census (#2524)](lowering.md#node-machine-census-2524).

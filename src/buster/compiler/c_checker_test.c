@@ -6442,6 +6442,7 @@ static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_lowering_inventory(CheckTest* test);
 static void check_test_node_census(CheckTest* test);
+static void check_test_attested(CheckTest* test);
 static void check_test_lowering_templates(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
@@ -6476,6 +6477,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_library = false;
     bool embed_initializers = false;
     bool requests = false;
+    bool attested = false;
     bool sizeof_only = false;
     bool transitions_only = false;
     bool semantic_diagnostics = false;
@@ -6550,6 +6552,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             requests = true;
         }
+        else if (strcmp(argv[i], "--attested") == 0)
+        {
+            attested = true;
+        }
         else if (strcmp(argv[i], "--semantic-diagnostics") == 0)
         {
             semantic_diagnostics = true;
@@ -6583,9 +6589,10 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(direct_initializers || program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || semantic_diagnostics || program_selection));
+                                                           program_library || embed_initializers || requests || attested || sizeof_only || transitions_only || semantic_diagnostics ||
+                                                           program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--attested|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -6631,6 +6638,11 @@ static int run_checker_tests(int argc, char** argv)
             check_test_lowering_source_benchmark(&test);
             check_test_backend_source_benchmark(&test);
             check_test_check_lanes_benchmark(&test);
+        }
+        else if (initialized && attested)
+        {
+            // #2531's census (measure-attested), alone.
+            check_test_attested(&test);
         }
         else if (initialized && program_selection)
         {
@@ -7140,6 +7152,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_node_census(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_attested(&test);
             }
             if (check_test_takes())
             {
