@@ -8241,6 +8241,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_redefinition_driver_test.c"
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
+#include "c_check_unused_label_driver_test.c"
 #include "c_check_implicit_value_driver_test.c"
 #include "c_check_chained_comparison_driver_test.c"
 #include "c_check_builtin_pointer_sign_driver_test.c"
@@ -9204,6 +9205,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_conditions(&test, clang, executable, directory);
+            check_test_driver_unused_labels(&test, clang, executable, directory);
             check_test_driver_implicit_values(&test, clang, executable, directory);
             check_test_driver_chained_comparisons(&test, clang, executable, directory);
             check_test_driver_builtin_pointer_sign(&test, clang, executable, directory);

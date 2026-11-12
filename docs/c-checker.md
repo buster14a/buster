@@ -5188,8 +5188,9 @@ jump `-Wfor-loop-analysis` looks for. A part may hold a label, another
 `goto`, a label's address or a local label's declaration (#1447): a left-out
 label that a kept `goto` names leaves the reading an error, so its view isn't
 taken, and a left-out `goto` outside loops changes no warning a flushed body
-gives (buster gives no `-Wunused-label` yet: once it does, a kept label whose
-only `goto` is left out would warn). The
+gives (a kept label whose only `goto` is left out gives no `-Wunused-label`:
+`check_driver_rejected_read` drops the view's event where the first reading's
+`label_targets` has a `goto` or `&&` naming it). The
 replacements are chosen to give no warning of their own (a constant condition
 would: clang's "no case matching constant switch condition"). A part left out
 gives no warning of its own reading, where clang gives those of what it builds
@@ -6313,7 +6314,19 @@ so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
 A block's own `static`, `register` and automatic objects can be unused. A
 variable with an applied `cleanup` attribute is used, as clang treats it,
 since its cleanup takes its address (#1881); one ignored at file scope can still
-be unused. The
+be unused. `-Wunused-label` (#2264, under `-Wunused`, so `-Wmost` and `-Wall`)
+is a label no goto, `&&` address or asm goto names (`check_input_unused_labels`,
+from the controls' label table; an asm goto's label resolves in its scope, a
+local label's included, as a goto's name does), at its name, or a local label's at its
+`__label__` list's name; `unused` or `maybe_unused` on it marks it used.
+Clang's labels are the function body's scope's declarations, which it warns of
+sorted by place as it pops that scope: a body's unused labels and unused
+variables share its `}` and are ordered by token (`CheckWarningEvent.suborder`),
+after an inner block's and before the body's runtime warnings, and a function
+with an error warns of neither. A `goto` that jumps into a statement expression
+is an error of clang's jump checker, not of the scope, so its function's unused
+variables still warn, and its label is still used though the recovery's view
+leaves the `goto` out. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 
