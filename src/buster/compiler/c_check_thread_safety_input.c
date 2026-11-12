@@ -117,6 +117,24 @@ static uint32_t check_input_generic_undeclared(CheckInputReader* reader, const C
     return undeclared;
 }
 
+// An attribute's argument's name that names nothing (#2251): clang's "use of undeclared identifier" at it, after which its
+// parser drops the attribute and the declaration goes on, with its other attributes. The report is recovered and the
+// attribute ignored; BUSTER_CHECK_NONE then, or the name where the recovery had no room (the report stops the
+// declaration, as it used to).
+static uint32_t check_input_names_drop(CheckInputReader* reader, CheckInputAttribute* attribute, uint32_t undeclared)
+{
+    uint32_t result = undeclared;
+    if (undeclared != BUSTER_CHECK_NONE)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+        const bool recovered = reader->output->report_count > before && check_input_recover_reports(reader, before);
+        attribute->ignored |= recovered;
+        result = recovered ? BUSTER_CHECK_NONE : undeclared;
+    }
+    return result;
+}
+
 // A tag's attributes' names (#1447: a generic attribute's later argument, objc_bridge's), as check_input_thread_names
 // checks them but without reading a thread-safety attribute's expressions, which a tag's attributes don't need (its
 // capability's is a string) and whose constants may name the tag's type: the first that names nothing is clang's
@@ -135,10 +153,7 @@ static bool check_input_tag_names(CheckInputReader* reader, const CheckInputAttr
             undeclared = identifier && !check_input_thread_name(reader, BUSTER_CHECK_NONE, NULL, 0, NULL, 0, token) ? token : BUSTER_CHECK_NONE;
         }
         undeclared = undeclared == BUSTER_CHECK_NONE ? check_input_generic_undeclared(reader, attribute, BUSTER_CHECK_NONE, NULL, 0, NULL, 0) : undeclared;
-    }
-    if (undeclared != BUSTER_CHECK_NONE)
-    {
-        check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+        undeclared = check_input_names_drop(reader, (CheckInputAttribute*)attribute, undeclared);
     }
     return undeclared == BUSTER_CHECK_NONE;
 }
@@ -183,10 +198,7 @@ static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttribu
         }
         undeclared = undeclared == BUSTER_CHECK_NONE ? check_input_generic_undeclared(reader, attribute, parameters, frames, depth, members, member_count) :
                                                        undeclared;
-    }
-    if (undeclared != BUSTER_CHECK_NONE)
-    {
-        check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+        undeclared = check_input_names_drop(reader, attribute, undeclared);
     }
     return valid && undeclared == BUSTER_CHECK_NONE;
 }
