@@ -21,6 +21,16 @@ static const CheckDriverDefaultWarningFixture check_driver_asm_label_auto_fixtur
         .warnings = 8,
     },
     {
+        // A for statement's declarations (#2419): each declarator's label, after a pointer's or a parenthesized declarator,
+        // with attributes after it; a register variable's is no automatic one's.
+        .name = "asm labels in for statements' declarations",
+        .source = "void b(void) { for (int i asm(\"i1\") = 0; i < 1; i++) {} }\n"
+                  "void c(void) { for (int i __asm__(\"i2\") __attribute__((unused)) = 0, j asm(\"j\") = 1; i < j; i++) {} }\n"
+                  "void d(void) { for (register int r asm(\"ebx\") = 0; r < 1; r++) {} }\n"
+                  "void e(void) { for (int *p asm(\"p1\") = 0, (*q) asm(\"q1\"), (k) asm(\"k1\"); ;) { (void)p; (void)q; (void)k; break; } }\n",
+        .warnings = 6,
+    },
+    {
         // C23's `auto` of an inferred type and constexpr objects.
         .name = "asm labels on C23 automatic variables",
         .source = "void a(void) { auto x __asm__(\"x1\") = 1; (void)x; constexpr int y __asm__(\"y1\") = 2; (void)y; }\n",
