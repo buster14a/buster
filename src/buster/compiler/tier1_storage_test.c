@@ -819,7 +819,7 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                                     (unsigned)error, failed, (unsigned)diagnostic.cause, diagnostic.error);
                             if (error == TIER1_EMIT_CERTIFICATE)
                             {
-                                Tier1EmitResult raw;
+                                Tier1EmitResult raw = { 0 };
                                 if (tier1_emit_cfg_function(&plan, &options, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
                                 {
                                     Tier1CertReport report = { 0 };

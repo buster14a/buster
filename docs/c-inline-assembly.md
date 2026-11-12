@@ -897,8 +897,16 @@ linked by clang and the direct path's executables against clang's build.
 
 The matcher's index admits every form the assembler's syntax takes, whatever
 the unit's target. GNU as and clang's integrated assembler take any instruction
-in a template. The lowering makes the index on its scratch arena, once per unit
-with asm statements, and frees it after the planning.
+in a template. The index depends on the form table alone, so it is made once
+(#2532): baked into the executable with the backend's tables
+(`check_asm_index_initialize`, [the build guide](commands/build.md)), and
+where it isn't baked, made before a command's units start on their lanes, or
+by a unit's planning at its first asm statement. Each unit with asm statements
+made it again before, 0.7 million user cycles a unit: on the 9700X, musl's
+1,336 units as one command on one lane (537 of them with asm statements) took
+1,064.2 ms of CPU and 5,894 M cycles at `0af27a30`, and take 991.4 ms and
+5,488 M baked, 1.07 times faster, with every object the same bytes
+([record](https://github.com/buster14a/buster-performance/tree/478ba92011fa7847f48738998b363baabcabe141/docs/measurements/asm-index-2532-2026-11-12)).
 
 The matcher admits every form the form table has whose operands the
 assembler's grammar reads (#1134: [the assembler's guide](assembler.md)'s "The

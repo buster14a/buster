@@ -623,6 +623,9 @@ struct CheckLowerOwnerPop
     // The type the conversion task pushed with it converts its value to (the task just below it, from the same owner),
     // which then owns that conversion's entries; 0 for none.
     TypeId target;
+    // The next label the body numbered then (CheckLowerWriter.label_count), as an index of CheckLowerOwners.labels: the
+    // first of the labels the node and the tasks it pushed number, in the order they pop.
+    uint32_t label;
     uint8_t flags;
 };
 
@@ -632,7 +635,15 @@ struct CheckLowerOwners
     CheckLowerOwnerPop* pops;
     uint64_t count;
     uint64_t capacity;
-    // Whether the tasks' loop runs (check_lower_drain_sources), and whether a pop found the log full.
+    // Optional (null for none): each body's labels' entries (CheckLowerWriter.labels, by label), the bodies' one after
+    // another, each appended once the body is lowered (check_lower_owner_labels), since the branches' values are their
+    // targets' entries from then on (check_lower_resolve_labels) and no longer their labels. #2524's shadow reads its
+    // branches' labels there, relative to an expression's pop (CheckLowerOwnerPop.label).
+    uint32_t* labels;
+    uint64_t label_count;
+    uint64_t label_capacity;
+    // Whether the tasks' loop runs (check_lower_drain_sources), and whether a pop found the log full (or the body's labels
+    // the labels' column).
     bool draining;
     bool overflow;
 };
@@ -14609,6 +14620,7 @@ static __attribute__((noinline)) uint32_t check_lower_task_owner(CheckLowerWrite
                 .node = task.node,
                 .pusher = pushed,
                 .entry = writer->count,
+                .label = (uint32_t)owners->label_count + writer->label_count,
                 .flags = (uint8_t)((uint32_t)task.address | (uint32_t)task.initialized << 1 | (uint32_t)task.discard << 2 | (uint32_t)task.volatile_copy << 3 |
                                    (uint32_t)task.bit_int << 4 | (writer->track ? BUSTER_CHECK_LOWER_OWNER_TRACKED : 0u)),
             };
@@ -14646,6 +14658,23 @@ static __attribute__((noinline)) void check_lower_owner_conversion(CheckLowerWri
                 owners->pops[owners->count - 1].target = conversion.type;
             }
         }
+    }
+}
+
+// The inventory's log (CheckLowerOwners.labels): the body's labels' entries, appended after the pops that numbered them,
+// so that a pop's `label` finds the entries of the labels its tasks numbered. Out of line, as only the inventory's
+// lowering has a log.
+static __attribute__((noinline)) void check_lower_owner_labels(CheckLowerWriter* writer)
+{
+    CheckLowerOwners* owners = writer->owners;
+    if (owners->labels != NULL && owners->label_capacity - owners->label_count >= writer->label_count)
+    {
+        memcpy(owners->labels + owners->label_count, writer->labels, (uint64_t)writer->label_count * sizeof(uint32_t));
+        owners->label_count += writer->label_count;
+    }
+    else if (owners->labels != NULL)
+    {
+        owners->overflow = true;
     }
 }
 
@@ -18340,6 +18369,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 check_lower_fail(writer, CHECK_PROGRAM_INVALID);
             }
+        }
+        if (writer->owners != NULL)
+        {
+            check_lower_owner_labels(writer);
         }
         // The labels whose addresses the program takes, from their control entries to their entries, as the targets.
         for (uint32_t k = 0; k < writer->label_entry_count && status->status == CHECK_PROGRAM_OK; k += 1)

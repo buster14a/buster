@@ -22,13 +22,18 @@
 //   the records instead of the stream's columns), and each evaluated operand's context and the type its consumer
 //   converts it to. A node the templates don't take refuses the expression.
 // - X, up again: each evaluated node's row, its own entries and then its conversion's, in the evaluation order the tasks
-//   write them in (postorder: no template writes before or between its operands). A local's entries hold its object,
-//   which the function's local numbers in step 2's splice; a global's its symbol.
+//   write them in: postorder, and a logical operator's and a conditional's entries that come before or between their
+//   operands' as a segment after the operand's row (NodeMachine.hooks), the rows' shape the design's risks name. A
+//   local's entries hold its object, which the function's local numbers in step 2's splice; a global's its symbol; a
+//   branch's its label, numbered from the expression's first (NodeMachine.label_bases), whose place in the tape is
+//   NodeMachine.label_entries: the splice numbers them from the function's count and check_lower_resolve_labels gives
+//   them their targets.
 //
-// The set is the census's (c_check_node_census.c) and, within it, the templates': a value read, an address, a folded
-// constant, `&x`, `*p`, a member, a cast, a conversion, the unary and binary scalar operators, a pointer plus an
-// integer, a subscript, the comma and an assignment to a local, a global or an address, each of a scalar class I8 to
-// F64. Calls, `&&`, `||`, `?:`, the increments and the compound assignments are not yet the machine's: it refuses them.
+// The set is the census's (c_check_node_census.c) and, within it, the templates' and check_lower_logical's: a value read,
+// an address, a folded constant, `&x`, `*p`, a member, a cast, a conversion, the unary and binary scalar operators, a
+// pointer plus an integer, a subscript, the comma, `&&`, `||`, `?:` and an assignment to a local, a global or an address,
+// each of a scalar class I8 to F64 (a conditional's of void too). Calls, the increments and the compound assignments are
+// not yet the machine's: it refuses them.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
 
@@ -36,15 +41,38 @@
 #define BUSTER_NODE_MACHINE_MOST 4096u
 // The most entries one record's row writes: its own and its conversion's (BUSTER_CHECK_LOWER_TEMPLATE_MOST).
 #define BUSTER_NODE_MACHINE_ROW_MOST 8u
+// The most entries a segment after a record's row writes (node_machine_hook): a test of its value and a branch.
+#define BUSTER_NODE_MACHINE_HOOK_MOST 4u
 // The builtin types a row's operand may be: a code below this.
 #define BUSTER_NODE_MACHINE_KINDS 24u
 // A record's state in C: reached and evaluated by its consumer's template.
 #define BUSTER_NODE_MACHINE_EVALUATED 0x01u
+// Its consumer's entries follow its row (NodeMachine.hooks): a logical operator's or a conditional's test of its
+// condition, and the branch past its second operand or first arm.
+#define BUSTER_NODE_MACHINE_AFTER_CONDITION 0x02u
+// A conditional's jump from the end of its first arm to its end, and its second arm's label.
+#define BUSTER_NODE_MACHINE_AFTER_ARM 0x04u
 
 // A type's word's flags (NodeMachine.type_words): no aligned typedef's wrapper (type_strip_aligned is the type itself), and
 // type_is_valid.
 #define BUSTER_NODE_MACHINE_WORD_PLAIN 0x01000000u
 #define BUSTER_NODE_MACHINE_WORD_VALID 0x02000000u
+
+// The machine's templates past the node templates' (CheckLowerTemplate), check_lower_logical's: a logical operator's and
+// a conditional's. A conditional whose condition is known takes CHECK_LOWER_TEMPLATE_PASS: its arm's entries alone,
+// after its condition's where that has effects.
+typedef enum NodeMachineTemplate
+{
+    // Its condition isn't known: two labels, its alternate and its end; its condition's test and branch to the alternate
+    // after the condition's row (BUSTER_NODE_MACHINE_AFTER_CONDITION); a conditional's jump to its end after its first
+    // arm's, with the alternate there (_AFTER_ARM); and its own row: a logical operator's second operand's test, its jump
+    // to its end, the alternate and its value there, a conditional's nothing; then its end.
+    NODE_MACHINE_TEMPLATE_BRANCH = CHECK_LOWER_TEMPLATE_STORE + 1,
+    // A logical operator whose known condition decides it: its value, 0 for `&&` and 1 for `||`.
+    NODE_MACHINE_TEMPLATE_DECIDED,
+    // A logical operator whose known condition leaves its value to its second operand: that operand's test.
+    NODE_MACHINE_TEMPLATE_SECOND,
+} NodeMachineTemplate;
 
 // Why the machine refuses an expression: the first sweep's reason that stopped it.
 typedef enum NodeMachineRefusal
@@ -52,8 +80,7 @@ typedef enum NodeMachineRefusal
     NODE_MACHINE_TAKEN,
     // Its nodes aren't one range of the graph with every operand inside it, or past BUSTER_NODE_MACHINE_MOST.
     NODE_MACHINE_REFUSED_SHAPE,
-    // An operator without a code of the machine's (a call, a logical operator, a conditional, an increment, a compound
-    // assignment, a builtin...).
+    // An operator without a code of the machine's (a call, an increment, a compound assignment, a builtin...).
     NODE_MACHINE_REFUSED_CODE,
     // A leaf it doesn't take: an overload set's, an invalid type's, a variable-length array's.
     NODE_MACHINE_REFUSED_LEAF,
@@ -377,6 +404,10 @@ struct NodeMachine
     // wrapper, and whether it is valid and has no such wrapper. One load answers what T, C and X ask of a type, where the
     // type table's columns take one each, each a miss of the first-level cache for a unit as large as sqlite3.c's.
     uint32_t* type_words;
+    // Every type's first source position at which check_context_source_complete takes it as complete with the graph's tag
+    // history (UINT32_MAX: none), by type index: one load where the function's walk reads four of the type table's
+    // columns and the history.
+    uint32_t* type_complete_at;
     uint32_t type_count;
     // --scalar: T types every node by the action, the rows' exact twin.
     bool scalar;
@@ -406,25 +437,82 @@ struct NodeMachine
     uint32_t* conversion_flags;
     uint64_t* member_offsets;
     // C's: each record's state, its context (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer
-    // converts it to, and its template (CheckLowerTemplate).
+    // converts it to, and its template (CheckLowerTemplate, or past it NodeMachineTemplate). Where its state has
+    // BUSTER_NODE_MACHINE_AFTER_CONDITION or _AFTER_ARM, `hooks` is its consumer's record, whose segment follows its row;
+    // where its template is NODE_MACHINE_TEMPLATE_BRANCH, `label_bases` is the first of its two labels, counted from the expression's first in the
+    // order the tasks number them (node_machine_number_labels), of the expression's `label_count`. `stack` is the
+    // numbering's: the labeled records C met, then their subtrees' first records.
     uint8_t* states;
     uint8_t* contexts;
     TypeId* targets;
     uint8_t* templates;
-    // X's tape: the expression's entries, a local's holding its object.
+    uint32_t* hooks;
+    uint32_t* label_bases;
+    uint32_t* stack;
+    uint32_t label_count;
+    // X's tape: the expression's entries, a local's holding its object and a branch's its label; and each label's entry,
+    // its place in the tape.
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* tape;
+    uint32_t* label_entries;
     uint32_t entry_count;
     // The record T, C or X stopped at, for a refusal's report.
     uint32_t stopped;
 };
 
+// The first source position at which check_context_source_complete takes `type` as complete, with `graph`'s tag history:
+// none (UINT32_MAX) for an incomplete type, every one (0) without a history or for a type whose base, past its arrays,
+// names no tag, and else its tag's completion's (none past the history).
+static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGraph* graph, TypeId type)
+{
+    uint32_t position = type_is_complete(types, type) ? 0 : UINT32_MAX;
+    if (position == 0 && graph->tag_completions != NULL)
+    {
+        TypeId base = type_strip_aligned(types, type);
+        while (type_kind_is_array(type_kind(types, base)))
+        {
+            base = type_strip_aligned(types, type_element(types, base));
+        }
+        const uint8_t kind = type_kind(types, base);
+        const uint32_t tag = types->types.index[type_index(base)];
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
+        {
+            position = tag < graph->tag_completion_count ? graph->tag_completions[tag] : UINT32_MAX;
+        }
+    }
+    return position;
+}
+
+// Whether `type` is complete at node `node`'s source position (check_action_source_complete's answer for an action at the
+// node), by the unit's table, and by the function for a type past it.
+static bool node_machine_complete(const NodeMachine* machine, TypeId type, uint32_t node)
+{
+    const CheckGraph* graph = machine->graph;
+    const uint32_t index = type_index(type);
+    const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
+    bool complete = false;
+    if (index < machine->type_count)
+    {
+        // UINT32_MAX is never, even at a node without a position; a rule refused for it takes the action instead.
+        const uint32_t at = machine->type_complete_at[index];
+        complete = at != UINT32_MAX && at <= position;
+    }
+    else
+    {
+        CheckAction context = { .node = node };
+        context.context = check_graph_context(graph, node, false);
+        complete = check_action_source_complete(machine->types, type, &context);
+    }
+    return complete;
+}
+
 // The machine's columns for `program`'s unit, from `arena`: whether there was room.
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
-    const uint32_t entries = BUSTER_NODE_MACHINE_MOST * BUSTER_NODE_MACHINE_ROW_MOST;
+    // Each record's row, and the segment one record's row may have after it.
+    const uint32_t entries = BUSTER_NODE_MACHINE_MOST * (BUSTER_NODE_MACHINE_ROW_MOST + BUSTER_NODE_MACHINE_HOOK_MOST);
     *machine = (NodeMachine){
         .program = program,
         .types = (TypeTable*)program->types,
@@ -434,6 +522,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
         .verify = verify,
     };
     machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
+    machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     machine->codes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
@@ -450,14 +539,19 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->contexts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
     machine->targets = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, most);
     machine->templates = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
+    machine->hooks = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+    machine->label_bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+    machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
     machine->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
     machine->classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
     machine->tape = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, entries);
-    const bool room = machine->type_words != NULL && classes != NULL && facts != NULL && machine->codes != NULL && machine->left != NULL && machine->right != NULL &&
+    machine->label_entries = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
+    const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->codes != NULL && machine->left != NULL && machine->right != NULL &&
                       machine->values != NULL && machine->words != NULL && machine->facts != NULL &&
                       machine->value_classes != NULL && machine->converted != NULL &&
                       machine->conversion_flags != NULL && machine->member_offsets != NULL && machine->states != NULL && machine->contexts != NULL &&
-                      machine->targets != NULL && machine->templates != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL;
+                      machine->targets != NULL && machine->templates != NULL && machine->hooks != NULL && machine->label_bases != NULL && machine->stack != NULL &&
+                      machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL;
     if (room)
     {
         check_lower_classify_types(program->types, machine->type_count, classes, facts);
@@ -469,6 +563,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
             const uint8_t kind = valid ? check_action_kind(program->types, type) : BUSTER_TYPE_KIND_NONE;
             machine->type_words[index] = (uint32_t)classes[index] | (uint32_t)facts[index] << 8 | (uint32_t)kind << 16 |
                                          (plain ? BUSTER_NODE_MACHINE_WORD_PLAIN : 0) | (valid ? BUSTER_NODE_MACHINE_WORD_VALID : 0);
+            machine->type_complete_at[index] = valid ? node_machine_complete_at(program->types, &program->input->graph, type) : UINT32_MAX;
         }
     }
     return room && node_machine_tables_initialize();
@@ -505,7 +600,8 @@ static bool node_machine_code(CheckOp op)
         case CHECK_OP_VALUE: case CHECK_OP_POSITIVE: case CHECK_OP_NEGATIVE: case CHECK_OP_NOT: case CHECK_OP_BIT_NOT: case CHECK_OP_ADD:
         case CHECK_OP_SUBTRACT: case CHECK_OP_MULTIPLY: case CHECK_OP_DIVIDE: case CHECK_OP_REMAINDER: case CHECK_OP_SHIFT_LEFT:
         case CHECK_OP_SHIFT_RIGHT: case CHECK_OP_LESS: case CHECK_OP_LESS_EQUAL: case CHECK_OP_GREATER: case CHECK_OP_GREATER_EQUAL:
-        case CHECK_OP_EQUAL: case CHECK_OP_NOT_EQUAL: case CHECK_OP_BIT_AND: case CHECK_OP_BIT_OR: case CHECK_OP_BIT_XOR: case CHECK_OP_CAST:
+        case CHECK_OP_EQUAL: case CHECK_OP_NOT_EQUAL: case CHECK_OP_BIT_AND: case CHECK_OP_BIT_OR: case CHECK_OP_BIT_XOR: case CHECK_OP_LOGICAL_AND:
+        case CHECK_OP_LOGICAL_OR: case CHECK_OP_CONDITIONAL: case CHECK_OP_CAST:
         case CHECK_OP_ADDRESS: case CHECK_OP_DEREFERENCE: case CHECK_OP_ASSIGN: case CHECK_OP_COMMA: case CHECK_OP_SUBSCRIPT: case CHECK_OP_SIZEOF:
         case CHECK_OP_ALIGNOF: case CHECK_OP_MEMBER: case CHECK_OP_ARROW: case CHECK_OP_INITIALIZE: case CHECK_OP_CONVERT: case CHECK_OP_CONDITION:
         case CHECK_OP_SELECT:
@@ -742,12 +838,7 @@ static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node,
     }
     const uint8_t kind = type_kind(types, record);
     taken = taken && space == 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && base.constant_kind == CHECK_CONSTANT_NONE;
-    if (taken)
-    {
-        CheckAction context = { .op = op, .node = node };
-        context.context = check_graph_context(graph, node, false);
-        taken = check_action_source_complete(types, record, &context);
-    }
+    taken = taken && node_machine_complete(machine, record, node);
     uint64_t offset = 0;
     uint32_t qualifiers = 0;
     const uint32_t member = taken ? type_lookup_member(types, record, graph->members[node], &offset, &qualifiers) : 0;
@@ -792,6 +883,46 @@ static bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uin
         node_machine_put_value(machine->values + r, BUSTER_TYPE_INT, CHECK_RVALUE, flags, known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE, integer, 0);
         const CheckConversion none = { 0 };
         node_machine_set(machine, r, op, &conversion, &none, 0);
+    }
+    return taken;
+}
+
+// T's logical operator, `&&` or `||` at record `r` of records `a` and `b`, by check_action_logic's steps for operands the
+// common conversions take, both scalars without a fault (the machine refuses a node of a floating-point environment
+// before, whose promotion the action would make): whether it typed the node. The action is its twin, as for the rules.
+static bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+{
+    TypeTable* types = machine->types;
+    CheckValue left;
+    CheckValue right;
+    CheckConversion conversions[2];
+    const bool taken = b < r && node_machine_operand_value(machine, a, &left, conversions) && node_machine_operand_value(machine, b, &right, conversions + 1) &&
+                       check_action_is_scalar(types, left.type) && check_action_is_scalar(types, right.type) && left.fault == CHECK_FAULT_NONE &&
+                       right.fault == CHECK_FAULT_NONE;
+    if (taken)
+    {
+        const bool conjunction = op == CHECK_OP_LOGICAL_AND;
+        bool left_truth = false;
+        bool right_truth = false;
+        const bool left_known = check_action_truth(types, &left, &left_truth);
+        const bool right_known = check_action_truth(types, &right, &right_truth);
+        // A condition that decides the value leaves the second operand unevaluated: its effects aren't the value's.
+        const bool skips_right = left_known && (conjunction ? !left_truth : left_truth);
+        CheckValue inherited = { 0 };
+        check_action_inherit(&inherited, &left);
+        if (!skips_right)
+        {
+            check_action_inherit(&inherited, &right);
+        }
+        const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
+        const bool right_ice = (right.flags & BUSTER_CHECK_ICE) != 0 || (skips_right && (right.flags & (BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM)) != 0);
+        const bool ice = (left.flags & BUSTER_CHECK_ICE) != 0 && right_ice;
+        const bool right_form = (right.flags & forms) != 0 || (skips_right && (right.flags & BUSTER_CHECK_ICE_UNEVALUATED) != 0);
+        const uint32_t flags = inherited.flags | (ice ? BUSTER_CHECK_ICE : (left.flags & forms) != 0 && right_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+        const bool constant = left_known && (skips_right || right_known);
+        const bool value = conjunction ? left_truth && right_truth : left_truth || right_truth;
+        node_machine_put_value(machine->values + r, BUSTER_TYPE_INT, CHECK_RVALUE, flags, constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE, constant && value, 0);
+        node_machine_set(machine, r, op, conversions, conversions + 1, 0);
     }
     return taken;
 }
@@ -930,9 +1061,7 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
     {
         const TypeId element = type_element(types, type_strip_aligned(types, pointer->type));
         const uint8_t kind = check_action_kind(types, element);
-        CheckAction context = { .op = op, .node = node };
-        context.context = check_graph_context(machine->graph, node, false);
-        taken = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && check_action_source_complete(types, element, &context);
+        taken = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && node_machine_complete(machine, element, node);
     }
     if (taken)
     {
@@ -969,6 +1098,10 @@ static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, C
     else if (op == CHECK_OP_CONDITION || op == CHECK_OP_NOT)
     {
         typed = node_machine_truth(machine, r, op, a);
+    }
+    else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        typed = node_machine_logic(machine, r, op, a, b);
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
     {
@@ -1063,54 +1196,62 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
     {
         const uint32_t node = node_machine_node(machine, r);
         const CheckOp op = graph->ops[node];
-        const uint32_t a = node_machine_operand(machine, r, 0);
-        const uint32_t b = node_machine_operand(machine, r, 1);
-        const uint32_t c = node_machine_operand(machine, r, 2);
+        const bool context = (graph->contexts != NULL && graph->contexts[node] != 0) || (graph->fp_environments != NULL && graph->fp_environments[node] != 0);
+        uint32_t word = 0;
         machine->codes[r] = (uint8_t)op;
-        machine->left[r] = a;
-        machine->right[r] = b;
-        if (!node_machine_code(op))
+        if (op == CHECK_OP_VALUE)
         {
-            refusal = NODE_MACHINE_REFUSED_CODE;
-        }
-        else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST || (op != CHECK_OP_VALUE && graph->argument_counts[node] != 0))
-        {
-            refusal = NODE_MACHINE_REFUSED_SHAPE;
-        }
-        else if ((graph->contexts != NULL && graph->contexts[node] != 0) || (graph->fp_environments != NULL && graph->fp_environments[node] != 0))
-        {
-            refusal = NODE_MACHINE_REFUSED_CONTEXT;
-        }
-        else if (op == CHECK_OP_VALUE)
-        {
+            // A leaf, two in five records: its record is the reader's, with no operand to find and its type's word read once.
             CheckValue* value = machine->values + r;
             node_machine_leaf(graph, node, value);
-            const uint32_t word = node_machine_word(machine, value->type);
+            word = node_machine_word(machine, value->type);
             const bool valid = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0 && (uint8_t)(word >> 16) != BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-            refusal = value->overload_head != 0 || !valid ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
+            refusal = context ? NODE_MACHINE_REFUSED_CONTEXT : value->overload_head != 0 || !valid ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
+            machine->left[r] = UINT32_MAX;
+            machine->right[r] = UINT32_MAX;
             machine->converted[2 * r] = value->type;
             machine->converted[2 * r + 1] = 0;
             machine->conversion_flags[2 * r] = 0;
             machine->conversion_flags[2 * r + 1] = 0;
             machine->member_offsets[r] = 0;
         }
-        else if (!machine->scalar && a != UINT32_MAX && c == UINT32_MAX &&
-                 ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
-        {
-            machine->row_nodes += 1;
-            machine->twin_differences += machine->verify && !node_machine_same_as_action(machine, r, op);
-        }
         else
         {
-            CheckActionResult result;
-            memset(&result, 0, sizeof(result));
-            node_machine_action(machine, r, op, &result);
-            refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
-            node_machine_store(machine, r, op, &result);
-            machine->action_nodes += 1;
-            machine->action_ops[op] += 1;
+            const uint32_t a = node_machine_operand(machine, r, 0);
+            const uint32_t b = node_machine_operand(machine, r, 1);
+            const uint32_t c = node_machine_operand(machine, r, 2);
+            machine->left[r] = a;
+            machine->right[r] = b;
+            if (!node_machine_code(op))
+            {
+                refusal = NODE_MACHINE_REFUSED_CODE;
+            }
+            else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST || graph->argument_counts[node] != 0)
+            {
+                refusal = NODE_MACHINE_REFUSED_SHAPE;
+            }
+            else if (context)
+            {
+                refusal = NODE_MACHINE_REFUSED_CONTEXT;
+            }
+            else if (!machine->scalar && a != UINT32_MAX && c == UINT32_MAX &&
+                     ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
+            {
+                machine->row_nodes += 1;
+                machine->twin_differences += machine->verify && !node_machine_same_as_action(machine, r, op);
+            }
+            else
+            {
+                CheckActionResult result;
+                memset(&result, 0, sizeof(result));
+                node_machine_action(machine, r, op, &result);
+                refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
+                node_machine_store(machine, r, op, &result);
+                machine->action_nodes += 1;
+                machine->action_ops[op] += 1;
+            }
+            word = node_machine_word(machine, machine->values[r].type);
         }
-        const uint32_t word = node_machine_word(machine, machine->values[r].type);
         const uint8_t facts = (uint8_t)(word >> 8);
         machine->words[r] = word;
         machine->facts[r] = facts;
@@ -1177,6 +1318,88 @@ static void node_machine_evaluate(NodeMachine* machine, uint32_t child, bool add
     machine->states[child] = BUSTER_NODE_MACHINE_EVALUATED;
     machine->contexts[child] = node_machine_child_context(machine, child, address, target);
     machine->targets[child] = target;
+}
+
+// Record `child` evaluated by its consumer `r` as a value converted to `target`, with `r`'s segment `hook`
+// (BUSTER_NODE_MACHINE_AFTER_CONDITION or _AFTER_ARM) after its row.
+static void node_machine_evaluate_hooked(NodeMachine* machine, uint32_t child, TypeId target, uint32_t r, uint8_t hook)
+{
+    node_machine_evaluate(machine, child, false, target);
+    machine->states[child] = BUSTER_NODE_MACHINE_EVALUATED | hook;
+    machine->hooks[child] = r;
+}
+
+// Whether a value of `type` takes check_lower_truth's test of it by a constant and NE (as the truth template does): a type of
+// a class short of a vector's and not void, and no aggregate (a complex value's or a __float128's test is a task of its
+// own) or vector (a vector condition's conditional is one too, check_lower_vector_logical).
+static bool node_machine_testable(const NodeMachine* machine, TypeId type)
+{
+    const uint32_t word = node_machine_word(machine, type);
+    const uint8_t class = (uint8_t)word;
+    const uint8_t kind = (uint8_t)(word >> 16);
+    return ((word >> 8) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 && class < BUSTER_TYPED_CLASS_VECTOR && class != BUSTER_TYPED_CLASS_VOID &&
+           kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR;
+}
+
+// C's logical operator or conditional at record `r` (`op`), of value class `class` (check_lower_logical's rules, which
+// check_lower_expand reaches for one that isn't folded, of a scalar class, or a conditional's of void, whose condition is
+// no vector): its template, with its evaluated operands given their targets and its segments after them, or
+// CHECK_LOWER_TEMPLATE_NONE. A condition the program knows (check_program_runtime_truth's, from its record) leaves its
+// untaken operand unevaluated and numbers no label; a conditional of one operand twice (`a ?: b`), whose condition the
+// tasks keep in a temporary, is the tasks'.
+static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
+{
+    const uint32_t a = machine->left[r];
+    const uint32_t b = machine->right[r];
+    const bool conditional = op == CHECK_OP_CONDITIONAL;
+    const uint32_t c = conditional ? node_machine_operand(machine, r, 2) : UINT32_MAX;
+    const TypeId type = machine->values[r].type;
+    const TypeId type_a = machine->converted[2 * r];
+    const TypeId type_b = machine->converted[2 * r + 1];
+    const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 && (machine->facts[r] & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0;
+    const bool shape = a < r && b < r && (!conditional || (c < r && a != b));
+    CheckLowerTemplate kind = CHECK_LOWER_TEMPLATE_NONE;
+    if (shape && (scalar || (conditional && class == BUSTER_TYPED_CLASS_VOID)))
+    {
+        const CheckValue* condition = machine->values + a;
+        bool truth = false;
+        const bool known = condition->constant_kind != CHECK_CONSTANT_NONE && (condition->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+                           condition->fault == CHECK_FAULT_NONE && check_action_truth(machine->types, condition, &truth);
+        const bool effects = (condition->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
+        if (known)
+        {
+            // The condition, for its effects alone, then the arm or the second operand it leaves the value to, if any.
+            const bool decided = !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
+            const bool second = !conditional && !decided;
+            kind = conditional ? CHECK_LOWER_TEMPLATE_PASS : decided ? (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_DECIDED :
+                   node_machine_testable(machine, type_b) ? (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_SECOND : CHECK_LOWER_TEMPLATE_NONE;
+            if (kind != CHECK_LOWER_TEMPLATE_NONE && effects)
+            {
+                node_machine_evaluate(machine, a, false, BUSTER_TYPE_VOID);
+            }
+            if (kind != CHECK_LOWER_TEMPLATE_NONE && (conditional || second))
+            {
+                node_machine_evaluate(machine, conditional ? (truth ? b : c) : b, false, conditional ? type : type_b);
+            }
+        }
+        else if (node_machine_testable(machine, type_a) && (conditional || node_machine_testable(machine, type_b)))
+        {
+            kind = (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCH;
+            machine->stack[machine->label_count / 2] = r;
+            machine->label_count += 2;
+            node_machine_evaluate_hooked(machine, a, type_a, r, BUSTER_NODE_MACHINE_AFTER_CONDITION);
+            if (conditional)
+            {
+                node_machine_evaluate_hooked(machine, b, type, r, BUSTER_NODE_MACHINE_AFTER_ARM);
+                node_machine_evaluate(machine, c, false, type);
+            }
+            else
+            {
+                node_machine_evaluate(machine, b, false, type_b);
+            }
+        }
+    }
+    return kind;
 }
 
 // Whether the unsigned division or remainder at record `r` is by a constant power of two, which the tasks write as a
@@ -1269,6 +1492,10 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
         {
             kind = node_machine_local(machine, known_object) ? CHECK_LOWER_TEMPLATE_LOCAL : CHECK_LOWER_TEMPLATE_GLOBAL;
         }
+    }
+    else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
+    {
+        kind = address ? CHECK_LOWER_TEMPLATE_NONE : node_machine_logical(machine, r, op, class);
     }
     else if (op == CHECK_OP_SELECT)
     {
@@ -1386,13 +1613,63 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
     return kind;
 }
 
+// The first record of record `r`'s subtree. Its operands' subtrees come before it one after another (X's postorder), so it
+// is its first operand's first record, the operand of the least record, down to a leaf.
+static uint32_t node_machine_subtree_first(const NodeMachine* machine, uint32_t r)
+{
+    uint32_t first = r;
+    bool deeper = true;
+    while (deeper)
+    {
+        const bool leaf = machine->codes[first] == CHECK_OP_VALUE;
+        const uint32_t a = leaf ? UINT32_MAX : machine->left[first];
+        const uint32_t b = leaf ? UINT32_MAX : machine->right[first];
+        const uint32_t c = machine->codes[first] == CHECK_OP_CONDITIONAL ? node_machine_operand(machine, first, 2) : UINT32_MAX;
+        const uint32_t least = a < b ? (a < c ? a : c) : (b < c ? b : c);
+        deeper = least < first;
+        first = deeper ? least : first;
+    }
+    return first;
+}
+
+// The labels' numbers (NodeMachine.label_bases), each labeled record's first, in the order the tasks number them: the
+// order they pop the records, a preorder from the root with each record's operands in the order of their entries, which
+// is the records' (X's postorder). A labeled record's rank in it among the labeled records is the number of those that are
+// its ancestors (whose subtree, from its first record to it, holds it) and of those before its subtree's first record (to
+// its left). Only an expression with labels runs it, and it reads the labeled records alone (C listed them in `stack`,
+// their subtrees' first records after them): a walk of every record cost C 125 cycles a new taken node on sqlite3.c on
+// the 9700X, three times its average, by its branches. Scalar: an expression has a few, and their order is the tree's.
+static void node_machine_number_labels(NodeMachine* machine)
+{
+    const uint32_t labeled = machine->label_count / 2;
+    uint32_t* records = machine->stack;
+    uint32_t* firsts = machine->stack + labeled;
+    for (uint32_t i = 0; i < labeled; i += 1)
+    {
+        firsts[i] = node_machine_subtree_first(machine, records[i]);
+    }
+    for (uint32_t i = 0; i < labeled; i += 1)
+    {
+        const uint32_t r = records[i];
+        uint32_t rank = 0;
+        for (uint32_t j = 0; j < labeled; j += 1)
+        {
+            const uint32_t other = records[j];
+            rank += (other > r && firsts[j] <= r) || other < firsts[i];
+        }
+        machine->label_bases[r] = 2 * rank;
+    }
+}
+
 // C: every evaluated record's template and its operands' contexts and targets, down from the root, which its consumer
-// evaluates with `context` and converts to `target`; `object` is what a root INITIALIZE initializes.
+// evaluates with `context` and converts to `target`; `object` is what a root INITIALIZE initializes. Then the labels'
+// numbers, where a record numbers any.
 static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
     const uint32_t count = machine->count;
     memset(machine->states, 0, count);
+    machine->label_count = 0;
     const uint32_t root = count - 1;
     machine->states[root] = BUSTER_NODE_MACHINE_EVALUATED;
     machine->contexts[root] = context;
@@ -1401,13 +1678,17 @@ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t co
     while (refusal == NODE_MACHINE_TAKEN && r != 0)
     {
         r -= 1;
-        if (machine->states[r] == BUSTER_NODE_MACHINE_EVALUATED)
+        if ((machine->states[r] & BUSTER_NODE_MACHINE_EVALUATED) != 0)
         {
             const CheckLowerTemplate kind = node_machine_classify(machine, r, r == root ? object : 0);
             machine->templates[r] = (uint8_t)kind;
             refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;
             machine->stopped = r;
         }
+    }
+    if (refusal == NODE_MACHINE_TAKEN && machine->label_count != 0)
+    {
+        node_machine_number_labels(machine);
     }
     return refusal;
 }
@@ -1419,6 +1700,19 @@ static inline __attribute__((always_inline)) void node_machine_put(NodeMachine* 
     machine->classes[at] = class;
     machine->tape[at] = value;
     machine->entry_count = at + 1;
+}
+
+// A test of a value of class `class` (check_lower_truth's entries): a narrow class's value converted to I32, then compared
+// with 0 by NE, or by EQ where `negate`.
+static void node_machine_put_truth(NodeMachine* machine, uint8_t class, bool negate)
+{
+    const bool narrow = check_lower_narrow(class);
+    if (narrow)
+    {
+        node_machine_put(machine, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+    }
+    node_machine_put(machine, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : class, 0);
+    node_machine_put(machine, negate ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
 }
 
 // An object's address's entries (check_lower_template_address): a local's (its object, which the splice numbers) or a
@@ -1522,14 +1816,29 @@ static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
     }
     else if (kind == CHECK_LOWER_TEMPLATE_TRUTH)
     {
-        const uint8_t operand_class = node_machine_class(machine, machine->converted[2 * r]);
-        const bool narrow = check_lower_narrow(operand_class);
-        if (narrow)
+        node_machine_put_truth(machine, node_machine_class(machine, machine->converted[2 * r]), op == CHECK_OP_NOT);
+    }
+    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCH)
+    {
+        // After its second operand's or second arm's row: a logical operator's test of it, its jump to its end, its
+        // alternate and its value there, 0 for `&&` and 1 for `||`; then its end, which a conditional's first arm jumps to.
+        const uint32_t alternate = machine->label_bases[r];
+        if (op != CHECK_OP_CONDITIONAL)
         {
-            node_machine_put(machine, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+            node_machine_put_truth(machine, node_machine_class(machine, machine->converted[2 * r + 1]), false);
+            node_machine_put(machine, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
+            machine->label_entries[alternate] = machine->entry_count;
+            node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
         }
-        node_machine_put(machine, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : operand_class, 0);
-        node_machine_put(machine, op == CHECK_OP_NOT ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+        machine->label_entries[alternate + 1] = machine->entry_count;
+    }
+    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_DECIDED)
+    {
+        node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
+    }
+    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_SECOND)
+    {
+        node_machine_put_truth(machine, node_machine_class(machine, machine->converted[2 * r + 1]), false);
     }
     else if (kind == CHECK_LOWER_TEMPLATE_BINARY)
     {
@@ -1613,8 +1922,30 @@ static bool node_machine_conversion(NodeMachine* machine, uint32_t r)
     return takes;
 }
 
-// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape. `object` as
-// in C.
+// The segment of record `r`'s consumer after `r`'s row (`state`, its state, says which): a logical operator's or a
+// conditional's test of its condition and branch to its alternate, past its second operand or first arm (a `||`'s where
+// the condition holds, the others' where it doesn't); or a conditional's jump from its first arm to its end, then its
+// alternate, where its second arm starts.
+static void node_machine_hook(NodeMachine* machine, uint32_t r, uint8_t state)
+{
+    const uint32_t consumer = machine->hooks[r];
+    const uint32_t alternate = machine->label_bases[consumer];
+    if ((state & BUSTER_NODE_MACHINE_AFTER_CONDITION) != 0)
+    {
+        node_machine_put_truth(machine, node_machine_class(machine, machine->converted[2 * consumer]), false);
+        node_machine_put(machine, machine->codes[consumer] == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32,
+                         alternate);
+    }
+    else
+    {
+        const uint8_t class = machine->value_classes[consumer];
+        node_machine_put(machine, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
+        machine->label_entries[alternate] = machine->entry_count;
+    }
+}
+
+// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, and after it
+// its consumer's segment where it has one (node_machine_hook). `object` as in C.
 static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
@@ -1623,12 +1954,17 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < count)
     {
-        if (machine->states[r] == BUSTER_NODE_MACHINE_EVALUATED)
+        const uint8_t state = machine->states[r];
+        if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
         {
             const uint32_t before = machine->entry_count;
             node_machine_own(machine, r, r == count - 1 ? object : 0);
             const bool takes = node_machine_conversion(machine, r);
             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+            if (refusal == NODE_MACHINE_TAKEN && (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)
+            {
+                node_machine_hook(machine, r, state);
+            }
             machine->stopped = r;
         }
         r += refusal == NODE_MACHINE_TAKEN;

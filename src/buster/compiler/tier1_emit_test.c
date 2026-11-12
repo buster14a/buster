@@ -524,6 +524,34 @@ static void tier1_emit_test_saves_twins(Tier1EmitTest* test)
     tier1_emit_test_expect(test, same, "the call-save rows' vector helpers give their scalar twins' masks and rows");
 }
 
+// #2538: the calls before each position by both paths, on random sorted call positions over random lengths (a call at the
+// last position, and none at all, among them): the vector prefix sum must give the scalar running count's column.
+static void tier1_emit_test_calls_before_twins(Tier1EmitTest* test)
+{
+    uint64_t random = UINT64_C(0x2538a1b2c3d4e5f6);
+    uint32_t calls[256];
+    uint32_t before[2][1024];
+    bool same = true;
+    for (uint32_t round = 0; round < 2048; round += 1)
+    {
+        const uint32_t positions = 1 + (uint32_t)(tier1_emit_test_random(&random) % 1000);
+        const uint32_t density = 1 + (uint32_t)(tier1_emit_test_random(&random) % 16);
+        uint32_t count = 0;
+        for (uint32_t q = 0; q < positions && count < 256; q += 1)
+        {
+            const bool call = (tier1_emit_test_random(&random) % density == 0 && round % 7 != 0) || (round % 5 == 0 && q + 1 == positions);
+            calls[count] = q;
+            count += call;
+        }
+        memset(before, 0xa5, sizeof(before));
+        tier1_emit_cfg_calls_before_vector(calls, count, positions, before[0]);
+        tier1_emit_cfg_calls_before_scalar(calls, count, positions, before[1]);
+        same &= memcmp(before[0], before[1], ((uint64_t)positions + 1) * sizeof(uint32_t)) == 0 && before[1][positions] == count;
+        same &= before[0][positions + 1] == 0xa5a5a5a5u;
+    }
+    tier1_emit_test_expect(test, same, "the calls before each position: the vector prefix sum gives its scalar twin's column");
+}
+
 #include "tier1_call_test.c"
 #include "tier1_narrow_test.c"
 #include "tier1_terminal_test.c"
@@ -1433,6 +1461,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_emit_test_lifetimes(&test);
             tier1_emit_test_object_overflow(&test);
             tier1_emit_test_saves_twins(&test);
+            tier1_emit_test_calls_before_twins(&test);
             tier1_call_tests(&test);
             tier1_narrow_tests(&test);
             tier1_terminal_tests(&test);

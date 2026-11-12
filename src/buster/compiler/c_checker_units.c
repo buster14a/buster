@@ -2589,6 +2589,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             check_lower_runtime_names_initialize();
         }
+        // And the asm matcher's index (#2532), which every unit's planning of its asm statements reads: baked, or made
+        // here once rather than by each unit with asm statements.
+        if (ready && emitting && !check_asm_index_ready)
+        {
+            ready = check_asm_index_initialize();
+        }
         // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
         // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
         if (ready && command->mixed_inputs)

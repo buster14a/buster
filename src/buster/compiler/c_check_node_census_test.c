@@ -185,9 +185,25 @@ static const char node_shadow_test_text[] =
     "        x = 1; // machine: taken\n"
     "    while (q != 0) // machine: taken\n"
     "        q = 0; // machine: taken\n"
+    "    x = a && b; // machine: taken\n"
+    "    x = a || (b && c); // machine: taken\n"
+    "    x = (a && b) || (c && u); // machine: taken\n"
+    "    x = !(a && d); // machine: taken\n"
+    "    x = a ? b : 1; // machine: taken\n"
+    "    d = a ? d : e; // machine: taken\n"
+    "    y = q ? *q : (a < b ? a : b); // machine: taken\n"
+    "    (void)(a ? (void)0 : (void)b); // machine: taken\n"
+    "    if (a && (b || c)) // machine: taken\n"
+    "        x = 2; // machine: taken\n"
+    "    x = 1 && a; // machine: taken\n"
+    "    x = 0 || a; // machine: taken\n"
+    "    x = 1 ? a : b; // machine: taken\n"
+    "    x = (q = 0, 1) && a; // machine: taken\n"
+    "    x = (q = 0, 0) && a; // machine: taken\n"
+    "    x = (q = 0, 1) || a; // machine: taken\n"
+    "    x = a ?: b; // machine: template\n"
     "    x = f(a); // machine: code\n"
-    "    x = a && b; // machine: code\n"
-    "    x = a ? b : 1; // machine: code\n"
+    "    x = a && f(b); // machine: code\n"
     "    x++; // machine: code\n"
     "    x += 2; // machine: code\n"
     "    y = q - r; // machine: template\n"
@@ -214,7 +230,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
     snprintf(path, sizeof(path), "%s/shadow.c", directory);
     const char* text = node_shadow_test_text;
     bool valid = parse_test_write(path, text, strlen(text));
-    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1 };
+    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1, .repeat = 1 };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&

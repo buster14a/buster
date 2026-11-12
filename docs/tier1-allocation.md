@@ -654,15 +654,34 @@ frames went from 1.49× clang -O2's to 0.89× on `sqlite3.c`, and from 1.45× to
 record](https://github.com/buster14a/buster-performance/pull/260)).
 
 Where the allocation puts it in a callee-saved register,
-the prologue saves that register once instead (`tier1_emit_cfg_callee`). `rbp`
+the prologue saves that register once instead (`tier1_emit_cfg_preference`). `rbp`
 is the sixth callee-saved register where the frame keeps no frame pointer in it.
 The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
 `reserved_registers`).
 
-That preference is a second, whole `tier1_cfg_allocate` over the first one's
-intervals. What the two calls cost a compile, and the design that makes them
-one call with the same result, are in
-[tier1-one-allocation.md](tier1-one-allocation.md) (#2538).
+The preference is a second problem over the same values: the values that cross
+a call allowed the callee-saved registers alone, the others the caller-saved
+ones. Without a fixed range a value's intervals don't depend on the registers
+it may take, so the CFG consumer allocates both problems in one call (#2538,
+`tier1_emit_cfg_one_call`). `tier1_cfg_prepare` builds the intervals once
+(validation, homes, hints, liveness, block lists, intervals). The preference
+reads them: an interval crosses a call where the calls before its end and before
+its start differ, two loads of a prefix count of the calls (the binary search
+it replaced stays in the reference order). The preferred problem's column
+(`tier1_cfg_column`) is assigned with the plain problem's verdict inside the
+same call (`tier1_allocate_verdict`), from the plain problem's scans over the
+events before the last bound definition ends; where that verdict is a
+constraint, every parameter is freed and the preferred problem assigned again.
+`tier1_cfg_finish` makes the lookup columns, slot sharing and edge moves once,
+for the allocation that stands, the preferred one where `tier1_cfg_taken` takes
+it; the plain problem is assigned whole only where it isn't
+(`tier1_cfg_order_run`). The order before, two whole `tier1_cfg_allocate` calls
+with the preference between them, stays as `tier1_emit_cfg_two_calls`: the path
+for a problem with fixed ranges, and the reference that `--verify` runs after
+the one-call order on every function, comparing the allocations field by field
+(`tier1_cfg_differs`), the problems each left and the values each moved. What
+the two calls cost, the design and what the one call measured are in
+[tier1-one-allocation.md](tier1-one-allocation.md).
 
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's

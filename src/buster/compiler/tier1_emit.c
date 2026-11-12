@@ -81,6 +81,11 @@ typedef enum Tier1EmitCause
 // A code certificate's refusal in a TIER1_EMIT_CAUSE_CERTIFICATE diagnostic: its Tier1CertEmittedReason plus this, past
 // every Tier1CertError.
 #define BUSTER_TIER1_EMIT_CODE_CERTIFICATE 0x100u
+// Under Tier1EmitOptions.certify, a CFG allocation by the one-call order that today's order, its reference, doesn't
+// produce (#2538, tier1_emit_cfg_order_check), in a TIER1_EMIT_CAUSE_CFG_ALLOCATION diagnostic: this plus the first group
+// of fields that differs (tier1_cfg_differs's 1 to 13), 14 for the problem as each order left it or the values each moved,
+// or 15 for the reference refusing the function.
+#define BUSTER_TIER1_EMIT_CFG_ORDER 0x200u
 
 typedef struct Tier1EmitDiagnostic Tier1EmitDiagnostic;
 struct Tier1EmitDiagnostic

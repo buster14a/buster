@@ -20,6 +20,7 @@
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - driver helpers preserve version thresholds, description failures and publication without redundant copies;
+//   - the parallel native generation's splitter links llvm-config's system libraries at paths the host lacks by name;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
 //     global/configuration flags, in generated compile/link commands and real unit compiles;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
@@ -3040,6 +3041,35 @@ static void check_driver(void)
     pass("driver versions and descriptions retain their contracts; publication skips unchanged copies and preserves both outputs on staging failure");
 }
 
+// BusterCodegen.cmake's mapping of llvm-config's system libraries: one named by a path the host lacks (the official
+// release names Ubuntu's static zstd, which the 9700X's Arch host has as /usr/lib/libzstd.so) links by its name, and
+// every other entry is kept as given, in its order. Hosted runners have Ubuntu's paths, so their builds never map one.
+static void check_codegen_system_libraries(void)
+{
+    char present[PATH_MAX];
+    char script[PATH_MAX];
+    char text[4 * PATH_MAX];
+    char expected[2 * PATH_MAX];
+    snprintf(present, sizeof(present), "%s/libpresent.a", work);
+    snprintf(script, sizeof(script), "%s/system-libraries.cmake", work);
+    write_file(present, "!<arch>\n", 0644);
+    snprintf(text, sizeof(text),
+        "include(\"%s/cmake/BusterCodegen.cmake\")\n"
+        "buster_codegen_system_libraries(libraries -lrt /buster-absent/x86_64-linux-gnu/libzstd.a \"%s\" /buster-absent/libxml2.so.2 -lm)\n"
+        "message(\"libraries: ${libraries}\")\n",
+        root, present);
+    write_file(script, text, 0644);
+    snprintf(expected, sizeof(expected), "libraries: -lrt;-lzstd;%s;-lxml2;-lm\n", present);
+    char* argv[] = { "cmake", "-P", script, 0 };
+    Text log = capture(argv);
+    if (strcmp(log.data, expected) != 0)
+    {
+        fail("BusterCodegen.cmake's system libraries: expected \"%s\", got \"%s\"", expected, log.data);
+    }
+    free(log.data);
+    pass("llvm-config's system libraries at paths the host lacks link by name, the others as given");
+}
+
 // Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
 // Copies keep the source edits, malformed IR and export-manifest failures inside the disposable fixture tree.
 static void check_parallel_codegen(void)
@@ -3371,6 +3401,7 @@ int main(int argc, char** argv)
     }
     if (argc == 1 || codegen_only)
     {
+        check_codegen_system_libraries();
         check_parallel_codegen();
     }
     if (!ownership_only && !driver_only && !flags_only && !commands_only && !codegen_only)
