@@ -267,4 +267,44 @@ static uint16_t ir_simd_reduce_form(uint32_t operation, uint32_t size, uint32_t 
     return operation < 4 ? ir_simd_lane_op_forms[operation][size][width] : ir_simd_reduce_forms[operation - 4][size - 2][width];
 }
 
+// The lanes' unary operations (#1840, BUSTER_IR_INTRINSIC_LANE_UNARY), by the operation (population count, leading zero
+// count, conflicts), the lanes (bytes to quadwords) and the width, the destination in reg and the source in rm:
+// vpopcntb to vpopcntq (BITALG's bytes and words, VPOPCNTDQ's doublewords and quadwords), AVX-512CD's vplzcntd,
+// vplzcntq, vpconflictd and vpconflictq, X86_FORM_NONE where AVX-512 has none.
+static const uint16_t ir_simd_lane_unary_forms[3][4][3] = {
+    {
+        { X86_FORM_VPOPCNTB_X_XM128, X86_FORM_VPOPCNTB_Y_YM256, X86_FORM_VPOPCNTB_Z_ZM512 },
+        { X86_FORM_VPOPCNTW_X_XM128, X86_FORM_VPOPCNTW_Y_YM256, X86_FORM_VPOPCNTW_Z_ZM512 },
+        { X86_FORM_VPOPCNTD_X_XM128, X86_FORM_VPOPCNTD_Y_YM256, X86_FORM_VPOPCNTD_Z_ZM512 },
+        { X86_FORM_VPOPCNTQ_X_XM128, X86_FORM_VPOPCNTQ_Y_YM256, X86_FORM_VPOPCNTQ_Z_ZM512 },
+    },
+    {
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_VPLZCNTD_X_XM128, X86_FORM_VPLZCNTD_Y_YM256, X86_FORM_VPLZCNTD_Z_ZM512 },
+        { X86_FORM_VPLZCNTQ_X_XM128, X86_FORM_VPLZCNTQ_Y_YM256, X86_FORM_VPLZCNTQ_Z_ZM512 },
+    },
+    {
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        { X86_FORM_VPCONFLICTD_X_XM128, X86_FORM_VPCONFLICTD_Y_YM256, X86_FORM_VPCONFLICTD_Z_ZM512 },
+        { X86_FORM_VPCONFLICTQ_X_XM128, X86_FORM_VPCONFLICTQ_Y_YM256, X86_FORM_VPCONFLICTQ_Z_ZM512 },
+    },
+};
+// The floating operations at their own rounding (#1840, BUSTER_IR_INTRINSIC_FROUND), by the operation (add, sub, mul,
+// div) and the lanes (floats, doubles): the 64-byte register forms with embedded rounding, the first operand in vvvv,
+// the second in rm and the rounding in the decorations' bits (BUSTER_X86_DECORATION_ROUNDING).
+// The truncating conversions of lane 0 (#1840, BUSTER_IR_INTRINSIC_CVTT), by the lane (float, double) and the result
+// (32, 64 bits): the EVEX forms, the general register in reg and the vector in rm.
+static const uint16_t ir_simd_cvtt_forms[2][2] = {
+    { X86_FORM_VCVTTSS2SI_R32_XM32_EVEX, X86_FORM_VCVTTSS2SI_R64_XM32_EVEX },
+    { X86_FORM_VCVTTSD2SI_R32_XM64_EVEX, X86_FORM_VCVTTSD2SI_R64_XM64_EVEX },
+};
+static const uint16_t ir_simd_fround_forms[4][2] = {
+    { X86_FORM_VADDPS_Z_Z_Z_ER, X86_FORM_VADDPD_Z_Z_Z_ER },
+    { X86_FORM_VSUBPS_Z_Z_Z_ER, X86_FORM_VSUBPD_Z_Z_Z_ER },
+    { X86_FORM_VMULPS_Z_Z_Z_ER, X86_FORM_VMULPD_Z_Z_Z_ER },
+    { X86_FORM_VDIVPS_Z_Z_Z_ER, X86_FORM_VDIVPD_Z_Z_Z_ER },
+};
+
 #endif

@@ -859,9 +859,9 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // bytes, whose naked function has a label another template takes the address of, and whose template calls libc's puts
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
-// A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
-// review): a deep expression's, in its depth's slot, which later expressions share. Both paths refuse it by name, and
-// compile a long double held across setjmp, whose slot the call snapshots (#1843), and a function with no value held.
+// A value held across a call in a function that calls __builtin_setjmp, which a longjmp's resumption must find: a deep
+// expression's, in its depth's slot, which later expressions share, and which the call snapshots (#2465); a long double's,
+// whose slot the call snapshots (#1843); and a function with no value held. Both paths compile all three.
 static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
 {
     static const char* const sources[3] = {
@@ -886,11 +886,9 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
             char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
             char* text = NULL;
             const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-            const bool refused = status == 1 && text != NULL &&
-                                 strstr(text, "unsupported: a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp") != NULL;
             const bool compiled = status == 0;
-            check_test_expect(test, s == 0 ? refused : compiled,
-                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp is refused by name" : "the same, scalar")
+            check_test_expect(test, compiled,
+                              s == 0   ? (path == 0 ? "a deep expression held across __builtin_setjmp compiles" : "the same, scalar")
                               : s == 1 ? (path == 0 ? "a long double held across __builtin_setjmp compiles" : "the same, scalar")
                                        : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
             free(text);
@@ -7125,6 +7123,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_fortify_driver_test.c"
 #include "c_check_library_driver_test.c"
 #include "c_check_transparent_driver_test.c"
+#include "c_check_avx_abi_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -7342,6 +7341,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_statement_recovery_driver_test.c"
 #include "c_check_type_attribute_recovery_driver_test.c"
 #include "c_check_structural_recovery_driver_test.c"
+#include "c_check_repaired_view_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
 #include "c_check_block_attribute_driver_test.c"
 #include "c_check_resume_corpus_test.c"
@@ -8255,7 +8255,10 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_ident_driver_test.c"
 #include "c_check_c23_attributes_driver_test.c"
 #include "c_check_empty_unit_driver_test.c"
+#include "c_check_reserved_macro_driver_test.c"
 #include "c_check_integer_overflow_driver_test.c"
+#include "c_check_gnu_empty_struct_driver_test.c"
+#include "c_check_unused_but_set_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
@@ -9007,6 +9010,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_structural_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_repaired_view(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && type_sugar_only)
     {
@@ -9153,6 +9157,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
+            check_test_driver_repaired_view(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_generic_builtins(&test, clang, executable, directory);
             check_test_driver_availability(&test, clang, executable, directory);
             check_test_driver_cpu_supports(&test, clang, executable, directory);
@@ -9209,7 +9217,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_ident(&test, clang, executable, directory);
             check_test_driver_c23_attributes(&test, clang, executable, directory);
             check_test_driver_empty_unit(&test, clang, executable, directory);
+            check_test_driver_reserved_macro(&test, clang, executable, directory);
             check_test_driver_integer_overflow(&test, clang, executable, directory);
+            check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
+            check_test_driver_unused_but_set(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);
@@ -9277,6 +9288,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_target_feature_errors(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_avx_abi(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
         {

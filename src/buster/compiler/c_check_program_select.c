@@ -112,6 +112,9 @@ static bool check_program_object_size_inline(const CheckInput* input, uint32_t d
 // one of them has a used, constructor or destructor attribute (an inline-only definition is never emitted). An ordinary
 // external definition (not an inline one) is emitted at once whatever its declarations, and is not looked at further.
 // Out of line, as only a unit with a target attribute asks it, once per selected body.
+// c_check_target_feature.c's: whether a unit's types hold a vector wider than 128 bits (#2367).
+static bool check_target_feature_abi_unit(const TypeTable* types);
+
 __attribute__((noinline)) static bool check_program_body_eager(const CheckProgram* program, const CheckDataPrepared* data, const CheckProgramBody* body)
 {
     const CheckInput* input = program->input;
@@ -856,8 +859,9 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     {
         symbol_pragmas = input->symbol_pragmas->records[i].after_use;
     }
+    // A unit with a vector wider than 128 bits too, whose direct calls take the AVX calling-convention check (#2367).
     const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0) || late || symbol_pragmas ||
-                              full->weak_late_count != 0;
+                              full->weak_late_count != 0 || (full->types != 0 && check_target_feature_abi_unit(full->types));
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;

@@ -864,6 +864,7 @@ static bool check_input_indirect_goto(const Parser* parser, uint32_t token);
 static bool check_input_label_address(const Parser* parser, uint32_t token);
 static bool check_input_asm_gotos(const CheckInput* input);
 static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_t token, const CheckInputCleanup* innermost);
+static uint32_t check_input_asm_goto_entered(const CheckInputReader* reader, uint32_t token);
 
 // A jump's report (`index`, if the reader made it) completes past its function's body (#1942): clang's JumpScopeChecker
 // runs in ActOnFinishFunctionBody, after the body's scopes have given their unused variables' warnings.
@@ -879,6 +880,34 @@ static void check_input_jump_completion(CheckInputReader* reader, uint32_t index
     if (at < parser->tokens.count)
     {
         input->reports[index].completion = at + 1;
+    }
+}
+
+// A computed goto's or an asm goto's report at `token` (#1942): where it enters the scope of `label` (or
+// BUSTER_CHECK_NONE: its `:`), clang's notes are "possible target of ... statement" at its name (the report's subject,
+// the name's token + 1) and
+// the bypassed declaration's at its name, worded as a goto's (detail, check_input_jump_scope's).
+static void check_input_report_indirect_jump(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t label)
+{
+    CheckInput* input = reader->output;
+    const uint32_t before = input->report_count;
+    check_input_report(reader, token, message);
+    const uint32_t declaration = label < reader->parser->tokens.count ? reader->scope_marks[label] - 1 : BUSTER_CHECK_NONE;
+    if (input->report_count > before && declaration != BUSTER_CHECK_NONE)
+    {
+        const bool typedef_name = input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_TYPEDEF;
+        const bool modified = reader->declared_types != NULL && check_input_vla_modified(reader->types, reader->declared_types[declaration]);
+        input->reports[before].note_kind = CHECK_INPUT_NOTE_JUMP;
+        input->reports[before].note_token = declaration;
+        // (The label's name, before its `:`.)
+        input->reports[before].subject = label;
+        input->reports[before].detail = typedef_name ? 3u : modified ? 1u : 2u;
+    }
+    check_input_jump_completion(reader, before);
+    // (It stops nothing, as a switch's doesn't: the goto's operand stays a use of its variable.)
+    if (input->report_count > before)
+    {
+        check_input_recover_reports(reader, before);
     }
 }
 
@@ -1013,11 +1042,19 @@ static void check_input_vla_finish(CheckInputReader* reader)
                 const bool leaves = innermost != NULL && (first_label <= innermost->declaration || last_label >= innermost->end);
                 if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token < low || token >= high || leaves))
                 {
-                    check_input_report(reader, token, CHECK_INPUT_JUMP_INDIRECT);
+                    // (Its notes at the first label whose scope it enters, clang's "possible target", #1942.)
+                    uint32_t target = BUSTER_CHECK_NONE;
+                    for (uint32_t at = opening + 1; target == BUSTER_CHECK_NONE && at < closing; at += 1)
+                    {
+                        const uint32_t label = check_input_label_address(parser, at) ? check_sparse_get(reader->output->label_targets, at) : BUSTER_CHECK_NONE;
+                        const uint32_t declaration = label < parser->tokens.count && reader->scope_marks[label] != 0 ? reader->scope_marks[label] - 1 : BUSTER_CHECK_NONE;
+                        target = declaration != BUSTER_CHECK_NONE && (token < declaration || token >= reader->vla_scope_ends[declaration]) ? label : target;
+                    }
+                    check_input_report_indirect_jump(reader, token, CHECK_INPUT_JUMP_INDIRECT, target);
                 }
                 if (asm_gotos && check_input_asm_goto_refused(reader, token, innermost))
                 {
-                    check_input_report(reader, token, CHECK_INPUT_JUMP_ASM);
+                    check_input_report_indirect_jump(reader, token, CHECK_INPUT_JUMP_ASM, check_input_asm_goto_entered(reader, token));
                 }
             }
             arena_pop_to(reader->scratch, mark);
