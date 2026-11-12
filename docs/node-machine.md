@@ -1214,13 +1214,16 @@ against main `5f75ea52`:
 and an update's destination read by name. It also adds 1 to its record every
 time, in place of the refusal's bool. The tape and the refusals are the same:
 `--verify` reports main's lines on all three corpora, with `-g` too. On the
-9700X, against main `f006224e`
-([record](https://github.com/buster14a/buster-performance/tree/755230610b031fdbfc782943836ae32ed02802bc/docs/measurements/node-machine-x-state-test-2524-2026-11-12)):
+9700X
+([record](https://github.com/buster14a/buster-performance/tree/fcee0f08ba82766dea4b9f1a94192645fd777c24/docs/measurements/node-machine-x-state-test-2524-2026-11-12)),
+per taken node:
 
-| a taken node | `sqlite3.c` | Lua 5.4.8 |
+| X's | `sqlite3.c` | Lua 5.4.8 |
 | --- | ---: | ---: |
-| X's instructions, main → one test → and the increment | 117.3 → 115.6 → **110.6** | 115.1 → 113.5 → **108.2** |
-| X's cycles, main → one test and the increment | 40.3 → **37.9** | 28.6 → **25.7** |
+| instructions on main `f006224e`: main → one test → and the increment | 117.3 → 115.6 → **110.6** | 115.1 → 113.5 → **108.2** |
+| cycles on main `f006224e`: main → one test and the increment | 40.3 → **37.9** | 28.6 → **25.7** |
+| instructions on main `c3eb40fc`, with #2580: main → both | 113.9 → **103.9** | 111.9 → **101.5** |
+| cycles on main `c3eb40fc`: main → both | 43.2 → 42.9 | 30.0 → 30.4 |
 
 - **The one test alone saves 1.7 instructions.** Clang spends most of it on
   register copies and stack accesses elsewhere in X, a count on a baseline
@@ -1228,6 +1231,12 @@ time, in place of the refusal's bool. The tape and the refusals are the same:
 - **The increment saves 5.0 more.** The record's end is one test of the
   refusal, and the loop steps two of the records' column pointers with the
   record.
+- **With #2580's records, X's cycles no longer follow its instructions.** Its
+  branch misses are the same with and without the change (45.2 M and 45.4 M
+  in 40 passes on `sqlite3.c`), and its hottest samples follow its
+  data-dependent branches: the record's state, its template and whether it
+  has a conversion. The change removes only branches X predicts well. Those
+  three are the next thing to take out of X's loop.
 
 ### The baked tables, measured
 
