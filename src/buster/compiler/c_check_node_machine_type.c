@@ -9,7 +9,7 @@
 // - an operator of builtin arithmetic operands, by its row of the transition table (node_machine_row), which
 //   node_machine_tables_initialize makes from the actions and baked.c bakes;
 // - the lookups, by direct rules (node_machine_rule: node_machine_discard, _member, _truth, _store_rule, _address_rule,
-//   _dereference and _pointer_rule), each its action's own steps for the common case behind a guard;
+//   _dereference, _pointer_rule and _call_rule), each its action's own steps for the common case behind a guard;
 // - everything else, by the action itself (node_machine_action), the rows' and the rules' exact twin, which --scalar
 //   takes for every node and --verify compares with them (node_machine_same_as_action).
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
@@ -360,7 +360,7 @@ static bool node_machine_code(CheckOp op)
         case CHECK_OP_EQUAL: case CHECK_OP_NOT_EQUAL: case CHECK_OP_BIT_AND: case CHECK_OP_BIT_OR: case CHECK_OP_BIT_XOR: case CHECK_OP_CAST:
         case CHECK_OP_ADDRESS: case CHECK_OP_DEREFERENCE: case CHECK_OP_ASSIGN: case CHECK_OP_COMMA: case CHECK_OP_SUBSCRIPT: case CHECK_OP_SIZEOF:
         case CHECK_OP_ALIGNOF: case CHECK_OP_MEMBER: case CHECK_OP_ARROW: case CHECK_OP_INITIALIZE: case CHECK_OP_CONVERT: case CHECK_OP_CONDITION:
-        case CHECK_OP_SELECT:
+        case CHECK_OP_SELECT: case CHECK_OP_CALL:
             code = true;
             break;
         default:
@@ -792,6 +792,218 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
     return taken;
 }
 
+// Call record `r`'s (node `node`'s) arguments into the expression's list (NodeMachine.arguments), each a record before it,
+// and its subtree's least record past theirs too: whether they all are.
+static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t node)
+{
+    const CheckGraph* graph = machine->graph;
+    const uint32_t count = graph->argument_counts[node];
+    const uint32_t offset = graph->argument_offsets[node];
+    const uint32_t first = machine->argument_total;
+    uint32_t lowest = machine->lowest[r];
+    bool inside = count <= BUSTER_NODE_MACHINE_MOST - first;
+    for (uint32_t i = 0; inside && i < count; i += 1)
+    {
+        const uint32_t argument = graph->argument_nodes[offset + i];
+        const uint32_t record = argument - machine->first;
+        inside = argument != BUSTER_CHECK_NONE && argument >= machine->first && record < r;
+        machine->arguments[first + i] = record;
+        lowest = inside && machine->lowest[record] < lowest ? machine->lowest[record] : lowest;
+    }
+    machine->lowest[r] = lowest;
+    machine->argument_first[r] = first;
+    machine->argument_counts[r] = inside ? count : 0;
+    machine->argument_total = inside ? first + count : first;
+    return inside;
+}
+
+// Whether call record `r` (node `node`, callee record `a`) has a callee with semantics of its own, which the machine
+// leaves to the pipeline (docs/node-machine.md, "T: bind and type"): a library builtin's call that the catalogue folds or
+// computes (the reader's BUSTER_CHECK_LIBRARY_CALL), any call in a unit with overload sets, a callee without a prototype
+// or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
+// registers), more arguments than Tier 0's calls take, or a callee that returns twice (check_lower_calls_twice's and
+// check_lower_indirect_twice's, which the lowering marks its function for). The census refuses before it the callees
+// whose attributes or names the warnings read (node_census_callee).
+static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
+{
+    const CheckProgram* program = machine->program;
+    const CheckGraph* graph = machine->graph;
+    const TypeTable* types = machine->types;
+    const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
+    const TypeId function = node_machine_callee_function(machine, a);
+    bool refused = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 || graph->overload_candidate_count != 0 || function == 0 ||
+                   machine->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
+    refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
+              type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);
+    const uint32_t object = refused ? 0 : node_machine_direct_callee(machine, a);
+    if (!refused && object != 0)
+    {
+        const uint32_t declaration = program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+        const IdentId name = program->parser != NULL && declaration < program->input->token_count ? program->parser->tokens.names[declaration] : 0;
+        refused = program->object_returns_twice != NULL && program->object_returns_twice[object] != 0;
+        for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+        {
+            refused |= name != 0 && machine->twice_names[k] == name;
+        }
+    }
+    else if (!refused)
+    {
+        // A pointer's call whose first parameter points to a jmp_buf's element (check_lower_indirect_twice).
+        uint32_t parameters = 0;
+        const TypeId* parameter_types = type_parameters(types, function, &parameters);
+        const TypeId first = parameters != 0 ? type_strip_aligned(types, parameter_types[0]) : 0;
+        const TypeId element = first != 0 && type_kind(types, first) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, first))) : 0;
+        refused = element != 0 && type_kind(types, element) == BUSTER_TYPE_KIND_STRUCT && machine->twice_tag != 0 &&
+                  types->tags.name[types->types.index[type_index(element)]] == machine->twice_tag;
+    }
+    return refused;
+}
+
+// Whether a pointer of type `from` converts to pointer type `to` as check_action_pointer_assignable converts it without
+// a diagnostic or a warning, in its common cases: pointees of the same extended qualifiers, `to`'s with at least
+// `from`'s qualifiers, and the same type but for them, or either void and neither a function.
+static bool node_machine_pointer_assignable(const NodeMachine* machine, TypeId to, TypeId from)
+{
+    const TypeTable* types = machine->types;
+    const TypeId target = type_unqualified(type_strip_aligned(types, to));
+    const TypeId input = type_unqualified(type_strip_aligned(types, from));
+    bool taken = type_kind(types, target) == BUSTER_TYPE_KIND_POINTER && type_kind(types, input) == BUSTER_TYPE_KIND_POINTER;
+    if (taken)
+    {
+        const TypeId to_element = type_element(types, target);
+        const TypeId from_element = type_element(types, input);
+        const uint8_t to_kind = check_action_kind(types, to_element);
+        const uint8_t from_kind = check_action_kind(types, from_element);
+        const bool function = to_kind == BUSTER_TYPE_KIND_FUNCTION || from_kind == BUSTER_TYPE_KIND_FUNCTION;
+        const bool either_void = to_kind == BUSTER_TYPE_KIND_VOID || from_kind == BUSTER_TYPE_KIND_VOID;
+        taken = type_object_qualifiers(types, to_element) == type_object_qualifiers(types, from_element) &&
+                (type_qualifiers(from_element) & ~type_qualifiers(to_element)) == 0 &&
+                ((either_void && !function) || type_unqualified(to_element) == type_unqualified(from_element));
+    }
+    return taken;
+}
+
+// Whether check_action_assignable_mode takes a value of type `source` to type `destination` by its arithmetic branches,
+// without a diagnostic or a warning: an arithmetic type (an enumeration's too) to another, or a scalar to bool, neither a
+// vector.
+static bool node_machine_arithmetic_assignable(const NodeMachine* machine, TypeId destination, TypeId source)
+{
+    const TypeTable* types = machine->types;
+    const TypeId target = type_unqualified(type_strip_aligned(types, destination));
+    const TypeId input = type_unqualified(type_strip_aligned(types, source));
+    return !check_vector_type(types, target) && !check_vector_type(types, input) &&
+           ((check_action_is_arithmetic(types, target) && check_action_is_arithmetic(types, input)) ||
+            (target == BUSTER_TYPE_BOOL && check_action_is_scalar(types, input)));
+}
+
+// Record `a`'s value as an operand of node `node` reads it where it is an lvalue of an enumeration, which
+// node_machine_operand_value leaves to the action: check_action_operand_value's lvalue conversion, where the enumeration
+// is complete at the node and the object isn't volatile. Whether it took it.
+static bool node_machine_enumeration_value(NodeMachine* machine, uint32_t a, uint32_t node, CheckValue* value, CheckConversion* conversion)
+{
+    const CheckValue* operand = machine->values + a;
+    const bool taken = operand->category == CHECK_LVALUE && (uint8_t)(machine->words[a] >> 16) == BUSTER_TYPE_KIND_ENUM &&
+                       (type_qualifiers(operand->type) & BUSTER_TYPE_VOLATILE) == 0 && (operand->flags & BUSTER_CHECK_VOLATILE_PART) == 0 &&
+                       node_machine_complete(machine, operand->type, node);
+    if (taken)
+    {
+        check_value_copy(value, operand);
+        value->constant_kind = value->constant_kind == CHECK_CONSTANT_ADDRESS || (value->flags & BUSTER_CHECK_ICE) == 0 ? CHECK_CONSTANT_NONE : value->constant_kind;
+        value->type = type_conversion_operand(machine->types, value->type);
+        value->category = CHECK_RVALUE;
+        value->flags &= ~(BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART);
+        *conversion = (CheckConversion){ .type = value->type, .flags = BUSTER_CHECK_CONVERT_LVALUE };
+    }
+    return taken;
+}
+
+// A call's argument, record `a` of call node `node`, as check_action_call converts it in the common cases, into `value`
+// (its value as an operand reads it, converted) and `conversion`: for a parameter of type `parameter`, as an assignment
+// converts it (node_machine_arithmetic_assignable's, or a null pointer constant's or a pointer node_machine_pointer_assignable
+// takes to a pointer); a variadic one (`parameter` 0) by the default argument promotions, of an arithmetic type or to the
+// same pointer type. Whether they took it: the action takes the rest, as an atomic value's.
+static bool node_machine_argument(NodeMachine* machine, uint32_t a, uint32_t node, TypeId parameter, CheckValue* value, CheckConversion* conversion)
+{
+    TypeTable* types = machine->types;
+    bool taken = (node_machine_operand_value(machine, a, value, conversion) || node_machine_enumeration_value(machine, a, node, value, conversion)) &&
+                 check_action_kind(types, value->type) != BUSTER_TYPE_KIND_ATOMIC;
+    if (taken && parameter != 0)
+    {
+        taken = check_action_kind(types, parameter) != BUSTER_TYPE_KIND_ATOMIC;
+        const TypeId destination = taken ? type_conversion_operand(types, parameter) : 0;
+        if (taken && check_action_kind(types, destination) == BUSTER_TYPE_KIND_POINTER)
+        {
+            const uint32_t extensions = check_graph_context(machine->graph, node, false).extensions;
+            taken = check_action_null(types, value, extensions) || node_machine_pointer_assignable(machine, destination, value->type);
+        }
+        else if (taken)
+        {
+            taken = node_machine_arithmetic_assignable(machine, destination, value->type);
+        }
+        if (taken)
+        {
+            check_action_conversion(types, value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, conversion, node);
+        }
+    }
+    else if (taken)
+    {
+        const TypeId original = type_unqualified(type_strip_aligned(types, value->type));
+        check_action_promote(types, value, conversion, node);
+        TypeId destination = type_default_argument_promote(types, value->type);
+        destination = original == BUSTER_TYPE_FLOAT || original == BUSTER_TYPE_HALF ? BUSTER_TYPE_DOUBLE : destination;
+        destination = type_conversion_operand(types, destination);
+        const bool pointer = destination == value->type && check_action_kind(types, destination) == BUSTER_TYPE_KIND_POINTER;
+        taken = pointer || node_machine_arithmetic_assignable(machine, destination, value->type);
+        if (taken)
+        {
+            check_action_conversion(types, value, destination, destination != value->type ? BUSTER_CHECK_CONVERT_PROMOTION : 0, conversion, node);
+        }
+    }
+    return taken;
+}
+
+// T's call, record `r` (node `node`) of callee record `a`, by check_action_call's steps where its callee's prototype takes
+// its arguments' count, its result is void or complete at the node's position and node_machine_argument takes each
+// argument: whether it typed the node, its arguments' conversions in their column (NodeMachine.argument_conversions).
+static bool node_machine_call_rule(NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
+{
+    TypeTable* types = machine->types;
+    const TypeId function = node_machine_callee_function(machine, a);
+    CheckValue callee;
+    CheckConversion callee_conversion;
+    bool taken = function != 0 && node_machine_operand_value(machine, a, &callee, &callee_conversion) && callee.fault == CHECK_FAULT_NONE;
+    uint32_t parameters = 0;
+    const TypeId* parameter_types = taken ? type_parameters(types, function, &parameters) : NULL;
+    const uint8_t flags = taken ? types->types.flags[type_index(function)] : 0;
+    const uint32_t count = machine->argument_counts[r];
+    const TypeId result = taken ? type_return(types, function) : 0;
+    taken = taken && (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && count >= parameters && ((flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || count == parameters) &&
+            (check_action_kind(types, result) == BUSTER_TYPE_KIND_VOID || node_machine_complete(machine, result, node));
+    CheckValue* value = machine->values + r;
+    if (taken)
+    {
+        // check_action_call's result: its return type's rvalue with an effect, and its callee's and its arguments' flags.
+        node_machine_put_value(value, result, CHECK_RVALUE, BUSTER_CHECK_SIDE_EFFECT, CHECK_CONSTANT_NONE, 0, 0);
+        check_action_inherit(value, &callee);
+    }
+    const uint32_t first = machine->argument_first[r];
+    for (uint32_t i = 0; taken && i < count; i += 1)
+    {
+        CheckValue argument;
+        taken = node_machine_argument(machine, machine->arguments[first + i], node, i < parameters ? parameter_types[i] : 0, &argument, machine->argument_conversions + first + i);
+        if (taken)
+        {
+            check_action_inherit(value, &argument);
+        }
+    }
+    if (taken)
+    {
+        const CheckConversion none = { 0 };
+        node_machine_set(machine, r, CHECK_OP_CALL, &callee_conversion, &none, 0);
+    }
+    return taken;
+}
+
 // T's direct rules for the operators whose type a lookup gives, each by its action's own steps for the common case, the
 // action taking the rest: whether one typed record `r` (node `node`, operator `op`, operands' records `a` and `b`).
 static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
@@ -825,12 +1037,17 @@ static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, C
     {
         typed = node_machine_pointer_rule(machine, r, node, op, a, b);
     }
+    else if (op == CHECK_OP_CALL)
+    {
+        typed = node_machine_call_rule(machine, r, node, a);
+    }
     return typed;
 }
 
 // T's exact path for record `r` (node `node`, operator `op`): the action itself, as the graph run calls it, on the
-// operands' records, into `result`.
-static void node_machine_action(const NodeMachine* machine, uint32_t r, CheckOp op, CheckActionResult* result)
+// operands' records, into `result`, and a call's on its arguments' records, their conversions into
+// `argument_conversions` (as check_graph_action gives the action the stream's).
+static void node_machine_action(const NodeMachine* machine, uint32_t r, CheckOp op, CheckConversion* argument_conversions, CheckActionResult* result)
 {
     const CheckGraph* graph = machine->graph;
     const uint32_t node = node_machine_node(machine, r);
@@ -848,6 +1065,17 @@ static void node_machine_action(const NodeMachine* machine, uint32_t r, CheckOp 
         {
             check_value_copy(&action.operands[k], machine->values + operand);
         }
+    }
+    if (op == CHECK_OP_CALL)
+    {
+        const uint32_t first = machine->argument_first[r];
+        action.argument_count = machine->argument_counts[r];
+        for (uint32_t i = 0; i < action.argument_count; i += 1)
+        {
+            check_value_copy(machine->argument_values + i, machine->values + machine->arguments[first + i]);
+        }
+        action.arguments = machine->argument_values;
+        action.argument_conversions = argument_conversions;
     }
     check_action_compute(machine->types, &action, result, 0, NULL);
 }
@@ -880,12 +1108,19 @@ static bool node_machine_same_as_action(const NodeMachine* machine, uint32_t r, 
 {
     CheckActionResult result;
     memset(&result, 0, sizeof(result));
-    node_machine_action(machine, r, op, &result);
+    node_machine_action(machine, r, op, machine->verified, &result);
     const CheckValue* value = machine->values + r;
-    return result.diagnostic == CHECK_DIAG_NONE && node_machine_same_values(&result.value, value) &&
-           result.conversions[0].type == machine->converted[2 * r] && result.conversions[1].type == machine->converted[2 * r + 1] &&
-           result.conversions[0].flags == machine->conversion_flags[2 * r] && result.conversions[1].flags == machine->conversion_flags[2 * r + 1] &&
-           result.member_offset == machine->member_offsets[r];
+    bool same = result.diagnostic == CHECK_DIAG_NONE && node_machine_same_values(&result.value, value) &&
+                result.conversions[0].type == machine->converted[2 * r] && result.conversions[1].type == machine->converted[2 * r + 1] &&
+                result.conversions[0].flags == machine->conversion_flags[2 * r] && result.conversions[1].flags == machine->conversion_flags[2 * r + 1] &&
+                result.member_offset == machine->member_offsets[r];
+    // A call's arguments' conversions too.
+    const uint32_t first = machine->argument_first[r];
+    for (uint32_t i = 0; op == CHECK_OP_CALL && i < machine->argument_counts[r]; i += 1)
+    {
+        same = same && machine->verified[i].type == machine->argument_conversions[first + i].type && machine->verified[i].flags == machine->argument_conversions[first + i].flags;
+    }
+    return same;
 }
 
 // T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
@@ -897,6 +1132,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
     machine->first = first;
     machine->root = root;
     machine->count = refusal == NODE_MACHINE_TAKEN ? count : 0;
+    machine->argument_total = 0;
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < machine->count)
     {
@@ -915,6 +1151,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             refusal = context ? NODE_MACHINE_REFUSED_CONTEXT : value->overload_head != 0 || !valid ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
             machine->left[r] = UINT32_MAX;
             machine->right[r] = UINT32_MAX;
+            machine->lowest[r] = r;
             machine->converted[2 * r] = value->type;
             machine->converted[2 * r + 1] = 0;
             machine->conversion_flags[2 * r] = 0;
@@ -928,17 +1165,27 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             const uint32_t c = node_machine_operand(machine, r, 2);
             machine->left[r] = a;
             machine->right[r] = b;
+            // Its subtree's least record (a call's arguments' too, node_machine_arguments).
+            uint32_t lowest = a < r ? machine->lowest[a] : r;
+            lowest = b < r && machine->lowest[b] < lowest ? machine->lowest[b] : lowest;
+            machine->lowest[r] = c < r && machine->lowest[c] < lowest ? machine->lowest[c] : lowest;
+            const bool call = op == CHECK_OP_CALL;
             if (!node_machine_code(op))
             {
                 refusal = NODE_MACHINE_REFUSED_CODE;
             }
-            else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST || graph->argument_counts[node] != 0)
+            else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST ||
+                     (call ? a == UINT32_MAX || !node_machine_arguments(machine, r, node) : graph->argument_counts[node] != 0))
             {
                 refusal = NODE_MACHINE_REFUSED_SHAPE;
             }
             else if (context)
             {
                 refusal = NODE_MACHINE_REFUSED_CONTEXT;
+            }
+            else if (call && node_machine_callee_refused(machine, r, node, a))
+            {
+                refusal = NODE_MACHINE_REFUSED_CALLEE;
             }
             else if (!machine->scalar && a != UINT32_MAX && c == UINT32_MAX &&
                      ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
@@ -950,7 +1197,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             {
                 CheckActionResult result;
                 memset(&result, 0, sizeof(result));
-                node_machine_action(machine, r, op, &result);
+                node_machine_action(machine, r, op, machine->argument_conversions + (call ? machine->argument_first[r] : 0), &result);
                 refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
                 node_machine_store(machine, r, op, &result);
                 machine->action_nodes += 1;

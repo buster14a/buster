@@ -4,8 +4,8 @@
 // #2524's node machine's C sweep (c_check_node_machine.c has the machine): node_machine_contexts walks the records
 // down from the root and gives each evaluated one its template in its context (node_machine_classify, #1048's
 // check_lower_template_classify rules read from the records), and its evaluated operands their contexts and targets
-// (node_machine_evaluate). It reads the records T typed through the record accessors alone, and writes its own columns
-// through them.
+// (node_machine_evaluate); a call's by node_machine_classify_call, the lowering's plain call. It reads the records T typed
+// through the record accessors alone, and writes its own columns through them.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_CONTEXTS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_CONTEXTS_INCLUDED
 
@@ -46,12 +46,15 @@ static uint8_t node_machine_child_context(const NodeMachine* machine, uint32_t c
     return context;
 }
 
-// Record `child` evaluated by its consumer with `address` and `target`.
+// Record `child` evaluated by its consumer, the record C is classifying, with `address` and `target`: below one more
+// call where its consumer is one.
 static void node_machine_evaluate(NodeMachine* machine, uint32_t child, bool address, TypeId target)
 {
+    const uint32_t consumer = machine->classified;
     node_machine_record_set_evaluated(machine, child);
     node_machine_record_set_context(machine, child, node_machine_child_context(machine, child, address, target));
     node_machine_record_set_target(machine, child, target);
+    node_machine_record_set_call_depth(machine, child, node_machine_record_call_depth(machine, consumer) + (node_machine_record_op(machine, consumer) == CHECK_OP_CALL));
 }
 
 // Whether the unsigned division or remainder at record `r` is by a constant power of two, which the tasks write as a
@@ -269,6 +272,42 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
     return kind;
 }
 
+// C's classification of call record `r`: the lowering's plain call (check_lower_call_body's `plain`: a result of a plain
+// scalar or void, parameters and arguments of plain scalars, none a transparent union's), evaluated for its value. Its
+// callee is then evaluated for its value, without a conversion, where the call is through a pointer, and each argument to
+// its conversion's type, as the call's tasks push them. BUSTER_NODE_MACHINE_TEMPLATE_CALL, or CHECK_LOWER_TEMPLATE_NONE
+// for any other call: a struct's, a union's, a long double's, a 128-bit integer's, a half-precision or an atomic value's
+// argument, parameter or result, which the lowering passes otherwise.
+static CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
+{
+    const TypeTable* types = machine->types;
+    const uint32_t a = node_machine_record_left(machine, r);
+    const TypeId function = node_machine_callee_function(machine, a);
+    const uint32_t count = node_machine_record_argument_count(machine, r);
+    bool plain = (node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) == 0 && function != 0 &&
+                 check_lower_plain_scalar(node_machine_word(machine, node_machine_record_type(machine, r)), true);
+    uint32_t parameters = 0;
+    const TypeId* parameter_types = plain ? type_parameters(types, function, &parameters) : NULL;
+    for (uint32_t i = 0; plain && i < parameters; i += 1)
+    {
+        plain = check_lower_plain_scalar(node_machine_word(machine, parameter_types[i]), false);
+    }
+    for (uint32_t i = 0; plain && i < count; i += 1)
+    {
+        plain = check_lower_plain_scalar(node_machine_word(machine, node_machine_record_argument_converted(machine, r, i)), false) &&
+                (node_machine_record_argument_conversion_flags(machine, r, i) & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0;
+    }
+    if (plain && node_machine_direct_callee(machine, a) == 0)
+    {
+        node_machine_evaluate(machine, a, false, 0);
+    }
+    for (uint32_t i = 0; plain && i < count; i += 1)
+    {
+        node_machine_evaluate(machine, node_machine_record_argument(machine, r, i), false, node_machine_record_argument_converted(machine, r, i));
+    }
+    return plain ? BUSTER_NODE_MACHINE_TEMPLATE_CALL : CHECK_LOWER_TEMPLATE_NONE;
+}
+
 // C: every evaluated record's template and its operands' contexts and targets, down from the root, which its consumer
 // evaluates with `context` and converts to `target`; `object` is what a root INITIALIZE initializes.
 static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object)
@@ -280,13 +319,16 @@ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t co
     node_machine_record_set_evaluated(machine, root);
     node_machine_record_set_context(machine, root, context);
     node_machine_record_set_target(machine, root, target);
+    node_machine_record_set_call_depth(machine, root, 0);
     uint32_t r = count;
     while (refusal == NODE_MACHINE_TAKEN && r != 0)
     {
         r -= 1;
         if (node_machine_record_evaluated(machine, r))
         {
-            const CheckLowerTemplate kind = node_machine_classify(machine, r, r == root ? object : 0);
+            machine->classified = r;
+            const CheckLowerTemplate kind = node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
+                                                                                                   node_machine_classify(machine, r, r == root ? object : 0);
             node_machine_record_set_template(machine, r, kind);
             refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;
             machine->stopped = r;
