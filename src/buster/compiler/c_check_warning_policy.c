@@ -82,6 +82,9 @@ static bool check_warning_option(uint32_t id, String8 option)
                       id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
                       id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS || id == CHECK_WARNING_ID_USER_DEFINED_WARNINGS || id == CHECK_WARNING_ID_MULTICHAR;
     matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
+    // -Wint-conversion is -Wconversion's, so -Wnon-gcc's; -Wreturn-mismatch -Wreturn-type's, so -Wmost's and -Wall's (#1963).
+    matches |= id == CHECK_WARNING_ID_INT_CONVERSION && check_diagnostic_option(option, "-Wnon-gcc");
+    matches |= id == CHECK_WARNING_ID_RETURN_MISMATCH && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     // -Wconstant-conversion holds -Wbitfield-constant-conversion, which holds -Wsingle-bit-bitfield-constant-conversion;
     // -Wconversion holds all three, and -Wnon-gcc -Wconversion (#1447).
     const bool constant_conversion = id == CHECK_WARNING_ID_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION ||
@@ -205,6 +208,19 @@ static CheckWarningCommandLine check_warning_command_line(const PPOptions* optio
     result.severity = result.quiet ? CHECK_WARNING_IGNORE : mapped;
     result.mapped = mapped;
     return result;
+}
+
+// Whether the command line demotes or ignores any of clang's conversions that default to errors (#1963,
+// CHECK_WARNING_ID_INT_CONVERSION to CHECK_WARNING_ID_RETURN_MISMATCH): then every token is relaxed
+// (BUSTER_CHECK_RELAXED_TOKEN), and the driver gives each conversion its group's severity. -w alone demotes none.
+static bool check_warning_default_error_relaxed(const PPOptions* options)
+{
+    bool relaxed = false;
+    for (uint32_t id = CHECK_WARNING_ID_INT_CONVERSION; id <= CHECK_WARNING_ID_RETURN_MISMATCH; id += 1)
+    {
+        relaxed |= check_warning_command_line(options, id, false, true).mapped < CHECK_WARNING_ERROR;
+    }
+    return relaxed;
 }
 
 // A grouped diagnose_if's command-line mapping (#1447): clang's custom diagnostic of warning group `group` (its index in
