@@ -6,7 +6,8 @@ Status: step 0, the census, is built and its gate holds
 corpus, `-g` included, but its sweeps cost 167 cycles a taken node where the
 gate asks for 120 (188 with `&&`, `||` and `?:` and 202 with calls, each measured
 on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cost
-more a node), and it codes only part of the set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
+more a node; T's per-unit answers for calls then take 15 off the three,
+[below](#calls-cost-in-t-two-per-unit-answers)), and it codes only part of the set (calls, `&&`, `||` and `?:` since [below](#calls); not yet the increments
 and the compound assignments). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
@@ -1009,6 +1010,62 @@ on `sqlite3.c`, against the split's 171.0 and 659.9. The nodes calls add cost
   and a pair of types' conversion, as the design's memo has it.
 
 `-c sqlite3.c` is unchanged: 124.1 ms against 124.0 ms, with the same
+instructions.
+
+### Calls' cost in T: two per-unit answers
+
+The two costs of T's own that calls brought are now answered from per-unit state
+([the record](https://github.com/buster14a/buster-performance/tree/3b080ff3f00a671fa8ce95bb6f3847ea3017be3d/docs/measurements/node-machine-call-cost-2524-2026-11-12)):
+
+- **The callee's pointer type.** `NodeMachine.function_pointers` holds a
+  function type's pointer type by type index, filled at the type's first
+  designator by `type_pointer`, its twin. A callee's conversion, and a function
+  argument's, is then one load.
+- **The arguments' conversions.** `NodeMachine.argument_memo` is 1,024
+  direct-mapped entries of 16 bytes (`node_machine_argument_memo`). Each holds
+  `node_machine_argument`'s answer, whether it took the argument and the
+  conversion, by three keys: the argument record's type, its standing (an
+  lvalue, an integer constant, or neither) and the parameter's type.
+  - **Only an argument the rule reads nothing else of is a key:** no constant
+    but an address or an integer; none of a null pointer's, a bit-field's, a
+    register array's or a volatile part's flags; no enumeration's lvalue, whose
+    completeness at the node the rule asks.
+  - **A hit inherits the record's value as it is.** The conversion changes
+    nothing that `check_action_inherit` reads for an integer, floating, pointer
+    or enumeration type, nor for an array or a function decayed to a pointer.
+  - **An integer constant's entry answers only where every integer constant of
+    its type converts alike** (`node_machine_memo_integers`). For a pointer
+    parameter it doesn't: a null pointer constant is taken and another integer
+    isn't.
+  - **The rule fills a miss and takes every other argument,** and `--verify`
+    checks each call it types against the action either way.
+
+The shadow forgets both before each timed sweep set, so each pass pays their
+fills as one compile of the unit would.
+
+On the 9700X, against main `afcb185e` (medians of ten alternating runs, `--passes
+11`; the comparison has 0 differences on `sqlite3.c`, Lua and musl, `-g` too,
+with main's counts):
+
+| T a taken node | main | with the answers |
+| --- | ---: | ---: |
+| `sqlite3.c`: cycles, instructions | 121.1, 446.7 | 109.8, 401.3 |
+| `sqlite3.c`, warm (`--repeat 2`, both runs) | 219.5, 891.1 | 199.6, 795.7 |
+| Lua: cycles, instructions | 126.8, 595.2 | 117.0, 542.8 |
+
+- **All three sweeps on `sqlite3.c`:** 215.1 cycles a node become 200.0. C and X
+  run the same instructions as before: the change is T's, and their 4 cycles
+  fewer are the caches' or the placement's.
+- **The profiles:** the interning falls from 2.4% to 1.1% of the run.
+  `check_action_convert_plain` falls from 3.5% to 2.6%; what remains of it is
+  mostly the stores' conversions, whose converted values are their records'.
+- **The memo on `sqlite3.c`:** 1,898 entries filled and 690 arguments left to
+  the rule, against the 33,320 arguments of its taken calls.
+
+Integer constants were most of what the first version left to the rule. Sharing
+their type's entry ran fewer instructions but more cycles on Lua; as keys of
+their own, a hit tests one key and one bit, and that version is the one kept.
+`-c sqlite3.c` is unchanged: 123.7 ms against 123.8 ms, with the same
 instructions.
 
 ### The baked tables, measured
