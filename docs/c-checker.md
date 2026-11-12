@@ -2548,14 +2548,22 @@ What the lowering covers past scalars (#145's programs):
   member's type gets clang's "cast to union type from type 'T' not present in
   union", and a cast to a struct from another type its "used type 'T' where
   arithmetic or pointer type is required", both at the `(`
-  (`check_semantic_expression`). Differences left:
+  (`check_semantic_expression`). A cast to an arithmetic or pointer type (or an
+  atomic one) from a record or an atomic cast's rvalue (#2375, #2230) is clang's
+  "operand of type 'T' where arithmetic or pointer type is required", at the operand's first token (the getExprLoc of the
+  lvalue conversion clang wraps it in, a member access's base too), T its type
+  after that conversion: a typedef's sugar kept, a qualified one's dropped
+  (`CT ct; (int)ct` is `'struct S'`), a cast's as written. A record's cast to
+  its own type (#2375, `check_warning_graph_nonscalar_cast`) is `-Wpedantic`'s
+  "C99 forbids casting nonscalar type 'T' to the same type", at the cast's
+  `(`, T as written (`'const T' (aka 'const struct S')`), off by default and
+  given by `-pedantic` and `-Wpedantic`. Differences left:
   - a function designator's decayed type in that error drops its parameters'
     typedef names, as buster's other diagnostics of a decayed function do;
-  - clang's `-Wpedantic` "C99 forbids casting nonscalar type 'T' to the same
-    type" isn't given;
-  - a cast to a scalar from a record keeps the generic error, where clang says
-    "operand of type 'T' where arithmetic or pointer type is required" at the
-    operand.
+  - where an error follows at the same expression, clang gives the cast's
+    `-Wpedantic` or `-Wgnu-union-cast` warning first, and buster after it: a
+    scalar cast of a same-type cast (`(int)(T)t`), and a file-scope
+    initializer's "initializer element is not a compile-time constant".
 
   `test-checker`'s programs (`c_check_program_union_cast_test.c`) run each
   kind of member, static initializers and a transparent union's cast against
@@ -3491,9 +3499,16 @@ What the lowering covers past scalars (#145's programs):
       the labels' own symbols, which the program's data reaches: clang's
       block-scope static `static void* t[] = { &&a };` holds the last clone's
       label addresses, since that clone is emitted last.
-    - A body with inline assembly is still compiled once, with the unit's
-      features. Its versions' names are symbols at that one code: those
-      plans are a body's own. A group with a reference, or a
+    - Each copy plans its asm statements for its own instruction set, as
+      clang's clones assemble each template again (#2247): a copy body's
+      statements have plans of their own past the statements'
+      (`CheckProgramAsms.copy_bases`, `check_program_asm_plan_of`), each
+      naming its statement (`CheckProgramAsm.statement`), whose index gives
+      `%=` its number and an asm goto's local labels and a helper's symbol
+      their names, so that the copies' differ. A label a template defines by
+      name is defined once per copy, a duplicate refused as in clang. A naked
+      function's body is still compiled once (`check_program_target_copy_refused`):
+      its templates are its whole code. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -3535,10 +3550,9 @@ What the lowering covers past scalars (#145's programs):
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
     resolver's result is named among clang's versions' distinct addresses.
-  - *Differences from clang's code.* A `target_clones` body with inline
-    assembly, a `switch` or an address-taken label is compiled once, with the
-    unit's features, where clang compiles a copy per version (each is valid
-    there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
+  - *Differences from clang's code.* A naked `target_clones` body is
+    compiled once, with the unit's features, where clang compiles a copy per
+    version (each is valid there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
     resolver is `.text`'s, not a COMDAT section's. Its
     unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
     its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again
@@ -5321,6 +5335,29 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name, clang's invalid expression, its rest is left out to its `;`, with the
   parser's error. Before C23 a name's call is an undeclared function's, which
   no search reads as a keyword (`whil (a)` stays a call).
+- **A parameter's unknown type name** (`ParseImplicitInt`'s
+  `DiagnoseUnknownTypeName`): clang corrects it to a typedef's name or a type
+  specifier's or storage class's keyword and reads the parameter with it,
+  "unknown type name 'myin'; did you mean 'myint'?" with "'myint' declared
+  here" (a keyword's has no note: `unsignd` is `unsigned`, `constt` is
+  `const`). The parse reads such a parameter in place, and the prefix view
+  reads it as `int` (`Parser.recovered_parameter_types`); where a unit's first
+  error is one, the driver takes that view, with every declaration before the
+  first other error, before a repair view, which would end at its declaration
+  (`check_prefix_parameter_view`), and the recovery rounds read past it. The
+  reader searches each such `int` whose source still spells the name, among the
+  declarations visible there, a block's own typedefs too
+  (`check_input_parameter_typo`, `check_typo_parameter`), and lists what it
+  suggests (`CheckInput.parameter_typo_tokens`, `CHECK_TYPO_PARAMETER`); the
+  driver reads the unit again with the type in the name's place, as for a
+  statement's start, and the error is its own. A name nothing is near keeps
+  the parser's "unknown type name" alone and reads as `int`.
+- **A parenthesized name before an operand** (`(myin)x`, clang's
+  `MaybeTypeCast`): the parse fails at the operand; clang reads the name as an
+  expression's, whose correction may be a typedef's ("use of undeclared
+  identifier 'myin'; did you mean 'myint'?"), and the expression is invalid
+  either way, with no recovery as a cast. The recovery view leaves the operand's
+  tail out as for a name before an operand (`check_driver_typo_tail`).
 - **A name after a block item's GNU attributes** that no binding of the parse
   names, which the parser reads as an implicit int's declarator
   (`parse_scalar_attribute_name`): clang's statement reader asks Sema what it
@@ -5376,6 +5413,13 @@ Left as they were:
   '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
   `__builtin_c23_va_start` named outside a call before C23).
 
+- A parameter's correction to a storage class (`statc v` to `static`) reads
+  the parameter with it, but buster lacks clang's "invalid storage class
+  specifier in function declarator" and stops reading that declaration
+  ("invalid or unsupported declaration"); so does a declaration's identifier
+  list (`int b(voi);`, clang's "a parameter list without types is only
+  allowed in a function definition"), which ends the reading before a later
+  parameter's search (#2498).
 - A statement start's correction whose statement then fails to parse in a way
   no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
   & 1`) ends the checking of its body there, as other such parse errors do;
@@ -6402,7 +6446,9 @@ reports.
 Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
 `check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
 conditions of statements and conditionals (`CheckBoolLikeConversion`, the
-operand itself and never a conditional's arms), and an initializer's,
+operand itself and never a conditional's arms), a static assertion's condition
+(#2409, `check_common_assertion_reach`; left: a failed assertion's, whose
+root its error leaves unwalked, gives none, where clang's precedes the error), and an initializer's,
 assignment's, return's or argument's conversion, whose conditional arms and
 comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
 or of two literals, always evaluates to one truth, which clang's evaluation

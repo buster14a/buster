@@ -1150,6 +1150,39 @@ static void check_warning_graph_union_cast(CheckInputReader* reader, const Check
     }
 }
 
+// A struct's or a union's cast to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar): -Wpedantic's
+// "C99 forbids casting nonscalar type 'T' to the same type" at the cast's `(`, its type as written, as soon as it is read,
+// in an unevaluated operand too. Off by default.
+static void check_warning_graph_nonscalar_cast(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t close = graph->tokens[node];
+    const TypeId target = graph->types != NULL ? graph->types[node] : 0;
+    const uint8_t kind = target != 0 ? type_kind(types, type_unqualified(type_strip_aligned(types, target))) : BUSTER_TYPE_KIND_NONE;
+    const bool same = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && node < stream->count &&
+                      (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE;
+    const uint32_t open = same && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
+                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    if (open < parser->tokens.count)
+    {
+        const uint32_t completion = graph->source_positions[node];
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_NONSCALAR_SAME_CAST,
+            .kind = CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
+            .token = open,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion > open ? completion : close + 1,
+            .payload = { .first_type = target, .name = check_input_operand_type_spelling(reader->output, parser, node), .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // -Wunevaluated-expression (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr): the expression
 // operand of a sizeof or an alignof (of no variable array type) and a _Generic's controlling expression are unevaluated,
 // and one with a side effect, as Expr::HasSideEffects finds it without the possible ones, warns at its expression's
@@ -1622,6 +1655,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 {
                     check_warning_graph_pointer_cast(&reader, stream, node);
                     check_warning_graph_union_cast(&reader, stream, node);
+                    check_warning_graph_nonscalar_cast(&reader, stream, node);
                 }
                 else if (op == CHECK_OP_CALL)
                 {

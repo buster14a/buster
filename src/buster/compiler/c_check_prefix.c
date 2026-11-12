@@ -143,6 +143,14 @@ static CheckPrefixStatus check_prefix_order(Parser* view, Arena* scratch)
     return status;
 }
 
+// Whether a parse diagnostic is a parameter's missing or unknown type, which the parser read in place as clang's does
+// (its recovered parameter is `int`).
+static bool check_prefix_parameter_error(const ParseDiagnostic* diagnostic)
+{
+    return diagnostic->parameter_type && (diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING ||
+                                          diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME);
+}
+
 static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* parser, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
@@ -169,9 +177,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
             {
                 const ParseDiagnostic* diagnostic = parser->diagnostics + i;
                 const uint32_t at = diagnostic->token < count ? diagnostic->token : count;
-                const bool parameter = diagnostic->parameter_type &&
-                    (diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING ||
-                     diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME);
+                const bool parameter = check_prefix_parameter_error(diagnostic);
                 if (diagnostic->error && (prefix->diagnostic == BUSTER_PARSE_NONE || at < first_error))
                 {
                     prefix->diagnostic = i;
@@ -197,12 +203,6 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
                              (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY))
                     {
                         end = token + 1;
-                        if (parameter_types && token >= first_error)
-                        {
-                            // Complete only the declaration containing the first error. Later declarations need
-                            // their own recovery decision, and any erased or structurally invalid node still cuts it.
-                            break;
-                        }
                     }
                 }
                 if (end != 0)
@@ -307,6 +307,34 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         prefix->parser = (Parser){ 0 };
     }
     return prefix->status;
+}
+
+// The prefix view of `parser` where its first error is a parameter's missing or unknown type, which the view reads as
+// `int` (clang's recovered parameter) with every declaration before the first other error: the driver takes it before
+// a repair view (check_repair_make), which would end at that parameter's declaration, so that each parameter's typo is
+// searched (#1447, check_input_parameter_typo) and the later declarations are checked. Whether it made one; `output` is
+// restored where it didn't.
+static bool check_prefix_parameter_view(CheckPrefix* prefix, const Parser* parser, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    bool first = parser->errors != 0 && parser->diagnostics != 0 && parser->diagnostic_count <= parser->diagnostic_capacity;
+    uint32_t at = UINT32_MAX;
+    for (uint32_t i = 0; first && i < parser->diagnostic_count; i += 1)
+    {
+        const ParseDiagnostic* diagnostic = parser->diagnostics + i;
+        const bool parameter = check_prefix_parameter_error(diagnostic);
+        const bool earlier = diagnostic->error && diagnostic->token < at;
+        first = earlier ? parameter : first;
+        at = earlier ? diagnostic->token : at;
+    }
+    const bool result = first && at != UINT32_MAX && check_prefix_make(prefix, parser, output, scratch) == CHECK_PREFIX_READY &&
+                        prefix->parser.recovered_parameter_types;
+    if (!result)
+    {
+        arena_pop_to(output, output_mark);
+        *prefix = (CheckPrefix){ 0 };
+    }
+    return result;
 }
 
 // A failed parse read as clang's recovery reads it (#147): where a declaration's `;` is missing before a declaration
@@ -642,7 +670,9 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* diagnostic = diagnostics + d;
-            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count);
+            // (A parameter's missing or unknown type, which the parse read in place, doesn't stop the rounds: the
+            // prefix view reads it as `int`, check_prefix_parameter_view.)
+            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !check_prefix_parameter_error(diagnostic);
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
             // The original parser abandoned this K&R header. Later diagnostics may have treated its remaining
             // parameter declarations as file scope, so re-establish the header before considering those repairs.
