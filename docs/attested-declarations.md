@@ -630,7 +630,7 @@ stage counters of the command with the skip:
 - **The asm matcher's index, 8%**:
   [#2532](https://github.com/buster14a/buster/issues/2532). Made once a
   process, musl's command takes 929 ms where it takes 1,008. Baked since
-  (`docs/c-inline-assembly.md`): 995.9 ms where `0af27a30` took 1,065.8.
+  (`docs/c-inline-assembly.md`): 991.4 ms where `0af27a30` took 1,064.2.
 - **The declarations still read**, about 470 M cycles after step 3: the
   reached, the unattested and the ineligible, the units' own tables first.
 - **The skipped tokens' parse**, 30 user cycles each: 89 M on musl (2% of the

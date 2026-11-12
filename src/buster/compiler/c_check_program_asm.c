@@ -1960,8 +1960,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
 // alone, so it is made once (#2532): baked into the executable (baked.h, #590) in the checker's unit, the C driver's, and
 // where it isn't baked (a PIE, BUSTER_BAKE=0, another unit's copy), by check_asm_index_initialize, which a command of
 // several units runs before its lanes start (c_checker_units.c) and a unit's planning otherwise runs at its first asm
-// statement. Making it was 0.7 million user cycles a unit with asm statements: 6.6% of musl's 1,336 units as one command
-// on the 9700X, 537 of them with asm statements.
+// statement. Making it was 0.76 million user cycles a unit with asm statements: 6.9% of musl's 1,336 units as one
+// command's cycles on the 9700X, 537 of them with asm statements.
 static BUSTER_BAKED_UNIT X86MatchIndex check_asm_index;
 static BUSTER_BAKED_UNIT bool check_asm_index_ready;
 

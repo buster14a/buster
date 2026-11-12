@@ -904,9 +904,9 @@ where it isn't baked, made before a command's units start on their lanes, or
 by a unit's planning at its first asm statement. Each unit with asm statements
 made it again before, 0.7 million user cycles a unit: on the 9700X, musl's
 1,336 units as one command on one lane (537 of them with asm statements) took
-1,065.8 ms of CPU and 5,900 M cycles at `0af27a30`, and take 995.9 ms and
-5,510 M baked, 1.07 times faster, with every object the same bytes (record
-`asm-index-2532-2026-11-12` in buster-performance).
+1,064.2 ms of CPU and 5,894 M cycles at `0af27a30`, and take 991.4 ms and
+5,488 M baked, 1.07 times faster, with every object the same bytes
+([record](https://github.com/buster14a/buster-performance/tree/478ba92011fa7847f48738998b363baabcabe141/docs/measurements/asm-index-2532-2026-11-12)).
 
 The matcher admits every form the form table has whose operands the
 assembler's grammar reads (#1134: [the assembler's guide](assembler.md)'s "The
