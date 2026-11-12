@@ -1018,7 +1018,7 @@ an object in a segment's space; the census refuses a bit-field's.
 
 On the 9700X at `6196395c`, on main `0af27a30` before #2569 had merged (CPU 2,
 under the lock;
-[the record](https://github.com/buster14a/buster-performance/tree/19494ae80595883601d191fbc05dace4ac1db93e/docs/measurements/node-machine-updates-2524-2026-11-12)):
+[the record](https://github.com/buster14a/buster-performance/tree/722bc1ea492efa797596744b847cdb34c5053803/docs/measurements/node-machine-updates-2524-2026-11-12)):
 
 | | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
 | --- | ---: | ---: | ---: |
@@ -1067,6 +1067,27 @@ segment after an operand's row, by its own state bit beside theirs. At
   5,141 of musl's.
 - **Instructions a taken node on `sqlite3.c`:** 714.8 against main's 695.3.
   On main's own expressions the code costs 0.4.
+
+With the split files (#2571) and calls (#2575) merged too, the updates live in
+the sweeps' files, reading the records through the accessors. At `5200426e`,
+against main `5f75ea52`:
+
+| | `sqlite3.c` | Lua 5.4.8, 34 files | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main | 242,002 (93.0%) | 53,385 (87.2%) | 98,763 (82.1%) |
+| machine-taken evaluated nodes, with the updates | 258,466 (99.4%) | 57,954 (94.7%) | 110,248 (91.6%) |
+| refused by code, main and with the updates | 3,616, 0 | 837, 0 | 2,630, 0 |
+| entries compared, calls compared | 353,246, 13,473 | 70,723, 4,064 | 149,651, 5,357 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **The machine now has a code for every operator the census takes.** What it
+  refuses is templates (on `sqlite3.c`, 159 expressions, most at a `-` or a
+  `/`), a few callees and rows. `main.c` and c-testsuite, run locally, take
+  98.4% and 99.8% of their census-taken nodes, with no difference.
+- **Instructions a taken node on `sqlite3.c`:** 779.5 against main's 764.1.
+  On main's own expressions the code costs 2.8. Of those, 2.0 are X's tests
+  for an update's destination, which one test of a state past `EVALUATED`
+  would fold.
 
 ## Expected gains
 
