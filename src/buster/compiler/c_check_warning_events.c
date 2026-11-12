@@ -205,6 +205,8 @@ enum
     // A relational comparison whose left operand is one, unparenthesized (#2264, clang's diagnoseChainedComparison):
     // -Wparentheses', an error by default.
     CHECK_WARNING_ID_CHAINED_COMPARISON = 143,
+    // An asm label on an automatic variable (#2370, clang's warn_asm_label_on_auto_decl): in no group, on by default.
+    CHECK_WARNING_ID_ASM_LABEL_ON_AUTO = 144,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -526,6 +528,9 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // An asm label on a block-scope object of automatic storage, not `register` (#2370, check_input_asm_labels): at the
+    // label's first string token, payload.token that token.
+    CHECK_WARNING_EVENT_ASM_LABEL_ON_AUTO,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
