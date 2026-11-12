@@ -2015,7 +2015,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         X86Instruction record = holes->memory;
         record.reg = holes->right;
         record.form = width == 1 ? X86_FORM_MOV_RM8_R8 : width == 2 ? X86_FORM_MOV_RM16_R16 : width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32;
-        if (holes->operation == X86_OPERATION_XCHG)
+        if (holes->compare_immediate)
+        {
+            // A constant's store (#2554): its low bytes as the immediate, sign-extended by an 8-byte store.
+            record.reg = 0;
+            record.form = width == 1 ? X86_FORM_MOV_RM8_IMM8 : width == 2 ? X86_FORM_MOV_RM16_IMM16 : width == 8 ? X86_FORM_MOV_RM64_IMM32 : X86_FORM_MOV_RM32_IMM32;
+            record.immediate = width == 1 ? (int8_t)holes->immediate : width == 2 ? (int16_t)holes->immediate : (int32_t)holes->immediate;
+        }
+        else if (holes->operation == X86_OPERATION_XCHG)
         {
             // The desired SSA value can remain live after this store. Xchg returns the discarded old value in the
             // reserved scratch instead; keep the memory record last for a frame address's displacement patch.
@@ -2948,7 +2955,8 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
 // A COPY's source_width is the plan's record of that certificate, which both paths' plans must agree on; the emitter
 // doesn't read it, since a copy in its own register is nothing at every width (#1116, tier1_select_expand).
-// A comparison with compare_memory reads values[1:2] as its address's base/index, and values[0] as the other register
+// A store with compare_immediate (#2554) stores `immediate`, its constant's bits, rather than a register: its values[2]
+// is NONE. A comparison with compare_memory reads values[1:2] as its address's base/index, and values[0] as the other register
 // (NONE for a memory/immediate comparison). Its width is the exact access width; its predicate already accounts for
 // operand swapping or a zero extension removed from the load. Its frame object is patched into the CMP, not SETcc/JMP.
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
@@ -6138,6 +6146,32 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.rule = store ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS;
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
+        // A constant stored (#2554): `mov $imm, mem` at the access's width, its immediate the constant's low bytes (an
+        // 8-byte store's sign-extends, where the constant fits), for each form above. The constant's node then computes
+        // nothing for this store. An exchange (a seq_cst store) takes a register.
+        uint64_t stored = 0;
+        if (store && base.operation != X86_OPERATION_XCHG && base.values[2] == b && tier1_select_constant(function, b, &stored) &&
+            (base.width != 8 || tier1_select_immediate_fits(8, stored)))
+        {
+            Tier1SelectPattern immediate = base;
+            immediate.values[2] = BUSTER_IR_NONE;
+            immediate.immediate = stored;
+            immediate.compare_immediate = true;
+            tier1_select_fold(forest, node, b, &immediate);
+            if (!walked || folded.stack_object == BUSTER_IR_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, immediate);
+            }
+            if (walked)
+            {
+                Tier1SelectPattern both = folded;
+                both.values[2] = BUSTER_IR_NONE;
+                both.immediate = stored;
+                both.compare_immediate = true;
+                tier1_select_fold(forest, node, b, &both);
+                tier1_select_add_candidate(forest, node, &candidates, both);
+            }
+        }
     }
     else if (op == IR_ICMP && (function->type[a] == IR_I32 || function->type[a] == IR_I64 || function->type[a] == IR_PTR))
     {
@@ -6426,6 +6460,8 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
             rank = 1;
             break;
         }
+        // A store of a constant's immediate over its register's, where the constant is another node's too (#2554).
+        rank += (pattern->rule == TIER1_RULE_STORE || pattern->rule == TIER1_RULE_STORE_ADDRESS) && pattern->compare_immediate ? 1u : 0u;
         rank += 16u * pattern->fold_count;
         if (rank > priority)
         {
