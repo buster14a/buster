@@ -734,6 +734,15 @@ base `6a021550e`, the tagged edge spills, reloads and moves fell from 469 M to
 (100 ln(head / base) of -4.91 and -8.25), head faster at every layout
 ([the record](https://github.com/buster14a/buster-performance/tree/c8cc523034dd4035161800a4d0940e287a8975dc/docs/measurements/tier1-loop-carried-1216-2026-11-09)).
 
+At main `c5f0efb2` (2026-11-12) the same measurement gives 1.42 and 1.39 times
+clang -O2's time, and gaps of 1,160 M and 1,780 M instructions; a ladder of
+LLVM's own pieces ranks what is left by time, and the compiler itself is
+measured as a third program. [The unit inlining design](tier1-unit-inlining.md)
+(#2541) has those tables, the ranking with each cause's issue, the design of
+the first-ranked lever that no issue owns (inlining the unit's small functions
+whatever their control flow, with a prototype's measurements), and the
+inventory of what stands between Tier 1 and `-O1` and above.
+
 ## Current integration boundary
 
 The implementation now consumes the shared IR and the upstream local-SSA

@@ -277,6 +277,11 @@ clang inlines have several blocks: `index2value`, `luaV_mod`, `prepCallInfo`,
 the lanes pays only once the scope takes callees with control flow and stack
 objects.
 
+[The unit inlining design](tier1-unit-inlining.md) (#2541) is the design for
+that scope: callees with control flow and calls of their own, expanded from
+summaries built once a unit between the emission's halves, with what a
+prototype of the block-level splice measured on the 9700X.
+
 These are local correctness diagnostics. Full source-corpus coverage,
 independent native before/after comparisons, translation-unit driver
 integration, compile-time and generated-code measurements on the locked
