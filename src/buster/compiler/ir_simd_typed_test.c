@@ -1989,6 +1989,97 @@ static void ir_simd_typed_test_lane_moves(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the front end's one-lane moves and movemasks decode to the IR's lane_extract, lane_insert and movemask\n", decoded_rows);
 }
 
+// The reductions (#1840): clang's __builtin_reduce_min, _max (both signs), _add, _mul, _and, _or and _xor of doublewords
+// and quadwords at 16, 32 and 64 bytes, as the producer gives them (check_vector_reduce_shape_rows): a row into the
+// general register, or the first of two rows into 16 bytes, decodes as the IR's reduce of its lanes and operation,
+// written out, at exactly its records' features and the vector's moves; a second row, the lane's move, as lane_extract
+// of lane 0. Each is refused without each feature it needs and under 6 changes.
+static void ir_simd_typed_test_reductions(IrTestTally* tally)
+{
+    static const CBuiltinId builtins[7] = { CBUILTIN_REDUCE_MIN, CBUILTIN_REDUCE_MAX, CBUILTIN_REDUCE_ADD, CBUILTIN_REDUCE_MUL, CBUILTIN_REDUCE_AND, CBUILTIN_REDUCE_OR, CBUILTIN_REDUCE_XOR };
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    uint32_t split = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t k = 0; tables && k < 7; k += 1)
+    {
+        for (uint32_t size = 2; size < 4; size += 1)
+        {
+            for (uint32_t sign = 0; sign < (k < 2 ? 2u : 1u); sign += 1)
+            {
+                for (uint32_t width = 0; width < 3; width += 1)
+                {
+                    const uint32_t bytes = 16u << width;
+                    const CheckVectorShape shape = { .lanes = bytes >> size, .bytes = bytes, .element = (uint8_t)(1u << size), .integer = true, .is_signed = sign != 0 };
+                    Tier0Operation rows[BUSTER_CHECK_VECTOR_REDUCE_ROWS];
+                    uint32_t count = 0;
+                    const char* reason = check_vector_reduce_shape_rows(&every, builtins[k], shape, rows, &count);
+                    // Written out: minimum 0 and 1, maximum 2 and 3 (the signed one odd), then sum, product, and, or and xor.
+                    const uint32_t operation = k < 2 ? 2 * k + sign : k + 2;
+                    const uint32_t flags = size | operation << 2;
+                    char description[224];
+                    snprintf(description, sizeof(description), "reduction 0x%x at %u bytes: the producer's rows", flags, bytes);
+                    ir_test_expect(tally, reason == NULL && (count == 1 || count == 2), description);
+                    for (uint32_t r = 0; reason == NULL && r < count; r += 1)
+                    {
+                        const Tier0Operation* row = &rows[r];
+                        uint64_t expected = ir_typed_vector_moves(row->operand_bytes[0], all);
+                        for (uint32_t i = 0; i < row->record_count; i += 1)
+                        {
+                            expected |= x86_target_requirement(row->records[i].form) & ~BUSTER_X86_TARGET_KNOWN;
+                        }
+                        IrSimdTypedOperation decoded;
+                        memset(&decoded, 0xa5, sizeof(decoded));
+                        const IrSimdTypedStatus status = ir_simd_typed_row(row, all, &decoded);
+                        const bool reduced = r == 0 && status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.reduce && decoded.immediate == flags && decoded.lane_move == 0;
+                        const bool moved = r == 1 && status == IR_SIMD_TYPED_OK && !decoded.machine && !decoded.reduce && decoded.lane_move == BUSTER_IR_INTRINSIC_LANE_EXTRACT + 1 &&
+                                           decoded.immediate == size;
+                        snprintf(description, sizeof(description), "reduction 0x%x at %u bytes, row %u: the IR's reduce, or lane 0's extraction, at exactly its features", flags, bytes, r);
+                        ir_test_expect(tally, (reduced || moved) && decoded.required_features == expected, description);
+                        decoded_rows += reduced;
+                        split += moved;
+                        for (uint32_t f = 0; r == 0 && f < BUSTER_ARRAY_LENGTH(features); f += 1)
+                        {
+                            IrSimdTypedOperation without;
+                            memset(&without, 0x5a, sizeof(without));
+                            const IrSimdTypedStatus refused = ir_simd_typed_row(row, all & ~features[f], &without);
+                            const bool required = ((expected | ir_typed_vector_moves(row->operand_bytes[0], all & ~features[f])) & features[f]) != 0;
+                            ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.reduce,
+                                           "a reduction without a feature it needs stays the machine row, and needs no other");
+                        }
+                        for (uint32_t m = 0; r == 0 && m < 6; m += 1)
+                        {
+                            Tier0Operation changed = *row;
+                            X86Instruction* first = &changed.records[0];
+                            X86Instruction* shuffle = &changed.records[changed.record_count - (changed.result_class == BUSTER_TYPED_CLASS_VECTOR ? 2 : 3)];
+                            switch (m)
+                            {
+                            case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+                            case 1: changed.records[1].mode = BUSTER_X86_MEMORY_BASE; break;
+                            case 2: shuffle->immediate ^= 0xff; break;
+                            case 3: changed.records[1].vvvv = BUSTER_TIER0_ROLE_VECTOR(1); break;
+                            // One record fewer: two would leave a bitwise reduction of doublewords the quadwords' one, which it is.
+                            case 4: changed.record_count -= 1; break;
+                            case 5: changed.result_class = changed.result_class == BUSTER_TYPED_CLASS_VECTOR ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_F64; break;
+                            }
+                            memset(&decoded, 0xa5, sizeof(decoded));
+                            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (status == IR_SIMD_TYPED_OK && !decoded.reduce),
+                                           "a changed reduction's row is not the IR's reduce");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Minima and maxima of both signs and the five others, of 2 lane sizes at 3 widths; the doublewords' at 64 bytes split.
+    ir_test_expect(tally, decoded_rows == (4 + 5) * 2 * 3 && split == 4 + 5, "every doubleword and quadword reduction decodes");
+    printf("  IR SIMD rows: %u of the front end's reductions decode to the IR's reduce, %u second rows to lane_extract\n", decoded_rows, split);
+}
+
 // The AES rounds (#1840): vaesenc and vaesenclast, EVEX at each width and VEX at 16 and 32 bytes, VECTOR(0) the state
 // and VECTOR(1) the round key, decode as the IR's aes of their round at exactly their form's features; refused without
 // VAES and under 4 changes.
@@ -2259,6 +2350,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_compresses(tally);
     ir_simd_typed_test_masked_memory(tally);
     ir_simd_typed_test_lane_moves(tally);
+    ir_simd_typed_test_reductions(tally);
     ir_simd_typed_test_aes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);

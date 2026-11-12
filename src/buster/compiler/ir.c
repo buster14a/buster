@@ -307,7 +307,21 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_LANE_EXTRACT 31u
 #define BUSTER_IR_INTRINSIC_LANE_INSERT 32u
 #define BUSTER_IR_INTRINSIC_MOVEMASK 33u
-#define BUSTER_IR_INTRINSIC_COUNT 34u
+// A reduction of a vector's integer lanes (#1840), unary: its result a 16-byte vector (V4I32) each of whose lanes is
+// the operation of all of a's lanes, a a vector of 16, 32 or 64 bytes; its flags the lanes' bytes' log2 in bits 0 and 1
+// (2 or 3: doublewords or quadwords) and the operation in bits 2 to 5 (BUSTER_IR_REDUCE_*): the unsigned (0) and signed
+// (1) minimum, the unsigned (2) and signed (3) maximum, as lane_op's, then the wrapping sum (4) and product (5), and
+// the and (6), or (7) and xor (8). Clang's __builtin_reduce_* code halves the vector (vextracti64x4, vextracti32x4,
+// then vpshufd 0x4e and, of doublewords, 0xb1), each half combined with the other, which leaves every lane of the last
+// 16 bytes the result; lane_extract's lane 0 then takes it.
+#define BUSTER_IR_INTRINSIC_REDUCE 34u
+#define BUSTER_IR_INTRINSIC_COUNT 35u
+#define BUSTER_IR_REDUCE_ADD 4u
+#define BUSTER_IR_REDUCE_MUL 5u
+#define BUSTER_IR_REDUCE_AND 6u
+#define BUSTER_IR_REDUCE_OR 7u
+#define BUSTER_IR_REDUCE_XOR 8u
+#define BUSTER_IR_REDUCE_OPERATIONS 9u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -864,6 +878,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_extract",
     "lane_insert",
     "movemask",
+    "reduce",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2108,6 +2123,11 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     valid = b == BUSTER_IR_NONE && lanes != 0 &&
                             (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
                                                                     type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_REDUCE)
+                {
+                    // A reduction of doublewords or quadwords into each lane of 16 bytes.
+                    valid = b == BUSTER_IR_NONE && type == IR_V4I32 && ir_vector_type(ta) && (part & 3) >= 2 && (part >> 2) < BUSTER_IR_REDUCE_OPERATIONS;
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_INSERT)
                 {
@@ -3575,7 +3595,8 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
-                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK)
+                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
+                                c == BUSTER_IR_INTRINSIC_REDUCE)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }
