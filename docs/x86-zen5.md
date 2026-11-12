@@ -309,6 +309,13 @@ A masked load merging into its destination still has no row (above). Its one lan
 cycle), `vpinsrb` to `vpinsrq` (4.5, 1 per cycle), and `vpmovmskb`, `vmovmskps` and `vmovmskpd` of
 an xmm and a ymm register (4.5 and 6.5, 2 per cycle)
 ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-lane-moves-1840-2026-11-11)).
+Its masked operations (Tier 1's `vselect` of an operation, item 5) then added 164: 155 `MASKED` rows of
+every form `tier1_select_masked_binary` can make (the integer sums, differences, products and variable
+shifts, the floating arithmetic and the lane operations, under a merging opmask, at every width that had
+none), and the `REGISTER` rows of the EVEX variable shifts' doubleword forms, which their zeroing takes.
+A merging opmask adds a cycle of latency to the integer sums (3 cycles, 4 per cycle, as `vpaddd`'s
+64-byte row had it) and leaves the products', the floating operations' and the divisions' at their unmasked
+values ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-masked-operations-1840-2026-11-12)).
 
 What the rows say, a few families (cycles; derived values in italics):
 
