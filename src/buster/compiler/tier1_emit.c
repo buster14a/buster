@@ -323,6 +323,9 @@ struct Tier1EmitResult
     // Recomputed values' definitions that nothing read, which the CFG consumer leaves out (tier1_emit_cfg_dead_definition).
     uint32_t dropped_definitions;
     uint32_t jumps;
+    // Jumps to a block that starts with an indirect jump, which took a copy of it instead (#2554,
+    // tier1_emit_cfg_dispatch): GNU C's computed goto's dispatch, a branch of its own at each jump.
+    uint32_t dispatch_copies;
     // In the CFG consumer, each of the function's labels' first record (IrFunction.labels, #789), where the driver defines
     // its symbol: its block's first record, or where the indirect jump that may go to it has a stub for that edge, the
     // stub's (tier1_emit_cfg_labels), or UINT32_MAX for an absent label no indirect branch reaches. There are label_count
