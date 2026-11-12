@@ -1714,13 +1714,44 @@ static bool check_semantic_overload_before(const TypeTable* types, const CheckOv
            left->failure != right->failure ? left->failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS : located;
 }
 
+// clang's fix-it words of a candidate's argument `node` of type `source` that converts to no `target` (#2384,
+// ConversionFixItGenerator in an overload's note): a pointer whose pointee is the target's type, "; dereference the
+// argument with *" ("; remove &" of an `&x`); an lvalue of no pointer type where the target is a pointer to an object,
+// "; take the address of the argument with &" ("; remove *" of a `*p`); else none.
+static const char* check_semantic_overload_hint(const TypeTable* types, const CheckStream* stream, uint32_t node, TypeId source, TypeId target)
+{
+    const CheckGraph* graph = stream->graph;
+    const TypeId from = type_strip_aligned(types, source);
+    const TypeId to = type_strip_aligned(types, target);
+    uint32_t written = node;
+    for (uint32_t steps = 0; written < graph->count && steps < graph->count && graph->ops[written] == CHECK_OP_VALUE && graph->operand0[written] < graph->count;
+         steps += 1)
+    {
+        written = graph->operand0[written];
+    }
+    const CheckOp op = written < graph->count ? graph->ops[written] : CHECK_OP_COUNT;
+    const bool pointer = type_kind(types, from) == BUSTER_TYPE_KIND_POINTER;
+    const char* result = "";
+    if (pointer && type_unqualified(type_strip_aligned(types, type_element(types, from))) == type_unqualified(to))
+    {
+        result = op == CHECK_OP_ADDRESS ? "; remove &" : "; dereference the argument with *";
+    }
+    else if (!pointer && type_kind(types, to) == BUSTER_TYPE_KIND_POINTER && node < stream->count && check_stream_category(stream, node) == CHECK_LVALUE &&
+             type_kind(types, type_strip_aligned(types, type_element(types, to))) != BUSTER_TYPE_KIND_FUNCTION)
+    {
+        result = op == CHECK_OP_DEREFERENCE ? "; remove *" : "; take the address of the argument with &";
+    }
+    return result;
+}
+
 // A call of an overload set that no candidate is viable for, or several are (#1447): clang's "no matching function for
 // call to 'f'" with each candidate's note, or "call to 'f' is ambiguous" with its best's ("candidate function"), at the
-// callee's name. The candidates' outcomes are the selection's again (check_overload_explain). NULL, and the checker's own
-// error, where a candidate failed by an argument's conversion (clang's "no known conversion" notes) or the notes are
-// more than the report holds.
+// callee's name. The candidates' outcomes are the selection's again (check_overload_explain), a candidate that failed by
+// an argument's conversion with clang's "no known conversion" note (#2384). NULL, and the checker's own error, where the
+// notes are more than the report holds.
 static const char* check_semantic_overload_call(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count, Arena* scratch)
+                                                CheckWarningSpelling* spell, uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count,
+                                                Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     uint32_t low = 0;
@@ -1770,7 +1801,7 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     {
         const uint8_t failure = explained[i].failure;
         renderable = ambiguous || failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS || failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS ||
-                     failure == CHECK_OVERLOAD_FAILURE_DISABLED;
+                     failure == CHECK_OVERLOAD_FAILURE_DISABLED || (failure == CHECK_OVERLOAD_FAILURE_CONVERSION && explained[i].argument < argument_count);
         // (An ambiguous call's notes are its best's alone, which are listed first.)
         explained[shown] = explained[i];
         shown += !ambiguous || explained[i].best ? 1u : 0u;
@@ -1798,6 +1829,29 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
             const String8 message = check_warning_strings_value(parser, pp, input->conditions[explained[i].condition].message, scratch);
             text = message.length != 0 ? check_warning_text(scratch, "candidate disabled: %.*s", (int)message.length, message.pointer) :
                                          "candidate disabled: <no message provided>";
+        }
+        else if (!ambiguous && explained[i].failure == CHECK_OVERLOAD_FAILURE_CONVERSION)
+        {
+            // clang's DiagnoseBadConversion (#2384): "no known conversion from 'A' to 'P' for Nth argument", the argument's type
+            // after its lvalue conversion, the parameter's, the argument's ordinal, with clang's fix-it words where the
+            // argument's address or its pointee would convert (check_semantic_overload_hint).
+            const uint32_t index = explained[i].argument;
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + index];
+            uint32_t parameter_count = 0;
+            const TypeId* parameters = type_parameters(types, type_strip_aligned(types, candidate->type), &parameter_count);
+            const TypeId parameter = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+            const TypeId value = check_semantic_value_type(types, check_stream_type(stream, argument), false);
+            const String8 from = value != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value,
+                                                                        check_semantic_operand_spelling(parser, input, stream, types, argument)) :
+                                              (String8){ "", 0 };
+            const String8 to = parameter != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, parameter, 0) : (String8){ "", 0 };
+            const uint32_t ordinal = index + 1;
+            const char* suffix = ordinal % 100 >= 11 && ordinal % 100 <= 13 ? "th" : ordinal % 10 == 1 ? "st" : ordinal % 10 == 2 ? "nd" : ordinal % 10 == 3 ? "rd" : "th";
+            const char* hint = parameter != 0 ? check_semantic_overload_hint(types, stream, argument, value, parameter) : "";
+            text = from.length != 0 && to.length != 0 ?
+                   check_warning_text(scratch, "candidate function not viable: no known conversion from %.*s to %.*s for %u%s argument%s", (int)from.length,
+                                      from.pointer, (int)to.length, to.pointer, ordinal, suffix, hint) : NULL;
+            renderable = text != NULL;
         }
         else if (!ambiguous)
         {
@@ -1865,7 +1919,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     // A call of an overload set none or several of whose candidates are viable (#1447), whose text is clang's where its
     // notes can be.
     const char* overloaded = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CALL && graph->overload_count != 0 ?
-                             check_semantic_overload_call(parser, pp, input, stream, types, node, location, note, &note_count, scratch) : NULL;
+                             check_semantic_overload_call(parser, pp, input, stream, types, spell, node, location, note, &note_count, scratch) : NULL;
     if (overloaded != NULL)
     {
         result = overloaded;
