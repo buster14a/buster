@@ -141,6 +141,10 @@ struct IrSimdTypedOperation
     // and whether it is clang's leading zero count with a second operand, that operand's lane where the first's is zero.
     bool lane_unary;
     bool lane_unary_zero;
+    // A floating operation at its own rounding (#1840, ir_simd_typed_fround): whether the row is one, its flags in
+    // `immediate`; and a truncating conversion of lane 0 (ir_simd_typed_cvtt), the same.
+    bool fround;
+    bool cvtt;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -2019,10 +2023,91 @@ static IrSimdTypedStatus ir_simd_typed_lane_unary(const Tier0Operation* source, 
     return status;
 }
 
+// A floating operation at its own rounding (#1840): a row of two 64-byte vectors into one, one record of
+// ir_simd_fround_forms' (vaddps to vdivpd with embedded rounding), VECTOR(0) in vvvv and VECTOR(1) in rm into VECTOR(0),
+// register-direct, its decorations the rounding alone (the builtins' _mm512_add_round_ps to _mm512_div_round_pd with
+// _MM_FROUND_NO_EXC and a direction). Its features its form's and the vectors' moves. It is the IR's fround.
+static IrSimdTypedStatus ir_simd_typed_fround(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const bool shaped = source->operand_count == 2 && source->record_count == 1 && source->result_class == BUSTER_TYPED_CLASS_VECTOR && source->result_bytes == 64 &&
+                        source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == 64 &&
+                        source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == 64;
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t operation = 0; shaped && operation < 4; operation += 1)
+    {
+        for (uint32_t lanes = 0; lanes < 2; lanes += 1)
+        {
+            const X86Instruction expected = {
+                .form = ir_simd_fround_forms[operation][lanes],
+                .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+                .vvvv = BUSTER_TIER0_ROLE_VECTOR(0),
+                .rm = BUSTER_TIER0_ROLE_VECTOR(1),
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = (uint8_t)(record->decorations & BUSTER_X86_DECORATION_ROUNDING),
+            };
+            if (memcmp(record, &expected, sizeof(expected)) == 0)
+            {
+                candidate.fround = true;
+                candidate.immediate = (uint8_t)(operation | lanes << 2 | (uint32_t)(record->decorations & BUSTER_X86_DECORATION_ROUNDING) >> 2);
+                candidate.required_features = ir_typed_vector_moves(64, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+            }
+        }
+    }
+    const IrSimdTypedStatus status = candidate.fround && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = IR_SIMD_V16I32;
+        candidate.operand_count = 2;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
+// A truncating conversion of lane 0 (#1840): a row of one 16-byte vector into an integer of 4 or 8 bytes, one record of
+// ir_simd_cvtt_forms' (vcvttss2si, vcvttsd2si), INTEGER_RESULT in reg and VECTOR(0) in rm, register-direct and
+// undecorated (the builtins' _mm_cvttss_si32 to _mm_cvttsd_si64 at _MM_FROUND_CUR_DIRECTION). Its features its form's
+// and the vector's moves. It is the IR's cvtt.
+static IrSimdTypedStatus ir_simd_typed_cvtt(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint32_t bytes = tier0_class_integer(source->result_class) ? tier0_class_bytes(source->result_class) : 0;
+    const bool shaped = source->operand_count == 1 && source->record_count == 1 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == 16 &&
+                        (bytes == 4 || bytes == 8);
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t lane = 0; shaped && lane < 2; lane += 1)
+    {
+        const X86Instruction expected = {
+            .form = ir_simd_cvtt_forms[lane][bytes == 8],
+            .reg = BUSTER_TIER0_ROLE_INTEGER_RESULT,
+            .rm = BUSTER_TIER0_ROLE_VECTOR(0),
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+        {
+            candidate.cvtt = true;
+            candidate.immediate = (uint8_t)(lane | (bytes == 8 ? 2u : 0u));
+            candidate.required_features = ir_typed_vector_moves(16, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.cvtt && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = IR_SIMD_V4I32;
+        candidate.operand_count = 1;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
 // comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, conversions and
 // shifts by a scalar count, lane operations, masks to vectors and back, masked loads and stores, one lane's moves,
-// reductions and the lanes' unary operations (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
+// reductions, the lanes' unary operations, floating operations at their own rounding and truncating conversions of
+// lane 0 (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
 // whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
 // vector, a width change, a permute, a conversion or a shift, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
@@ -2108,6 +2193,14 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_lane_unary(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_fround(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && tier0_class_integer(source->result_class))
+    {
+        status = ir_simd_typed_cvtt(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {

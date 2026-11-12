@@ -37,6 +37,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "host_math.h"
 
 #define BUSTER_TIER1_MASKS_TEST_BUFFER 256
 // The native entry's xmm0 and xmm1 (#1280, tier1_masks_test_call): a double's and a float's bits, signaling NaNs past
@@ -160,6 +161,13 @@ struct Tier1MasksTest
     // the IR's.
     uint32_t unary_attempts;
     uint32_t unary_rows;
+    // The floating operations at their own rounding (#1840, tier1_masks_test_frounds): those tried, and those through
+    // every stage as the IR's.
+    uint32_t fround_attempts;
+    uint32_t fround_rows;
+    // The truncating conversions of lane 0 (#1840, tier1_masks_test_cvtts): those tried, and those through every stage.
+    uint32_t cvtt_attempts;
+    uint32_t cvtt_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -6379,6 +6387,264 @@ static void tier1_masks_test_lane_unaries(Tier1MasksTest* test)
     free(program);
 }
 
+// A floating operation at its own rounding's row (#1840): `flags` the IR's fround flags (operation, lanes, rounding), one
+// record of its _ER form, VECTOR(0) in vvvv and VECTOR(1) in rm into VECTOR(0), the rounding in its decorations, as the
+// front end's rule rows of _mm512_add_round_ps to _mm512_div_round_pd have it. ir_simd_typed_test.c reads it too.
+static Tier0Operation tier1_masks_test_fround_row(uint32_t flags)
+{
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    row.records[0] = check_vector_lower_record(ir_simd_fround_forms[flags & 3][(flags >> 2) & 1], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(1));
+    row.records[0].decorations = (uint8_t)(((flags >> 3) & 3) << 5);
+    row.record_count = 1;
+    row.operand_count = 2;
+    row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+    row.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+    row.operand_bytes[0] = 64;
+    row.operand_bytes[1] = 64;
+    row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+    row.result_bytes = 64;
+    return row;
+}
+
+// C's operation of two lanes in the rounding mode the flags name, by host_fesetround and volatile operands: the
+// expectation of the floating operations at their own rounding.
+static uint64_t tier1_masks_test_fround_oracle(uint32_t flags, uint64_t a, uint64_t b)
+{
+    static const int modes[4] = { FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO };
+    const int saved = host_fegetround();
+    const uint32_t operation = flags & 3;
+    uint64_t result = 0;
+    host_fesetround(modes[(flags >> 3) & 3]);
+    if ((flags & 4) == 0)
+    {
+        volatile float x = 0;
+        volatile float y = 0;
+        volatile float z = 0;
+        const uint32_t xa = (uint32_t)a;
+        const uint32_t yb = (uint32_t)b;
+        memcpy((void*)&x, &xa, sizeof(xa));
+        memcpy((void*)&y, &yb, sizeof(yb));
+        z = operation == 0 ? x + y : operation == 1 ? x - y : operation == 2 ? x * y : x / y;
+        uint32_t word = 0;
+        memcpy(&word, (const void*)&z, sizeof(word));
+        result = word;
+    }
+    else
+    {
+        volatile double x = 0;
+        volatile double y = 0;
+        volatile double z = 0;
+        memcpy((void*)&x, &a, sizeof(a));
+        memcpy((void*)&y, &b, sizeof(b));
+        z = operation == 0 ? x + y : operation == 1 ? x - y : operation == 2 ? x * y : x / y;
+        memcpy(&result, (const void*)&z, sizeof(result));
+    }
+    host_fesetround(saved);
+    return result;
+}
+
+// The floating operations at their own rounding through the IR to Tier 1 (#1840): every operation, lanes and rounding's
+// row (tier1_masks_test_fround_row) as the program's only row in 4 statements of the input buffer's vectors k and k + 1
+// into the output's vector k, inputs whose lanes are random floats of nearby magnitudes, ties and specials.
+// tier1_masks_test_typed_pipeline takes each through the IR as its fround, which the interpreter runs at every stage, and
+// Tier 1 natively, against C's operation in that rounding mode.
+static void tier1_masks_test_frounds(Tier1MasksTest* test)
+{
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the floating operations' memory");
+    uint64_t state = test->random ^ UINT64_C(0x9b05688c2b3e6c1f);
+    for (uint32_t flags = 0; ready && flags < 32; flags += 1)
+    {
+        const uint32_t lane_bits = (flags & 4) != 0 ? 64 : 32;
+        const uint64_t output_mark = test->output.length;
+        test->fround_attempts += 1;
+        Tier0Operation row = tier1_masks_test_fround_row(flags);
+        char name[96];
+        snprintf(name, sizeof(name), "fround 0x%x", flags);
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t st = 0; st < 4; st += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, st * 8);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, st * 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 64);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (st + 1) * 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 64);
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, 64);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        bool ok = tier1_masks_test_expect(test, !program->overflow, "the floating operation's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            // Floats of a few binades around 1 (sums and products that round), and now and then a special.
+            static const uint64_t specials[2][4] = { { 0, UINT64_C(0x7f800000), UINT64_C(0x7fc00000), UINT64_C(0x7f7fffff) },
+                                                     { 0, UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff8000000000000), UINT64_C(0x7fefffffffffffff) } };
+            for (uint32_t lane = 0; lane < BUSTER_TIER1_MASKS_TEST_IN * 8 / lane_bits; lane += 1)
+            {
+                const uint64_t random = tier0_test_mask_random(&state);
+                const uint64_t sign = (random & 1) << (lane_bits - 1);
+                const uint64_t value = (random & 0x1e) == 0 ? specials[lane_bits == 64][(random >> 5) & 3] | sign :
+                                       lane_bits == 32 ? sign | (UINT64_C(124) + ((random >> 5) & 7)) << 23 | ((random >> 8) & UINT64_C(0x7fffff)) :
+                                                         sign | (UINT64_C(1020) + ((random >> 5) & 7)) << 52 | ((random >> 8) & UINT64_C(0xfffffffffffff));
+                memcpy((uint8_t*)in + lane * (lane_bits / 8), &value, lane_bits / 8);
+            }
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t st = 0; st < 4; st += 1)
+            {
+                const uint8_t* a = (const uint8_t*)in + st * 64 % 256;
+                const uint8_t* b = (const uint8_t*)in + (st + 1) * 64 % 256;
+                for (uint32_t lane = 0; lane < 512 / lane_bits; lane += 1)
+                {
+                    uint64_t x = 0;
+                    uint64_t y = 0;
+                    memcpy(&x, a + lane * (lane_bits / 8), lane_bits / 8);
+                    memcpy(&y, b + lane * (lane_bits / 8), lane_bits / 8);
+                    const uint64_t z = tier1_masks_test_fround_oracle(flags, x, y);
+                    memcpy(wanted + st * 64 + lane * (lane_bits / 8), &z, lane_bits / 8);
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a floating operation at its own rounding is the IR's, not a machine row");
+        test->fround_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the floating operations return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            arena_pop_to(&arenas[r], 0);
+        }
+    }
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        arena_release(&arenas[r]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
+// A truncating conversion of lane 0's row (#1840): `flags` the IR's cvtt flags (bit 0 a double, bit 1 a 64-bit result),
+// one record of ir_simd_cvtt_forms', INTEGER_RESULT in reg and VECTOR(0) in rm, as the front end's rule rows of
+// _mm_cvttss_si32 to _mm_cvttsd_si64 have it. ir_simd_typed_test.c reads it too.
+static Tier0Operation tier1_masks_test_cvtt_row(uint32_t flags)
+{
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    row.records[0] = check_vector_lower_record(ir_simd_cvtt_forms[flags & 1][(flags >> 1) & 1], BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, BUSTER_TIER0_ROLE_VECTOR(0));
+    row.record_count = 1;
+    row.operand_count = 1;
+    row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+    row.operand_bytes[0] = 16;
+    row.result_class = (flags & 2) != 0 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+    return row;
+}
+
+// The truncating conversions of lane 0 through the IR to Tier 1 (#1840): each lane and result's row as the program's only
+// row in 4 statements of the input buffer's vector k into the output's word k, lanes of every magnitude around both
+// ranges' edges, NaNs and infinities. tier1_masks_test_typed_pipeline takes each through the IR as its cvtt, which the
+// interpreter runs at every stage, and Tier 1 natively, against x86's result written out with long double bounds.
+static void tier1_masks_test_cvtts(Tier1MasksTest* test)
+{
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the truncating conversions' memory");
+    uint64_t state = test->random ^ UINT64_C(0x3c6ef372a54ff53a);
+    for (uint32_t flags = 0; ready && flags < 4; flags += 1)
+    {
+        const bool is_double = (flags & 1) != 0;
+        const bool wide = (flags & 2) != 0;
+        const uint64_t output_mark = test->output.length;
+        test->cvtt_attempts += 1;
+        Tier0Operation row = tier1_masks_test_cvtt_row(flags);
+        char name[64];
+        snprintf(name, sizeof(name), "cvtt %u", flags);
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t st = 0; st < 4; st += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, st);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, st * 2);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, 16);
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, 0);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        bool ok = tier1_masks_test_expect(test, !program->overflow, "the truncating conversion's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t st = 0; st < 4; st += 1)
+            {
+                // A value of 2^-2 to 2^65 in magnitude, either sign, now and then an edge, an infinity or a NaN.
+                const uint64_t random = tier0_test_mask_random(&state);
+                static const double edges[8] = { 2147483647.5, 2147483648.0, -2147483648.75, -2147483649.0, 0x1.fffffffffffffp62, -0x1p63, INFINITY, NAN };
+                const double magnitude = ldexp(1.0 + (double)(random >> 12) * 0x1p-52, (int)((random >> 4) % 68) - 2);
+                const double x = (random & 7) == 0 ? edges[(random >> 3) & 7] : ((random >> 3) & 1) != 0 ? -magnitude : magnitude;
+                const double value = is_double ? x : (double)(float)x;
+                in[st * 2 + 1] = 0;
+                if (is_double)
+                {
+                    memcpy(&in[st * 2], &value, sizeof(value));
+                }
+                else
+                {
+                    const float single = (float)value;
+                    uint32_t word = 0;
+                    memcpy(&word, &single, sizeof(word));
+                    in[st * 2] = word;
+                }
+                const long double limit = wide ? 0x1p63L : 0x1p31L;
+                const bool fits = value == value && (long double)value > -limit - 1.0L && (long double)value < limit;
+                const uint64_t result = !fits ? (wide ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)) : wide ? (uint64_t)(int64_t)value : (uint64_t)(uint32_t)(int32_t)value;
+                memcpy(wanted + st * 8, &result, wide ? 8 : 4);
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a truncating conversion is the IR's, not a machine row");
+        test->cvtt_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the truncating conversions return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            arena_pop_to(&arenas[r], 0);
+        }
+    }
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        arena_release(&arenas[r]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The masked loads and stores through the IR to Tier 1 (#1840): vmovdqu8 to vmovdqu64 at each width, a load's merged
 // under a mask from the input into a passthrough and moved into the result, a store's of an input vector under one, each
 // as the program's only row in 4 statements: a load's from the input buffer's vector k into the output's vector k, its
@@ -6994,6 +7260,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_lane_moves(&test);
             tier1_masks_test_reductions(&test);
             tier1_masks_test_lane_unaries(&test);
+            tier1_masks_test_frounds(&test);
+            tier1_masks_test_cvtts(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -7008,7 +7276,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
-                                                                               test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows),
+                                                                               test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -7080,6 +7348,11 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the lanes' population counts, leading zero counts and conflicts: %u through the IR's interpreter, SSA, the optimizer and Tier 1 "
                "natively as its lane_unary\n",
                test.unary_rows);
+        tier1_masks_test_expect(&test, test.fround_attempts == 32 && test.fround_rows == test.fround_attempts, "every floating operation at its own rounding goes through the IR and Tier 1");
+        printf("test-tier1-masks: the floating operations at their own rounding: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its fround\n",
+               test.fround_rows);
+        tier1_masks_test_expect(&test, test.cvtt_attempts == 4 && test.cvtt_rows == test.cvtt_attempts, "every truncating conversion goes through the IR and Tier 1");
+        printf("test-tier1-masks: the truncating conversions of lane 0: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its cvtt\n", test.cvtt_rows);
         printf("test-tier1-masks: the front end's masks to vectors and back: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as vpmovm2 and vpmov2m\n",
                test.mask_vector_rows);
         printf("test-tier1-masks: the front end's shifts by an int: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its shift\n", test.shift_rows);

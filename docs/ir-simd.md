@@ -1487,6 +1487,107 @@ The tests:
   interpreter at every stage and Tier 1 natively, against C. The population
   counts' target adds BITALG and VPOPCNTDQ to x86-64-v4's; a host that runs
   Tier 1's code natively without them leaves those 12 to `test-ir-simd`.
+## Floating operations at their own rounding (#1840)
+
+One more binary `intrinsic` kind, `fround` (`BUSTER_IR_INTRINSIC_FROUND`), is
+a floating operation of two 64-byte vectors' lanes at a rounding of its own,
+its exceptions suppressed:
+
+```text
+%3 = intrinsic.v16i32 %2, %1 fround 13
+```
+
+- **Operands:** a and b are of the result's type, which is `v16i32`: AVX-512
+  embeds a rounding in its 64-byte register forms alone.
+- **Flags:** the operation in bits 0 and 1 (`a + b`, `a - b`, `a * b`,
+  `a / b`), the lanes in bit 2 (floats, doubles) and the rounding in bits 3 and
+  4 (to nearest, down, up, toward zero: EVEX's and MXCSR's order).
+- **Semantics:** each lane is x86's packed operation's in that rounding,
+  whatever MXCSR holds, and sets none of its flags. So the kind reads no
+  floating environment.
+- **Model:** `IR_SIMD_FROUND` (`ir_simd_float_rounded`) runs the host's scalar
+  SSE instruction (`addss` to `divsd`) with MXCSR's rounding set to the flags',
+  then restores MXCSR and its flags. That is the lane exactly as the packed form
+  computes it, NaNs included; the compiler runs on x86-64 alone.
+- **Passes:** SCCP folds two constant vectors by the model. GVN and LICM take it
+  as pure and total, since it reads no MXCSR and writes none of it.
+
+**Decoder** (`ir_simd_typed_fround`): the builtins' `_mm512_add_round_ps` to
+`_mm512_div_round_pd` with `_MM_FROUND_NO_EXC` and a direction are one record of
+`ir_simd_fround_forms`' `_ER` form, VECTOR(0) in vvvv and VECTOR(1) in rm into
+VECTOR(0), its decorations the rounding alone. With `_MM_FROUND_CUR_DIRECTION`
+they are the ordinary forms, the IR's `fadd` to `fdiv`.
+
+**Tier 1** selects the same record (`BUSTER_TIER1_VECTOR_FROUND`), the rounding
+in its decorations. Seven of the eight `_ER` forms had no Zen 5 row; they were
+measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-fround-1840-2026-11-12)), as
+their forms without rounding are: `vaddpd`, `vsubps` and `vsubpd` 2 cycles,
+`vmulps` and `vmulpd` 3, `vdivps` 10 and `vdivpd` 13, 2 per cycle for the
+first five, and a `vdivps` every 2.5 cycles and a `vdivpd` every 4.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against main (`91a87ab2`), with the
+truncating conversions below:
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 6 | 6 |
+| `main_unit_backend.c` | 162 | 136 |
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `fround` exactly of two 64-byte vectors
+  of its type at every flags byte below 32. The model is checked against C's
+  operation in that rounding mode (`host_fesetround`, volatile operands) on
+  random lanes, ties, overflow, underflow, zeros, infinities and NaNs, and
+  leaves MXCSR as it was.
+- **`test-ir-parse`:** `tests/ir/fround.ir` round-trips.
+- **`test-ir-simd`:** the 32 rows (4 operations, 2 lane sizes, 4 roundings)
+  decode at exactly AVX512F, refused without it and under 6 changes.
+- **`test-tier1-masks`:** the 32 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C in each rounding
+  mode, so that the processor checks the model.
+
+## Truncating conversions of lane 0 (#1840)
+
+One more unary `intrinsic` kind, `cvtt` (`BUSTER_IR_INTRINSIC_CVTT`), converts a
+16-byte vector's lane 0 into an integer as x86 does:
+
+```text
+%4 = intrinsic.i64 %1 cvtt 3
+```
+
+- **Flags:** bit 0 makes the lane a double (else a float), bit 1 the result an
+  `i64` (else an `i32`), which the verifier checks against the type.
+- **Semantics:** rounded toward zero. A NaN or a value past the result's range
+  gives its smallest value, x86's integer indefinite, where C's `fptosi` (and
+  the interpreter's) would be undefined. So the builtins' rows can't be the
+  IR's `fptosi`.
+- **Model:** `IR_SIMD_CVTT`, a scalar result in word 0, as `lane_extract`'s.
+  SCCP leaves it overdefined, and GVN and LICM don't move it, as the lane moves.
+
+**Decoder** (`ir_simd_typed_cvtt`): `_mm_cvttss_si32` to `_mm_cvttsd_si64` are
+one record of `vcvttss2si` or `vcvttsd2si`'s EVEX form, INTEGER_RESULT in reg
+and VECTOR(0) in rm. **Tier 1** selects the same record into the general
+destination (`BUSTER_TIER1_VECTOR_CVTT`). The four EVEX forms had no Zen 5 row;
+they were measured on the 9700X in the same record: 7.5 cycles of latency
+across the register files, as the legacy forms', 2 per cycle, two macro-ops.
+
+Machine rows: 10 of the 26 the table above counts in `main_unit_backend.c`
+are these conversions.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `cvtt` exactly of a `v4i32` into its
+  flags' integer. The model gives x86's results at both ranges' edges, for
+  infinities and for NaNs, against bounds written out in long double.
+- **`test-ir-parse`:** `tests/ir/fround.ir`'s second function.
+- **`test-ir-simd`:** the four rows decode at exactly their features, refused
+  without AVX512F and under 5 changes.
+- **`test-tier1-masks`:** the four run through both lowering paths, the
+  interpreter and Tier 1 natively on values of every magnitude around both
+  ranges, infinities and NaNs.
 
 ## Masks to vectors and back (#1840)
 
