@@ -910,7 +910,7 @@ static bool check_common_runtime_id(uint32_t id)
                         id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_DIVISION_BY_ZERO ||
                         id == CHECK_WARNING_ID_ARRAY_BOUNDS || id == CHECK_WARNING_ID_SIGN_COMPARE || id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE ||
                         id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || id == CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE ||
-                        id == CHECK_WARNING_ID_NULL_DEREFERENCE;
+                        id == CHECK_WARNING_ID_NULL_DEREFERENCE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE;
     return result;
 }
 
@@ -1094,6 +1094,8 @@ typedef struct CheckCommonEnabled CheckCommonEnabled;
 struct CheckCommonEnabled
 {
     bool sign_compare;
+    // -Wtautological-constant-out-of-range-compare's, on by default, which the comparison walk serves too.
+    bool out_of_range;
     bool self_assign;
     bool uninitialized;
     // Whether the unit names a tagged enumeration's enumerator or variable (CheckInput.enum_names), which an implicit
@@ -1788,6 +1790,47 @@ static void check_common_emit_kids(CheckCommonEmission* emission, uint32_t node,
     }
 }
 
+// The comparison walk's frames of `node`, in the order clang's AnalyzeImplicitConversions visits a full expression: a
+// comparison is analyzed before its operands (AnalyzeComparison), which are then visited left to right, as an
+// assignment's, a compound assignment's and a conditional's are (AnalyzeAssignment, CheckConditionalOperator); any other
+// node's children go on its work list in order and so are visited right to left, a call's last argument first.
+static void check_common_sign_scan(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckOp op = graph->ops[node];
+    const bool ordered = (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONDITIONAL ||
+                         (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    if (ordered)
+    {
+        // Pushed in reverse, its children pop left to right, and the comparison's own frame first. GNU's omitted-middle
+        // conditional reads its condition once, although both graph slots name it.
+        const bool repeated = op == CHECK_OP_CONDITIONAL && graph->operand1[node] == graph->operand0[node];
+        check_common_emit_reach(emission, graph->operand2[node], BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
+        check_common_emit_reach(emission, repeated ? BUSTER_CHECK_NONE : graph->operand1[node], BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
+        check_common_emit_reach(emission, graph->operand0[node], BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
+        if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
+        {
+            check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_SIGN_OWN);
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            check_common_emit_reach(emission, i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node],
+                                    BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
+        }
+        if (check_graph_has_arguments(op) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+        {
+            for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+            {
+                check_common_emit_reach(emission, graph->argument_nodes[graph->argument_offsets[node] + i], BUSTER_CHECK_EMIT_SIGN_SCAN,
+                                        BUSTER_CHECK_REACH_SIGN);
+            }
+        }
+    }
+}
+
 static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node);
 static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node);
 
@@ -2107,6 +2150,416 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
 
 
 
+static bool check_common_from_macro(const Parser* parser, const Preprocessor* pp, uint32_t token);
+
+// clang's PromotedRange::compare (SemaChecking.cpp) of a constant against an operand's range promoted to the comparison's
+// type: Less, Greater and InHole (a wrapped signed range's gap, NE alone) lie out of the range, Min, Max, OnlyValue and
+// InRange in it.
+#define BUSTER_CHECK_RANGE_LT 0x01u
+#define BUSTER_CHECK_RANGE_LE 0x02u
+#define BUSTER_CHECK_RANGE_GT 0x04u
+#define BUSTER_CHECK_RANGE_GE 0x08u
+#define BUSTER_CHECK_RANGE_EQ 0x10u
+#define BUSTER_CHECK_RANGE_NE 0x20u
+#define BUSTER_CHECK_RANGE_IN 0x40u
+#define BUSTER_CHECK_RANGE_LESS (BUSTER_CHECK_RANGE_LE | BUSTER_CHECK_RANGE_LT | BUSTER_CHECK_RANGE_NE)
+#define BUSTER_CHECK_RANGE_MIN (BUSTER_CHECK_RANGE_LE | BUSTER_CHECK_RANGE_IN)
+#define BUSTER_CHECK_RANGE_MAX (BUSTER_CHECK_RANGE_GE | BUSTER_CHECK_RANGE_IN)
+#define BUSTER_CHECK_RANGE_GREATER (BUSTER_CHECK_RANGE_GE | BUSTER_CHECK_RANGE_GT | BUSTER_CHECK_RANGE_NE)
+#define BUSTER_CHECK_RANGE_ONLY (BUSTER_CHECK_RANGE_LE | BUSTER_CHECK_RANGE_GE | BUSTER_CHECK_RANGE_EQ | BUSTER_CHECK_RANGE_IN)
+
+// Whether two bit patterns of `width` bits order a < b, read as `is_signed` says.
+static bool check_common_range_below(unsigned __int128 a, unsigned __int128 b, uint32_t width, bool is_signed)
+{
+    const bool result = is_signed ? check_common_integer_bits(a, width, true) < check_common_integer_bits(b, width, true) :
+                                    (a & check_action_mask(width)) < (b & check_action_mask(width));
+    return result;
+}
+
+// A constant `value` of the comparison's type (`width` bits, up to 128, `is_signed`) against the range of an operand of
+// `range_width` bits, nonnegative or not, promoted to that type, as PromotedRange's extOrTrunc builds it.
+static uint32_t check_common_range_compare(unsigned __int128 value, uint32_t width, bool is_signed, uint32_t range_width, bool nonnegative)
+{
+    const unsigned __int128 mask = check_action_mask(width);
+    unsigned __int128 minimum = 0;
+    unsigned __int128 maximum = 0;
+    if (range_width >= width && is_signed)
+    {
+        // Promotion made the type narrower: every value of the signed type is in range.
+        minimum = (unsigned __int128)1 << (width - 1);
+        maximum = minimum - 1;
+    }
+    else
+    {
+        // getMinValue and getMaxValue of the range's own width, extended (sign-extended when signed) or truncated.
+        const uint32_t own = range_width < width ? range_width : width;
+        minimum = nonnegative ? 0 : (~(unsigned __int128)0 << (own - 1)) & mask;
+        maximum = nonnegative ? check_action_mask(own) : check_action_mask(own - 1);
+    }
+    value &= mask;
+    uint32_t result = 0;
+    if (check_common_range_below(maximum, minimum, width, is_signed))
+    {
+        // A discontiguous range, which only an unsigned comparison of a signed operand has.
+        result = value == 0 ? BUSTER_CHECK_RANGE_MIN : value == mask ? BUSTER_CHECK_RANGE_MAX :
+                 value >= minimum || value <= maximum ? BUSTER_CHECK_RANGE_IN : BUSTER_CHECK_RANGE_NE;
+    }
+    else if (check_common_range_below(value, minimum, width, is_signed))
+    {
+        result = BUSTER_CHECK_RANGE_LESS;
+    }
+    else if (value == minimum)
+    {
+        result = minimum == maximum ? BUSTER_CHECK_RANGE_ONLY : BUSTER_CHECK_RANGE_MIN;
+    }
+    else
+    {
+        result = check_common_range_below(value, maximum, width, is_signed) ? BUSTER_CHECK_RANGE_IN :
+                 value == maximum ? BUSTER_CHECK_RANGE_MAX : BUSTER_CHECK_RANGE_GREATER;
+    }
+    return result;
+}
+
+// PromotedRange::constantValue: whether comparison `op` is always true (1), always false (0), or neither (-1) for a
+// constant whose place against the other operand's range is `place`.
+static int32_t check_common_range_truth(CheckOp op, uint32_t place, bool constant_right)
+{
+    uint32_t true_flag = BUSTER_CHECK_RANGE_EQ;
+    uint32_t false_flag = BUSTER_CHECK_RANGE_NE;
+    if (op == CHECK_OP_NOT_EQUAL)
+    {
+        true_flag = BUSTER_CHECK_RANGE_NE;
+        false_flag = BUSTER_CHECK_RANGE_EQ;
+    }
+    else if (op != CHECK_OP_EQUAL)
+    {
+        const bool lower = (op == CHECK_OP_LESS || op == CHECK_OP_GREATER_EQUAL) != constant_right;
+        true_flag = lower ? BUSTER_CHECK_RANGE_LT : BUSTER_CHECK_RANGE_GT;
+        false_flag = lower ? BUSTER_CHECK_RANGE_GE : BUSTER_CHECK_RANGE_LE;
+        const bool swap = op == CHECK_OP_GREATER_EQUAL || op == CHECK_OP_LESS_EQUAL;
+        const uint32_t held = true_flag;
+        true_flag = swap ? false_flag : true_flag;
+        false_flag = swap ? held : false_flag;
+    }
+    const int32_t result = (place & true_flag) != 0 ? 1 : (place & false_flag) != 0 ? 0 : -1;
+    return result;
+}
+
+// A comparison's range facts for -Wtautological-constant-out-of-range-compare (#2218): which side is the constant, the
+// comparison's type of the usual arithmetic conversions (`width`, up to 128 bits here, `is_signed`), the other operand's
+// own range (its type's, or a boolean's one bit), and the constant converted to the comparison's type.
+typedef struct CheckCommonValueRange CheckCommonValueRange;
+struct CheckCommonValueRange
+{
+    unsigned __int128 converted;
+    TypeId other_type;
+    uint32_t constant;
+    uint32_t other;
+    uint32_t width;
+    uint32_t range_width;
+    uint32_t place;
+    bool constant_right;
+    bool is_signed;
+    bool range_signed;
+    bool known_boolean;
+    // Whether the facts hold: a candidate outside a required constant whose types are integers.
+    bool ranged;
+};
+
+// The range facts of comparison `node` (CheckCommonValueRange), and the constant's place against the other operand's range
+// where the comparison's type is 128 bits or narrower (`place`, BUSTER_CHECK_RANGE_IN otherwise).
+static CheckCommonValueRange check_common_range_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    CheckCommonValueRange range = { .place = BUSTER_CHECK_RANGE_IN };
+    // A candidate (clang's CheckTautologicalComparison may find it out of range): outside a required constant, an integer
+    // constant expression on exactly one side, and on the other an operand whose range is narrower than the comparison's
+    // type, a narrower type's or a boolean's. An operand of the comparison's width covers all of its values, wrapped or not.
+    // Each operand's type is asked once: its own width, then its promotion's.
+    const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    const bool left_constant = check_common_integer_constant(stream, left) && (check_stream_flags(stream, left) & BUSTER_CHECK_ICE) != 0;
+    const bool right_constant = check_common_integer_constant(stream, right) && (check_stream_flags(stream, right) & BUSTER_CHECK_ICE) != 0;
+    const bool one = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) == 0 && left < graph->count && right < graph->count &&
+                     left_constant != right_constant;
+    range.constant_right = one && right_constant;
+    range.constant = range.constant_right ? right : left;
+    range.other = range.constant_right ? left : right;
+    range.other_type = one ? check_stream_type(stream, range.other) : 0;
+    const TypeId constant_type = one ? check_stream_type(stream, range.constant) : 0;
+    uint32_t own_width = 0;
+    bool own_signed = false;
+    uint32_t constant_width = 0;
+    bool constant_signed = false;
+    const bool own = one && (check_common_integer(types, range.other_type, &own_width, &own_signed) ||
+                             check_wide_type(types, range.other_type, &own_width, &own_signed));
+    const bool constant_integer = one && (check_common_integer(types, constant_type, &constant_width, &constant_signed) ||
+                                          check_wide_type(types, constant_type, &constant_width, &constant_signed));
+    // (The integer promotions: narrower than int becomes int, but a _BitInt isn't promoted.)
+    const bool other_bit = own && type_kind(types, type_unqualified(type_strip_aligned(types, range.other_type))) == BUSTER_TYPE_KIND_BIT_INT;
+    const bool constant_bit = constant_integer && type_kind(types, type_unqualified(type_strip_aligned(types, constant_type))) == BUSTER_TYPE_KIND_BIT_INT;
+    const uint32_t other_width = own && own_width < 32 && !other_bit ? 32 : own_width;
+    const bool other_signed = own && own_width < 32 && !other_bit ? true : own_signed;
+    const bool constant_promoted = constant_integer && constant_width < 32 && !constant_bit;
+    constant_width = constant_promoted ? 32 : constant_width;
+    constant_signed = constant_promoted || constant_signed;
+    const CheckOp other_op = one ? graph->ops[range.other] : CHECK_OP_COUNT;
+    range.known_boolean = other_op == CHECK_OP_NOT || other_op == CHECK_OP_LOGICAL_AND || other_op == CHECK_OP_LOGICAL_OR ||
+                          (other_op >= CHECK_OP_LESS && other_op <= CHECK_OP_NOT_EQUAL);
+    const bool narrow = own && constant_integer && own_width < (constant_width > other_width ? constant_width : other_width);
+    const bool integers = one && own && constant_integer && (range.known_boolean || narrow);
+    range.known_boolean = integers && range.known_boolean;
+    const bool boolean_type = integers && type_unqualified(type_strip_aligned(types, range.other_type)) == BUSTER_TYPE_BOOL;
+    range.ranged = integers;
+    range.range_width = range.known_boolean || boolean_type ? 1 : integers ? own_width : 0;
+    range.range_signed = !(range.known_boolean || boolean_type) && own_signed;
+    // The comparison's type, of the usual arithmetic conversions.
+    const bool same_sign = constant_signed == other_signed;
+    const uint32_t signed_width = constant_signed ? constant_width : other_width;
+    const uint32_t unsigned_width = constant_signed ? other_width : constant_width;
+    range.width = constant_width > other_width ? constant_width : other_width;
+    range.is_signed = same_sign ? constant_signed : signed_width > unsigned_width;
+    if (range.ranged && range.range_width != 0 && range.width <= 128)
+    {
+        TypeId value_type = 0;
+        const unsigned __int128 integer = check_common_stream_integer(stream, range.constant, &value_type);
+        uint32_t value_width = 0;
+        bool value_signed = false;
+        check_common_integer(types, value_type, &value_width, &value_signed);
+        range.converted = (unsigned __int128)check_common_integer_bits(integer, value_width, value_signed) & check_action_mask(range.width);
+        range.place = check_common_range_compare(range.converted, range.width, range.is_signed, range.range_width, !range.range_signed);
+    }
+    return range;
+}
+
+// Whether comparison `node` may give -Wtautological-constant-out-of-range-compare (#2218), the comparison walk's test of
+// whether to take it: its constant out of the other operand's range, as check_common_out_of_range finds it, or a
+// comparison past 128 bits, which only that function decides. A constant in range, `c == 'x'`'s, costs no walk.
+static bool check_common_range_out(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckCommonValueRange range = check_common_range_facts(graph, stream, types, node);
+    const bool wide = range.ranged && range.range_width != 0 && range.width > 128;
+    const bool out = range.ranged && range.range_width != 0 && range.width <= 128 && (range.place & BUSTER_CHECK_RANGE_IN) == 0 &&
+                     check_common_range_truth(graph->ops[node], range.place, range.constant_right) >= 0;
+    return wide || out;
+}
+
+// Of up to 16 comparison nodes `nodes` (`lanes` live), those that may give -Wtautological-constant-out-of-range-compare
+// (check_common_range_out), a bit each, for the comparison walk's reach where -Wsign-compare doesn't take every comparison.
+// The lanes gather both operands and their value flags from the stream's flag column: one of them an integer constant
+// expression's, which every candidate has, and, where only one is, the other operand neither an int or long class builtin
+// that covers the constant's type (the TypeIds' builtin codes, gathered too) nor a narrow builtin compared with an int or
+// unsigned int constant in its range (the constant's value gathered from its payload row), but for a boolean operator's,
+// which no candidate's is; only the lanes left take the scalar test. A stream without the columns tests every comparison,
+// as the scalar path, the twin and oracle, does through check_common_own_reach.
+static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* nodes, __mmask16 lanes)
+{
+    const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
+    const __m512i indices = _mm512_maskz_loadu_epi32(lanes, nodes);
+    const __mmask16 compares = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32((int)count));
+    uint32_t selected = compares;
+    if (compares != 0 && stream->dense_values == NULL && stream->value_flags != NULL && stream->value_types != NULL)
+    {
+        const __m512i limit = _mm512_set1_epi32((int)count);
+        const __m512i left = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), compares, indices, graph->operand0, 4);
+        const __m512i right = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), compares, indices, graph->operand1, 4);
+        const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(_mm512_mask_cmplt_epu32_mask(compares, left, limit), right, limit);
+        const __m512i ice = _mm512_set1_epi32(BUSTER_CHECK_ICE);
+        const __m512i left_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, left, stream->value_flags, 4);
+        const __m512i right_flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, right, stream->value_flags, 4);
+        const __mmask16 left_ice = _mm512_mask_test_epi32_mask(inside, left_flags, ice);
+        const __mmask16 right_ice = _mm512_mask_test_epi32_mask(inside, right_flags, ice);
+        // Where one operand alone is an integer constant expression, it is the constant: the other one is no candidate's
+        // when it is an int or a long class builtin at least as wide as the constant's type promoted, and no boolean
+        // operator's (check_common_range_facts' narrowness test, its types' codes read from their TypeIds).
+        const __mmask16 one = (__mmask16)(left_ice ^ right_ice);
+        const __m512i left_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, stream->value_types, 4);
+        const __m512i right_types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, stream->value_types, 4);
+        const __m512i left_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, left, graph->ops, 4);
+        const __m512i right_ops = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), one, right, graph->ops, 4);
+        const __m512i other_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, left_types, right_types), BUSTER_TYPE_INDEX_SHIFT);
+        const __m512i constant_code = _mm512_srli_epi32(_mm512_mask_blend_epi32(left_ice, right_types, left_types), BUSTER_TYPE_INDEX_SHIFT);
+        const __m512i other_op = _mm512_mask_blend_epi32(left_ice, left_ops, right_ops);
+        const __m512i bool_code = _mm512_set1_epi32(BUSTER_TYPE_CODE_BOOL);
+        const __mmask16 boolean = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_op, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                                _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS)) |
+                                  _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_NOT)) |
+                                  _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
+                                  _mm512_mask_cmpeq_epi32_mask(one, other_op, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR));
+        const __m512i constant_offset = _mm512_sub_epi32(constant_code, bool_code);
+        const __mmask16 int_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_INT)), _mm512_set1_epi32(1)) &
+                                   _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT - BUSTER_TYPE_CODE_BOOL));
+        const __mmask16 long_wide = _mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG)), _mm512_set1_epi32(3)) &
+                                    _mm512_mask_cmple_epu32_mask(one, constant_offset, _mm512_set1_epi32(BUSTER_TYPE_CODE_ULLONG - BUSTER_TYPE_CODE_BOOL));
+        // A narrow builtin (_Bool to unsigned short) compared with an int or unsigned int constant inside its range (char's
+        // taken as 0 to 127, whichever its signedness): the constant's value, the low 32 bits of its payload row's integer
+        // (none for no row, a zero), gathered too. An unsigned constant is in range up to the type's maximum.
+        const __mmask16 narrow_other = (__mmask16)(_mm512_mask_cmple_epu32_mask(one, _mm512_sub_epi32(other_code, bool_code),
+                                                                                _mm512_set1_epi32(BUSTER_TYPE_CODE_USHORT - BUSTER_TYPE_CODE_BOOL)) & ~boolean);
+        const __mmask16 int_constant = _mm512_mask_cmple_epu32_mask(narrow_other, _mm512_sub_epi32(constant_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_INT)),
+                                                                     _mm512_set1_epi32(1));
+        const bool rows_fit = stream->payload_rows != NULL && stream->payloads != NULL &&
+                              (uint64_t)stream->payload_count * sizeof(CheckValue) < (UINT64_C(1) << 31);
+        __mmask16 in_range = 0;
+        if (int_constant != 0 && rows_fit)
+        {
+            const __m512i constant_nodes = _mm512_mask_blend_epi32(left_ice, right, left);
+            const __m512i rows = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), int_constant, constant_nodes, stream->payload_rows, 4);
+            const __mmask16 rowed = _mm512_mask_cmpneq_epu32_mask(int_constant, rows, _mm512_setzero_si512());
+            const __m512i offsets = _mm512_mullo_epi32(_mm512_sub_epi32(rows, _mm512_set1_epi32(1)), _mm512_set1_epi32((int)sizeof(CheckValue)));
+            const __m512i values = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), rowed, offsets,
+                                                               (const char*)stream->payloads + offsetof(CheckValue, integer), 1);
+            // The ranges of codes 2 to 7: _Bool, char, signed char, unsigned char, short and unsigned short.
+            static const int32_t lows[16] = { 0, 0, -128, 0, -32768, 0 };
+            static const int32_t highs[16] = { 1, 127, 127, 255, 32767, 65535 };
+            const __m512i slot = _mm512_sub_epi32(other_code, bool_code);
+            const __m512i low = _mm512_permutexvar_epi32(slot, _mm512_loadu_si512(lows));
+            const __m512i high = _mm512_permutexvar_epi32(slot, _mm512_loadu_si512(highs));
+            const __mmask16 unsigned_constant = _mm512_mask_cmpeq_epi32_mask(int_constant, constant_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT));
+            // (Unmasked signed compares, which the baseline host's scalar emulation has too.)
+            const __mmask16 signed_in = (__mmask16)(int_constant & ~unsigned_constant & _mm512_cmpge_epi32_mask(values, low) & _mm512_cmpge_epi32_mask(high, values));
+            const __mmask16 unsigned_in = _mm512_mask_cmple_epu32_mask(unsigned_constant, values, high);
+            in_range = (__mmask16)(signed_in | unsigned_in);
+        }
+        const __mmask16 covered = (__mmask16)((one & ~boolean & (int_wide | long_wide)) | in_range);
+        selected = (uint32_t)(left_ice | right_ice) & ~(uint32_t)covered;
+    }
+    uint32_t result = 0;
+    for (uint32_t bits = selected; bits != 0; bits &= bits - 1)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(bits);
+        result |= check_common_range_out(graph, stream, types, nodes[lane]) ? 1u << lane : 0u;
+    }
+    return result;
+}
+
+// clang's -Wtautological-constant-out-of-range-compare (#2218, CheckTautologicalComparison): an integer constant
+// expression compared with an operand whose type's values all compare one way with it, the constant out of their range
+// (a range's gap too, of a signed operand an unsigned comparison wraps). The operand's range is its type's (a _Bool's
+// and a known boolean's 0 to 1, as "boolean expression"), not clang's tighter range of its value. Reported as
+// DiagRuntimeBehavior reports it, at the operator, with the constant as the comparison's type holds it, an enumerator's
+// name before it. Whether the comparison is always true or false whatever the warning's policy, which -Wsign-compare
+// then leaves alone, as AnalyzeComparison does; in range, its other warnings (-Wtautological-constant-compare's) aren't
+// given.
+static bool check_common_out_of_range(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    const TypeTable* types = emission->types;
+    const Parser* parser = emission->parser;
+    const CheckOp op = graph->ops[node];
+    const CheckCommonValueRange range = check_common_range_facts(graph, stream, types, node);
+    const bool constant_right = range.constant_right;
+    const uint32_t constant = range.constant;
+    const uint32_t other = range.other;
+    const TypeId other_type = range.other_type;
+    const bool known_boolean = range.known_boolean;
+    const bool ranged = range.ranged;
+    const uint32_t range_width = range.range_width;
+    const bool range_signed = range.range_signed;
+    const uint32_t width = range.width;
+    const bool is_signed = range.is_signed;
+    uint32_t constant_width = 0;
+    bool constant_signed = false;
+    const CheckValue value = ranged ? check_stream_value(stream, constant) : (CheckValue){ 0 };
+    uint32_t place = range.place;
+    char digits[48];
+    const char* text = NULL;
+    if (ranged && range_width != 0 && width <= 128)
+    {
+        const unsigned __int128 converted = range.converted;
+        // APSInt's decimal digits, as the comparison's type reads them.
+        const bool negative = is_signed && ((converted >> (width - 1)) & 1u) != 0;
+        unsigned __int128 magnitude = negative ? (0 - converted) & check_action_mask(width) : converted;
+        uint32_t count = sizeof(digits) - 1;
+        digits[count] = 0;
+        do
+        {
+            count -= 1;
+            digits[count] = (char)('0' + (uint32_t)(magnitude % 10));
+            magnitude /= 10;
+        }
+        while (magnitude != 0);
+        if (negative)
+        {
+            count -= 1;
+            digits[count] = '-';
+        }
+        text = digits + count;
+    }
+    else if (ranged && range_width != 0 && range_width <= 127 && is_signed && value.type != 0 && check_wide_type(types, value.type, &constant_width, &constant_signed))
+    {
+        // A comparison past 128 bits whose type is the constant's own: past the operand's range by its magnitude's bits.
+        const uint32_t count = check_wide_count(constant_width);
+        uint64_t* limbs = check_wide_allocate(count);
+        if (limbs != NULL && check_wide_operand(types, &value, limbs, count))
+        {
+            const bool negative = check_wide_negative(limbs, constant_width, constant_signed);
+            if (negative)
+            {
+                check_wide_negate_in_place(limbs, count, constant_width);
+            }
+            const uint32_t bits = check_wide_bits(limbs, count);
+            const __int128 small = bits <= 126 ? (negative ? -(__int128)(((unsigned __int128)limbs[1] << 64) | limbs[0]) :
+                                                             (__int128)(((unsigned __int128)limbs[1] << 64) | limbs[0])) : 0;
+            const __int128 low = range_signed ? -((__int128)1 << (range_width - 1)) : 0;
+            const __int128 high = range_signed ? ((__int128)1 << (range_width - 1)) - 1 : (__int128)check_action_mask(range_width);
+            place = bits > 126 ? (negative ? BUSTER_CHECK_RANGE_LESS : BUSTER_CHECK_RANGE_GREATER) :
+                    small < low ? BUSTER_CHECK_RANGE_LESS : small > high ? BUSTER_CHECK_RANGE_GREATER :
+                    small == low ? (low == high ? BUSTER_CHECK_RANGE_ONLY : BUSTER_CHECK_RANGE_MIN) :
+                    small == high ? BUSTER_CHECK_RANGE_MAX : BUSTER_CHECK_RANGE_IN;
+            text = check_wide_text(types, &value, emission->scratch);
+        }
+    }
+    const int32_t truth = text != NULL ? check_common_range_truth(op, place, constant_right) : -1;
+    const bool out = truth >= 0 && (place & BUSTER_CHECK_RANGE_IN) == 0;
+    if (out)
+    {
+        Arena* scratch = emission->scratch;
+        // An enumerator's name before its value.
+        const uint32_t token = graph->tokens[constant];
+        const uint32_t declaration = graph->ops[constant] == CHECK_OP_VALUE && token < emission->input->token_count && emission->input->declarations != NULL ?
+                                     emission->input->declarations[token] : BUSTER_CHECK_NONE;
+        const bool enumerator = declaration < emission->input->token_count && emission->input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+        const uint32_t name = enumerator ? parser->tokens.names[token] : 0;
+        const char* shown = enumerator ? check_warning_text(scratch, "'%.*s' (%s)", (int)intern_length(emission->pp->table, name),
+                                                            intern_bytes(emission->pp->table, name), text) : text;
+        const String8 type_name = known_boolean ? (String8){ 0 } :
+                                  check_driver_warning_type(parser, emission->pp, emission->input, emission->types, emission->spell, scratch, other_type,
+                                                            check_common_operand_spelling(parser, emission->input, graph, stream, emission->types, other));
+        const char* message = shown == NULL ? NULL : known_boolean ?
+                              check_warning_text(scratch, "result of comparison of constant %s with boolean expression is always %s", shown,
+                                                 truth != 0 ? "true" : "false") :
+                              type_name.length != 0 ?
+                              check_warning_text(scratch, "result of comparison of constant %s with expression of type %.*s is always %s", shown,
+                                                 (int)type_name.length, type_name.pointer, truth != 0 ? "true" : "false") : NULL;
+        if (message != NULL)
+        {
+            // As a division's: queued to a file-scope declarator's end, else to the function's.
+            const uint32_t at = graph->tokens[node];
+            const uint32_t boundary = check_common_function_boundary(parser, at);
+            const uint32_t declarator = boundary == at ? check_driver_file_initializer_end(parser, emission->input, at) : BUSTER_CHECK_NONE;
+            const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
+            check_common_report_evaluated(parser, emission->pp, emission->input, at, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                          declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED,
+                                          CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE, false, message, NULL, 0, scratch);
+            if (declarator != BUSTER_CHECK_NONE)
+            {
+                // After what building the declarator's expression queued, as CheckCompletedExpr analyzes it once complete.
+                pp_diagnostic_suborder(emission->pp, previous, UINT64_MAX >> 1);
+            }
+        }
+    }
+    // In range, a constant from a macro or an enumerator decides nothing (IsEnumConstOrFromMacro).
+    const bool decided = truth >= 0 && (out || !(check_common_from_macro(parser, emission->pp, graph->tokens[constant]) ||
+                                                 (graph->ops[constant] == CHECK_OP_VALUE && graph->tokens[constant] < emission->input->token_count &&
+                                                  emission->input->declarations != NULL &&
+                                                  emission->input->declarations[graph->tokens[constant]] < emission->input->token_count &&
+                                                  emission->input->declaration_kinds[emission->input->declarations[graph->tokens[constant]]] ==
+                                                  C_BINDING_ENUMERATOR)));
+    return decided;
+}
+
 // The sign-mismatch visit one scan frame runs after its subtree: these warnings follow every other
 // warning the expression produces.
 static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
@@ -2117,7 +2570,9 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
     const Parser* parser = emission->parser;
     TypeTable* types = emission->types;
     Arena* scratch = emission->scratch;
-    if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
+    // An always true or false comparison gives no -Wsign-compare (AnalyzeComparison).
+    const bool tautological = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL && check_common_out_of_range(emission, node);
+    if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL && !tautological)
     {
         const uint32_t left = graph->operand0[node];
         const uint32_t right = graph->operand1[node];
@@ -3845,23 +4300,26 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     emission->emitted[node] |= BUSTER_CHECK_EMITTED_TREE;
                 }
                 break;
-            case BUSTER_CHECK_EMIT_ARITHMETIC_SCAN:
             case BUSTER_CHECK_EMIT_SIGN_SCAN:
+                if (node < graph->count && (emission->evaluated == NULL || emission->evaluated[node] != 0))
+                {
+                    check_common_sign_scan(emission, node);
+                }
+                break;
+            case BUSTER_CHECK_EMIT_ARITHMETIC_SCAN:
                 if (node < graph->count && (emission->evaluated == NULL || emission->evaluated[node] != 0) &&
                     (kind != BUSTER_CHECK_EMIT_ARITHMETIC_SCAN || (emission->emitted[node] & BUSTER_CHECK_EMITTED_ARITHMETIC_SCAN) == 0))
                 {
-                    emission->emitted[node] |= kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN ? BUSTER_CHECK_EMITTED_ARITHMETIC_SCAN : 0u;
-                    check_common_emit_push(emission, node,
-                                           kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN ? BUSTER_CHECK_EMIT_ARITHMETIC_OWN : BUSTER_CHECK_EMIT_SIGN_OWN);
+                    emission->emitted[node] |= BUSTER_CHECK_EMITTED_ARITHMETIC_SCAN;
+                    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_ARITHMETIC_OWN);
                     check_common_emit_kids(emission, node, 3, kind);
-                    if (kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN && emission->inner_count != 0 && graph->ops[node] == CHECK_OP_STATEMENT_VALUE)
+                    if (emission->inner_count != 0 && graph->ops[node] == CHECK_OP_STATEMENT_VALUE)
                     {
                         // A statement expression's statements, built before its value is read, each a whole root's visit.
                         check_common_inner_push(emission, node);
                     }
                 }
-                else if (node < graph->count && kind == BUSTER_CHECK_EMIT_ARITHMETIC_SCAN &&
-                         (emission->reach[node] & BUSTER_CHECK_REACH_DETACHED) != 0)
+                else if (node < graph->count && (emission->reach[node] & BUSTER_CHECK_REACH_DETACHED) != 0)
                 {
                     check_common_emit_kids(emission, node, 3, BUSTER_CHECK_EMIT_DETACHED_SCAN);
                 }
@@ -4119,6 +4577,52 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
         scan->base = first;
         scan->next = first + live;
         scan->pending = selected;
+    }
+    const uint32_t result = check_common_scan_take(scan, graph->count);
+    return result;
+}
+
+// A batch of `live` (up to 16) listed comparison nodes (check_common_next_reach_op): those
+// -Wtautological-constant-out-of-range-compare may warn of (check_common_range_lanes) reach their roots, a reach's bits
+// being a union up the parents, so that the comparisons' order among the others' changes nothing.
+static void check_common_range_batch(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint8_t* reach,
+                                     const uint32_t* nodes, uint32_t live)
+{
+    const uint32_t count = graph->count;
+    const __mmask16 lanes = (__mmask16)(live >= 16 ? 0xffffu : (1u << live) - 1);
+    for (uint32_t bits = live != 0 ? check_common_range_lanes(graph, stream, types, nodes, lanes) : 0u; bits != 0; bits &= bits - 1)
+    {
+        uint8_t reached = BUSTER_CHECK_REACH_SIGN;
+        for (uint32_t at = nodes[(uint32_t)__builtin_ctz(bits)]; reached != 0 && at < count; at = parents[at])
+        {
+            reached &= (uint8_t)~reach[at];
+            reach[at] |= reached;
+        }
+    }
+}
+
+// check_common_next_op for the reach scan: with `comparisons`, each block's comparison nodes are appended to it (`*listed`
+// of them so far), compressed from the same operator load, for -Wtautological-constant-out-of-range-compare's batches
+// (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
+static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonOps* set, uint32_t* comparisons, uint32_t* listed, CheckCommonScan* scan)
+{
+    while (scan->pending == 0 && scan->next < graph->count)
+    {
+        const uint32_t first = scan->next;
+        const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+        const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        if (comparisons != NULL)
+        {
+            const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                                     _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
+            const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+            _mm512_mask_compressstoreu_epi32(comparisons + *listed, compares, nodes);
+            *listed += (uint32_t)__builtin_popcount(compares);
+        }
+        scan->base = first;
+        scan->next = first + live;
+        scan->pending = check_common_op_lanes(set, ops, lanes);
     }
     const uint32_t result = check_common_scan_take(scan, graph->count);
     return result;
@@ -6108,7 +6612,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
                            check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor)) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
-    const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
+    const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL &&
+                            (enabled->sign_compare || (enabled->out_of_range && check_common_range_out(graph, stream, types, node)));
     // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
     const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
     // (A self-assignment is no walk's: check_common_self_assigns gives it, in unreachable code too.)
@@ -9678,11 +10183,22 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     if (walk)
     {
         memset(reach, 0, count);
-        // The comparisons, last in the list, only where -Wsign-compare may warn.
+        // The comparisons, last in the list, only where -Wsign-compare may warn: it takes every one. Otherwise only those
+        // -Wtautological-constant-out-of-range-compare may warn of reach their roots, in batches after the scan.
         const CheckCommonOps own = check_common_ops(check_common_reach_ops, BUSTER_ARRAY_LENGTH(check_common_reach_ops) - (enabled->sign_compare ? 0u : 6u));
         CheckCommonScan owners = { 0 };
-        for (uint32_t node = check_common_next_op(graph, &own, &owners, true); node < count; node = check_common_next_op(graph, &own, &owners, true))
+        uint32_t* comparisons = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
+        uint32_t listed = 0;
+        uint32_t tested = 0;
+        for (uint32_t node = check_common_next_reach_op(graph, &own, comparisons, &listed, &owners); node < count;
+             node = check_common_next_reach_op(graph, &own, comparisons, &listed, &owners))
         {
+            // A full batch of comparisons is tested as soon as it is listed, while the scan is near their nodes: tested at
+            // the end, a large unit's gathers would find its columns cold.
+            for (; listed - tested >= 16; tested += 16)
+            {
+                check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, 16);
+            }
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
             if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
             {
@@ -9694,8 +10210,15 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
+        // The rest of the comparisons, fewer than 16.
+        if (comparisons != NULL)
+        {
+            check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, listed - tested);
+        }
+        // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
+        const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
         check_common_assertion_reach(graph, stream, reach);
-        evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
+        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, parents, scratch);
     }
     else if (allocated)
     {
@@ -11254,6 +11777,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     const CheckCommonEnabled enabled =
     {
         .sign_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_SIGN_COMPARE, true),
+        .out_of_range = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE, false),
         .self_assign = check_common_enabled(pp, input, CHECK_WARNING_ID_SELF_ASSIGN, true),
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),

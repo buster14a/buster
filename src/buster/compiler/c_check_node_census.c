@@ -260,6 +260,8 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_EXCESSIVE_REGSAVE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_TCB_ENFORCEMENT] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_INVALID_VERSION_AVAILABILITY] = NODE_CENSUS_WARNING_OUTSIDE,
+    // A label's warning, a statement's (c_check_control_input.c).
+    [CHECK_WARNING_ID_UNUSED_LABEL] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_VOID_PTR_DEREFERENCE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_MULTICHAR] = NODE_CENSUS_WARNING_TESTED,
@@ -323,6 +325,10 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = NODE_CENSUS_WARNING_EVENTS,
     [CHECK_WARNING_ID_SHIFT_SIGN_OVERFLOW] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_ASSIGN_ENUM] = NODE_CENSUS_WARNING_TESTED,
+    // Its comparisons are the tautological test's: a constant outside its other operand's range (#2218).
+    [CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    // A typedef is a declaration's, no expression's (#2264).
+    [CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF] = NODE_CENSUS_WARNING_OUTSIDE,
     // The default-error conversions fire only at relaxed tokens (#1963): a unit with any is refused whole.
     [CHECK_WARNING_ID_INT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES] = NODE_CENSUS_WARNING_TESTED,
@@ -508,7 +514,8 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
                     check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE, false);
     policy.null_dereference = check_common_enabled(pp, input, CHECK_WARNING_ID_NULL_DEREFERENCE, false);
     policy.array_bounds = check_common_enabled(pp, input, CHECK_WARNING_ID_ARRAY_BOUNDS, false);
-    policy.tautological = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false);
+    policy.tautological = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false) ||
+                          check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE, false);
     policy.non_literal_null = check_common_enabled(pp, input, CHECK_WARNING_ID_NON_LITERAL_NULL, false);
     policy.parentheses = check_common_enabled(pp, input, CHECK_WARNING_ID_PARENTHESES, false);
     policy.logical_not = check_common_enabled(pp, input, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false);

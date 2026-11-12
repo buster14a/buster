@@ -235,15 +235,23 @@ enum
     // An integer constant converted to an enumeration that none of its enumerators equals (#2264, clang's
     // DiagnoseAssignmentEnum): -Wassign-enum, off by default.
     CHECK_WARNING_ID_ASSIGN_ENUM = 154,
+    // A function's label that no goto and no address names (#2264, clang's DiagnoseUnusedDecl of a LabelDecl):
+    // -Wunused-label, under -Wunused and so -Wmost and -Wall.
+    CHECK_WARNING_ID_UNUSED_LABEL = 155,
+    // clang's -Wtautological-constant-out-of-range-compare (#2218), on by default, in -Wtautological-constant-compare.
+    CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE = 156,
+    // A block-scope typedef that is never used (#2264, clang's emitAndClearUnusedLocalTypedefWarnings): -Wunused-local-typedef,
+    // off by default, under -Wunused and so -Wmost and -Wall.
+    CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF = 157,
     // clang's warnings that default to errors, of a conversion it still makes (#1963): an integer and a pointer either way
     // (-Wint-conversion, -Wconversion's and so -Wnon-gcc's), pointers to incompatible types (-Wincompatible-pointer-types)
     // and to incompatible function types (-Wincompatible-function-pointer-types, under it), and a void function's value or a
     // non-void function's missing one (-Wreturn-mismatch, -Wreturn-type's and so -Wmost's and -Wall's). Each is an error
     // unless an option or a pragma demotes or ignores it (BUSTER_CHECK_RELAXED_TOKEN).
-    CHECK_WARNING_ID_INT_CONVERSION = 155,
-    CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES = 156,
-    CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES = 157,
-    CHECK_WARNING_ID_RETURN_MISMATCH = 158,
+    CHECK_WARNING_ID_INT_CONVERSION = 158,
+    CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES = 159,
+    CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES = 160,
+    CHECK_WARNING_ID_RETURN_MISMATCH = 161,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -282,6 +290,12 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_UNUSED_VARIABLE,
     CHECK_WARNING_EVENT_UNUSED_FUNCTION,
     CHECK_WARNING_EVENT_UNUSED_PARAMETER,
+    // A label no goto or address names (#2264): "unused label 'l'" at its name, or a local label's at its `__label__`
+    // list's, published as the function's body ends.
+    CHECK_WARNING_EVENT_UNUSED_LABEL,
+    // A block-scope typedef no use names (#2264, -Wunused-local-typedef), at its name, completed at the unit's end: payload.name
+    // its name. Published after the unused file-scope declarations, under their gate (check_driver_unit_end_split).
+    CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF,
     // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
     // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
     CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,

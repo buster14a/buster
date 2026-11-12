@@ -5188,8 +5188,9 @@ jump `-Wfor-loop-analysis` looks for. A part may hold a label, another
 `goto`, a label's address or a local label's declaration (#1447): a left-out
 label that a kept `goto` names leaves the reading an error, so its view isn't
 taken, and a left-out `goto` outside loops changes no warning a flushed body
-gives (buster gives no `-Wunused-label` yet: once it does, a kept label whose
-only `goto` is left out would warn). The
+gives (a kept label whose only `goto` is left out gives no `-Wunused-label`:
+`check_driver_rejected_read` drops the view's event where the first reading's
+`label_targets` has a `goto` or `&&` naming it). The
 replacements are chosen to give no warning of their own (a constant condition
 would: clang's "no case matching constant switch condition"). A part left out
 gives no warning of its own reading, where clang gives those of what it builds
@@ -6287,7 +6288,30 @@ default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 boolean or enumeration type in either order, "adding 'T' to a string does not
 append to the string" at the `+` with its note, T the operand's type as
 written (a typedef's, `__size_t`'s sugar), given as the `+` is built; a `+`
-whose neighbor is no string literal is passed at once. Left: where a C23
+whose neighbor is no string literal is passed at once.
+`-Wtautological-constant-out-of-range-compare` (#2218, on by default, in
+`-Wtautological-constant-compare` and `-Wtautological-compare`,
+`check_common_out_of_range`) is clang's `CheckTautologicalComparison`'s out-of-range
+half: an integer constant expression on exactly one side of a comparison, outside
+the other operand's range promoted to the comparison's type (`PromotedRange`, a
+wrapped signed range's gap included), gives "result of comparison of constant V
+with expression of type 'T' is always true" (or false) at the operator, V as the
+comparison's type holds it (an enumerator's `'A' (V)`, past 128 bits
+`check_wide_text`'s digits), T the operand's type as written; a `_Bool` and a
+known boolean (`!`, a comparison, `&&`, `||`) range over 0 and 1, the latter as
+"boolean expression". It is a runtime warning, queued as a division's, not
+given in a constant context. An always true or false comparison gives no
+`-Wsign-compare`, as `AnalyzeComparison` returns first. Both follow clang's
+`AnalyzeImplicitConversions` order through a full expression
+(`check_common_sign_scan`): a comparison before its operands, a comparison's, an
+assignment's and a conditional's operands left to right, any other node's right
+to left. Left: the operand's range is its type's, not clang's tighter range of
+its value (`GetExprRange`: a bit-field's width, `x & 0xff`, a sum's extra bit),
+so those comparisons give nothing; the in-range half
+(`-Wtautological-constant-compare`'s `_Bool` comparisons, the off-by-default
+type-limit and unsigned-zero comparisons) isn't given; and a constant compared
+in a type past 128 bits gives it only where that type is the constant's and the
+comparison signed. Left: where a C23
 `u8"ab" + 1` is returned as a `const char *`, its `-Wpointer-sign` comes
 first, which clang gives after. A conditional's
 `-Wpointer-type-mismatch` and `-Wconditional-type-mismatch` (#2292,
@@ -6318,6 +6342,17 @@ expression statement (not a statement expression's last), a `for` header's
 first or third clause, or a comma's left operand; a volatile variable's
 compound assignment and step read it. A parameter's is
 `-Wunused-but-set-parameter`'s (the `-Wuninitialized` pass's). `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+them. `-Wunused-local-typedef` (#2264, clang's
+`emitAndClearUnusedLocalTypedefWarnings`, off by default, `-Wunused`'s and so
+`-Wmost`'s and `-Wall`'s, GCC's `-Wunused-local-typedefs` too) is a block-scope
+typedef that nothing names: no binding use, and no later token of its block
+that resolves to it (a declaration's specifiers, which no use event holds).
+"unused typedef 'T'" at its name; a variable array's is too, whatever its
+bound's side effects. They come at the unit's end, after the unused
+file-scope declarations and under their gate (none once an error has been
+given before those), in source order, with those a macro wrote last, as
+clang's macro expansion locations follow its file locations
+(`check_driver_unit_end_class`). `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
 const object without an initializer, at its name, with its type as declared.
 - **Automatic storage:**
   - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
@@ -6346,7 +6381,19 @@ so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
 A block's own `static`, `register` and automatic objects can be unused. A
 variable with an applied `cleanup` attribute is used, as clang treats it,
 since its cleanup takes its address (#1881); one ignored at file scope can still
-be unused. The
+be unused. `-Wunused-label` (#2264, under `-Wunused`, so `-Wmost` and `-Wall`)
+is a label no goto, `&&` address or asm goto names (`check_input_unused_labels`,
+from the controls' label table; an asm goto's label resolves in its scope, a
+local label's included, as a goto's name does), at its name, or a local label's at its
+`__label__` list's name; `unused` or `maybe_unused` on it marks it used.
+Clang's labels are the function body's scope's declarations, which it warns of
+sorted by place as it pops that scope: a body's unused labels and unused
+variables share its `}` and are ordered by token (`CheckWarningEvent.suborder`),
+after an inner block's and before the body's runtime warnings, and a function
+with an error warns of neither. A `goto` that jumps into a statement expression
+is an error of clang's jump checker, not of the scope, so its function's unused
+variables still warn, and its label is still used though the recovery's view
+leaves the `goto` out. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 
@@ -6691,7 +6738,17 @@ The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
 only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
 where the command line or a source pragma may enable them: the comparison bit
-for `-Wsign-compare`, a plain `x = y` for `-Wself-assign`, and the
+for `-Wsign-compare` (and, while `-Wtautological-constant-out-of-range-compare`
+is on and `-Wsign-compare` off, only for a comparison whose constant is out of
+the other operand's range, `check_common_range_out`: the reach scan's 16-node
+operator blocks (`check_common_next_reach_op`) compress their comparisons
+into a list, and its batches of 16 (`check_common_range_lanes`) gather the
+operands' value flags, types, operators and payload values, testing only the
+lanes of a comparison one of whose operands is an integer constant expression,
+where the other one, if only one is, is neither an `int` or `long` class
+builtin that covers the constant's type nor a narrow builtin compared with an
+`int` or `unsigned` constant in its range, but for a boolean operator's; the
+scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wself-assign`, and the
 `-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
 an analysis whose diagnostics are ignored. The token passes find their roles
 and kinds 64 tokens at a time, the node passes their operators 16 nodes at a

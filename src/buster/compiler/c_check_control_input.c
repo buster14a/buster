@@ -243,6 +243,17 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
             check_input_report(reader, attribute->first, CHECK_INPUT_LABEL_ATTRIBUTE);
         }
     }
+    // An unused (or maybe_unused) attribute marks the label used for -Wunused-label (#2264): recorded at its colon.
+    bool unused = false;
+    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    {
+        unused |= attributes->records[i].kind == CHECK_ATTRIBUTE_UNUSED;
+    }
+    const uint32_t label = colon ? first - 1 : after + 1;
+    if (unused && label < count && parser->tree.roles[label] == PARSE_ROLE_LABEL)
+    {
+        check_input_set_attributes_at(reader->output, label, attributes);
+    }
     for (uint32_t token = first; token < after; token += 1)
     {
         reader->ignored[token] = true;
@@ -1363,6 +1374,11 @@ static uint32_t check_input_label_name(const CheckInputReader* reader, uint32_t 
     return attributed ? entry - 1 : child;
 }
 
+static uint32_t check_input_asm_goto_label(const CheckInput* input, uint32_t keyword, uint32_t index);
+
+// A label table entry's mark that a goto or an address found it (#2264, -Wunused-label), above its token plus one.
+#define BUSTER_CHECK_LABEL_USED 0x80000000u
+
 // The label of `scope` spelled `name` in check_input_controls' table (`capacity` slots), or BUSTER_CHECK_NONE.
 static uint32_t check_input_find_label(const CheckInputReader* reader, const CheckLocalLabels* locals, const uint32_t* labels, uint64_t capacity, uint32_t scope,
                                        uint32_t name)
@@ -1372,12 +1388,70 @@ static uint32_t check_input_find_label(const CheckInputReader* reader, const Che
     uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
     while (result == BUSTER_CHECK_NONE && labels[slot] != 0)
     {
-        const uint32_t target = labels[slot] - 1;
+        const uint32_t target = (labels[slot] & ~BUSTER_CHECK_LABEL_USED) - 1;
         const uint32_t target_name = check_input_label_name(reader, target);
         result = check_input_label_scope(reader, locals, target) == scope && parser->tokens.names[target_name] == name ? target : BUSTER_CHECK_NONE;
         slot = (slot + 1) & (capacity - 1);
     }
     return result;
+}
+
+// The slot of label `target` (its colon) in check_input_controls' table (`capacity` slots), or `capacity` if it has none.
+static uint64_t check_input_label_slot(const CheckInputReader* reader, const CheckLocalLabels* locals, const uint32_t* labels, uint64_t capacity, uint32_t target)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t name = parser->tokens.names[check_input_label_name(reader, target)];
+    const uint32_t scope = check_input_label_scope(reader, locals, target);
+    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
+    uint64_t result = capacity;
+    while (result == capacity && labels[slot] != 0)
+    {
+        result = (labels[slot] & ~BUSTER_CHECK_LABEL_USED) == target + 1 ? slot : capacity;
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return result;
+}
+
+// -Wunused-label (#2264, clang's DiagnoseUnusedDecl of a LabelDecl as its function's scope pops): each label of the table
+// (`capacity` slots) no goto or address found (BUSTER_CHECK_LABEL_USED), from `begin` to `limit`, but one an unused or
+// maybe_unused attribute marks. Its event is at its name, or a local label's at its `__label__` list's name, and completes
+// at its function body's `}`, among that scope's unused variables by place, as clang sorts them.
+static void check_input_unused_labels(CheckInputReader* reader, const CheckLocalLabels* locals, const uint32_t* labels, uint64_t capacity, uint32_t begin,
+                                      uint32_t limit)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint64_t slot = 0; slot < capacity; slot += 1)
+    {
+        const uint32_t label = labels[slot] != 0 ? (labels[slot] & ~BUSTER_CHECK_LABEL_USED) - 1 : BUSTER_CHECK_NONE;
+        const bool defined = label >= begin && label < limit && parser->tree.roles[label] == PARSE_ROLE_LABEL && (labels[slot] & BUSTER_CHECK_LABEL_USED) == 0;
+        const uint32_t body = defined ? check_sparse_get(reader->output->declaration_bodies, label) : BUSTER_CHECK_NONE;
+        const uint32_t close = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
+        const CheckInputAttributes* attributes = close < count ? check_input_attributes_at(reader->output, label) : NULL;
+        bool marked = false;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            marked |= attributes->records[i].kind == CHECK_ATTRIBUTE_UNUSED;
+        }
+        if (close < count && !marked)
+        {
+            const uint32_t name = check_input_label_name(reader, label);
+            const uint32_t scope = check_input_label_scope(reader, locals, label);
+            const uint32_t at = scope != body && scope < count ? scope : name;
+            const CheckWarningEvent warning = {
+                .id = CHECK_WARNING_ID_UNUSED_LABEL,
+                .kind = CHECK_WARNING_EVENT_UNUSED_LABEL,
+                .token = at,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+                .completion = close,
+                .payload = { .name = parser->tokens.names[name], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                .suborder = (uint64_t)at + 1,
+            };
+            (void)check_input_warning_event(reader, &warning, NULL, 0);
+        }
+    }
 }
 
 // Makes the local labels' columns (CheckLocalLabels) on a unit's first list: the heads and the function's labels per name,
@@ -3724,7 +3798,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     // reference may find alone: it goes into the table, but never as a redefinition.
                     while (labels[slot] != 0)
                     {
-                        const uint32_t old = labels[slot] - 1;
+                        const uint32_t old = (labels[slot] & ~BUSTER_CHECK_LABEL_USED) - 1;
                         const uint32_t old_name = check_input_label_name(reader, old);
                         if (!ambiguous && check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
                         {
@@ -3763,6 +3837,24 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     if (!kept_earlier)
                     {
                         labels[slot] = token + 1;
+                    }
+                }
+            }
+            else if (kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) != 0)
+            {
+                // An asm goto's labels are uses too (#2264): a local label's takes its scope here, as a goto's name does.
+                uint32_t name = BUSTER_CHECK_NONE;
+                for (uint32_t l = 0; (name = check_input_asm_goto_label(reader->output, token, l)) < count; l += 1)
+                {
+                    const uint32_t local = parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? check_input_local_label(reader, &locals, parser->tokens.names[name]) :
+                                                                                                  BUSTER_CHECK_NONE;
+                    if (local != BUSTER_CHECK_NONE)
+                    {
+                        locals.scopes[name] = locals.tokens[local] + 1;
+                    }
+                    else
+                    {
+                        check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, name, body);
                     }
                 }
             }
@@ -3834,6 +3926,20 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
             const uint8_t kind = parser->tokens.kinds[token];
             const bool jump = kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0;
             const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
+            // An asm goto's labels are used as a goto's are (#2264, -Wunused-label); check_input_asm_finish checks its targets.
+            uint32_t asm_label = BUSTER_CHECK_NONE;
+            for (uint32_t l = 0; kind == PARSE_KIND_GOTO && !jump && (asm_label = check_input_asm_goto_label(reader->output, token, l)) < count; l += 1)
+            {
+                const uint32_t target = parser->tokens.kinds[asm_label] == PARSE_KIND_IDENTIFIER ?
+                    check_input_find_label(reader, &locals, labels, capacity, check_input_label_scope(reader, &locals, asm_label), parser->tokens.names[asm_label]) :
+                    BUSTER_CHECK_NONE;
+                const uint64_t slot = target < count && parser->tree.roles[target] == PARSE_ROLE_LABEL ? check_input_label_slot(reader, &locals, labels, capacity, target) :
+                                                                                                         capacity;
+                if (slot < capacity)
+                {
+                    labels[slot] |= BUSTER_CHECK_LABEL_USED;
+                }
+            }
             if (jump && check_input_indirect_goto(parser, token))
             {
                 // goto *expression: its labels are every one whose address its function takes (check_input_indirect_gotos).
@@ -3869,6 +3975,11 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 }
                 if (target != BUSTER_CHECK_NONE)
                 {
+                    const uint64_t slot = parser->tree.roles[target] == PARSE_ROLE_LABEL ? check_input_label_slot(reader, &locals, labels, capacity, target) : capacity;
+                    if (slot < capacity)
+                    {
+                        labels[slot] |= BUSTER_CHECK_LABEL_USED;
+                    }
                     check_sparse_set(reader->output->sparse_pool, reader->output->label_targets, token, target);
                     reader->output->label_address_count += address;
                     if (!address && (!prefix || !unfinished) && !check_input_region_transfer(reader, token, target))
@@ -3920,6 +4031,11 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
         if (reader->indirect_gotos != 0 && begin == 0 && end == count)
         {
             check_input_indirect_gotos(reader);
+        }
+        // (A synthetic control walk's, of no preprocessor, has no warnings.)
+        if (!prefix && reader->pp != NULL)
+        {
+            check_input_unused_labels(reader, &locals, labels, capacity, begin, limit);
         }
     }
     arena_pop_to(reader->scratch, mark);
