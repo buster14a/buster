@@ -6219,7 +6219,22 @@ each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
 one first, "operator '<<' has lower precedence than '+'; '+' will be
 evaluated first" at the `+` with its note, given as the shift is built; a `+`
 from a macro's argument shows that macro, its range being the `+`
-expression's. `-Wstring-plus-int` (#2190, on by
+expression's. `-Wshift-sign-overflow` (#2264, off by default,
+`check_common_shift_sign_overflow`) is the last case of clang's
+`DiagnoseBadShiftValues`: a `<<` of a signed left operand and a count that
+both fold, the left one nonnegative and the count below the promoted type's
+width, whose result needs exactly one bit more than that width, its sign bit
+(`1 << 31`, `(_BitInt(9))1 << 8`), "signed shift result (0x80000000) sets the
+sign bit of the shift expression's type ('int') and becomes negative" at the
+`<<`, the type as written, given as the shift is built. It is no runtime
+warning: an unevaluated or unreachable shift gives it too. Under `-fwrapv`
+(or `-fno-strict-overflow`) clang gives none. The constant reader's shifts,
+which no graph node holds (an enumerator's, a bound's), leave a
+`CHECK_WARNING_EVENT_SHIFT_SIGN`, which the scan reports as the graph's.
+Left: a left operand past 64 bits there (an `__int128`'s), and a
+`_BitInt` past 128 bits anywhere, give none. And, as on main before it, a
+body's `-Wshift-overflow` is published at the function's end, where clang
+gives it as the shift is built (#2488). `-Wstring-plus-int` (#2190, on by
 default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 `+` of a string literal, not parenthesized, and an operand of integer,
 boolean or enumeration type in either order, "adding 'T' to a string does not
@@ -10575,7 +10590,15 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   the warning is published with the body's queued diagnostics at its end
   (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it;
   at file scope it precedes the declarator's fold warning
-  (`c_check_vla_fold_driver_test.c`).
+  (`c_check_vla_fold_driver_test.c`). A variable bound that no graph walk
+  reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s type
+  name, `check_input_vla_bound`) takes the same pass. Left: in a function
+  body, a constant's comma (an enumerator's, a typedef's bound) is published
+  before the body's other queued diagnostics, where clang queues it in source
+  order, as the reader's events reach the body's end first; and in a unit
+  with errors, a file-scope declaration's comma whose initializer is an error
+  (`int b = sizeof(int[(6, 2)]);`) comes after that error, where clang gives
+  it first.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
