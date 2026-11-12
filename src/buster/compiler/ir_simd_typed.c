@@ -137,6 +137,10 @@ struct IrSimdTypedOperation
     uint8_t lane_move;
     // A reduction of a vector's lanes (#1840, ir_simd_typed_reduce): whether the row is one, its flags in `immediate`.
     bool reduce;
+    // A unary operation of each lane (#1840, ir_simd_typed_lane_unary): whether the row is one, its flags in `immediate`;
+    // and whether it is clang's leading zero count with a second operand, that operand's lane where the first's is zero.
+    bool lane_unary;
+    bool lane_unary_zero;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1944,10 +1948,81 @@ static IrSimdTypedStatus ir_simd_typed_reduce(const Tier0Operation* source, uint
     return status;
 }
 
+// A unary operation of each lane (#1840): a row of one vector of 16, 32 or 64 bytes into a vector of its type, one
+// record of ir_simd_lane_unary_forms' (vpopcntb to vpopcntq, vplzcntd, vplzcntq, vpconflictd, vpconflictq) from
+// VECTOR(0) into it, register-direct and undecorated: clang's __builtin_elementwise_popcount and _clzg of one operand, and
+// the x86 builtins' _mm512_popcnt_*, _mm512_lzcnt_* and _mm512_conflict_*. And clang's __builtin_elementwise_clzg of a
+// second operand of the first's type, its lane where the first's is zero: the count into VECTOR(2), vptestnmd or
+// vptestnmq of VECTOR(0) with itself into k1, then vpblendmd or vpblendmq of VECTOR(2) and VECTOR(1) under k1 into
+// VECTOR(0) (c_check_program_vector_builtins.c's three records). Their features their records' and the vectors' moves.
+// It is the IR's lane_unary, and for the second form the vselect of the second operand where the first's lanes equal
+// zero.
+static IrSimdTypedStatus ir_simd_typed_lane_unary(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint16_t tests[2][3] = {
+        { X86_FORM_VPTESTNMD_K_X_XM128, X86_FORM_VPTESTNMD_K_Y_YM256, X86_FORM_VPTESTNMD_K_Z_ZM512 },
+        { X86_FORM_VPTESTNMQ_K_X_XM128, X86_FORM_VPTESTNMQ_K_Y_YM256, X86_FORM_VPTESTNMQ_K_Z_ZM512 },
+    };
+    static const uint16_t blends[2][3] = {
+        { X86_FORM_VPBLENDMD_X_X_XM128, X86_FORM_VPBLENDMD_Y_Y_YM256, X86_FORM_VPBLENDMD_Z_Z_ZM512 },
+        { X86_FORM_VPBLENDMQ_X_X_XM128, X86_FORM_VPBLENDMQ_Y_Y_YM256, X86_FORM_VPBLENDMQ_Z_Z_ZM512 },
+    };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint32_t bytes = source->result_class == BUSTER_TYPED_CLASS_VECTOR ? source->result_bytes : 0;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    bool shaped = (bytes == 16 || bytes == 32 || bytes == 64) && (source->operand_count == 1 || source->operand_count == 2);
+    for (uint32_t j = 0; shaped && j < source->operand_count; j += 1)
+    {
+        shaped = source->operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[j] == bytes;
+    }
+    const bool fallback = shaped && source->operand_count == 2 && source->record_count == 3;
+    const bool plain = shaped && source->operand_count == 1 && source->record_count == 1;
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    uint64_t required = 0;
+    for (uint32_t operation = 0; (plain || fallback) && operation < 3; operation += 1)
+    {
+        for (uint32_t size = 0; size < 4; size += 1)
+        {
+            const uint16_t form = ir_simd_lane_unary_forms[operation][size][width];
+            const X86Instruction count = { .form = form, .reg = fallback ? v2 : v0, .rm = v0, .mode = BUSTER_X86_REGISTER_DIRECT };
+            bool matched = form != X86_FORM_NONE && (plain || (operation == BUSTER_IR_LANE_UNARY_LZCNT && size >= 2)) && memcmp(&source->records[0], &count, sizeof(count)) == 0;
+            uint64_t features = matched ? x86_target_requirement(form) : 0;
+            if (matched && fallback)
+            {
+                const X86Instruction test = { .form = tests[size - 2][width], .reg = 1, .vvvv = v0, .rm = v0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                const X86Instruction blend = { .form = blends[size - 2][width], .reg = v0, .vvvv = v2, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .decorations = 1 };
+                matched = memcmp(&source->records[1], &test, sizeof(test)) == 0 && memcmp(&source->records[2], &blend, sizeof(blend)) == 0;
+                features |= x86_target_requirement(test.form) | x86_target_requirement(blend.form);
+            }
+            if (matched)
+            {
+                candidate.lane_unary = true;
+                candidate.lane_unary_zero = fallback;
+                candidate.immediate = (uint8_t)(size | operation << 2);
+                candidate.lane = (IrSimdLane)ir_intrinsic_lanes[size];
+                required = features;
+            }
+        }
+    }
+    candidate.required_features = candidate.lane_unary ? ir_typed_vector_moves(bytes, target_features) | (required & ~BUSTER_X86_TARGET_KNOWN) : 0;
+    const IrSimdTypedStatus status = candidate.lane_unary && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
 // comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, conversions and
-// shifts by a scalar count, lane operations, masks to vectors and back, masked loads and stores, one lane's moves and
-// reductions (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
+// shifts by a scalar count, lane operations, masks to vectors and back, masked loads and stores, one lane's moves,
+// reductions and the lanes' unary operations (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
 // whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
 // vector, a width change, a permute, a conversion or a shift, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
@@ -2029,6 +2104,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && (source->result_class == BUSTER_TYPED_CLASS_VECTOR || tier0_class_integer(source->result_class)))
     {
         status = ir_simd_typed_reduce(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_lane_unary(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {

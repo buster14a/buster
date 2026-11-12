@@ -984,7 +984,8 @@ static void ir_parse_instruction(IrParseState* state)
                         row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
                         row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT ||
                         row.c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(row.c) || row.c == BUSTER_IR_INTRINSIC_AES || row.c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ||
-                        row.c == BUSTER_IR_INTRINSIC_LANE_INSERT || row.c == BUSTER_IR_INTRINSIC_MOVEMASK || row.c == BUSTER_IR_INTRINSIC_REDUCE)
+                        row.c == BUSTER_IR_INTRINSIC_LANE_INSERT || row.c == BUSTER_IR_INTRINSIC_MOVEMASK || row.c == BUSTER_IR_INTRINSIC_REDUCE ||
+                        row.c == BUSTER_IR_INTRINSIC_LANE_UNARY)
                     {
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }

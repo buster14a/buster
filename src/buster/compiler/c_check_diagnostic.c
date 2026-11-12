@@ -199,6 +199,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
                                                 "non-defining declaration of enumeration with a fixed underlying type is only permitted as a standalone "
                                                 "declaration; missing list of enumerators?" },
     [CHECK_WARNING_ID_PSABI] = { "-Wpsabi", NULL, "AVX vector argument of type T without 'avx' enabled changes the ABI" },
+    [CHECK_WARNING_ID_GNU_EMPTY_STRUCT] = { "-Wgnu-empty-struct", "-Wgnu", "empty struct is a GNU extension" },
     [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = { "-Wunused-but-set-variable", "-Wunused", "variable set but not used" },
 };
 
