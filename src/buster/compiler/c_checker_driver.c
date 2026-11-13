@@ -2009,6 +2009,16 @@ static void check_driver_pragma_report(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+static void check_driver_pack_report(const Parser* parser, Preprocessor* pp, const CheckInputPackPragma* record)
+{
+    if (record->handled == 1 && record->error)
+    {
+        const uint32_t publication = check_driver_publication_position(parser, pp, record->token, pp->output.count);
+        pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, record->diagnostic_source, publication, PP_DIAGNOSTIC_SEMANTIC,
+                                 "mac68k alignment pragma is not supported on this target");
+    }
+}
+
 static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, const CheckInput* input,
                                        const CheckInputPackedMember* member)
 {
@@ -2196,23 +2206,31 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
     }
 }
 
-static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t* fp, uint32_t* visibility, bool quiet)
+static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t* fp, uint32_t* visibility, uint32_t* pack, bool quiet)
 {
     const CheckInputVisibilityPragmas* history = input->visibility_pragmas;
     const uint32_t count = history != NULL ? history->count : 0;
-    while (!pp->fatal && (*fp < input->fp_pragma_count || *visibility < count))
+    const CheckInputPackPragmas* packing = input->pack_pragmas;
+    const uint32_t pack_count = packing != NULL ? packing->count : 0;
+    while (!pp->fatal && (*fp < input->fp_pragma_count || *visibility < count || *pack < pack_count))
     {
         const uint32_t first_fp = *fp < input->fp_pragma_count ? input->fp_pragmas[*fp].source_begin : UINT32_MAX;
         const uint32_t first_visibility = *visibility < count ? history->records[*visibility].source : UINT32_MAX;
-        if (first_fp < first_visibility)
+        const uint32_t first_pack = *pack < pack_count ? packing->records[*pack].source_begin : UINT32_MAX;
+        if (first_fp < first_visibility && first_fp < first_pack)
         {
             check_driver_pragma_report(parser, pp, input, input->fp_pragmas + *fp, quiet);
             *fp += 1;
         }
-        else
+        else if (first_visibility < first_pack)
         {
             check_driver_visibility_report(parser, pp, input, history->records + *visibility, quiet);
             *visibility += 1;
+        }
+        else
+        {
+            check_driver_pack_report(parser, pp, packing->records + *pack);
+            *pack += 1;
         }
     }
 }
@@ -4684,13 +4702,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
+        const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas;
         uint32_t visibility = 0;
         uint32_t pragma = 0;
+        uint32_t pack = 0;
         uint32_t packed = 0;
         // From `from` on (a rejected unit's second reading, check_driver_rejected_common), the pragmas' records are the
         // unit's, which the first reading published whole, wherever its walk ended: none of them again.
         visibility = from != 0 && visibility_history != NULL ? visibility_history->count : 0;
         pragma = from != 0 ? pragma_input->fp_pragma_count : 0;
+        pack = from != 0 && pack_history != NULL ? pack_history->count : 0;
         while (from != 0 && packed < input->packed_member_count && input->packed_members[packed].address < from)
         {
             packed += 1;
@@ -4712,6 +4733,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             {
                 next = visibility_history->records[visibility].token;
             }
+            if (pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token >= position && pack_history->records[pack].token < next)
+            {
+                next = pack_history->records[pack].token;
+            }
             if (packed < input->packed_member_count)
             {
                 const uint64_t address = input->packed_members[packed].address;
@@ -4720,14 +4745,17 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             walking = next <= count;
             const uint32_t token = walking ? (uint32_t)next : 0;
             while (walking && !pp->fatal && ((pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token) ||
-                (visibility_history != NULL && visibility < visibility_history->count && visibility_history->records[visibility].token == token)))
+                (visibility_history != NULL && visibility < visibility_history->count && visibility_history->records[visibility].token == token) ||
+                (pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token == token)))
             {
                 const bool retained = original_pragmas != NULL || repair == NULL || token < check_repair_pragma_end(repair);
                 const uint32_t fp_source = pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token ?
                                            pragma_input->fp_pragmas[pragma].source_begin : UINT32_MAX;
                 const uint32_t visibility_source = visibility_history != NULL && visibility < visibility_history->count &&
                     visibility_history->records[visibility].token == token ? visibility_history->records[visibility].source : UINT32_MAX;
-                if (fp_source < visibility_source)
+                const uint32_t pack_source = pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token == token ?
+                                             pack_history->records[pack].source_begin : UINT32_MAX;
+                if (fp_source < visibility_source && fp_source < pack_source)
                 {
                     if (retained)
                     {
@@ -4735,13 +4763,21 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     pragma += 1;
                 }
-                else
+                else if (visibility_source < pack_source)
                 {
                     if (retained)
                     {
                         check_driver_visibility_report(original, pp, pragma_input, visibility_history->records + visibility, quiet);
                     }
                     visibility += 1;
+                }
+                else
+                {
+                    if (retained)
+                    {
+                        check_driver_pack_report(original, pp, pack_history->records + pack);
+                    }
+                    pack += 1;
                 }
             }
             const bool warned = walking && show_warnings && (warnings[warning] >> 32) == token;
@@ -6306,7 +6342,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         // source spelling and warning policy are independent of that expression and precede the parser failure.
         if (original_pragmas != NULL)
         {
-            check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, quiet);
+            check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, &pack, quiet);
         }
     }
     const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
@@ -7789,6 +7825,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         published.kr_diagnostic_count = 0;
         published.fp_pragma_count = 0;
         published.visibility_pragmas = NULL;
+        published.pack_pragmas = NULL;
         published.packed_member_count = 0;
         published.pragma_warnings.count = 0;
         if (valid && *found_count != 0)
@@ -11299,11 +11336,18 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         visibility_diagnostics |= record->error || record->warning != 0;
                         visibility_errors |= record->error;
                     }
+                    bool pack_errors = false;
+                    const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas;
+                    for (uint32_t i = 0; pack_history != NULL && i < pack_history->count; i += 1)
+                    {
+                        const CheckInputPackPragma* record = pack_history->records + i;
+                        pack_errors |= record->handled == 1 && record->error && record->token < pragma_end;
+                    }
                     for (uint32_t i = 0; !quiet && !promoted && i < excess_count; i += 1)
                     {
                         promoted = check_diagnostic_severity(&input, excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS) >= CHECK_WARNING_ERROR;
                     }
-                    if (!expression_valid || repairing || additional_count != 0 || promoted || visibility_diagnostics || pp->errors != 0)
+                    if (!expression_valid || repairing || additional_count != 0 || promoted || visibility_diagnostics || pack_errors || pp->errors != 0)
                     {
                         CheckProgramDiagnostic control = { 0 };
                         const uint32_t control_before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
@@ -11331,9 +11375,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
-                    // The errors the reports' publication below makes: warnings promoted to errors and visibility pragmas'
+                    // The errors the reports' publication below makes: warnings promoted to errors and semantic pragmas'
                     // errors, which reject the unit as those already published do.
-                    const bool publication_errors = promoted || visibility_errors;
+                    const bool publication_errors = promoted || visibility_errors || pack_errors;
                     result = !driver_fatal && ready && expression_valid && !input.recovered_valid && additional_count == 0 && !repairing && pp->errors == 0 &&
                              !publication_errors && !pp->diagnostic_collection_failed && !pp->history_failed ? 0 : 1;
                     CheckProgram program;
@@ -11721,7 +11765,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
-                check_driver_remaining_pragmas(recovered, pp, &original_pragmas, &fp, &visibility, quiet);
+                uint32_t pack = 0;
+                check_driver_remaining_pragmas(recovered, pp, &original_pragmas, &fp, &visibility, &pack, quiet);
                 if (!check_driver_warning_events_at(recovered, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");

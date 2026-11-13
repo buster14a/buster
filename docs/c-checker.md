@@ -11221,8 +11221,11 @@ else warns "#pragma options align=reset failed: stack empty". A malformed one
 is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
 'align' following '#pragma options'", "expected '='", "expected identifier",
 "invalid alignment option", "extra tokens"), as the options and pragmas map
-it. `mac68k`, clang's error on this target, is refused by name, as are other
-unsupported semantic effects.
+it. `mac68k` gives clang's target error without changing the stack; later
+declarations are still checked, and an emitting command preserves any existing
+output after the error (#2449). This error cannot be suppressed by warning
+options or diagnostic pragmas. The driver merges it with other retained pragma
+diagnostics in source order, including after a parse error.
 
 `#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
 `check_input_pack_align_warnings`) are clang's, whole output on both paths:
