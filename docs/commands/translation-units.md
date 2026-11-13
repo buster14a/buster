@@ -196,7 +196,9 @@ the census below measures, run in the compile). `--attested=MODE` picks:
   and the system tokens from the levels the passes mapped
   (`check_attested_token_levels`). A function definition's semantic hash is
   its own in the lane (it is never attested), so that the passes don't hash its
-  body.
+  body. The expressions' walk gives a skipped declaration's tokens no class
+  (`check_input_expression_classes`): a whole file-scope tree of ignored
+  tokens, none of whose values reaches a token read.
 - **`verify`:** the same passes, and nothing skipped: a hit whose reading here
   isn't silent, pure and listed (a contradiction: an input of a reading that
   the semantic hash doesn't cover) fails the unit with a fatal error naming
