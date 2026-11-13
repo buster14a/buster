@@ -7686,17 +7686,25 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
                 _mm512_storeu_si512(depths + block + 16 * q, _mm512_add_epi32(base_vector, relative));
             }
             (void)none;
-            // The openers still open at the block's end, onto open_stack.
-            if (open != 0)
+            // The openers still open at the block's end, onto open_stack, each at its depth before it (#892). A delta is
+            // -1, 0 or 1, so those depths are consecutive from the first's: a later open opener's is at least the depth after
+            // an earlier one, which it never goes below, and the last opener at a depth between them is open too. So the
+            // block's positions of `open`, compressed, are open_stack's entries from the first's depth, a quarter of the
+            // block at a time, each store masked to its quarter's openers. The loop over them a lane at a time ran its
+            // number of openers, mispredicted at most blocks on the 9700X.
+            int8_t before_bytes[64];
+            _mm512_storeu_si512(before_bytes, before);
+            uint32_t* pushed = open_stack + base + before_bytes[open != 0 ? (uint32_t)__builtin_ctzll(open) : 0];
+            for (uint32_t q = 0; q < 4; q += 1)
             {
-                int8_t before_bytes[64];
-                _mm512_storeu_si512(before_bytes, before);
-                while (open != 0)
-                {
-                    const uint32_t lane = (uint32_t)__builtin_ctzll(open);
-                    open &= open - 1;
-                    open_stack[base + before_bytes[lane]] = block + lane;
-                }
+                const __mmask16 quarter = (__mmask16)(open >> (16 * q));
+                const uint32_t opened = (uint32_t)__builtin_popcount(quarter);
+                const __m512i positions = _mm512_add_epi32(block_vector, _mm512_setr_epi32((int)(16 * q), (int)(16 * q + 1), (int)(16 * q + 2), (int)(16 * q + 3),
+                                                                                            (int)(16 * q + 4), (int)(16 * q + 5), (int)(16 * q + 6), (int)(16 * q + 7),
+                                                                                            (int)(16 * q + 8), (int)(16 * q + 9), (int)(16 * q + 10), (int)(16 * q + 11),
+                                                                                            (int)(16 * q + 12), (int)(16 * q + 13), (int)(16 * q + 14), (int)(16 * q + 15)));
+                _mm512_mask_storeu_epi32(pushed, (__mmask16)_bzhi_u32(0xffffu, opened), _mm512_maskz_compress_epi32(quarter, positions));
+                pushed += opened;
             }
             int8_t after_bytes[64];
             _mm512_storeu_si512(after_bytes, after);
