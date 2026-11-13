@@ -14726,7 +14726,10 @@ static uint8_t check_input_expression_class(const CheckInputReader* reader, uint
 // act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path skips
 // it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
 // reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
-// (CheckInput.visit_misses). Returns the number of tokens the walk acts at.
+// (CheckInput.visit_misses). A token of a declaration attested declarations skip (CheckInputReader.skips) takes no class
+// on either path: each such declaration is a whole file-scope tree whose tokens are ignored, whose leaves would drop and
+// whose other tokens would pass on their children's empty lists, so that no value of it reaches a token read (#2531).
+// Returns the number of tokens the walk acts at.
 static uint32_t check_input_expression_classes(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -14755,8 +14758,10 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t taken = (skipped & _mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_LIST))) |
                                (~skipped & (_mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_EXPRESSION)) |
                                             _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_EXPRESSION))));
-        // The 64 tokens' sparse entries, a word of their marks (CheckInputReader.sparse_marks).
-        const uint64_t sparse = reader->sparse_marks[token >> 6] & lanes;
+        // The 64 tokens' sparse entries, a word of their marks (CheckInputReader.sparse_marks), and those attested
+        // declarations skip, which take no class.
+        const uint64_t passed = reader->skips != NULL ? reader->skips[token >> 6] : 0;
+        const uint64_t sparse = reader->sparse_marks[token >> 6] & lanes & ~passed;
         // The classes: the role's, an operand's by its kind, a role no test takes a DROP but for the refused kinds, and an
         // ignored token's a LIST of a list role and a DROP otherwise.
         const __m512i role_codes = _mm512_permutex2var_epi8(role_codes_low, role, role_codes_high);
@@ -14794,7 +14799,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const __mmask16 parts = (__mmask16)_bzhi_u32(UINT32_MAX, length - part < 16 ? length - part : 16);
             const uint32_t at = token + part;
             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
-            const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
+            const __mmask16 part_acts = (__mmask16)((children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part)) & ~(__mmask16)(passed >> part));
             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
             // The type queries that finish at the tokens, 8 pointers at a time.
             const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, check_input_rare_line(reader, reader->specifier_finishes + at));
@@ -14828,7 +14833,8 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const bool coded = !parser->options.scalar;
     for (; token < count; token += 1)
     {
-        reader->visits[token] = check_input_expression_class(reader, token, coded);
+        const bool passed = reader->skips != NULL && ((reader->skips[token >> 6] >> (token & 63)) & 1) != 0;
+        reader->visits[token] = passed ? 0 : check_input_expression_class(reader, token, coded);
         if ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
         {
             reader->first_value[token] = BUSTER_CHECK_NONE;
