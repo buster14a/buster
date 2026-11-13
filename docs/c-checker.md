@@ -3493,16 +3493,28 @@ What the lowering covers past scalars (#145's programs):
     `isUsed`) is read from the binding events: an evaluated use that reached
     its declarations, outside its own body. A unit with a multiversioned
     function is read in source order for it (`CheckInput.target_multiversion`,
-    `check_deferred_bodies`).
+    `check_deferred_bodies`). Each use of a visible `target` overload set
+    retains its latest default declaration in `CheckInput.target_candidates`
+    (#2424), respecting scope and declaration order. Calls use an isolated
+    default candidate through the existing overload checker: wrong arity or
+    a nonviable argument gives "no matching function" and the default's
+    candidate note. The candidate's `BUSTER_CHECK_OVERLOAD_TARGET` bit rejects
+    incompatible function-pointer signatures, as do ordinary overload sets
+    with multiple distinct functions. An ordinary singleton keeps its
+    configurable conversion. C's viable object-pointer
+    conversions keep their warning policy and note the default's parameter.
+    A mismatched function-pointer
+    initialization or assignment spells the source as '<overloaded function
+    type>'; initialization also notes the default's signature. Passing or returning it uses
+    the same source spelling, with the callee's parameter note when passing.
+    A lone target version and `target_clones` keep ordinary-call diagnostics.
   - *Tests.* `test-checker-driver --target-versions-only` compares each unit's
     whole output with clang's by the vector path, the scalar one and with the
     bodies deferred.
-  - *Differences from clang.* Where several versions are visible, clang
-    resolves a reference as an overload set. A call of the wrong arity or
-    argument types gets this checker's call errors, not "no matching function"
-    with its candidate notes. A reference other than a call, which clang
-    resolves only against a function pointer type and a default version,
-    is accepted. A different calling convention isn't compared.
+  - *Differences from clang.* A reference other than a call without a default
+    version or without a function-pointer target is still accepted in cases
+    where clang cannot resolve its overload set. A different calling
+    convention isn't compared.
   - *Code* (`c_check_program_target_versions.c`, as clang's
     `emitMultiVersionFunctions` and `EmitX86MultiVersionResolver` make it). A
     name's versions form a group (`CheckProgram.target_groups`). A `target`
@@ -4882,9 +4894,8 @@ on past it. A declaration of another version is another entity's, checked
 as any, and one of the invalid version's that follows it is a redefinition of
 it again, noted there, as clang's `CheckMultiVersionAdditionalDecl` finds it.
 A call of a `target` multiversioned name keeps its other versions, as clang's
-overload resolution does. Its argument errors are still the plain call's
-wording, not clang's "no matching function", as with every multiversioned
-call.
+overload resolution does. Its visible default is the overload checker's
+candidate (#2424), so invalid arguments name that candidate in their notes.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'

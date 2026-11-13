@@ -1213,6 +1213,10 @@ struct CheckInput
     // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
     bool target_multiversion;
+    // The default candidate of a target overload set visible at each identifier use (#2424): declaration token + 1,
+    // or 0 for a set without a default. NONE means an ordinary use, including one visible version and target_clones.
+    // A separate sparse pool is allocated only for a use that actually sees multiple target-version entities.
+    CheckSparseColumn target_candidates;
     bool resource;
     // Type sugar (#1447, c_types_sugar.c), last, out of the hot fields' cache lines: the nodes, and the declaring tokens
     // that have one, an open-addressed map of token plus one (0 empty) to node, `sugar_mask + 1` slots
@@ -1224,6 +1228,11 @@ struct CheckInput
     uint32_t sugar_mask;
     uint32_t sugar_entries;
 };
+
+static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)
+{
+    return token < input->token_count && check_sparse_present(input->target_candidates) ? check_sparse_get(input->target_candidates, token) : BUSTER_CHECK_NONE;
+}
 
 // The type sugar of the declaration at `token` (#1447, CheckInput.sugar_tokens), or 0.
 static __attribute__((unused)) uint32_t check_input_declared_sugar(const CheckInput* input, uint32_t token)
@@ -2216,6 +2225,8 @@ struct CheckInputReader
     uint32_t* target_bind_redeclares;
     uint32_t target_bind_count;
     uint32_t target_bind_capacity;
+    // Writer state for CheckInput.target_candidates; absent until the first use of an actual target overload set.
+    CheckSparsePool* target_candidate_pool;
     // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
     // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
     // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).

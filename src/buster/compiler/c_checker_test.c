@@ -2377,7 +2377,8 @@ static bool check_test_source_graphs_equal(const CheckInput* a, const CheckInput
     }
     for (uint32_t call = 0; equal && call < x->overload_count; call += 1)
     {
-        equal = x->overload_calls[call].node == y->overload_calls[call].node && x->overload_calls[call].head == y->overload_calls[call].head;
+        equal = x->overload_calls[call].node == y->overload_calls[call].node && x->overload_calls[call].head == y->overload_calls[call].head &&
+                x->overload_calls[call].captured_head == y->overload_calls[call].captured_head;
     }
     for (uint32_t token = 0; equal && token < tokens; token += 1)
     {

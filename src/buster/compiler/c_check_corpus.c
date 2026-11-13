@@ -2372,7 +2372,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     }
     for (uint32_t call = 0; equal && !a->resource && call < graph->overload_count; call += 1)
     {
-        equal = graph->overload_calls[call].node == other->overload_calls[call].node && graph->overload_calls[call].head == other->overload_calls[call].head;
+        equal = graph->overload_calls[call].node == other->overload_calls[call].node && graph->overload_calls[call].head == other->overload_calls[call].head &&
+                graph->overload_calls[call].captured_head == other->overload_calls[call].captured_head;
     }
     for (uint32_t region = 0; equal && !a->resource && region < graph->region_proof_count; region += 1)
     {

@@ -1664,7 +1664,8 @@ static void check_semantic_parameter_note(const Parser* parser, Preprocessor* pp
                                           PPOutputDiagnosticNote* note, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
-    const uint32_t declaration = callee < input->token_count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ? input->declarations[callee] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = callee < input->token_count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ?
+                                 check_driver_callee_declaration(input, callee) : BUSTER_CHECK_NONE;
     const bool function = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION && declaration + 1 < count &&
                           parser->tokens.kinds[declaration + 1] == PARSE_KIND_L_PAREN;
     const uint32_t close = function ? parser->tree.parents[declaration + 1] : 0;
@@ -1934,6 +1935,8 @@ static const char* check_semantic_overload_hint(const TypeTable* types, const Ch
 // callee's name. The candidates' outcomes are the selection's again (check_overload_explain), a candidate that failed by
 // an argument's conversion with clang's "no known conversion" note (#2384). NULL, and the checker's own error, where the
 // notes are more than the report holds.
+static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument);
+
 static const char* check_semantic_overload_call(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                 CheckWarningSpelling* spell, uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count,
                                                 Arena* scratch)
@@ -1951,7 +1954,8 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
         low = node > at ? middle + 1 : low;
     }
     const uint32_t callee = graph->operand0[node];
-    const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t named = callee < graph->count && graph->ops[callee] == CHECK_OP_ADDRESS ? graph->operand0[callee] : callee;
+    const uint32_t name = named < graph->count && graph->ops[named] == CHECK_OP_VALUE ? graph->tokens[named] : BUSTER_CHECK_NONE;
     const uint32_t argument_count = graph->argument_counts[node];
     const bool found = head < graph->overload_candidate_count && name < parser->tokens.count;
     CheckValue* arguments = found ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, (uint64_t)argument_count + 1) : NULL;
@@ -2025,15 +2029,35 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
             uint32_t parameter_count = 0;
             const TypeId* parameters = type_parameters(types, type_strip_aligned(types, candidate->type), &parameter_count);
             const TypeId parameter = parameters != NULL && index < parameter_count ? parameters[index] : 0;
-            const TypeId value = check_semantic_value_type(types, check_stream_type(stream, argument), false);
+            const TypeId actual = check_stream_type(stream, argument);
+            // A rejected function designator keeps its function type in the candidate note (#2424).
+            const TypeId value = type_kind(types, type_strip_aligned(types, actual)) == BUSTER_TYPE_KIND_FUNCTION ?
+                                 actual : check_semantic_value_type(types, actual, false);
             const String8 from = value != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value,
                                                                         check_semantic_operand_spelling(parser, input, stream, types, argument)) :
                                               (String8){ "", 0 };
             const String8 to = parameter != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, parameter, 0) : (String8){ "", 0 };
             const uint32_t ordinal = index + 1;
             const char* suffix = ordinal % 100 >= 11 && ordinal % 100 <= 13 ? "th" : ordinal % 10 == 1 ? "st" : ordinal % 10 == 2 ? "nd" : ordinal % 10 == 3 ? "rd" : "th";
-            const char* hint = parameter != 0 ? check_semantic_overload_hint(types, stream, argument, value, parameter) : "";
-            text = from.length != 0 && to.length != 0 ?
+            const bool pointer_lvalue = check_stream_category(stream, argument) == CHECK_LVALUE &&
+                                        check_action_kind(types, value) == BUSTER_TYPE_KIND_POINTER && check_action_kind(types, parameter) == BUSTER_TYPE_KIND_POINTER &&
+                                        check_action_kind(types, type_element(types, value)) == BUSTER_TYPE_KIND_FUNCTION &&
+                                        check_action_kind(types, type_element(types, parameter)) == BUSTER_TYPE_KIND_FUNCTION;
+            const uint32_t first = pointer_lvalue && graph->argument_tokens != NULL ? check_semantic_argument_begin(parser, graph, node, index) : BUSTER_CHECK_NONE;
+            // clang's candidate fix-it names an address change for an incompatible function-pointer lvalue. Parentheses
+            // distinguish its "take the address" wording from a bare dereference's "remove *" (#2424).
+            const char* hint = pointer_lvalue ?
+                               (first < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_STAR && parser->tree.roles[first] == PARSE_ROLE_PREFIX ?
+                                "; remove *" : "; take the address of the argument with &") :
+                               parameter != 0 ? check_semantic_overload_hint(types, stream, argument, value, parameter) : "";
+            const uint32_t referenced = argument < graph->count && graph->ops[argument] == CHECK_OP_ADDRESS ? graph->operand0[argument] : argument;
+            const uint32_t reference = referenced < graph->count && graph->ops[referenced] == CHECK_OP_VALUE ? graph->tokens[referenced] : BUSTER_CHECK_NONE;
+            const String8 overloaded = check_input_target_candidate(input, reference) != BUSTER_CHECK_NONE ?
+                                       check_semantic_name(parser, pp, reference) : (String8){ 0 };
+            text = overloaded.length != 0 && to.length != 0 ?
+                   check_warning_text(scratch, "candidate function not viable: no overload of '%.*s' matching %.*s for %u%s argument", (int)overloaded.length,
+                                      overloaded.pointer, (int)to.length, to.pointer, ordinal, suffix) :
+                   from.length != 0 && to.length != 0 ?
                    check_warning_text(scratch, "candidate function not viable: no known conversion from %.*s to %.*s for %u%s argument%s", (int)from.length,
                                       from.pointer, (int)to.length, to.pointer, ordinal, suffix, hint) : NULL;
             renderable = text != NULL;
@@ -2063,7 +2087,12 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     if (renderable)
     {
         const String8 called = check_semantic_name(parser, pp, name);
-        *location = name;
+        uint32_t first = name;
+        if ((graph->overload_candidates[head].flags & BUSTER_CHECK_OVERLOAD_TARGET) != 0)
+        {
+            check_target_versions_callee_end(parser, name, &first);
+        }
+        *location = first;
         result = ambiguous ? check_warning_text(scratch, "call to '%.*s' is ambiguous", (int)called.length, called.pointer) :
                              check_warning_text(scratch, "no matching function for call to '%.*s'", (int)called.length, called.pointer);
     }
