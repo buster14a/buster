@@ -11306,7 +11306,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     if (__builtin_expect(!continuation && parser->recovered_types != NULL, 0))
     {
         const uint8_t* const recovered_types = parser->recovered_types;
-        for (uint32_t token = first; !invalid_specifiers && token < i; token += 1)
+        for (uint32_t token = first; !invalid_specifiers && token < i && token < count; token += 1)
         {
             invalid_specifiers = recovered_types[token] != 0;
         }
