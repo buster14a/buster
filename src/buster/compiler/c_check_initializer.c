@@ -51,6 +51,9 @@ typedef enum CheckInitStatus
     // A designation in a scalar's or a vector's braced list (#2202, clang's err_designator_for_scalar_or_sizeless_init), at
     // the list's `{`, failed_type the list's type.
     CHECK_INIT_NON_AGGREGATE_DESIGNATOR,
+    // An atomic object cannot take a braced initializer, including a compound literal's (#2441): at its `{`, with
+    // failed_type the atomic type and failed_offset its subobject's bit offset.
+    CHECK_INIT_ATOMIC_BRACES,
 } CheckInitStatus;
 
 typedef struct CheckInitPart CheckInitPart;
@@ -81,7 +84,8 @@ struct CheckInitializer
     CheckInitStatus status;
     uint32_t failed_token;
     // The record named by CHECK_INIT_MEMBER, the current object of a designator of the wrong kind (CHECK_INIT_ARRAY_DESIGNATOR,
-    // CHECK_INIT_FIELD_DESIGNATOR, CHECK_INIT_NON_AGGREGATE_DESIGNATOR), or a failed conversion's target (failed_source's); else zero.
+    // CHECK_INIT_FIELD_DESIGNATOR, CHECK_INIT_NON_AGGREGATE_DESIGNATOR, CHECK_INIT_ATOMIC_BRACES), or a failed conversion's
+    // target (failed_source's); else zero.
     TypeId failed_type;
     // A failed conversion's source node plus one (check_init_fail_conversion), or zero: the driver words its error as clang's
     // initialization's (#147).
@@ -921,7 +925,12 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
     const bool valid = walker->depth < walker->capacity && !atomic_braces;
     if (!valid)
     {
-        check_init_fail(walker, atomic_braces ? CHECK_INIT_INVALID : CHECK_INIT_RESOURCE, token);
+        if (atomic_braces && walker->result->status == CHECK_INIT_OK)
+        {
+            walker->result->failed_type = selected->type;
+            walker->result->failed_offset = selected->offset;
+        }
+        check_init_fail(walker, atomic_braces ? CHECK_INIT_ATOMIC_BRACES : CHECK_INIT_RESOURCE, token);
     }
     else
     {
@@ -3011,8 +3020,9 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
     if (valid && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE)
     {
         valid = false;
-        result->status = CHECK_INIT_INVALID;
+        result->status = CHECK_INIT_ATOMIC_BRACES;
         result->failed_token = begin;
+        result->failed_type = type;
     }
     if (valid && (stream->status != CHECK_STATUS_OK || (!diagnostic_only && stream->report_count != 0)))
     {

@@ -311,11 +311,11 @@ struct CheckInitDiagnostic
 // `complete`). An initializer with no node keeps its report. A statement expression's inner errors leave its
 // value valid, as clang's. Such reports leave `input->reports`; only a unit with another error drops one, so a rejected
 // unit always says why. Error-free units and those without the report don't look.
-// Whether an undeclared name at `token`, in an initializer from `begin`, makes the initializer no value: unless a
+// Whether a source error at `token`, in an initializer from `begin`, makes the initializer no value: unless a
 // statement expression shields it, a statement of it before its last (its value) holding the name. From the innermost
 // statement expression around the name outward, the statement that holds it (from it to the next `;` of that block,
 // past nested groups) must be the block's last, its `;` right before the block's `}`. Bounded by the initializer's tokens.
-static bool check_init_undeclared_poisons(const Parser* parser, uint32_t begin, uint32_t token)
+static bool check_init_source_poisons(const Parser* parser, uint32_t begin, uint32_t token)
 {
     const uint8_t* kinds = parser->tokens.kinds;
     const uint32_t* parents = parser->tree.parents;
@@ -405,7 +405,7 @@ static void check_init_listless_drop(CheckInput* input, const Parser* parser, co
             const CheckInputReport* name = input->reports + u;
             undeclared = (name->message == CHECK_INPUT_UNDECLARED || name->message == CHECK_INPUT_INVALID_USE || name->message == CHECK_INPUT_AMBIGUOUS) &&
                          name->token >= report->value && name->token < report->completion &&
-                         check_init_undeclared_poisons(parser, (uint32_t)report->value, name->token);
+                         check_init_source_poisons(parser, (uint32_t)report->value, name->token);
         }
         // No node is no evidence: a rejected unit's retained graph ends at its first missing name, so a later valid
         // initializer has none (review on #1791). The missing names in it are, read from the reports.
@@ -572,6 +572,16 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         {
             const uint32_t node = input->token_nodes[token];
             eligible = node == BUSTER_CHECK_NONE || (node < stream->count && complete[node]);
+            // An atomic compound literal has no value: its own initializer reports the illegal atomic type at `{`
+            // (#2441). Do not also diagnose the initializer that uses it. The literal's declaration is at `(`, outside
+            // its own initializer span, so that span remains eligible and independent later declarations still run.
+            const bool compound = eligible && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != 0;
+            const TypeId literal = compound ? input->declared_types[token] : 0;
+            const uint32_t body = compound ? check_sparse_get(input->initializer_begins, token) : BUSTER_CHECK_NONE;
+            const bool atomic_literal = body < end && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
+                                        type_is_valid(types, literal) && type_kind(types, type_strip_aligned(types, literal)) == BUSTER_TYPE_KIND_ATOMIC &&
+                                        check_init_source_poisons(parser, begin, token);
+            eligible &= !atomic_literal;
         }
         if (placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 && begin < result->token &&

@@ -210,6 +210,28 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
         "    char c[1] = 7;\n    (void)b; (void)q; (void)c;\n}\nstatic int *sp = { 1.5 };\nint n = undeclared;\nstruct P r = { 1, 2, 3 };\nint e[3] = 8;\n",
         "int k;\nstatic int s1 = k;\nint a[2] = 5;\nstruct Q { char *p; } qs = { 4 };\nstatic struct Q qq = { 5L };\nint u(void) { int w; return 0; }\n",
+        // An illegal atomic compound literal's initializer (#2441 item 5) is diagnosed once, at its `{` and with its
+        // actual type. Its enclosing initializer has no value to convert; later independent errors still appear.
+        "struct S { int x; };\n_Atomic struct S t = (_Atomic struct S){1};\nint after = 1 + (void)0;\n",
+        // Atomic scalars, direct braces and typedef spelling, including a type name whose value type is a typedef.
+        "typedef int I;\ntypedef _Atomic(int) A;\nA a = (A){1};\n_Atomic(I) b = (_Atomic(I)){2};\n"
+        "_Atomic int c = {3};\nA d = {4};\nint after = 1 + (void)0;\n",
+        // Unions, a record typedef, parenthesized literals, and several independent declarations in one unit.
+        "union U { int x; double y; };\ntypedef struct S { int x; } S;\ntypedef _Atomic(S) AS;\n"
+        "_Atomic union U u = (_Atomic union U){1};\nAS s = ((AS){2});\n"
+        "void local(void) { _Atomic struct S a = (_Atomic struct S){3}; AS b = (AS){4}; (void)a; (void)b; }\n"
+        "int after = 1 + (void)0;\n",
+        // Array elements and member initializers: plain lists containing atomic scalar elements and ordinary compound
+        // literals remain valid, while an element's own atomic braces fail. A later initializer keeps its own error.
+        "struct S { int x; };\nstruct T { _Atomic int x; };\n_Atomic int good_array[2] = {1, 2};\n"
+        "struct T good_record = {3};\nstruct S good_literal = (struct S){4};\n"
+        "_Atomic int bad_array[1] = {(_Atomic int){5}};\nstruct T bad_record = {{6}};\n"
+        "int *after = 1.5;\n",
+        // An earlier discarded statement-expression statement does not poison its final value: the final int still
+        // gives the record's independent conversion error. A literal that is the last statement does poison it.
+        "struct S { int x; };\n"
+        "void f(void) { struct S s = ({ (void)(_Atomic int){1}; 3; }); (void)s; }\n"
+        "void g(void) { _Atomic struct S s = ({ (_Atomic struct S){2}; }); (void)s; }\n",
         // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
         // from the type attributes' session).
         "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",

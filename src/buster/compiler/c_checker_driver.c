@@ -908,6 +908,7 @@ static const char* check_driver_initializer_message(CheckInitStatus status)
         case CHECK_INIT_ARRAY_DESIGNATOR:
         case CHECK_INIT_FIELD_DESIGNATOR:
         case CHECK_INIT_NON_AGGREGATE_DESIGNATOR:
+        case CHECK_INIT_ATOMIC_BRACES:
         case CHECK_INIT_OK: break;
     }
     return result;
@@ -1232,6 +1233,10 @@ static const char* check_driver_initializer_field_message(const Parser* parser, 
     else if (status == CHECK_INIT_FIELD_DESIGNATOR)
     {
         result = check_warning_text(scratch, "field designator cannot initialize a non-struct, non-union type %.*s", (int)printed.length, printed.pointer);
+    }
+    else if (status == CHECK_INIT_ATOMIC_BRACES)
+    {
+        result = check_warning_text(scratch, "illegal initializer type %.*s", (int)printed.length, printed.pointer);
     }
     else
     {
@@ -11224,10 +11229,21 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 // its type as the declarator spells it.
                                 const bool outermost = failure.status == CHECK_INIT_NON_AGGREGATE_DESIGNATOR && failure.failed_declaration < input.token_count &&
                                                        check_sparse_get(input.initializer_begins, failure.failed_declaration) == failure.token;
+                                const bool atomic_braces = failure.status == CHECK_INIT_ATOMIC_BRACES;
+                                const bool atomic_whole = atomic_braces && failure.failed_declaration < input.token_count &&
+                                                          check_sparse_get(input.initializer_begins, failure.failed_declaration) == failure.token;
                                 uint32_t spelling = 0;
-                                const TypeId designated = outermost ? check_input_object_spelling(&types, &input, checking, failure.failed_declaration, 0, failure.failed_type,
-                                                                                                  &spelling) : failure.failed_type;
-                                const char* message = conversion != NULL ? conversion : designator ?
+                                const TypeId designated = outermost || atomic_whole ?
+                                    check_input_object_spelling(&types, &input, checking, failure.failed_declaration, 0, failure.failed_type, &spelling) : failure.failed_type;
+                                if (atomic_braces)
+                                {
+                                    const bool compound = failure.token < tokens && checking->tree.roles[failure.token] == PARSE_ROLE_OPEN_COMPOUND_BODY;
+                                    spelling = compound ? check_input_token_type_spelling(&input, checking, failure.token, false) :
+                                               !atomic_whole && failure.failed_declaration < input.token_count ?
+                                               check_semantic_subobject_spelling(checking, &input, &types, input.declared_types[failure.failed_declaration],
+                                                                                failure.failed_declaration, failure.failed_offset, failure.failed_type) : spelling;
+                                }
+                                const char* message = conversion != NULL ? conversion : designator || atomic_braces ?
                                     check_driver_initializer_field_message(checking, checking_pp, &input, &types, failure.status, designated, spelling, failure.token,
                                                                            output_arena) :
                                     check_driver_initializer_message(failure.status);

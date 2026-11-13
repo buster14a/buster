@@ -1926,6 +1926,18 @@ each with clang on both paths, `-fsyntax-only` and `-c`. Differences left: an
 array of unknown bound's error still stops the unit's later initializers'
 checks, as an unknown field's in one does.
 
+An atomic object's braced initializer, including a compound literal's, retains
+its atomic type and the opening brace in `CHECK_INIT_ATOMIC_BRACES` (#2441,
+item 5). The driver prints "illegal initializer type 'T'" there, preserving
+typedef spelling. A compound literal with this error does not produce another
+error from the enclosing initializer that uses it; independent later
+initializers are still diagnosed. An earlier statement of a GNU statement
+expression does not invalidate that expression's separate final value. The
+semantic-recovery fixtures compare full
+diagnostics with Clang for scalars, records, unions, typedefs, member and array
+initializers on both paths and with deferred bodies. Atomic-brace errors during
+unknown-array-bound inference still use its generic declaration diagnostic.
+
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
 still expression-checked, but produce no stores, runtime evaluations or live
