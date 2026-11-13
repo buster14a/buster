@@ -17,7 +17,6 @@
 #include <stdint.h>
 #include <string.h>
 #include "host_isa.h"
-#include "baked.h"
 #include "c_builtin_fortify.c"
 #include "c_builtin_library.c"
 
@@ -129,8 +128,15 @@ static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_loo
 #define BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS 8192u
 _Static_assert(BUSTER_BUILTIN_INTRINSIC_COUNT * 2 <= BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS, "the exact table stays at most half full");
 _Static_assert(BUSTER_BUILTIN_INTRINSIC_COUNT < UINT16_MAX, "a row plus one fits a slot's low half");
-static BUSTER_BAKED_UNIT uint32_t builtin_intrinsic_table[BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS];
-static BUSTER_BAKED_UNIT bool builtin_intrinsic_table_ready;
+// main.c's units have baked.h already (x86_64_encoder.c's); a unit of its own (a benchmark's) keeps the table in .bss.
+// test-baked-tables fails a baked executable whose table isn't baked.
+#if defined(BUSTER_BAKED_UNIT)
+#define BUSTER_BUILTIN_INTRINSIC_BAKED BUSTER_BAKED_UNIT
+#else
+#define BUSTER_BUILTIN_INTRINSIC_BAKED
+#endif
+static BUSTER_BUILTIN_INTRINSIC_BAKED uint32_t builtin_intrinsic_table[BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS];
+static BUSTER_BUILTIN_INTRINSIC_BAKED bool builtin_intrinsic_table_ready;
 
 // The exact table's hash of a bounded name: its 8-byte words, the last one's bytes past the name zero, each folded in by
 // a multiply and a shift, then a final mix. It reads the name's bytes alone.
