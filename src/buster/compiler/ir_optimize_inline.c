@@ -1582,6 +1582,118 @@ static void ir_inline_expand_general(const IrFunction* source, uint32_t node, co
     }
 }
 
+// The caller's nodes [first, end) of one block, between its expanded calls, copied to the cursor (#2541's design, "The
+// splice's columns"): each operand column rebased by its kind from the IR's operand tables (IrInlineKinds), a value to
+// its new place (`values`), a branch's block to its target's first part (`block_first`) and any other row kept, the
+// caller's own; then each rebuilt node's slice, in node order: a call's descriptor, a phi's edges (each from its
+// predecessor's last part, `block_last`), a switch's targets, an indirect branch's labels, a ternary intrinsic's third
+// operand. The columns 16 nodes a vector, by a table lookup of the kinds and two masked gathers, or by the scalar twin,
+// ir_inline_node's loop; the slices by both alike.
+static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_t end, const IrInlineKinds* kinds, const uint32_t* values, const uint32_t* block_first,
+                               const uint32_t* block_last, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
+{
+    (void)scalar;
+    (void)kinds;
+    const uint32_t at = cursor->node;
+    if (!BUSTER_SCALAR_PATH(scalar))
+    {
+        const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_IR_NONE);
+        const uint32_t* inputs[3] = {
+            source->a,
+            source->b,
+            source->c,
+        };
+        uint32_t* outputs[3] = {
+            rewritten->a,
+            rewritten->b,
+            rewritten->c,
+        };
+        for (uint32_t i = first; i < end; i += 16)
+        {
+            const uint32_t remaining = end - i;
+            const __mmask16 mask = remaining >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
+            const uint32_t to = at + (i - first);
+            const __m128i op = _mm_maskz_loadu_epi8(mask, source->op + i);
+            _mm_mask_storeu_epi8(rewritten->op + to, mask, op);
+            _mm_mask_storeu_epi8(rewritten->type + to, mask, _mm_maskz_loadu_epi8(mask, source->type + i));
+            _mm_mask_storeu_epi8(rewritten->flags + to, mask, _mm_maskz_loadu_epi8(mask, source->flags + i));
+            _mm_mask_storeu_epi8(rewritten->alignment_log2 + to, mask, _mm_maskz_loadu_epi8(mask, source->alignment_log2 + i));
+            for (uint32_t column = 0; column < 3; column += 1)
+            {
+                const __m512i kind = ir_lookup_bytes(kinds->columns[column], op);
+                const __m512i operand = _mm512_maskz_loadu_epi32(mask, inputs[column] + i);
+                const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
+                const __mmask16 value = mask & (_mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional);
+                const __mmask16 target = mask & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_BLOCK));
+                __m512i rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
+                rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
+                _mm512_mask_storeu_epi32(outputs[column] + to, mask, rebased);
+            }
+        }
+    }
+    else
+    {
+        const IrInlineBases own = { 0 };
+        for (uint32_t i = first; i < end; i += 1)
+        {
+            const uint32_t to = at + (i - first);
+            ir_inline_node(source, i, rewritten, to, values, own);
+            if (source->op[i] == IR_BR)
+            {
+                rewritten->a[to] = block_first[source->a[i]];
+            }
+            else if (source->op[i] == IR_CBR)
+            {
+                rewritten->b[to] = block_first[source->b[i]];
+                rewritten->c[to] = block_first[source->c[i]];
+            }
+        }
+    }
+    const IrInlineBases own = { 0 };
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        const uint32_t op = source->op[i];
+        const uint32_t to = at + (i - first);
+        if (op == IR_CALL || op == IR_CALL_INDIRECT)
+        {
+            ir_inline_descriptor(source, i, rewritten, to, values, own, cursor);
+        }
+        else if (op == IR_PHI)
+        {
+            // An edge leaves its predecessor's last part.
+            rewritten->a[to] = cursor->extra;
+            for (uint32_t p = 0; p < source->b[i]; p += 1)
+            {
+                rewritten->extra[cursor->extra++] = block_last[source->extra[source->a[i] + p * 2]];
+                rewritten->extra[cursor->extra++] = values[source->extra[source->a[i] + p * 2 + 1]];
+            }
+        }
+        else if (op == IR_SWITCH)
+        {
+            // A branch goes to its target's first part; the cases' constants are the caller's, the first rows.
+            rewritten->b[to] = cursor->extra;
+            rewritten->extra[cursor->extra++] = block_first[source->extra[source->b[i]]];
+            for (uint32_t k = 0; k < source->c[i]; k += 1)
+            {
+                rewritten->extra[cursor->extra++] = source->extra[source->b[i] + 1 + k * 2];
+                rewritten->extra[cursor->extra++] = block_first[source->extra[source->b[i] + 2 + k * 2]];
+            }
+        }
+        else if (op == IR_BR_INDIRECT && source->b[i] != BUSTER_IR_NONE)
+        {
+            // Its labels' list (#785), the caller's label indices, which keep their blocks.
+            rewritten->b[to] = cursor->extra;
+            memcpy(rewritten->extra + cursor->extra, source->extra + source->b[i], (uint64_t)source->c[i] * 4);
+            cursor->extra += source->c[i];
+        }
+        else if (ir_ternary_instruction(source, i))
+        {
+            ir_inline_third(source, i, rewritten, to, values, cursor);
+        }
+    }
+    cursor->node = at + (end - first);
+}
+
 static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineOptions options, const IrInlineBody* shapes, const IrInlineKinds* kinds,
                                  IrInlineResult* result)
 {
@@ -1783,7 +1895,6 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             rewritten.block_offsets[new_block++] = cursor.node;
             for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
             {
-                const uint32_t op = source->op[node];
                 const bool site = ir_inline_site(source, node);
                 if (site && result->decisions[call] == IR_INLINE_SELECTED)
                 {
@@ -1847,54 +1958,17 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 }
                 else
                 {
-                    const IrInlineBases own = { 0 };
-                    ir_inline_node(source, node, &rewritten, cursor.node, values, own);
-                    if (op == IR_CALL || op == IR_CALL_INDIRECT)
+                    // The caller's nodes up to its block's next expanded call, a run copied whole (ir_inline_copy_run).
+                    uint32_t last = node + 1;
+                    uint32_t sites = site;
+                    while (last < source->block_offsets[block + 1] && !(ir_inline_site(source, last) && result->decisions[call + sites] == IR_INLINE_SELECTED))
                     {
-                        ir_inline_descriptor(source, node, &rewritten, cursor.node, values, own, &cursor);
+                        sites += ir_inline_site(source, last);
+                        last += 1;
                     }
-                    else if (op == IR_PHI)
-                    {
-                        // An edge leaves its predecessor's last part.
-                        rewritten.a[cursor.node] = cursor.extra;
-                        for (uint32_t p = 0; p < source->b[node]; p += 1)
-                        {
-                            rewritten.extra[cursor.extra++] = block_last[source->extra[source->a[node] + p * 2]];
-                            rewritten.extra[cursor.extra++] = values[source->extra[source->a[node] + p * 2 + 1]];
-                        }
-                    }
-                    else if (op == IR_SWITCH)
-                    {
-                        // A branch goes to its target's first part; the cases' constants are the caller's, the first rows.
-                        rewritten.b[cursor.node] = cursor.extra;
-                        rewritten.extra[cursor.extra++] = block_first[source->extra[source->b[node]]];
-                        for (uint32_t k = 0; k < source->c[node]; k += 1)
-                        {
-                            rewritten.extra[cursor.extra++] = source->extra[source->b[node] + 1 + k * 2];
-                            rewritten.extra[cursor.extra++] = block_first[source->extra[source->b[node] + 2 + k * 2]];
-                        }
-                    }
-                    else if (op == IR_BR)
-                    {
-                        rewritten.a[cursor.node] = block_first[source->a[node]];
-                    }
-                    else if (op == IR_CBR)
-                    {
-                        rewritten.b[cursor.node] = block_first[source->b[node]];
-                        rewritten.c[cursor.node] = block_first[source->c[node]];
-                    }
-                    else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
-                    {
-                        // Its labels' list (#785), the caller's label indices, which keep their blocks.
-                        rewritten.b[cursor.node] = cursor.extra;
-                        memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
-                        cursor.extra += source->c[node];
-                    }
-                    else if (ir_ternary_instruction(source, node))
-                    {
-                        ir_inline_third(source, node, &rewritten, cursor.node, values, &cursor);
-                    }
-                    cursor.node += 1;
+                    ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, &rewritten, options.scalar, &cursor);
+                    node = last - 1;
+                    call += sites - site;
                 }
                 call += site;
             }
