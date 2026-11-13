@@ -31,9 +31,22 @@ static void check_test_driver_repaired_view(CheckTest* test, const char* clang, 
         "int g(int a) { if (a) { a == 1; } else { a + 2; } return a + \"b\";\n",
         // A stray `)` in a body, after a complete statement the view keeps.
         "void g(int *p) { p == 0; }\nvoid h(int a) { a == 1; ) }\n",
+        // Scope-pop warnings require a real closer (#2515): the inner block closes, the outer body does not.
+        "void o(void) { int a = 1; { int b; }\n",
+        "int n(int x) { return x + \"a\"; }\nvoid o(void) { int a = 1; { int b; }\n",
+        // The repaired view's last original body closes before the later parse error, so its warning precedes it.
+        "static int unused(void) { return 0; }\nvoid g(int a) { int b; a == 1; }\nint z = ;\n",
+        "void g(int a) { int b; { int c; } a == 1; }\nint z = ;\n",
+        "void g(void) { for (int i = 0; i < 1; ++i) { int b; } int a;\n",
+        "void o(int p) { int a = 1; L:; { int b; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    static const char* const options[][2] = { { "-Wall", NULL }, { "-Wall", "-Wextra" } };
+    static const char* const options[][2] = {
+        { "-Wall", NULL },
+        { "-Wall", "-Wextra" },
+        { "-Wall", "-Werror=unused-variable" },
+        { "-Wall", "-Wno-unused-variable" },
+    };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);

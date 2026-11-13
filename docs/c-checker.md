@@ -5273,11 +5273,14 @@ writes again where the original has it publishes its deferred warnings before
 the parse error, and one the error left open after it, without its flow
 analysis (`check_driver_flushed_bodies`) or `-Wreturn-type`. A reading's
 fresh error at a synthetic or incomplete statement isn't taken, and nor is a
-program failure there. `c_check_repaired_view_driver_test.c` compares
-fixtures with clang 23 as the structural ones are. Differences left: an
-unused variable of a scope the parse error leaves open is still given
-(clang's isn't), and one of a body the repair closes again publishes after
-the parse error; both predate the repaired view's common warnings.
+program failure there. Scope-pop unused-variable and label events
+require an original scope closer (#2515); their publication uses its original
+lookahead, so a closed body's warnings precede a later parse error and a scope
+the error leaves open has none. Unused parameters retain their function-end
+warning even when its closing brace is missing. `CheckRepair.original_closed` supplies the
+same closure boundary to these events and `CheckCommonView`.
+`c_check_repaired_view_driver_test.c` compares fixtures with clang 23 as the
+structural ones are, including unused-variable suppression and promotion.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the

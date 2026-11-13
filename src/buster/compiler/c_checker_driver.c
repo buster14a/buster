@@ -2104,18 +2104,12 @@ static uint64_t check_driver_first_error(const Parser* original, const Preproces
 static CheckCommonView check_driver_common_view(const CheckRepair* repair, const Parser* original)
 {
     const Parser* view = &repair->parser;
-    uint32_t closed = repair->original_end;
-    while (closed < view->tokens.count && closed < original->tokens.count && view->tokens.kinds[closed] == original->tokens.kinds[closed] &&
-           (view->tokens.kinds[closed] == PARSE_KIND_R_BRACE || view->tokens.kinds[closed] == PARSE_KIND_SEMI))
-    {
-        closed += 1;
-    }
     const CheckCommonView result = {
         .complete = repair->warning_complete,
         .original = original,
         .count = view->tokens.count,
         .end = repair->original_end,
-        .closed = closed,
+        .closed = repair->original_closed,
     };
     return result;
 }
