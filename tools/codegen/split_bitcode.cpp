@@ -5,7 +5,8 @@
 //
 // split.c's bitcode output (split_write_bitcode). Clang's -emit-llvm keeps the module's use-list order, and code
 // generation follows it (a block's predecessors, a value's users): a partition written without it compiles to different
-// instructions. LLVM's C API writes bitcode without it, so this call takes the choice as an argument.
+// instructions. LLVM's C API writes bitcode without it, so this call takes the choice as an argument. split.c's parts
+// also erase the aliases they don't emit (split_erase_alias), which LLVM's C API can't.
 //
 // presplit.c's parts (split_clone_part, split_write_part): a module's clone with chosen definitions alone, and its
 // bitcode without the use-list order, which the optimizer that follows each part doesn't need (the part's object then
@@ -48,6 +49,20 @@ extern "C" bool split_write_bitcode(LLVMModuleRef module, const char* path)
 extern "C" bool split_write_part(LLVMModuleRef module, const char* path)
 {
     return split_write(module, path, false);
+}
+
+// split.c's aliases of another part's definitions (split_part), which LLVM's C API can't erase: `alias` goes once its
+// dead constant users (the initializers and bodies the part dropped left them) are gone, and only if nothing else uses it.
+extern "C" bool split_erase_alias(LLVMValueRef alias)
+{
+    llvm::GlobalAlias* value = llvm::cast<llvm::GlobalAlias>(llvm::unwrap(alias));
+    value->removeDeadConstantUsers();
+    const bool unused = value->use_empty();
+    if (unused)
+    {
+        value->eraseFromParent();
+    }
+    return unused;
 }
 
 // `module`'s clone in the same context: every global value declared, and the `count` in `keep` defined as they are.
