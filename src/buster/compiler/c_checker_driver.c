@@ -2104,18 +2104,12 @@ static uint64_t check_driver_first_error(const Parser* original, const Preproces
 static CheckCommonView check_driver_common_view(const CheckRepair* repair, const Parser* original)
 {
     const Parser* view = &repair->parser;
-    uint32_t closed = repair->original_end;
-    while (closed < view->tokens.count && closed < original->tokens.count && view->tokens.kinds[closed] == original->tokens.kinds[closed] &&
-           (view->tokens.kinds[closed] == PARSE_KIND_R_BRACE || view->tokens.kinds[closed] == PARSE_KIND_SEMI))
-    {
-        closed += 1;
-    }
     const CheckCommonView result = {
         .complete = repair->warning_complete,
         .original = original,
         .count = view->tokens.count,
         .end = repair->original_end,
-        .closed = closed,
+        .closed = repair->original_closed,
     };
     return result;
 }
@@ -6431,10 +6425,13 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         view->meanings.meanings = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, view->meanings.capacity);
         result->to_view = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
         result->to_original = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, total);
+        uint8_t* recovered_types = original->recovered_types != NULL ? check_prefix_column(output, total, sizeof(uint8_t)) : NULL;
+        view->recovered_types = recovered_types;
         uint32_t* positions = original->tokens.pragma_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, original->tokens.pragma_count) : NULL;
         valid = view->tokens.kinds != NULL && view->tokens.names != NULL && view->tokens.sources != NULL && view->tokens.flags != NULL &&
                 view->tree.roles != NULL && view->tree.parents != NULL && view->tree.depths != NULL && view->postorder != NULL && view->sizes != NULL &&
                 view->diagnostics != NULL && view->meanings.meanings != NULL && result->to_view != NULL && result->to_original != NULL &&
+                (original->recovered_types == NULL || recovered_types != NULL) &&
                 (original->tokens.pragma_count == 0 || positions != NULL);
         uint32_t written = 0;
         // The left-out statement whose `}` is still to come, after its kept operands (CHECK_DRIVER_CAST_OPERAND): its last
@@ -6564,6 +6561,12 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         if (valid)
         {
             result->to_view[count] = written;
+            // A later reading's token edits retain the invalid type's provenance at the mapped specifier (#2509).
+            for (uint32_t token = 0; recovered_types != NULL && token < written; token += 1)
+            {
+                const uint32_t source = result->to_original[token];
+                recovered_types[token] = source < count ? original->recovered_types[source] : 0;
+            }
             for (uint32_t i = 0; i < original->tokens.pragma_count; i += 1)
             {
                 const uint32_t position = original->tokens.pragma_positions[i];
@@ -10772,9 +10775,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     prefix_only = true;
                     ready = true;
                 }
-                else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                else if (check_prefix_type_view(&prefix, recovered, arena, scratch))
                 {
-                    // A parameter's unknown type first: every declaration before the first other error.
+                    // A recoverable type error first: every declaration before the first structural error.
                     checking = &prefix.parser;
                     prefix_only = true;
                     ready = true;
@@ -10916,7 +10919,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         resumed.parser.whole_view = true;
                         checking = recovered;
                     }
-                    else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                    else if (check_prefix_type_view(&prefix, recovered, arena, scratch))
                     {
                         checking = &prefix.parser;
                     }
@@ -11370,7 +11373,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
                     // parser, where a prefix's or a repair's is a view of its own).
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing) &&
+                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing || checking->prefix_view) &&
                          (pp->errors != 0 || publication_errors || input.recovered_valid || repairing) && !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
@@ -11481,13 +11484,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         check_common_view = (CheckCommonView){ 0 };
                     }
-                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered || repairing) && !pp->fatal &&
+                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered || repairing || checking->prefix_view) && !pp->fatal &&
                              !pp->diagnostic_collection_failed && !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
                     {
                         // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
                         // graph's and its other errors' tokens, and its program's. A parse a resume read whole (#147) is
-                        // one too: its checking is the recovered parser, where a prefix's or a repair's is a view of its own.
-                        // A repair's is read too, at its complete original statements alone (CheckCommonView, #2431).
+                        // one too: its checking is the recovered parser. A prefix's complete declarations get these
+                        // readings too (#2509); a repair's keeps its complete original statements alone (CheckCommonView, #2431).
                         // Under -w too (#2162): its rounds' readings find the errors past a reader's error that ended its walk,
                         // which clang gives, where -w's policy leaves out every warning they publish.
                         const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;

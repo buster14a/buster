@@ -241,6 +241,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int c = undecl_n;\nint y = 3 + (void)0;\nunknown_type z;\n",
         "int c = undecl_n, d[] = 1 + (void)0;\nunknown_type z;\n",
         "int c = undecl_n;\nint f(int);\nint y = f(1, 2);\nunknown_type z;\n",
+        // A recoverable unknown type preserves the complete declarations on both sides (#2509), including graphs
+        // in function bodies and aggregate initializers and the rejected unit's subsequent readings.
+        "int c = undecl_n;\nint g(void) { return 1 + (void)0; }\nunknown_type z;\n",
+        "int c = undecl_n;\nstruct S { int a; } s = { 1 + (void)0 };\nunknown_type z;\n",
+        "int a = undecl;\nfoo bar;\nint c = 1 + (void)0;\n",
+        "unknown_type z;\nint g(void) { return 1 + (void)0; }\n",
+        "unknown_type z;\nstruct S { int a; } s = { 1 + (void)0 };\n",
+        "unknown_type z;\nint c = undecl_n;\nint y = 1 + (void)0;\n",
+        "unknown_type z = \"x\";\nint y = 1 + (void)0;\n",
+        "void f(void) { unknown_type z = \"x\"; }\nint y = 1 + (void)0;\n",
+        "unknown_type a = \"x\";\nint b = a + 1;\nint y = 1 + (void)0;\n",
+        "unknown_type z = \"x\";\nint g(void) { return 1 + (void)0; }\nint h(void) { return 2 + (void)0; }\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its

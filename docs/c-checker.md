@@ -5273,11 +5273,14 @@ writes again where the original has it publishes its deferred warnings before
 the parse error, and one the error left open after it, without its flow
 analysis (`check_driver_flushed_bodies`) or `-Wreturn-type`. A reading's
 fresh error at a synthetic or incomplete statement isn't taken, and nor is a
-program failure there. `c_check_repaired_view_driver_test.c` compares
-fixtures with clang 23 as the structural ones are. Differences left: an
-unused variable of a scope the parse error leaves open is still given
-(clang's isn't), and one of a body the repair closes again publishes after
-the parse error; both predate the repaired view's common warnings.
+program failure there. Scope-pop unused-variable and label events
+require an original scope closer (#2515); their publication uses its original
+lookahead, so a closed body's warnings precede a later parse error and a scope
+the error leaves open has none. Unused parameters retain their function-end
+warning even when its closing brace is missing. `CheckRepair.original_closed` supplies the
+same closure boundary to these events and `CheckCommonView`.
+`c_check_repaired_view_driver_test.c` compares fixtures with clang 23 as the
+structural ones are, including unused-variable suppression and promotion.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -5402,12 +5405,16 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   its uses, so a name its complete declarations before the error don't declare
   the whole unit doesn't either, and a graph error past the name (`x = 1, y =
   x()`'s called `int`, `3 + (void)0`'s operands) is clang's, an unsized
-  array's list error giving way to its initializer's own. Differences left: an
-  error the prefix's first reading doesn't reach, which a unit without the
-  parse error takes from its second readings (`check_driver_rejected_common`,
-  which a prefix view doesn't run), such as one in a function body or a
-  struct's initializer list after the name, and one past the parse error
-  (#2509).
+  array's list error giving way to its initializer's own. Complete prefix
+  declarations also take the rejected unit's subsequent readings
+  (`check_driver_rejected_common`, #2509), including function bodies and
+  aggregate initializers. A diagnosed unknown type whose specifier and
+  declaration tree survive is recovered as `int` in the private view; it
+  does not cut off the declarations after it. Its declaration remains invalid:
+  the existing invalid-declaration path skips initializer conversions and
+  quiets its invalid uses, with that status carried across comma declarators.
+  An actual structural error
+  still cuts the view, and the original error always rejects the unit.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5437,7 +5444,7 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   reads it as `int` (`Parser.recovered_parameter_types`); where a unit's first
   error is one, the driver takes that view, with every declaration before the
   first other error, before a repair view, which would end at its declaration
-  (`check_prefix_parameter_view`), and the recovery rounds read past it. The
+  (`check_prefix_type_view`), and the recovery rounds read past it. The
   reader searches each such `int` whose source still spells the name, among the
   declarations visible there, a block's own typedefs too
   (`check_input_parameter_typo`, `check_typo_parameter`), and lists what it
