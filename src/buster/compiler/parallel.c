@@ -952,8 +952,19 @@ static bool parallel_render(Arena* arena, const ParallelCommand* command, const 
     return built;
 }
 
+// Whether a command that ran kept clearly more CPUs busy than it holds (#2031): its CPU time over its time past 1.5 times
+// its CPUs, and past them by a second of CPU or more. Its processes then took CPUs the runner gave other commands, and
+// its heading needs a larger `[N CPUs]`, or the test fewer processes at once (test_process_cpus).
+static bool parallel_overcommitted(const ParallelResult* result)
+{
+    const uint64_t wall = result->end > result->start ? result->end - result->start : 0;
+    const uint64_t held = result->cpus * wall;
+    return result->state == PARALLEL_STATE_ENDED && result->start_error == 0 && wall != 0 && result->cpu * 2 > held * 3 && result->cpu - held >= BUSTER_PARALLEL_NANOSECONDS;
+}
+
 // The report's last part, built at the arena's end once every command has ended or won't start: the summary line, then a
-// line (or with --github an annotation) for each command that failed. Sets *full when the arena can't hold it.
+// line (or with --github an annotation) for each command that failed, then a line (or a warning) for each that kept more
+// CPUs busy than it holds. Sets *full when the arena can't hold it.
 static String8 parallel_render_summary(Arena* arena, const ParallelList* list, const ParallelOptions* options, const ParallelResult* results, const ParallelSummary* summary,
                                        uint64_t jobs, int signal_error, bool* full)
 {
@@ -986,6 +997,23 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
                                                     parallel_append_escaped(arena, outcome_text, false)
                                               : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
                                                     parallel_append(arena, outcome_text.pointer, outcome_text.length));
+            built = built && parallel_append(arena, "\n", 1);
+        }
+    }
+    for (uint64_t i = 0; i < list->count; i += 1)
+    {
+        if (parallel_overcommitted(&results[i]))
+        {
+            char busy[BUSTER_PARALLEL_OUTCOME_BYTES];
+            const int busy_length = snprintf(busy, sizeof(busy), "kept %.1f CPUs busy, more than the %llu it holds", (double)results[i].cpu / (double)(results[i].end - results[i].start),
+                                             (unsigned long long)results[i].cpus);
+            const String8 busy_text = { .pointer = busy, .length = busy_length > 0 ? (uint64_t)busy_length : 0 };
+            const String8 title = list->commands[i].title;
+            built = built && busy_length > 0 &&
+                    (options->github ? parallel_append(arena, "::warning title=", 16) && parallel_append_escaped(arena, title, true) && parallel_append(arena, "::", 2) &&
+                                           parallel_append_escaped(arena, busy_text, false)
+                                     : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
+                                           parallel_append(arena, busy_text.pointer, busy_text.length));
             built = built && parallel_append(arena, "\n", 1);
         }
     }

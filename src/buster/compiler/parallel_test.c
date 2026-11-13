@@ -754,6 +754,43 @@ static void parallel_test_memory(ParallelTest* test)
     test->arena.length = 0;
 }
 
+// The summary's warnings for commands that kept more CPUs busy than they hold (#2031), from results made up here rather
+// than run, whose CPU times a loaded machine would blur: 1.9 of 1 and 1.6 of 1 are flagged; 2.9 of 2 isn't past 1.5
+// times its CPUs, and 1.9 of 1 for a second isn't past them by a second of CPU.
+static void parallel_test_overcommitted(ParallelTest* test)
+{
+    const uint64_t second = BUSTER_PARALLEL_NANOSECONDS;
+    const ParallelList list = parallel_list_parse(&test->arena, parallel_test_string("== a, wide: at once\ntrue\n== b [2 CPUs]\ntrue\n== c\ntrue\n== d\ntrue\n"));
+    ParallelResult results[4] = {
+        { .end = 10 * second, .cpus = 1, .cpu = 19 * second, .state = PARALLEL_STATE_ENDED, .passed = true },
+        { .end = 10 * second, .cpus = 2, .cpu = 29 * second, .state = PARALLEL_STATE_ENDED, .passed = true },
+        { .end = second, .cpus = 1, .cpu = 19 * second / 10, .state = PARALLEL_STATE_ENDED, .passed = true },
+        { .end = 2 * second, .cpus = 1, .cpu = 32 * second / 10, .state = PARALLEL_STATE_ENDED, .passed = true },
+    };
+    const ParallelSummary summary = { .passed = 4, .elapsed = 10 * second, .cpu = 531 * second / 10 };
+    static const char* const expected[] = {
+        "parallel: 4 commands in 10.0 s, 53.1 s of CPU, at most 4 CPUs at once: 4 passed, 0 failed, 0 skipped, 0 not started\n"
+        "parallel: a, wide: at once kept 1.9 CPUs busy, more than the 1 it holds\n"
+        "parallel: d kept 1.6 CPUs busy, more than the 1 it holds\n",
+        "parallel: 4 commands in 10.0 s, 53.1 s of CPU, at most 4 CPUs at once: 4 passed, 0 failed, 0 skipped, 0 not started\n"
+        "::warning title=a%2C wide%3A at once::kept 1.9 CPUs busy, more than the 1 it holds\n"
+        "::warning title=d::kept 1.6 CPUs busy, more than the 1 it holds\n",
+    };
+    for (uint64_t github = 0; github < 2 && list.error == 0 && list.count == 4; github += 1)
+    {
+        const ParallelOptions options = { .jobs = 4, .github = github != 0 };
+        bool full = false;
+        const String8 text = parallel_render_summary(&test->arena, &list, &options, results, &summary, 4, 0, &full);
+        parallel_test_check(test, github != 0 ? "CPUs: the summary's warnings, with --github" : "CPUs: the summary's warnings", !full, text, expected[github]);
+    }
+    if (list.error != 0 || list.count != 4)
+    {
+        printf("  CPUs: the warnings' list didn't parse\n");
+        test->failures += 1;
+    }
+    test->arena.length = 0;
+}
+
 static void parallel_test_output(ParallelTest* test)
 {
     ParallelSummary summary;
@@ -1678,6 +1715,7 @@ static int run_parallel_tests(int argc, char** argv)
             parallel_test_at_once(&test);
             parallel_test_cpus(&test);
             parallel_test_memory(&test);
+            parallel_test_overcommitted(&test);
             parallel_test_output(&test);
             parallel_test_processes(&test);
             parallel_test_slow_reader(&test);

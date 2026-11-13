@@ -182,7 +182,13 @@ its CPU time over its time shows (the report gives both). Brief phases on more
 don't count, as the 8-lane checks of the longer test-files runs and of
 test-checker, whose CPU time stays near their time, but lanes that wait for each
 other in loops do. A command whose report shows it keeping more busy than its
-heading says needs a larger count or less work. Run together, the step is bound
+heading says needs a larger count or less work. The summary warns of one that
+keeps clearly more busy (#2031): its CPU time over its time past 1.5 times its
+CPUs, and past them by a second of CPU or more, gets a line `parallel: TITLE
+kept 1.9 CPUs busy, more than the 1 it holds` after the failures' (with
+`--github`, a `::warning`). In the first merge-queue candidate's sanitizer
+shards only the differential harness's lifecycle cases, eight at once, did
+(1.6 to 1.9 CPUs on one); they declare 2. Run together, the step is bound
 by the machine's CPU rather than by its longest test (#465: its tests took 622 s
 of CPU, their times in the job 404 s, in a step of 52.5 s when 8 ran at once on
 15 CPUs; #526's first run: 73.9 s, against 213.5 s one at a time, with 441.5 s
@@ -236,7 +242,10 @@ as expected with its times, CPU times and peak memory written as `*`:
 - memory (#2031): the 32 MiB a shell holds and the 32 MiB a process it waits
   for holds each count in their command's peak, a shell that holds nothing
   comes to under 16 MiB, and each command's heading gives its own peak in MiB
-  rounded up;
+  rounded up; then the summary's warnings, from made-up results, both plain
+  and with `--github`: 1.9 CPUs of 1 and 1.6 of 1 are warned of, 2.9 of 2
+  (not past 1.5 times) and 1.9 of 1 for a second (not a second of CPU past)
+  aren't;
 - output: 1 MB from one command, past a pipe's 64 KB;
 - processes: a command past its timeout killed with the process it started,
   what a command leaves running killed when its shell ends, and a shell that
