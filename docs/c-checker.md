@@ -234,6 +234,32 @@ Both modes use the same checked-reference selection for object publication;
 tests require equal objects for valid inputs. Performance comparisons use the
 default mode, with any lazy-mode measurements reported separately.
 
+Before planning, the compile driver checks whether missing expansion history
+or the existing opaque-reference policy already requires every body: assembly
+or an `alias`, `ifunc` or `cleanup` name. In that case it uses the ordinary
+reader directly, without allocating body records, a mask or binding events.
+This proof does not depend on how complicated a declaration is.
+
+Otherwise the lazy planner first tries a certificate from the completed parser
+tree (#1364). It identifies simple function declarations and their complete
+body intervals, then admits references only where the tree proves their
+ordinary function identity. Its compact demand graph uses the existing
+scalar/vector reachability kernels. It neither reparses the unit nor builds
+the parser's complete binding-event stream on this path. Ambiguous declarations,
+shadowing and unsupported syntactic contexts return to the original exact
+grammar/binding planner; this fallback preserves the lazy diagnostic policy.
+An allocation failure is a resource failure, not an admission failure.
+
+The ordinary eager path does not run either planner. The selected reader still
+checks headers and demanded bodies in original source order, and emission
+still follows the checked semantic references. With `--time-stages`, a
+`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection,
+references and retained bytes; planning remains charged to `check-input`.
+Use those counters to distinguish an admitted tree plan from a grammar fallback
+when measuring a workload. The new planner's performance requires the approved
+9700X campaign; its structural removal of a replay alone is not a measured
+whole-compilation speedup.
+
 Unsupported source constructs produce an explicit diagnostic. `-c` also
 requires the checked program to be representable by the current backend; a
 successful syntax check alone does not establish executable support for every
