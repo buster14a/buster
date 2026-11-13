@@ -26,9 +26,9 @@
 //   then emits them as the single module did (a sanitizer's module constructor, in a retained section, and
 //   AddressSanitizer's, in a comdat with its .init_array entry); an alias goes with its base object (AddressSanitizer's
 //   private aliases of the globals it describes), and no declaration keeps a comdat.
-// The merge restores local binding to everything the input didn't export, and the comdat flags llvm-objcopy clears. Read-only data keeps its order and each
-// item's alignment, but a part's .rodata takes its greatest item's alignment, so the items after a part boundary can
-// move by less than that alignment. The build's comparison (build-regression) checks the rest: identical functions at
+// The merge restores local binding to everything the input didn't export, and the comdat flags llvm-objcopy clears.
+// Read-only data keeps its order and each item's alignment, but a part's .rodata takes its greatest item's alignment,
+// so the items after a part boundary can move by less than that alignment. The build's comparison (build-regression) checks the rest: identical functions at
 // identical addresses.
 //
 // --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
@@ -345,12 +345,13 @@ static uint64_t split_references(const SplitPlan* plan, LLVMValueRef value)
     return mask;
 }
 
-// The part that emits `value`'s base object (through constant expressions and aliases): its function's code part, or the
-// data part for a global variable or anything no part defines.
+// The part that emits `value`'s base object (through constant expressions and aliases): its function's code part, or
+// the data part for a global variable or anything no part defines.
 static uint32_t split_owner(const SplitPlan* plan, LLVMValueRef value)
 {
     LLVMValueRef base = value;
-    for (uint32_t depth = 0; depth < 64 && base != 0; depth += 1)
+    bool stripping = true;
+    for (uint32_t depth = 0; depth < 64 && stripping && base != 0; depth += 1)
     {
         if (LLVMIsAGlobalAlias(base) != 0)
         {
@@ -359,6 +360,10 @@ static uint32_t split_owner(const SplitPlan* plan, LLVMValueRef value)
         else if (LLVMIsAConstantExpr(base) != 0 && LLVMGetNumOperands(base) != 0)
         {
             base = LLVMGetOperand(base, 0);
+        }
+        else
+        {
+            stripping = false;
         }
     }
     uint32_t part = plan->parts;
@@ -481,9 +486,9 @@ static void split_readable_closure(LLVMModuleRef module)
     free(stack);
 }
 
-// The plan's decisions every part shares, made before the parts fork: the boundaries; llvm.compiler.used dropped (it only
-// keeps definitions from the optimizer, which no longer runs, and ELF code generation ignores it; the entry arrays stay,
-// for split_part_entries); names for unnamed local definitions; which functions are aliased; and the other local
+// The plan's decisions every part shares, made before the parts fork: the boundaries; llvm.compiler.used dropped (it
+// only keeps definitions from the optimizer, which no longer runs, and ELF code generation ignores it; the entry arrays
+// stay, for split_part_entries); names for unnamed local definitions; which functions are aliased; and the other local
 // definitions another part refers to made hidden external ones.
 static void split_plan(SplitPlan* plan)
 {
@@ -610,8 +615,8 @@ static void split_delete_body(LLVMValueRef function)
     }
 }
 
-// Part `part`'s entry arrays (split_entry_array): the entries of what it emits, in their order, an array the same as the
-// module's where it keeps them all and none where it keeps none (split_entries_kept checked that the rest can go so).
+// Part `part`'s entry arrays (split_entry_array): the entries of what it emits, in their order, an array the same as
+// the module's where it keeps them all and none where it keeps none (split_entries_kept checked that the rest can go).
 static void split_part_entries(const SplitPlan* plan, uint32_t part)
 {
     LLVMModuleRef module = plan->module;
@@ -713,8 +718,8 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
         }
     }
     // An alias goes with its base object: AddressSanitizer's private aliases of the globals it describes, which its
-    // descriptors in the data part name. A part that doesn't emit the object drops the alias, which would be an alias of
-    // a declaration; one that still refers to it there can't be split.
+    // descriptors in the data part name. A part that doesn't emit the object drops the alias, which would be an alias
+    // of a declaration; one that still refers to it there can't be split.
     bool aliases = true;
     LLVMValueRef alias = LLVMGetFirstGlobalAlias(module);
     while (alias != 0)
