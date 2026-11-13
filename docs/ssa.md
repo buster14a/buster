@@ -3,8 +3,11 @@
 `ssa.c` implements local promotion for [#134](https://github.com/buster14a/buster/issues/134).
 It takes a completed CFG and a view of the local accesses in its instruction
 columns. It returns read replacements and phis without prescribing the rest of
-the IR. `ssa_build` is the vector path; `ssa_build_scalar` is its independent
-predecessor-reading twin. Both are included in the existing compiler executable.
+the IR. `ssa_build` selects vector kernels where available; `ssa_build_scalar`
+is its scalar twin. Small functions retain the independent frontier-based and
+predecessor-reading constructors. Large functions use bounded predecessor
+reading with vector or scalar renaming kernels. All are included in the existing
+compiler executable.
 `ssa_ir.c` connects the core to #131's `IrFunction`, including the all-memory
 functions produced by `ir_lower.c` from Tier 0's typed stream.
 Both constructors use #174's shared `dominators_analyze` interface; the vector
@@ -114,8 +117,9 @@ SSA reserves at most 16 MiB for the combined quadratic regions needed by the
 shared analysis: its frontier output span, temporary dominator matrix and one
 temporary reachable row. With `row_bytes` rounded to a 512-bit boundary, the
 vector path requires `(2 * blocks + 1) * row_bytes <= 16 MiB`. Above this bound,
-`ssa_build` uses the scalar constructor and requests only the shared scalar
-dominator tree. It does not request frontier or loop matrices on that path.
+`ssa_build` uses predecessor reading and requests only the shared scalar
+dominator tree. Its bounded path can still vectorize access renaming; neither
+predecessor-reading path requests frontier or loop matrices.
 This is a storage policy, **not a measured performance crossover**. The IR's
 promotion (`ssa_ir_promote`) adds one (#787): its vector path's phi placement,
 entry definitions and renaming each pass over every (block, slot) cell, where the
@@ -135,8 +139,13 @@ span for retained analysis columns, followed by temporary storage. The views
 own no mappings, and only the completed analysis output remains after the
 call. This preserves the public SSA APIs without per-function memory mappings.
 Linear analysis columns and alignment remain bounded by scratch capacity.
-Current-definition tables are dense in `blocks × promoted locals`; the caller's
-arena also bounds that remaining storage.
+The dense constructor has a second, conservative 16 MiB bound for its complete
+workspace (`ssa_dense_fits`): definition/entry tables, provisional phi records
+and operands, aliases, renaming columns, padded liveness matrices, cleanup,
+emission and linear preparation columns. The estimate uses all input locals,
+so exclusions can only reduce it. Above this complete-workspace bound, no
+full `blocks × locals` or `edges × locals` workspace is reserved. The existing
+16,384-cell performance crossover remains separate from this storage policy.
 
 ### Scalar path
 
@@ -147,6 +156,56 @@ query frames live on an explicit stack. This handles loops without recursive
 calls, including single-predecessor chains. All predecessors are already known:
 the API accepts a filled, sealed function and does not expose incremental
 unsealed-block construction.
+
+### Bounded construction (#1353)
+
+`ssa_bounded.c` keeps the predecessor-reading algorithm while bounding its
+temporary state to one local. `ssa_prepare_path` prepares the same topology,
+reachability and dominator tree once; only a budgeted dense construction asks
+it for full-local dataflow rows. Both the core API and the shared IR adapter
+select bounded construction before allocating those rows.
+
+A stable counting pass groups reachable, eligible READ/WRITE instruction IDs
+by original local. Each group preserves instruction and block order. The
+inventory is offsets/counts plus contiguous IDs, with no per-access allocation
+and no repeated full-input scan. Unreachable READs receive their own typed
+undef, and locals with no accesses skip immediately.
+
+For each nonempty group:
+
+1. Record final WRITEs in the touched blocks. Reuse one `last[blocks]`,
+   `entry[blocks]`, predecessor-query stack and provisional phi graph.
+2. Request an incoming value only for an upward-exposed READ. Rename the
+   group's block segments in original order. The vector kernel uses the same
+   16-lane prefix maxima and permutes as dense renaming; its scalar kernel
+   selects the same preceding writes. Masked tails read only the actual group.
+3. Simplify that local's provisional phi SCCs and retain only phis reachable
+   from its original READs. Allocate exactly the retained phi rows and their
+   predecessor operands. Single-input chains are discarded before the next
+   local, so their provisional nodes cannot accumulate across locals.
+4. Save replacements separately, then reset only touched access and entry
+   records. Temporary phi IDs can now be reused.
+
+During local cleanup, every other local's original READ remains a symbolic
+identity, including READs of locals already processed. Following an earlier
+local's answer while provisional IDs are reused would make cross-local
+recurrences depend on local order. Retained phis receive stable global IDs
+before workspace reuse. After all groups, assembly resolves the saved READ
+references and shared global SCC cleanup removes cross-local redundancy.
+
+For `I` instructions, `B` blocks, `E` edges, `L` locals, and `P/A` phis/operands
+retained after local cleanup, storage is `O(I + B + E + L + P + A)`. A local's
+temporary graph holds at most `B` phis and `E` operands; the graph is reused,
+not appended. Global cleanup can further reduce `P/A`. Extent arithmetic is
+widened and actual phi/operand IDs are checked before append and assembly.
+An unused Cartesian product exceeding `u32` no longer causes an ID failure.
+The public output, ownership, rollback and undef contracts remain unchanged.
+
+This removes unconditional Cartesian storage. It does not promise linear time
+or linear SSA output for every CFG: many locals that genuinely span the whole
+function can require repeated predecessor work and many retained phis. The
+allocator's separate liveness matrices remain owned by #1384. Changing the
+storage bound changes algorithm selection, not the published SSA semantics.
 
 ### Shared cleanup
 
@@ -240,6 +299,15 @@ uses at their respective predecessor exits. It then solves independent symbolic
 reaching-definition equations and replays local accesses. This catches wrong
 same-type, dominating substitutions which a structural verifier alone accepts.
 
+`ssa_verify.c` independently rebuilds access and phi groups from the original
+input and candidate result. It reuses generation-stamped block rows for one
+local, derives exposed reads and final writes independently, propagates
+liveness backwards, then propagates symbolic exits through a worklist. Every
+known incoming value at a live block without a phi must agree. Every phi
+operand and original READ is checked, including WRITEs sourced from READs of
+another local. Neither full-local dataflow nor constructor definition tables
+are allocated by verification, and unused locals require no block traversal.
+
 ```sh
 ./build/compiler test-ssa
 ./build/compiler test-ssa --seed 7439 --count 150
@@ -262,6 +330,15 @@ regions. Boundary cases exceed 512 blocks and exercise exactly 511, 512, 513 and
 batch boundaries. Invalid inputs, damaged result columns and allocation failures
 must fail with intact caller state. Deliberately swapped phi operands and wrong
 dominating read values must fail both the verifier and the interpreter.
+
+The bounded kernels also run all these fixtures and generated CFGs, including
+guarded tails and failure sweeps. Dedicated regressions check cross-local
+irreducible recurrences in both local orders, with distinct/shared entry values
+and scalar/vector/mask types. Fixed-capacity construction and verification cover
+65,536 blocks with 65,536 unused locals in 32 MiB scratch, 8,192 blocks with 256
+live-through locals in 16 MiB, and 2,048 independent scoped loops in 16 MiB.
+The tests assert exact read/phi answers, input immutability and preserved arena
+prefixes; these are resource/correctness checks, not throughput measurements.
 
 After shared-dominator integration, local qualification used Clang 23.1.1 on a
 cloud AVX-512 AMD EPYC 9V74. The optimized and ASan/UBSan core suites each passed

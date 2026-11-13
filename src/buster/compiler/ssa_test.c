@@ -309,48 +309,51 @@ static void ssa_test_run(SsaTestTally* tally, SsaTestSpace* space, const SsaInpu
 {
     tally->blocks = input->block_count;
     tally->locals = input->local_count;
-    arena_pop_to(&space->output, 0);
-    arena_pop_to(&space->twin, 0);
-    arena_pop_to(&space->scratch, 0);
     const uint64_t hash = ssa_test_input_hash(input);
-    SsaResult vector = { 0 };
-    SsaResult scalar = { 0 };
-    const SsaError vector_error = ssa_build(input, &space->output, &space->scratch, &vector);
-    const SsaError scalar_error = ssa_build_scalar(input, &space->twin, &space->scratch, &scalar);
-    const bool vector_built = ssa_test_expect(tally, vector_error == SSA_OK, "vector construction");
-    const bool scalar_built = ssa_test_expect(tally, scalar_error == SSA_OK, "scalar construction");
-    const bool built = vector_built && scalar_built;
-    ssa_test_expect(tally, space->scratch.length == 0, "constructors restore scratch");
-    if (built)
+    for (uint32_t bounded = 0; bounded < 2; bounded += 1)
     {
-        const SsaCheck vector_check = ssa_verify(input, &vector, &space->scratch);
-        const SsaCheck scalar_check = ssa_verify(input, &scalar, &space->scratch);
-        if (vector_check.error != SSA_OK && tally->failures < BUSTER_SSA_TEST_REPORTS)
+        arena_pop_to(&space->output, 0);
+        arena_pop_to(&space->twin, 0);
+        arena_pop_to(&space->scratch, 0);
+        SsaResult vector = { 0 };
+        SsaResult scalar = { 0 };
+        const SsaError vector_error = bounded != 0 ? ssa_build_bounded_path(input, &space->output, &space->scratch, &vector, true) : ssa_build(input, &space->output, &space->scratch, &vector);
+        const SsaError scalar_error = bounded != 0 ? ssa_build_bounded_path(input, &space->twin, &space->scratch, &scalar, false) : ssa_build_scalar(input, &space->twin, &space->scratch, &scalar);
+        const bool vector_built = ssa_test_expect(tally, vector_error == SSA_OK, bounded != 0 ? "bounded vector construction" : "vector construction");
+        const bool scalar_built = ssa_test_expect(tally, scalar_error == SSA_OK, bounded != 0 ? "bounded scalar construction" : "scalar construction");
+        const bool built = vector_built && scalar_built;
+        ssa_test_expect(tally, space->scratch.length == 0, "constructors restore scratch");
+        if (built)
         {
-            fprintf(stderr, "test-ssa: vector verifier: %s at %u\n", vector_check.rule, vector_check.instruction);
-        }
-        if (scalar_check.error != SSA_OK && tally->failures < BUSTER_SSA_TEST_REPORTS)
-        {
-            fprintf(stderr, "test-ssa: scalar verifier: %s at %u\n", scalar_check.rule, scalar_check.instruction);
-        }
-        const bool vector_verified = ssa_test_expect(tally, vector_check.error == SSA_OK, "vector verification");
-        const bool scalar_verified = ssa_test_expect(tally, scalar_check.error == SSA_OK, "scalar verification");
-        const bool verified = vector_verified && scalar_verified;
-        ssa_test_expect(tally, space->scratch.length == 0, "verifier restores scratch");
-        if (verified)
-        {
-            ssa_test_expect(tally, ssa_test_metadata(input, &vector, &space->oracle), "vector metadata against source graph");
-            ssa_test_expect(tally, ssa_test_metadata(input, &scalar, &space->oracle), "scalar metadata against source graph");
-            ssa_test_expect(tally, ssa_test_interpret(input, &vector, &space->oracle, tally->seed), "vector execution against memory locals");
-            ssa_test_expect(tally, ssa_test_interpret(input, &scalar, &space->oracle, tally->seed), "scalar execution against memory locals");
-        }
-        if (no_phis)
-        {
-            ssa_test_expect(tally, vector.phi_count == 0 && scalar.phi_count == 0, "redundant or unused phis are absent");
-        }
-        if (needs_phi)
-        {
-            ssa_test_expect(tally, vector.phi_count != 0 && scalar.phi_count != 0, "different reaching definitions retain a phi");
+            const SsaCheck vector_check = ssa_verify(input, &vector, &space->scratch);
+            const SsaCheck scalar_check = ssa_verify(input, &scalar, &space->scratch);
+            if (vector_check.error != SSA_OK && tally->failures < BUSTER_SSA_TEST_REPORTS)
+            {
+                fprintf(stderr, "test-ssa: %s vector verifier: %s at %u\n", bounded != 0 ? "bounded" : "selected", vector_check.rule, vector_check.instruction);
+            }
+            if (scalar_check.error != SSA_OK && tally->failures < BUSTER_SSA_TEST_REPORTS)
+            {
+                fprintf(stderr, "test-ssa: %s scalar verifier: %s at %u\n", bounded != 0 ? "bounded" : "selected", scalar_check.rule, scalar_check.instruction);
+            }
+            const bool vector_verified = ssa_test_expect(tally, vector_check.error == SSA_OK, "vector verification");
+            const bool scalar_verified = ssa_test_expect(tally, scalar_check.error == SSA_OK, "scalar verification");
+            const bool verified = vector_verified && scalar_verified;
+            ssa_test_expect(tally, space->scratch.length == 0, "verifier restores scratch");
+            if (verified)
+            {
+                ssa_test_expect(tally, ssa_test_metadata(input, &vector, &space->oracle), "vector metadata against source graph");
+                ssa_test_expect(tally, ssa_test_metadata(input, &scalar, &space->oracle), "scalar metadata against source graph");
+                ssa_test_expect(tally, ssa_test_interpret(input, &vector, &space->oracle, tally->seed), "vector execution against memory locals");
+                ssa_test_expect(tally, ssa_test_interpret(input, &scalar, &space->oracle, tally->seed), "scalar execution against memory locals");
+            }
+            if (no_phis)
+            {
+                ssa_test_expect(tally, vector.phi_count == 0 && scalar.phi_count == 0, "redundant or unused phis are absent");
+            }
+            if (needs_phi)
+            {
+                ssa_test_expect(tally, vector.phi_count != 0 && scalar.phi_count != 0, "different reaching definitions retain a phi");
+            }
         }
     }
     ssa_test_expect(tally, hash == ssa_test_input_hash(input), "inputs remain immutable");
@@ -592,6 +595,62 @@ static void ssa_test_fixtures(SsaTestTally* tally, SsaTestSpace* space)
     ssa_test_run(tally, space, &fixture.input, true, false);
 }
 
+static void ssa_test_bounded_cycles(SsaTestTally* tally, SsaTestSpace* space)
+{
+    // Each local's loop equation reads another local. With one entry value the whole cross-local SCC collapses,
+    // but no local may substitute a previously processed local's READ while its provisional IDs are being reused.
+    // Reverse local numbering, keep instruction order fixed, and check scalar, vector and both bounded kernels.
+    const uint8_t types[] = { BUSTER_SSA_TYPE_I64, BUSTER_SSA_TYPE_V16I32, BUSTER_SSA_TYPE_M16 };
+    for (uint32_t type = 0; type < sizeof(types) / sizeof(types[0]); type += 1)
+    {
+        for (uint32_t same = 0; same < 2; same += 1)
+        {
+            for (uint32_t reverse = 0; reverse < 2; reverse += 1)
+            {
+                SsaTestFixture fixture;
+                ssa_test_fixture_begin(&fixture, 4, 3);
+                for (uint32_t local = 0; local < 3; local += 1)
+                {
+                    fixture.local_types[local] = types[type];
+                }
+                const uint32_t a = reverse != 0 ? 2 : 0;
+                const uint32_t b = 1;
+                const uint32_t c = reverse != 0 ? 0 : 2;
+                ssa_test_fixture_block(&fixture, 0);
+                const uint32_t x = ssa_test_emit(&fixture, BUSTER_SSA_VALUE, a, BUSTER_SSA_NONE);
+                const uint32_t y = ssa_test_emit(&fixture, BUSTER_SSA_VALUE, b, BUSTER_SSA_NONE);
+                const uint32_t z = ssa_test_emit(&fixture, BUSTER_SSA_VALUE, c, BUSTER_SSA_NONE);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, a, x);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, b, same != 0 ? x : y);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, c, same != 0 ? x : z);
+                ssa_test_fixture_edge(&fixture, 0, 1);
+                ssa_test_fixture_edge(&fixture, 0, 2);
+                ssa_test_fixture_block(&fixture, 1);
+                uint32_t left = ssa_test_emit(&fixture, BUSTER_SSA_READ, a, BUSTER_SSA_NONE);
+                uint32_t right = ssa_test_emit(&fixture, BUSTER_SSA_READ, b, BUSTER_SSA_NONE);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, a, right);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, b, left);
+                ssa_test_fixture_edge(&fixture, 1, 2);
+                ssa_test_fixture_edge(&fixture, 1, 3);
+                ssa_test_fixture_block(&fixture, 2);
+                left = ssa_test_emit(&fixture, BUSTER_SSA_READ, b, BUSTER_SSA_NONE);
+                right = ssa_test_emit(&fixture, BUSTER_SSA_READ, c, BUSTER_SSA_NONE);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, b, right);
+                ssa_test_emit(&fixture, BUSTER_SSA_WRITE, c, left);
+                ssa_test_fixture_edge(&fixture, 2, 1);
+                ssa_test_fixture_edge(&fixture, 2, 3);
+                ssa_test_fixture_block(&fixture, 3);
+                ssa_test_emit(&fixture, BUSTER_SSA_READ, a, BUSTER_SSA_NONE);
+                ssa_test_emit(&fixture, BUSTER_SSA_READ, b, BUSTER_SSA_NONE);
+                ssa_test_emit(&fixture, BUSTER_SSA_READ, c, BUSTER_SSA_NONE);
+                ssa_test_fixture_finish(&fixture);
+                tally->name = reverse != 0 ? "cross-local irreducible SCC, reversed locals" : "cross-local irreducible SCC";
+                ssa_test_run(tally, space, &fixture.input, same != 0, same == 0);
+            }
+        }
+    }
+}
+
 static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_t count)
 {
     static const uint32_t boundaries[] = { 1, 2, 15, 16, 17, 63, 64, 65, 511, 512, 513, 1025 };
@@ -745,15 +804,15 @@ static void ssa_test_reject(SsaTestTally* tally, SsaTestSpace* space, const SsaI
 {
     tally->blocks = input->block_count;
     tally->locals = input->local_count;
-    for (uint32_t path = 0; path < 2; path += 1)
+    for (uint32_t path = 0; path < 4; path += 1)
     {
         space->output.length = 37;
         space->scratch.length = 29;
         SsaResult before;
         memset(&before, 0x5a, sizeof(before));
         SsaResult result = before;
-        const SsaError error = path == 0 ? ssa_build(input, &space->output, &space->scratch, &result) :
-                                         ssa_build_scalar(input, &space->output, &space->scratch, &result);
+        const SsaError error = path >= 2 ? ssa_build_bounded_path(input, &space->output, &space->scratch, &result, path == 2) :
+                              path == 0 ? ssa_build(input, &space->output, &space->scratch, &result) : ssa_build_scalar(input, &space->output, &space->scratch, &result);
         ssa_test_expect(tally, error == SSA_ERROR_INVALID || error == SSA_ERROR_LIMIT, "invalid input refused");
         ssa_test_expect(tally, space->output.length == 37 && space->scratch.length == 29 && memcmp(&before, &result, sizeof(result)) == 0,
                         "invalid input preserves output, scratch and result");
@@ -939,6 +998,209 @@ static void ssa_test_dominance_handoff(SsaTestTally* tally, SsaTestSpace* space)
     arena_pop_to(&space->output, 0);
 }
 
+static bool ssa_test_bounded_input(Arena* arena, uint32_t shape, SsaInput* result)
+{
+    const uint32_t locals = shape == 0 ? 65536 : shape == 1 ? 256 : 2048;
+    const uint32_t blocks = shape == 0 ? 65536 : shape == 1 ? 8192 : 3 * locals + 2;
+    const uint32_t instructions = shape == 0 ? 0 : shape == 1 ? 3 * locals : 8 * locals;
+    const uint32_t edges = shape < 2 ? blocks - 1 : 4 * locals + 1;
+    const uint64_t saved = arena->length;
+    uint32_t* block_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)blocks + 1);
+    uint32_t* successor_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)blocks + 1);
+    uint32_t* successors = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, edges);
+    uint8_t* kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, instructions == 0 ? 1 : instructions);
+    uint8_t* types = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, instructions == 0 ? 1 : instructions);
+    uint32_t* accesses = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, instructions == 0 ? 1 : instructions);
+    uint32_t* operands = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, instructions == 0 ? 1 : instructions);
+    uint8_t* local_types = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, locals);
+    uint8_t* local_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, locals);
+    const bool ready = block_offsets != 0 && successor_offsets != 0 && successors != 0 && kinds != 0 && types != 0 && accesses != 0 && operands != 0 && local_types != 0 && local_flags != 0;
+    if (ready)
+    {
+        memset(kinds, BUSTER_SSA_VALUE, instructions);
+        memset(types, BUSTER_SSA_TYPE_I64, instructions);
+        memset(accesses, 0xff, (uint64_t)instructions * sizeof(uint32_t));
+        memset(operands, 0xff, (uint64_t)instructions * sizeof(uint32_t));
+        memset(local_types, BUSTER_SSA_TYPE_I64, locals);
+        memset(local_flags, 0, locals);
+        if (shape < 2)
+        {
+            for (uint32_t block = 0; block < blocks; block += 1)
+            {
+                block_offsets[block] = shape == 0 || block == 0 ? 0 : 2 * locals;
+                successor_offsets[block] = block;
+                if (block + 1 < blocks)
+                {
+                    successors[block] = block + 1;
+                }
+            }
+            if (shape == 1)
+            {
+                for (uint32_t local = 0; local < locals; local += 1)
+                {
+                    kinds[2 * local + 1] = BUSTER_SSA_WRITE;
+                    accesses[2 * local + 1] = local;
+                    operands[2 * local + 1] = 2 * local;
+                    kinds[2 * locals + local] = BUSTER_SSA_READ;
+                    accesses[2 * locals + local] = local;
+                }
+            }
+        }
+        else
+        {
+            // Each local belongs to one init/header/body loop. Its lifetime start and subsequent definition kill
+            // all prior state; the header must retain exactly the initial/body-value phi, with no other locals.
+            block_offsets[0] = 0;
+            successor_offsets[0] = 0;
+            successors[0] = 1;
+            for (uint32_t local = 0; local < locals; local += 1)
+            {
+                const uint32_t block = 3 * local + 1;
+                const uint32_t first = 8 * local;
+                const uint32_t edge = 4 * local + 1;
+                block_offsets[block] = first;
+                block_offsets[block + 1] = first + 3;
+                block_offsets[block + 2] = first + 4;
+                successor_offsets[block] = edge;
+                successor_offsets[block + 1] = edge + 1;
+                successor_offsets[block + 2] = edge + 3;
+                successors[edge] = block + 1;
+                successors[edge + 1] = block + 2;
+                successors[edge + 2] = block + 3;
+                successors[edge + 3] = block + 1;
+                const uint8_t sequence[] = { BUSTER_SSA_WRITE, BUSTER_SSA_VALUE, BUSTER_SSA_WRITE, BUSTER_SSA_READ, BUSTER_SSA_READ, BUSTER_SSA_VALUE, BUSTER_SSA_WRITE, BUSTER_SSA_READ };
+                for (uint32_t offset = 0; offset < 8; offset += 1)
+                {
+                    kinds[first + offset] = sequence[offset];
+                    accesses[first + offset] = sequence[offset] == BUSTER_SSA_VALUE ? BUSTER_SSA_NONE : local;
+                }
+                operands[first] = instructions + local;
+                operands[first + 2] = first + 1;
+                operands[first + 6] = first + 5;
+            }
+            block_offsets[blocks - 1] = instructions;
+            successor_offsets[blocks - 1] = edges;
+        }
+        block_offsets[blocks] = instructions;
+        successor_offsets[blocks] = edges;
+        *result = (SsaInput){
+            .block_count = blocks,
+            .instruction_count = instructions,
+            .local_count = locals,
+            .edge_count = edges,
+            .block_offsets = block_offsets,
+            .successor_offsets = successor_offsets,
+            .successors = successors,
+            .kinds = kinds,
+            .types = types,
+            .locals = accesses,
+            .operands = operands,
+            .local_types = local_types,
+            .local_flags = local_flags,
+        };
+    }
+    else
+    {
+        arena_pop_to(arena, saved);
+    }
+    return ready;
+}
+
+static void ssa_test_bounded(SsaTestTally* tally, SsaTestSpace* space)
+{
+    const uint64_t scratch_capacity = space->scratch.capacity;
+    const uint64_t output_capacity = space->output.capacity;
+    const char* names[] = { "unused locals exceed Cartesian u32 limit", "live-through locals on a long chain", "independent scoped loops" };
+    for (uint32_t shape = 0; shape < 3; shape += 1)
+    {
+        tally->name = names[shape];
+        arena_pop_to(&space->input, 0);
+        SsaInput input = { 0 };
+        if (ssa_test_expect(tally, ssa_test_bounded_input(&space->input, shape, &input), "allocate bounded-memory fixture"))
+        {
+            tally->blocks = input.block_count;
+            tally->locals = input.local_count;
+            const uint64_t hash = ssa_test_input_hash(&input);
+            if (shape == 0)
+            {
+                ssa_test_expect(tally, (uint64_t)input.block_count * input.local_count > UINT32_MAX, "fixture exceeds only the obsolete Cartesian ID reservation");
+            }
+            for (uint32_t path = 0; path < 4; path += 1)
+            {
+                arena_pop_to(&space->output, 0);
+                arena_pop_to(&space->scratch, 0);
+                // These bounds apply to both construction and the independent verifier. They exclude the old
+                // blocks-by-locals state, and the chain excludes retaining every provisional one-input phi.
+                space->output.capacity = 8ull << 20;
+                space->scratch.capacity = (shape == 0 ? 32ull : 16ull) << 20;
+                uint8_t* output_prefix = arena_push(&space->output, 37, 1);
+                uint8_t* scratch_prefix = arena_push(&space->scratch, 29, 1);
+                const bool ready = ssa_test_expect(tally, output_prefix != 0 && scratch_prefix != 0, "reserve nonzero arena prefixes");
+                if (ready)
+                {
+                    memset(output_prefix, 0xab, 37);
+                    memset(scratch_prefix, 0xcd, 29);
+                    SsaResult result = { 0 };
+                    const SsaError error = path >= 2 ? ssa_build_bounded_path(&input, &space->output, &space->scratch, &result, path == 2) :
+                                          path == 0 ? ssa_build(&input, &space->output, &space->scratch, &result) : ssa_build_scalar(&input, &space->output, &space->scratch, &result);
+                    if (error != SSA_OK && tally->failures < BUSTER_SSA_TEST_REPORTS)
+                    {
+                        fprintf(stderr, "test-ssa: bounded storage path=%u error=%u\n", path, (unsigned)error);
+                    }
+                    if (ssa_test_expect(tally, error == SSA_OK, "construction fits fixed memory with actual phi extents"))
+                    {
+                        bool values = result.reachable_edge_count == input.edge_count && result.phi_count == (shape == 2 ? input.local_count : 0) && result.operand_count == (shape == 2 ? 2 * input.local_count : 0);
+                        for (uint32_t local = 0; values && local < input.local_count; local += 1)
+                        {
+                            values = result.promoted[local] != 0;
+                            if (shape == 1)
+                            {
+                                values &= result.replacements[2 * input.local_count + local] == 2 * local;
+                            }
+                        }
+                        for (uint32_t block = 0; values && block < input.block_count; block += 1)
+                        {
+                            values = result.reachable[block] != 0;
+                        }
+                        for (uint32_t phi = 0; values && shape == 2 && phi < result.phi_count; phi += 1)
+                        {
+                            const uint32_t local = result.phi_locals[phi];
+                            const uint32_t begin = result.phi_offsets[phi];
+                            values = local < input.local_count && result.phi_blocks[phi] == 3 * local + 2 && result.phi_offsets[phi + 1] - begin == 2;
+                            if (values)
+                            {
+                                values = result.phi_operands[begin] == 8 * local + 1 && result.phi_operands[begin + 1] == 8 * local + 5 && result.replacements[8 * local + 3] == result.phi_base + phi && result.replacements[8 * local + 4] == result.phi_base + phi && result.replacements[8 * local + 7] == 8 * local + 5;
+                            }
+                        }
+                        ssa_test_expect(tally, values, "all sparse reads, retained phis and exact incoming values match the fixture");
+                        const SsaCheck check = ssa_verify(&input, &result, &space->scratch);
+                        if (check.error != SSA_OK && tally->failures < BUSTER_SSA_TEST_REPORTS)
+                        {
+                            fprintf(stderr, "test-ssa: bounded storage verifier path=%u: %s at %u\n", path, check.rule, check.instruction);
+                        }
+                        ssa_test_expect(tally, check.error == SSA_OK, "independent equations fit the same fixed memory budget");
+                    }
+                    bool prefixes = space->scratch.length == 29;
+                    for (uint32_t byte = 0; byte < 37; byte += 1)
+                    {
+                        prefixes &= output_prefix[byte] == 0xab;
+                    }
+                    for (uint32_t byte = 0; byte < 29; byte += 1)
+                    {
+                        prefixes &= scratch_prefix[byte] == 0xcd;
+                    }
+                    ssa_test_expect(tally, prefixes, "bounded passes restore scratch and preserve both arena prefixes");
+                    ssa_test_expect(tally, ssa_test_input_hash(&input) == hash, "bounded passes preserve input columns");
+                }
+                space->scratch.capacity = scratch_capacity;
+                space->output.capacity = output_capacity;
+            }
+        }
+    }
+    arena_pop_to(&space->output, 0);
+    arena_pop_to(&space->scratch, 0);
+}
+
 static void ssa_test_capacity(SsaTestTally* tally, SsaTestSpace* space)
 {
     SsaTestFixture fixture;
@@ -946,7 +1208,7 @@ static void ssa_test_capacity(SsaTestTally* tally, SsaTestSpace* space)
     tally->name = "arena failure rollback";
     const uint64_t capacity = space->output.capacity;
     const uint64_t scratch_capacity = space->scratch.capacity;
-    for (uint32_t path = 0; path < 2; path += 1)
+    for (uint32_t path = 0; path < 4; path += 1)
     {
         for (uint32_t small = 0; small < 2; small += 1)
         {
@@ -964,8 +1226,8 @@ static void ssa_test_capacity(SsaTestTally* tally, SsaTestSpace* space)
                 SsaResult before;
                 memset(&before, 0x5a, sizeof(before));
                 SsaResult result = before;
-                const SsaError error = path == 0 ? ssa_build(&fixture.input, &space->output, &space->scratch, &result) :
-                                                 ssa_build_scalar(&fixture.input, &space->output, &space->scratch, &result);
+                const SsaError error = path >= 2 ? ssa_build_bounded_path(&fixture.input, &space->output, &space->scratch, &result, path == 2) :
+                                      path == 0 ? ssa_build(&fixture.input, &space->output, &space->scratch, &result) : ssa_build_scalar(&fixture.input, &space->output, &space->scratch, &result);
                 reached_success = error == SSA_OK;
                 if (!reached_success)
                 {
@@ -998,32 +1260,37 @@ static void ssa_test_verifier(SsaTestTally* tally, SsaTestSpace* space)
     SsaTestFixture fixture;
     ssa_test_diamond(&fixture, true, true);
     tally->name = "verifier rejects semantic corruption";
-    arena_pop_to(&space->output, 0);
-    arena_pop_to(&space->scratch, 0);
-    SsaResult result = { 0 };
-    if (ssa_test_expect(tally, ssa_build(&fixture.input, &space->output, &space->scratch, &result) == SSA_OK && result.phi_count == 1, "build verifier fixture"))
+    for (uint32_t path = 0; path < 4; path += 1)
     {
-        const uint32_t first = result.phi_offsets[0];
-        const uint32_t last = result.phi_offsets[1] - 1;
-        const uint32_t saved_first = result.phi_operands[first];
-        const uint32_t saved_last = result.phi_operands[last];
-        result.phi_operands[first] = saved_last;
-        result.phi_operands[last] = saved_first;
-        ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error != SSA_OK, "swapped dominating values violate reaching definitions");
-        ssa_test_expect(tally, !ssa_test_interpret(&fixture.input, &result, &space->oracle, tally->seed), "interpreter detects swapped phi operands");
-        result.phi_operands[first] = saved_first;
-        result.phi_operands[last] = saved_last;
-        const uint32_t read = fixture.input.instruction_count - 1;
-        const uint32_t saved_read = result.replacements[read];
-        result.replacements[read] = 0;
-        ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error != SSA_OK, "wrong dominating replacement rejected");
-        ssa_test_expect(tally, !ssa_test_interpret(&fixture.input, &result, &space->oracle, tally->seed), "interpreter detects incorrect read replacement");
-        result.replacements[read] = saved_read;
-        const uint32_t saved_edge = result.predecessor_edges[0];
-        result.predecessor_edges[0] = BUSTER_SSA_NONE;
-        ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error != SSA_OK, "invalid predecessor edge rejected");
-        result.predecessor_edges[0] = saved_edge;
-        ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error == SSA_OK, "restored result verifies");
+        arena_pop_to(&space->output, 0);
+        arena_pop_to(&space->scratch, 0);
+        SsaResult result = { 0 };
+        const SsaError error = path >= 2 ? ssa_build_bounded_path(&fixture.input, &space->output, &space->scratch, &result, path == 2) :
+                              path == 0 ? ssa_build(&fixture.input, &space->output, &space->scratch, &result) : ssa_build_scalar(&fixture.input, &space->output, &space->scratch, &result);
+        if (ssa_test_expect(tally, error == SSA_OK && result.phi_count == 1, "build verifier fixture"))
+        {
+            const uint32_t first = result.phi_offsets[0];
+            const uint32_t last = result.phi_offsets[1] - 1;
+            const uint32_t saved_first = result.phi_operands[first];
+            const uint32_t saved_last = result.phi_operands[last];
+            result.phi_operands[first] = saved_last;
+            result.phi_operands[last] = saved_first;
+            ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error != SSA_OK, "swapped dominating values violate reaching definitions");
+            ssa_test_expect(tally, !ssa_test_interpret(&fixture.input, &result, &space->oracle, tally->seed), "interpreter detects swapped phi operands");
+            result.phi_operands[first] = saved_first;
+            result.phi_operands[last] = saved_last;
+            const uint32_t read = fixture.input.instruction_count - 1;
+            const uint32_t saved_read = result.replacements[read];
+            result.replacements[read] = 0;
+            ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error != SSA_OK, "wrong dominating replacement rejected");
+            ssa_test_expect(tally, !ssa_test_interpret(&fixture.input, &result, &space->oracle, tally->seed), "interpreter detects incorrect read replacement");
+            result.replacements[read] = saved_read;
+            const uint32_t saved_edge = result.predecessor_edges[0];
+            result.predecessor_edges[0] = BUSTER_SSA_NONE;
+            ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error != SSA_OK, "invalid predecessor edge rejected");
+            result.predecessor_edges[0] = saved_edge;
+            ssa_test_expect(tally, ssa_verify(&fixture.input, &result, &space->scratch).error == SSA_OK, "restored result verifies");
+        }
     }
 }
 
@@ -1075,8 +1342,10 @@ static int run_ssa_tests(int argc, char** argv)
                             "reserve arenas"))
         {
             ssa_test_fixtures(&tally, &space);
+            ssa_test_bounded_cycles(&tally, &space);
             ssa_test_generated(&tally, &space, count);
             ssa_test_dominance_handoff(&tally, &space);
+            ssa_test_bounded(&tally, &space);
             ssa_test_guards(&tally, &space);
             ssa_test_invalid(&tally, &space);
             ssa_test_capacity(&tally, &space);
