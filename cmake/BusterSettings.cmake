@@ -565,6 +565,13 @@ function(buster_settings_linker)
         list(APPEND flags -Wl,-O0)
     endif()
     set(buster_linker_flags ${flags} PARENT_SCOPE)
+    # Whether the link merges identical constants and strings across objects (SHF_MERGE): every linker but lld at
+    # -O0. The parallel parts' join keeps the flags for one that does (BusterCodegenMerge.cmake).
+    if(lld)
+        set(buster_linker_merges FALSE PARENT_SCOPE)
+    else()
+        set(buster_linker_merges TRUE PARENT_SCOPE)
+    endif()
     if(buster_static_candidate AND NOT wild)
         set(buster_link_mode ${buster_link_mode} -static -Wl,--wrap=__register_frame_info,--wrap=__deregister_frame_info PARENT_SCOPE)
         set(buster_flags ${buster_flags} -DBUSTER_HOST_STATIC=1 PARENT_SCOPE)

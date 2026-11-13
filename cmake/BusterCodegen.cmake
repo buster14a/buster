@@ -208,6 +208,17 @@ function(buster_develop_partitions name output)
     set(${output} ${parts} PARENT_SCOPE)
 endfunction()
 
+# Whether the final link merges the objects' identical constants and strings (buster_linker_merges, from
+# BusterSettings.cmake), into `output`: 1 or 0, which the join (BusterCodegenMerge.cmake) reads. Without the setting
+# (the build regression's fixture), 0.
+function(buster_codegen_merges output)
+    if(buster_linker_merges)
+        set(${output} 1 PARENT_SCOPE)
+    else()
+        set(${output} 0 PARENT_SCOPE)
+    endif()
+endfunction()
+
 # The unit's object for the link: in Release, the joined native parts of a split unit; in Develop, those of a unit split
 # before the optimizer.
 function(buster_native_object output name)
@@ -227,6 +238,7 @@ endfunction()
 # the parts' code-generation options (the unit's -march and debug information).
 function(buster_codegen_unit name)
     set(scripts "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    buster_codegen_merges(merges)
     # The link uses every unit's object, and CMake makes a command whose output the link uses wait for all of them as
     # well (implicit order-only dependencies): the backend's parts, ready at 43.7 s on the 9700X, waited for the
     # checker's bitcode until 58.2 s and then competed with the checker's parts. These commands name every input they
@@ -287,7 +299,8 @@ function(buster_codegen_unit name)
     add_custom_command(OUTPUT "${native}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
-            "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" -P "${scripts}/BusterCodegenMerge.cmake"
+            "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" "-DMERGES=${merges}"
+            -P "${scripts}/BusterCodegenMerge.cmake"
         DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
             "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s native parts"
@@ -301,6 +314,7 @@ endfunction()
 # its bitcode alone, which the split rewrites only when it changed (Ninja's restat).
 function(buster_develop_unit name)
     set(scripts "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    buster_codegen_merges(merges)
     set(explicit "")
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
         set(explicit DEPENDS_EXPLICIT_ONLY)
@@ -342,7 +356,8 @@ function(buster_develop_unit name)
     add_custom_command(OUTPUT "${native}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
-            "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" -P "${scripts}/BusterCodegenMerge.cmake"
+            "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" "-DMERGES=${merges}"
+            -P "${scripts}/BusterCodegenMerge.cmake"
         DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
             "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s parts"
