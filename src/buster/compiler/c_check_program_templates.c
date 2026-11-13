@@ -250,6 +250,11 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     else if (op == CHECK_OP_STATEMENT_VALUE || (!address && value->category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0))
     {
     }
+    else if (address && (value->flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    {
+        // A bit-field's address, which only its stores ask for, is its unit's (#1372, check_lower_bit_member and
+        // check_lower_bit_constant_address): the tasks'.
+    }
     else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
              ((value->category == CHECK_RVALUE && !address) || ((address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
     {
@@ -912,10 +917,10 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
             check_lower_template_put(entries, BUSTER_TYPED_CONST, class, bits);
             fast.handled = true;
         }
-        else if (constant == CHECK_CONSTANT_ADDRESS)
+        else if (constant == CHECK_CONSTANT_ADDRESS && (flags & BUSTER_CHECK_BIT_FIELD) == 0)
         {
             // An address constant (check_lower_constant's): its object's address and offset, converted where it is a signed
-            // integer's rvalue.
+            // integer's rvalue. A bit-field's is its unit's, the tasks' (check_lower_bit_constant_address).
             const uint32_t local = known ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
             if (object == 0 || (known && (local != BUSTER_CHECK_NONE || program->object_symbols[object] != 0)))
             {
