@@ -4479,8 +4479,8 @@ static inline __attribute__((always_inline)) void check_common_root_frames(Check
     }
 }
 
-// check_common_next_op's and check_common_next_token's items listed at once, at least this many unless the scan reaches its
-// end (#892).
+// check_common_next_op's, check_common_next_reach_op's, check_common_next_root's and check_common_next_token's items listed
+// at once, at least this many unless the scan reaches its end (#892).
 #define BUSTER_CHECK_SCAN_ITEMS 64u
 
 // A pass's walk over the items its own test needs first (check_common_next_token, check_common_next_op and
@@ -4493,9 +4493,10 @@ struct CheckCommonScan
     uint32_t next;
     // The group's items still to visit, a bit each.
     uint64_t pending;
-    // check_common_next_op's and check_common_next_token's: their groups' items, listed in order (`listed` of them, room for
-    // a group past BUSTER_CHECK_SCAN_ITEMS), of which `taken` were visited. Each scan reads a column no pass writes, the
-    // graph's operators or the tokens' roles and kinds, so it lists items ahead of the pass.
+    // The listed scans' (check_common_next_op's, _reach_op's, _root's and _token's): their groups' items, listed in order
+    // (`listed` of them, room for a group past BUSTER_CHECK_SCAN_ITEMS), of which `taken` were visited. Each scan reads a
+    // column no pass writes while it runs, the graph's operators, the parents or the tokens' roles and kinds, so it lists
+    // items ahead of the pass.
     uint32_t taken;
     uint32_t listed;
     uint32_t items[BUSTER_CHECK_SCAN_ITEMS + 64];
@@ -4648,25 +4649,31 @@ static void check_common_range_batch(const CheckGraph* graph, const CheckStream*
 // (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
 static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonOps* set, uint32_t* comparisons, uint32_t* listed, CheckCommonScan* scan)
 {
-    while (scan->pending == 0 && scan->next < graph->count)
+    // Groups listed until BUSTER_CHECK_SCAN_ITEMS nodes or the end, once the list is taken, as check_common_next_op's
+    // (#892); the comparisons of the groups listed ahead are appended ahead too, which changes no reach, a union.
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-        const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
-        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-        if (comparisons != NULL)
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < graph->count)
         {
-            const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
-                                                                     _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
-            const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-            _mm512_mask_compressstoreu_epi32(comparisons + *listed, compares, nodes);
-            *listed += (uint32_t)__builtin_popcount(compares);
+            const uint32_t first = scan->next;
+            const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+            const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
+            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+            if (comparisons != NULL)
+            {
+                const __mmask16 compares = _mm512_mask_cmple_epu32_mask(lanes, _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_LESS)),
+                                                                         _mm512_set1_epi32(CHECK_OP_NOT_EQUAL - CHECK_OP_LESS));
+                const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+                _mm512_mask_compressstoreu_epi32(comparisons + *listed, compares, nodes);
+                *listed += (uint32_t)__builtin_popcount(compares);
+            }
+            scan->next = first + live;
+            check_common_scan_list(scan, first, (__mmask16)check_common_op_lanes(set, ops, lanes));
         }
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = check_common_op_lanes(set, ops, lanes);
     }
-    const uint32_t result = check_common_scan_take(scan, graph->count);
+    const uint32_t result = check_common_scan_listed(scan, graph->count);
     return result;
 }
 
@@ -6666,21 +6673,27 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
 }
 
 // The scan's next node below `count` without a parent, or `count`: the vector path tests 16 nodes at a time; the scalar
-// path, its twin, gives every node, so that its caller tests each.
+// path, its twin, gives every node, so that its caller tests each. Both take the nodes from the scan's list, groups listed
+// until BUSTER_CHECK_SCAN_ITEMS nodes or the end, as check_common_next_op's (#892): every caller reads `parents` once
+// check_common_parents has written it whole, so the list can run ahead of the pass.
 static uint32_t check_common_next_root(const uint32_t* parents, uint32_t count, CheckCommonScan* scan, bool vector)
 {
-    while (scan->pending == 0 && scan->next < count)
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = count - first < 16 ? count - first : 16;
-        const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
-        const uint32_t selected = vector ? _mm512_mask_cmpeq_epi32_mask((__mmask16)lanes, _mm512_maskz_loadu_epi32((__mmask16)lanes, parents + first),
-                                                                         _mm512_set1_epi32((int)BUSTER_CHECK_NONE)) : lanes;
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = selected;
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
+        {
+            const uint32_t first = scan->next;
+            const uint32_t live = count - first < 16 ? count - first : 16;
+            const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+            const uint32_t selected = vector ? _mm512_mask_cmpeq_epi32_mask((__mmask16)lanes, _mm512_maskz_loadu_epi32((__mmask16)lanes, parents + first),
+                                                                             _mm512_set1_epi32((int)BUSTER_CHECK_NONE)) : lanes;
+            scan->next = first + live;
+            check_common_scan_list(scan, first, (__mmask16)selected);
+        }
     }
-    const uint32_t result = check_common_scan_take(scan, count);
+    const uint32_t result = check_common_scan_listed(scan, count);
     return result;
 }
 
