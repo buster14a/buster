@@ -984,7 +984,12 @@ at most two transitions, its own and its victim's, so the output's bound stands.
 By callgrind at main `26f0bb0e` (#1189's `gap.c`, #1217's inputs), Lua's
 `luaV_execute` runs 2,365.8 M instructions instead of 2,415.0 M, 45.6 M fewer
 moves and 3.6 M fewer frame addresses' `lea`s, and speedtest1 1.0 M fewer
-(`sqlite3VdbeRecordUnpack` 0.8 M). Letting the values claim such registers among
+(`sqlite3VdbeRecordUnpack` 0.8 M). On the 9700X, with #2618's placement test
+([the record](https://github.com/buster14a/buster-performance/tree/afc37fed2abcb7a99fca93fb64a7af7d667d2575/docs/measurements/tier1-hoist-allocator-2618-2026-11-13)), Lua's instructions fall 0.91% at each of six link
+orders and its time is 0.9979 (95% interval 0.9902 to 1.0057). Its arithmetic
+script runs 3% to 6% slower at five of the orders and 3% faster at the sixth.
+That is no branch mispredictions, decoder ops or load stalls the change adds,
+and the same build varies as much between orders. Letting the values claim such registers among
 a position's starts as well changed no executable. `tier1_allocate_hints_test.c`
 has the rule's two traces on all three entry points: a recipe that leaves its
 register to the value its hint names, and one a use requires, which keeps it.

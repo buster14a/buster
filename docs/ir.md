@@ -1075,8 +1075,12 @@ hinted values"), speedtest1 runs 2,993.97 M instructions instead of 2,996.70 M
 `sqlite3_str_vappendf` −1.08 M against main, `sqlite3GenerateColumnNames`
 −0.27 M, `patternCompare` −0.26 M, `sqlite3StrICmp` −0.23 M, `sqlite3Atoi64`
 −0.09 M, each now as without the hoist, and `jsonTranslateTextToBlob`
-−1.06 M. The rules measured on the way, as speedtest1's instructions against
-this one's:
+−1.06 M. On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/afc37fed2abcb7a99fca93fb64a7af7d667d2575/docs/measurements/tier1-hoist-allocator-2618-2026-11-13), #2593's method with a hold of
+the lock per round), speedtest1's instructions fall 0.13% at every layout and
+its user cycles 0.73% over six (0.9927, 95% interval 0.9821 to 1.0034).
+`sqlite3.c`'s `--tier1 -c` runs 0.03% more instructions, its time inside the
+rounds' noise. The rules measured on the way, as speedtest1's instructions
+against this one's:
 
 | Rule | speedtest1 | `luaV_execute` |
 | --- | ---: | ---: |
