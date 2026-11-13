@@ -3484,19 +3484,45 @@ static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t
     return labeled;
 }
 
-// The library builtin a call computes inline as clang -O0's code does (#967), or CBUILTIN_LIBRARY_COUNT: a call of the
-// unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the builtin (the reader's mark,
-// BUSTER_CHECK_LIBRARY_CALL), but of one with an asm label on a declaration, which clang's code calls by its label
-// (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it). The label's search reads the callee's declarations, in a unit
-// with an asm keyword alone, for the few calls the reader marked.
-static CBuiltinLibraryId check_program_call_extreme(const CheckProgram* program, uint32_t node)
+// A builtin's size or value argument whose value the code may take as a constant, as ordinary constant emission's proof
+// takes it: a retained folded integer is no runtime value where a floating environment or evaluation effect still
+// matters, and then its evaluation runs no code. Its value's low 64 bits in *value.
+static bool check_program_constant_operand(const CheckGraph* graph, const CheckStream* stream, uint32_t node, uint64_t* value)
+{
+    const CheckOp op = graph->ops[node];
+    const CheckValue checked = check_stream_value(stream, node);
+    const bool constant = op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && checked.category == CHECK_RVALUE &&
+                          checked.constant_kind == CHECK_CONSTANT_INTEGER && checked.fault == CHECK_FAULT_NONE &&
+                          (checked.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+    *value = constant ? (uint64_t)checked.integer : 0;
+    return constant;
+}
+
+// The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
+// cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
+// makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
+// its prototype's arguments, memcpy, memmove and memset with a constant size of at most
+// BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES; but of one with an asm label on a declaration, which clang's code calls by its
+// label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it). The label's search reads the callee's declarations, in a
+// unit with an asm keyword alone, for the few calls the reader marked.
+static uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node)
 {
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
     const uint32_t member = graph->members[node];
     const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
-    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && graph->argument_counts[node] == 2 &&
-                        cbuiltin_library_plain_folds[index].library != CBUILTIN_LIBRARY_COUNT;
+    const bool library = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    const CBuiltinLibraryComputed computed = library ? cbuiltin_library_plain_folds[index].computed : CBUILTIN_LIBRARY_COMPUTED_NONE;
+    const bool memory = computed == CBUILTIN_LIBRARY_COMPUTED_COPY || computed == CBUILTIN_LIBRARY_COMPUTED_MOVE || computed == CBUILTIN_LIBRARY_COMPUTED_SET;
+    const bool unary = computed == CBUILTIN_LIBRARY_COMPUTED_ABSOLUTE || computed == CBUILTIN_LIBRARY_COMPUTED_FLOAT_ABSOLUTE;
+    const uint32_t arity = memory ? 3 : unary ? 1 : 2;
+    bool marked = computed != CBUILTIN_LIBRARY_COMPUTED_NONE && graph->argument_counts[node] == arity;
+    uint64_t size = 0;
+    if (marked && memory)
+    {
+        const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
+        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+    }
     const uint32_t callee = marked ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
     bool labelled = false;
@@ -3508,7 +3534,20 @@ static CBuiltinLibraryId check_program_call_extreme(const CheckProgram* program,
             labelled |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
         }
     }
-    return marked && !labelled ? cbuiltin_library_plain_folds[index].library : CBUILTIN_LIBRARY_COUNT;
+    return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+}
+
+// Whether a call has a plain library builtin's semantics of its own, which the node machine and its census leave to the
+// pipeline: the reader marked it (BUSTER_CHECK_LIBRARY_CALL), and its row folds (where its arguments are constants) or
+// the code computes it (check_program_call_computed). Any other marked call, a memcpy of a size that is no small constant,
+// is an ordinary call of its declaration.
+static bool check_program_call_library(const CheckProgram* program, uint32_t node)
+{
+    const uint32_t member = program->input->graph.members[node];
+    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    return marked && (cbuiltin_library_plain_folds[index].fold != CBUILTIN_LIBRARY_FOLD_NONE ||
+                      check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS);
 }
 
 static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
@@ -3609,9 +3648,9 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                     // This edge names the source overload set; the checked selection above is the callee.
                     operands[0] = BUSTER_CHECK_NONE;
                 }
-                // A plain fmax or its kin that the code computes inline (#967, check_lower_call_extreme) references no
-                // function, as clang's code doesn't.
-                if (check_program_call_extreme(program, node) != CBUILTIN_LIBRARY_COUNT)
+                // A plain fmax, memcpy or their kin that the code computes inline (#967, #1373, check_program_call_computed)
+                // references no function, as clang's code doesn't.
+                if (check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
                 {
                     operands[0] = BUSTER_CHECK_NONE;
                 }

@@ -1183,7 +1183,7 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 
 // Whether call record `r` (node `node`, callee record `a`) has a callee with semantics of its own, which the machine
 // leaves to the pipeline (docs/node-machine.md, "T: bind and type"): a library builtin's call that the catalogue folds or
-// computes (the reader's BUSTER_CHECK_LIBRARY_CALL), any call in a unit with overload sets, a callee without a prototype
+// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library), any call in a unit with overload sets, a callee without a prototype
 // or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
 // registers), more arguments than Tier 0's calls take, or a callee that returns twice (check_lower_calls_twice's and
 // check_lower_indirect_twice's, which the lowering marks its function for). The census refuses before it the callees
@@ -1196,7 +1196,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, 
     const TypeTable* types = machine->types;
     const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
     const TypeId function = node_machine_callee_function(machine, a);
-    bool refused = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 || graph->overload_candidate_count != 0 || function == 0 ||
+    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && check_program_call_library(program, node)) || graph->overload_candidate_count != 0 || function == 0 ||
                    columns->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
               type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);

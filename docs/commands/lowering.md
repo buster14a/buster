@@ -298,7 +298,8 @@ takes its entries.
 - **A call** is typed by its callee's prototype (`node_machine_call_rule`):
   each argument converted as an assignment converts it, a variadic one by the
   default promotions, the action taking the rest. A callee with semantics of
-  its own (a library builtin's call the catalogue folds, a unit with overload
+  its own (a library builtin's call the catalogue folds or the lowering
+  computes, `check_program_call_library`, a unit with overload
   sets, no prototype, another convention than System V's, a callee that
   returns twice) is refused as `callee`; a call the lowering doesn't make
   plainly (`check_lower_call_body`'s plain call: a struct's, a union's, a long
