@@ -480,13 +480,17 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
 }
 
 // `diagnostic` at the original's tokens, from a view's whose tokens' originals `origin` has (a synthetic `;`'s, the
-// token after it).
+// token after it). Without `origin`, it is already at the original's tokens.
 static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* diagnostic, const uint32_t* origin, uint32_t count, uint32_t original_count)
 {
     ParseDiagnostic result = *diagnostic;
-    result.token = diagnostic->token < count ? origin[diagnostic->token] : original_count;
-    result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
-    result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
+    if (origin != 0)
+    {
+        result.token = diagnostic->token < count ? origin[diagnostic->token] : original_count;
+        result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
+        result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
+        result.publication = diagnostic->publication != 0 ? (diagnostic->publication < count ? origin[diagnostic->publication] : original_count) : 0;
+    }
     result.resumed = false;
     result.resume_delete = false;
     result.resume_end = 0;
@@ -713,6 +717,8 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         uint32_t discard = 0;
         uint32_t repairs = 0;
         uint32_t last = 0;
+        uint32_t preserve_begin = 0;
+        uint32_t preserve_end = 0;
         bool ordered = true;
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
@@ -724,10 +730,20 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             insert += taken && !diagnostic->resume_delete;
             repairs += taken;
             discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
+            // At most one tail is taken in a round (limit above). A tail starting before its error also removes
+            // diagnostics already read in that span, such as an unknown parameter type in a later declarator.
+            preserve_begin = taken && diagnostic->resume_begin != 0 ? begin : preserve_begin;
+            preserve_end = taken && diagnostic->resume_begin != 0 ? diagnostic->token : preserve_end;
+        }
+        uint32_t preserved = 0;
+        for (uint32_t d = 0; preserve_begin != 0 && d < current->diagnostic_count; d += 1)
+        {
+            const uint32_t token = diagnostics[d].token;
+            preserved += token >= preserve_begin && token < preserve_end;
         }
         const uint32_t total = count + insert - discard;
         work += total;
-        more = ordered && repairs != 0 && total <= capacity && pending_count + repairs <= original_count && work <= budget;
+        more = ordered && repairs != 0 && total <= capacity && (uint64_t)pending_count + repairs + preserved <= original_count && work <= budget;
         Parser* view = views + (round & 1);
         uint32_t* next_origin = origins[round & 1];
         if (more)
@@ -740,6 +756,17 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             uint32_t written = 0;
             uint32_t from = 0;
             uint32_t pragma = 0;
+            for (uint32_t d = 0; preserve_begin != 0 && d < current->diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = diagnostics + d;
+                if (diagnostic->token >= preserve_begin && diagnostic->token < preserve_end)
+                {
+                    // Nonoverlapping repairs cannot already retain one of these diagnostics. Its token is gone
+                    // from the next parse, so keep it once, including warnings and all original source references.
+                    pending[pending_count] = check_prefix_original_diagnostic(diagnostic, origin, count, original_count);
+                    pending_count += 1;
+                }
+            }
             for (uint32_t d = 0; d <= current->diagnostic_count; d += 1)
             {
                 const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? diagnostics + d : 0;
@@ -772,13 +799,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                             next_origin[written] = origin != 0 ? origin[to] : to;
                             written += 1;
                         }
-                        // (The first round's tokens are the original's.)
-                        pending[pending_count] = origin != 0 ? check_prefix_original_diagnostic(diagnostic, origin, count, original_count) : *diagnostic;
-                        pending[pending_count].resumed = false;
-                        pending[pending_count].resume_delete = false;
-                        pending[pending_count].resume_end = 0;
-                        pending[pending_count].resume_begin = 0;
-                        pending[pending_count].resume_colon = false;
+                        pending[pending_count] = check_prefix_original_diagnostic(diagnostic, origin, count, original_count);
                         pending_count += 1;
                     }
                     from = diagnostic != NULL && diagnostic->resume_end != 0 ? diagnostic->resume_end : to;

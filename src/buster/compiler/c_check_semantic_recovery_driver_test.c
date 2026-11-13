@@ -283,6 +283,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "unknown_type a = 1, b = (1, (2 + (void)0)), c = absent;\nint y = 1 + (void)0;\n",
         "unknown_type a = 1, b[] = { 2, 3 };\nint y = 1 + (void)0;\n",
         "unknown_type a = 1, (*b)(void) = 0;\nint y = 1 + (void)0;\n",
+        // The discarded declarators can already have diagnosed their parameters. Keep those diagnostics once,
+        // including after another recovery round has shifted all their token indices.
+        "unknown_type a = 1, (*b)(other_type p) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, (*b)(const p) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b = 2;\nunknown_type c = 3, (*d)(other_type p, another_type q) = 0;\nint y = 1 + (void)0;\n",
+        "void f(void) {\nunknown_type a = 1, b = 2;\nunknown_type c = 3, (*d)(other_type p) = 0;\nint y = 1 + (void)0;\n}\n",
         "unknown_type first = 1, never_declared = 2;\nint *use = &never_declared;\nint y = 1 + (void)0;\n",
         "void f(void) { unknown_type a = 1, b = 2; int y = 1 + (void)0; }\nint z = 2 + (void)0;\n",
         "unknown_type a = 1, b = 2;\nunknown_type c = 3, d = 4;\nint y = 1 + (void)0;\n",

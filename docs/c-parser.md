@@ -241,6 +241,9 @@ that tail, preserving clang's lack of bindings for those names. It reparses
 the remaining first declarator and following declarations while retaining
 the unknown-type error and invalid-type provenance. This repair applies to
 file and block declarations; for-init declarations have different recovery.
+Diagnostics already read inside the discarded declarators, including their
+parameters' unknown or missing types, are retained once at their original
+source positions across successive recovery rounds.
 `test-parser` checks every diagnostic's place and mark on both paths
 (`parse_test_check_resumed`). It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without
