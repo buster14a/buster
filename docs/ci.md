@@ -798,6 +798,18 @@ pushes run nothing, `selfhost.yml`'s daily schedule keeps the caches fresh,
 since it calls `prepare-hosted-tools.yml`. The apt closure's key changes with
 each runner image.
 
+**Hotfix entry.** The `hotfix` label lets a pull request enter the queue without waiting for its own rows, to land
+a fix as fast as possible. The queue admits a pull request only once the ruleset's contexts pass on the pull
+request itself, and `Integration qualification` normally waits for its hosted rows.
+- **When the label is added,** `hotfix.yml` reports that context as passed on the pull request's head. With the
+  policy job's `Measurement storage policy`, about 30 s, the pull request can be queued at once.
+- **On later pushes while the label stays,** `9700x.yml` skips the pull request's aggregate, which counts as passed.
+- **Unchanged:** its rows still run as feedback, and its candidate runs the full contract like any other. A
+  `merge_group` event has no pull request labels, and nothing in `hotfix.yml` runs for a candidate or a push
+  (`changes_hotfix_policy` pins this).
+- **The cost:** a hotfix that fails its candidate fails in the queue, holds a candidate until then, and makes
+  GitHub rebuild the entries behind it. Adding a label takes triage access.
+
 Still to come, tracked in #1430: the ruleset that requires the queue, and the
 change that removes the checking workflows' `push` triggers. The two land
 together, and AGENTS.md's main-push sentence changes with them.

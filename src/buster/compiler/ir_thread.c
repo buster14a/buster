@@ -314,13 +314,20 @@ static void ir_thread_escapes(IrThreadWork* work, bool scalar)
     (void)scalar;
 }
 
-// The phi's input from `predecessor`, or BUSTER_IR_NONE.
+// The phi's input from `predecessor`, or BUSTER_IR_NONE: its last entry for it, found from the end. The search stops
+// there, a scalar walk of a phi's few entries. The select-every-entry loop it replaces, vectorized where it was inlined
+// in ir_thread_block, failed MemorySanitizer's native row with an uninitialized value of no allocation's (an origin the
+// compiler's vector code made) while every entry it read was set (#2554).
 static uint32_t ir_thread_incoming(const IrFunction* f, uint32_t phi, uint32_t predecessor)
 {
     uint32_t value = BUSTER_IR_NONE;
-    for (uint32_t p = 0; p < f->b[phi]; p += 1)
+    const uint32_t* entries = f->extra + f->a[phi];
+    for (uint32_t p = f->b[phi]; p != 0 && value == BUSTER_IR_NONE; p -= 1)
     {
-        value = f->extra[f->a[phi] + p * 2] == predecessor ? f->extra[f->a[phi] + p * 2 + 1] : value;
+        if (entries[(p - 1) * 2] == predecessor)
+        {
+            value = entries[(p - 1) * 2 + 1];
+        }
     }
     return value;
 }

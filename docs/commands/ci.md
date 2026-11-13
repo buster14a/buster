@@ -73,6 +73,10 @@ rule change together, after the capacity gate and the owner's decision.
   listing and harvest accept the candidate's runs of the same commit. Once
   one is credited, the report lists the states without a passing candidate run
   as coverage gaps.
+- **Hotfix entry.** Label a pull request `hotfix` to queue it without waiting for its own rows. `hotfix.yml`
+  reports `Integration qualification` passed when the label is added, and `9700x.yml` skips the aggregate on the
+  pull request's later pushes. Its candidate still runs everything. Use it for fixes that must land fast: a
+  hotfix that fails does so in the queue, where it costs the entries behind it a rebuild.
 - **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
   passed but invalidated, failed, cancelled), with their runner-minutes and
   the merged ones' wall time (`timings --queue`).

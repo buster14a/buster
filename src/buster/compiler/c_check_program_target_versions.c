@@ -715,22 +715,30 @@ static bool check_program_target_number(CheckProgram* program, Arena* output)
 }
 
 // The symbol body `b` is defined at for these groups: a version's own, or a target_clones body's; 0 for another body.
+// Each list is searched from its end and the search stops at the last match, which a whole-list scan keeping it returned:
+// Clang 23 vectorizes that scan into a gather whose result MemorySanitizer reports as uninitialized, as
+// check_program_body_symbol's did (#2359), and did here in the native MSan row on a runner without the host vector path.
 static SymbolId check_program_target_body_symbol(const CheckProgram* program, uint32_t b)
 {
     const uint32_t object = program->bodies[b].object;
-    SymbolId symbol = 0;
-    for (uint32_t v = 0; program->target_symbols != NULL && v < program->target_version_count; v += 1)
+    uint32_t v = program->target_symbols != NULL ? program->target_version_count : 0;
+    while (v != 0 && program->target_versions[v - 1].object != object)
     {
-        symbol = program->target_versions[v].object == object ? program->target_symbols[v] : symbol;
+        v -= 1;
     }
-    // A target_clones body's, or its copy's (CheckProgram.body_options).
+    SymbolId symbol = v != 0 ? program->target_symbols[v - 1] : 0;
+    // A target_clones body's, or its copy's (CheckProgram.body_options): the last group whose clones it is.
     const uint32_t option = program->body_options != NULL ? program->body_options[b] : 0;
-    for (uint32_t g = 0; program->target_symbols != NULL && g < program->target_group_count; g += 1)
+    uint32_t g = program->target_symbols != NULL ? program->target_group_count : 0;
+    while (g != 0 && (program->target_groups[g - 1].clones == 0 || program->target_groups[g - 1].clones != object))
     {
-        const CheckProgramTargetGroup* group = program->target_groups + g;
-        const bool own = group->clones != 0 && group->clones == object;
-        const SymbolId copy = own && option != 0 && program->clone_symbols != NULL ? program->clone_symbols[group->clone_first + option] : 0;
-        symbol = own ? (copy != 0 ? copy : program->target_symbols[program->target_version_count + g]) : symbol;
+        g -= 1;
+    }
+    if (g != 0)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g - 1;
+        const SymbolId copy = option != 0 && program->clone_symbols != NULL ? program->clone_symbols[group->clone_first + option] : 0;
+        symbol = copy != 0 ? copy : program->target_symbols[program->target_version_count + g - 1];
     }
     return symbol;
 }
