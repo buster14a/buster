@@ -163,7 +163,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
-| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code, and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
+| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code (a sanitizer build's too), and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -690,8 +690,9 @@ has the runs, scripts and the comparison of the two executables' code.
 wherever its flags allow and the tools are there, and otherwise says why in the
 configure step's `parallel native generation` line and compiles the units
 whole. `1` requires the parts, failing the configuration without them; `0`
-never uses them. Sanitizers, fuzzing, PGO, an explicit host runtime,
-`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile. The tools,
+never uses them. Fuzzing, PGO, an explicit host runtime,
+`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile; sanitizer
+builds take the parts ([below](#in-sanitizer-builds)). The tools,
 beside the configured Clang or on `PATH`, at its version: `llvm-config` with
 LLVM's C API headers and library (the splitter is built in the tree, at
 `codegen-tools/split`, and Develop's at `codegen-tools/presplit`, with the
@@ -732,6 +733,43 @@ its gate on the 9700X: `benchmark-assembler` ran 9.6% slower, and 4.6% after
 five changes to the splitter, where its clean build took 77.6 s against 86.4 s
 and an edit of `c_check_input.c` 32.5 s against 75.1 s ([A faster stage 1
 build](../stage1-build-design.md#step-5-measured), #2559).
+
+### In sanitizer builds
+
+A sanitizer build (`BUSTER_SANITIZER=address|undefined|thread|memory`) generates
+the two units' native code in parts too (#2639): its checker unit's single
+compile was the whole build's wall time, and its CI rows build it once per
+candidate. The sanitizers instrument the module inside the unit's own
+optimization pipeline, before the split, and MemorySanitizer's cleanup passes
+run there too, so the parts generate the single compile's instrumented, optimized
+module, with the unit's optimization level and the sanitizer's flags (its
+`-fPIE` among them). What a sanitizer adds to the module goes with the part
+that emits it:
+
+- **The module constructors.** `llvm.used` and the constructor and destructor
+  arrays keep their entries in the part that emits the function they name, so
+  that the constructor keeps its retained section (`.text.msan.module_ctor`,
+  `"axR"`) and AddressSanitizer's its comdat with its `.init_array.1` entry.
+  The split refuses arrays whose entries a part order would reorder, or whose
+  key another part emits.
+- **AddressSanitizer's globals.** Each instrumented global is in a comdat of its
+  own, with its descriptor in `asan_globals` and a private alias the
+  descriptor names: the data part keeps all three, no declaration keeps a
+  comdat, and a code part drops the aliases (the split fails for one it still
+  refers to).
+- **The comdat flags.** `llvm-objcopy`, which the join runs to clear the merge
+  flags and to localize names, also clears `GRP_COMDAT` on every group whose
+  signature is local, as the module constructor's is. The join's last step,
+  `codegen-tools/comdat` (`tools/codegen/comdat.c`), sets it again on the groups
+  the parts had as comdats: without it the executable ran each split unit's
+  AddressSanitizer constructor beside the first unit's.
+
+`build-regression --parallel-codegen-only` builds and runs the codegen fixture
+under AddressSanitizer and MemorySanitizer and checks that the joined objects
+keep the comdat constructor (one in the executable) and the retained one. A
+sanitizer tree's Develop units still compile whole (below). `BUSTER_DEBUG_INFO`
+changes no sanitizer build: its units have line tables either way, in the same
+tree.
 
 ## Develop
 
