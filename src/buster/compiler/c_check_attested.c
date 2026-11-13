@@ -218,8 +218,10 @@ struct CheckAttestedList
 
 // The lists' cache (check_attested_lists_cached): a lane's lists of the declarations its units read, by each one's own
 // hash before its literals (its tokens' kinds, roles, names and system levels at their places, which are everything its
-// list is made from) and its length. A slot's list is in the cache's pool at `offset`: its `names` entries, its
-// `declared` keys and its `strings` tokens' places in it; `flags` are its BUSTER_ATTESTED_* (no definition is kept). A
+// list is made from) and its length. A slot's list is in the cache's pool at `offset`: the block of its declaration's tree
+// columns in the tree pool (BUSTER_ATTESTED_NONE until a reader keeps them, check_attested_tree_columns), then its `names`
+// entries, its `declared` keys and its `strings` tokens' places in it; `flags` are its BUSTER_ATTESTED_* (no definition is
+// kept). A
 // zero `low` is an empty slot (a key's is never zero). The table doubles at a quarter full, as the memo does, up to
 // its most slots; the pool takes the lane's lists up to its most entries, then keeps no more.
 typedef struct CheckAttestedListSlot CheckAttestedListSlot;
@@ -240,6 +242,8 @@ _Static_assert(sizeof(CheckAttestedListSlot) == 32, "two slots a cache line");
 #define BUSTER_ATTESTED_LIST_FIRST_SLOTS (1u << 12)
 #define BUSTER_ATTESTED_LIST_SLOTS (1u << 20)
 #define BUSTER_ATTESTED_LIST_POOL (1u << 24)
+// The tree pool's most words: a kept declaration's tree is seven columns of its length (check_attested_tree_columns).
+#define BUSTER_ATTESTED_TREE_POOL (1u << 26)
 
 // A name entry of a declaration's list (CheckAttested.name_entries): its key, and its class above it.
 #define BUSTER_ATTESTED_CLASS_SHIFT 25u
@@ -265,6 +269,9 @@ struct CheckAttested
     uint64_t skipped_tokens;
     uint32_t unit_contradictions;
     uint32_t contradicted;
+    // The unit's tree columns that differed from the whole unit's (check_attested_tree_columns' twin), which its record
+    // counts among its contradictions.
+    uint32_t unit_tree_mismatches;
     // The lane's units that skipped, and those read again.
     uint64_t units_skipping;
     uint64_t units_again;
@@ -305,6 +312,17 @@ struct CheckAttested
     uint64_t list_pool_length;
     uint64_t list_hits;
     uint64_t list_misses;
+    // The cached declarations' tree columns (check_attested_tree_columns), and how many declarations took theirs from it, had
+    // them made, kept them, and had a tree other than the one kept under their key (none: a key's tokens give its tree).
+    Arena tree_pool_arena;
+    uint32_t* tree_pool;
+    uint64_t tree_pool_length;
+    uint64_t tree_hits;
+    uint64_t tree_made;
+    uint64_t tree_kept;
+    uint64_t tree_mismatches;
+    // By declaration of the unit: its list's block in the pool, or BUSTER_ATTESTED_NONE where the cache holds none.
+    uint32_t* list_blocks;
     // The keys of the runtime functions' names the lane's table holds.
     uint32_t* runtime_keys;
     uint32_t runtime_count;
@@ -951,6 +969,8 @@ static bool check_attested_lists_walk(CheckAttested* census, const Parser* parse
     census->name_count = listing.names_count;
     census->string_count = listing.strings;
     census->any_definition = listing.any_definition;
+    // (The walk keeps nothing in the lists' cache.)
+    memset(census->list_blocks, 0xff, (uint64_t)declaration * sizeof(uint32_t));
     arena_pop_to(&census->unit_arena, mark);
     return valid;
 }
@@ -1362,7 +1382,7 @@ static void check_attested_list_keep(CheckAttested* census, uint64_t low, uint64
     const uint32_t names = census->name_starts[d + 1] - census->name_starts[d];
     const uint32_t declared = census->declared_starts[d + 1] - census->declared_starts[d];
     const uint32_t strings = strings_to - strings_from;
-    const uint64_t words = (uint64_t)names + declared + strings;
+    const uint64_t words = 1 + (uint64_t)names + declared + strings;
     bool room = census->list_slots != NULL && census->list_pool != NULL && names <= UINT16_MAX && declared <= UINT16_MAX && strings <= UINT8_MAX &&
                 census->list_pool_length + words <= BUSTER_ATTESTED_LIST_POOL;
     if (room && census->list_count >= (census->list_mask + 1) / 4)
@@ -1386,7 +1406,9 @@ static void check_attested_list_keep(CheckAttested* census, uint64_t low, uint64
     if (room)
     {
         CheckAttestedListSlot* slot = check_attested_list_slot(census, low, high, length);
-        uint32_t* const pool = census->list_pool + census->list_pool_length;
+        census->list_pool[census->list_pool_length] = BUSTER_ATTESTED_NONE;
+        census->list_blocks[d] = (uint32_t)census->list_pool_length;
+        uint32_t* const pool = census->list_pool + census->list_pool_length + 1;
         memcpy(pool, census->name_entries + census->name_starts[d], (uint64_t)names * sizeof(uint32_t));
         memcpy(pool + names, census->declared_keys + census->declared_starts[d], (uint64_t)declared * sizeof(uint32_t));
         for (uint32_t k = 0; k < strings; k += 1)
@@ -1464,9 +1486,11 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         const uint32_t ahead = d + BUSTER_ATTESTED_LIST_AHEAD < declarations ? d + BUSTER_ATTESTED_LIST_AHEAD : d;
         __builtin_prefetch(census->list_slots + ((census->owns[ahead].low | 1) & census->list_mask));
         CheckAttestedListSlot* slot = kept ? check_attested_list_slot(census, low, high, length) : NULL;
+        census->list_blocks[d] = BUSTER_ATTESTED_NONE;
         if (slot != NULL && slot->low != 0)
         {
-            const uint32_t* const pool = census->list_pool + slot->offset;
+            census->list_blocks[d] = slot->offset;
+            const uint32_t* const pool = census->list_pool + slot->offset + 1;
             check_attested_copy_words(listing.name_entries + listing.names_count, pool, slot->names);
             listing.names_count += slot->names;
             check_attested_copy_words(listing.declared_keys + listing.declared_count, pool + slot->names, slot->declared);
@@ -1863,9 +1887,6 @@ static __attribute__((noinline)) void check_attested_reach(CheckAttested* census
         const uint8_t flags = census->flags[d];
         for (uint32_t n = census->name_starts[d]; n < census->name_starts[d + 1]; n += 1)
         {
-            // A name's state a few entries on fetched while this one's cursors move, as the chain fetches them.
-            const uint32_t ahead = n + BUSTER_ATTESTED_CHAIN_AHEAD < census->name_count ? census->name_entries[n + BUSTER_ATTESTED_CHAIN_AHEAD] : 0;
-            __builtin_prefetch(census->keys + (ahead & BUSTER_ATTESTED_KEY_MASK));
             const uint32_t entry = census->name_entries[n];
             const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
             check_attested_rise(census, reached, &pending, key, d);
@@ -2041,6 +2062,7 @@ static bool check_attested_unit_arrays(CheckAttested* census, uint32_t count, ui
     census->sums_low = arena_push_array(arena, slots + 8, sizeof(uint64_t), 64);
     census->sums_high = arena_push_array(arena, slots + 8, sizeof(uint64_t), 64);
     census->hits = arena_push_array(arena, slots, sizeof(uint8_t), 64);
+    census->list_blocks = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->unlisted = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->reached = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->reached_without_runtime = arena_push_array(arena, slots, sizeof(uint8_t), 64);
@@ -2196,7 +2218,9 @@ static void check_attested_twins(CheckAttested* census, const Parser* parser, Pr
     uint32_t* entries = arena_push_array(&census->unit_arena, (uint64_t)names + 1, sizeof(uint32_t), 64);
     uint32_t* texts = arena_push_array(&census->unit_arena, (uint64_t)strings + 1, sizeof(uint32_t), 64);
     CheckAttestedHash* owns = arena_push_array(&census->unit_arena, (uint64_t)declarations + 1, sizeof(CheckAttestedHash), 64);
-    const bool room = firsts != NULL && lasts != NULL && flags != NULL && starts != NULL && entries != NULL && texts != NULL && owns != NULL;
+    // (The reader's tree columns take the lists' blocks of the path that runs first: the twin's are its own.)
+    uint32_t* blocks = arena_push_array(&census->unit_arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    const bool room = firsts != NULL && lasts != NULL && flags != NULL && starts != NULL && entries != NULL && texts != NULL && owns != NULL && blocks != NULL;
     if (room)
     {
         memcpy(firsts, census->firsts, (uint64_t)declarations * sizeof(uint32_t));
@@ -2206,6 +2230,7 @@ static void check_attested_twins(CheckAttested* census, const Parser* parser, Pr
         memcpy(entries, census->name_entries, (uint64_t)names * sizeof(uint32_t));
         memcpy(texts, census->string_tokens, (uint64_t)strings * sizeof(uint32_t));
         memcpy(owns, census->owns, (uint64_t)declarations * sizeof(CheckAttestedHash));
+        memcpy(blocks, census->list_blocks, (uint64_t)declarations * sizeof(uint32_t));
         const bool other = !parser->options.scalar;
         const bool listed = check_attested_lists(census, parser, other) && check_attested_pragmas(census, parser, pp);
         if (listed)
@@ -2232,6 +2257,7 @@ static void check_attested_twins(CheckAttested* census, const Parser* parser, Pr
         {
             census->twin_differences += census->string_tokens[k] == texts[k] ? 0 : 1;
         }
+        memcpy(census->list_blocks, blocks, (uint64_t)declarations * sizeof(uint32_t));
     }
     census->twin_differences += room ? 0 : 1;
     arena_pop_to(&census->unit_arena, mark);
@@ -2245,6 +2271,7 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
     const uint32_t count = parser->tokens.count;
     census->unit_ready = false;
     census->levels_ready = false;
+    census->unit_tree_mismatches = 0;
     census->path = path;
     census->token_count = count;
     const bool whole = complete_translation_unit && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && parser->tree.roles != NULL &&
@@ -2434,6 +2461,7 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
     const uint32_t count = parser->tokens.count;
     attested->unit_ready = false;
     attested->levels_ready = false;
+    attested->unit_tree_mismatches = 0;
     attested->skipped = false;
     attested->again = false;
     attested->path = NULL;
@@ -2452,6 +2480,192 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
     attested->events_checked = false;
     return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, false, true,
                            true, attested);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The tree's columns from the lists' cache (the reader's, check_input_run's parse_tree_columns): in a valid parse each
+// file-scope declaration's tokens are one tree whose root is its last token, with no sibling (a root has none), so its
+// columns are its own parents' alone, offset by its first token: its tokens' positions in the postorder are its own
+// run (every earlier token's subtree ends before it), and every column holds tokens of its own run or none. A cached
+// declaration's columns are kept relative to its first token, with its parents (seven columns of its length, in the
+// tree pool, check_attested_tree_keep); a later declaration under its key whose parents are the same takes them, 16
+// tokens at a time, and any other has them made over its run as parse_tree_columns makes the unit's, the twin.
+
+// The declaration of tokens [`a`, `b`]'s tree columns as parse_tree_columns makes the unit's (with the sizes), its three
+// passes over the run alone: the positions' prefix sum starts at `a`, the tokens whose subtree ends before it.
+static void check_attested_tree_range(const uint32_t* parents, uint32_t count, uint32_t a, uint32_t b, uint32_t* last_children, uint32_t* before,
+                                      uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
+                                      uint32_t* starts, uint32_t* sizes)
+{
+    for (uint32_t v = a; v <= b; v += 1)
+    {
+        last_children[v] = 0;
+        first_children[v] = BUSTER_PARSE_NONE;
+        before[v] = 0;
+    }
+    first_children[count] = BUSTER_PARSE_NONE;
+    for (uint32_t i = a; i <= b; i += 1)
+    {
+        last_children[parents[i] == BUSTER_PARSE_NONE ? count : parents[i]] = i;
+    }
+    for (uint32_t v = b + 1; v-- > a;)
+    {
+        const uint32_t parent = parents[v];
+        const uint32_t slot = parent != BUSTER_PARSE_NONE ? parent : count;
+        const uint32_t sibling = first_children[slot];
+        next_siblings[v] = parent != BUSTER_PARSE_NONE ? sibling : BUSTER_PARSE_NONE;
+        first_children[slot] = v;
+        const uint32_t last = last_children[v];
+        const uint32_t end = ends[last];
+        const uint32_t own = __builtin_unpredictable(last > v) ? end : v;
+        ends[v] = own;
+        before[own] += 1;
+    }
+    uint32_t sum = a;
+    for (uint32_t v = a; v <= b; v += 1)
+    {
+        const uint32_t position = sum + ends[v] - v;
+        positions[v] = position;
+        postorder[position] = v;
+        sum += before[v];
+        const uint32_t first = first_children[v];
+        const bool before_v = first < v;
+        const uint32_t start = starts[before_v ? first : v];
+        starts[v] = __builtin_unpredictable(before_v) ? start : v;
+        sizes[position] = ends[v] - starts[v] + 1;
+    }
+}
+
+// Whether every parent of tokens [`a`, `b`] is one of them or none: the declaration is its own tree.
+static bool check_attested_tree_own(const uint32_t* parents, uint32_t a, uint32_t b)
+{
+    const __m512i none = _mm512_set1_epi32(-1);
+    bool own = true;
+    for (uint32_t t = a; own && t <= b; t += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, b - t + 1 < 16 ? b - t + 1 : 16);
+        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, parents + t);
+        const __mmask16 inside = _mm512_mask_cmpge_epu32_mask(lanes, parent, _mm512_set1_epi32((int32_t)a)) &
+                                 _mm512_mask_cmple_epu32_mask(lanes, parent, _mm512_set1_epi32((int32_t)b));
+        own = (__mmask16)(inside | _mm512_mask_cmpeq_epi32_mask(lanes, parent, none)) == lanes;
+    }
+    return own;
+}
+
+// `column`'s tokens' values [`a`, `a` + `length`) less `a` into `kept` (none stays none), or with `restore` `kept`'s plus
+// `a` back into `column`: 16 at a time, masked at the run's end.
+static void check_attested_tree_shift(uint32_t* column, uint32_t* kept, uint32_t a, uint32_t length, bool restore)
+{
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i offset = _mm512_set1_epi32((int32_t)a);
+    for (uint32_t k = 0; k < length; k += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
+        const __m512i value = _mm512_maskz_loadu_epi32(lanes, restore ? kept + k : column + a + k);
+        const __mmask16 some = _mm512_mask_cmpneq_epi32_mask(lanes, value, none);
+        const __m512i shifted = restore ? _mm512_mask_add_epi32(value, some, value, offset) : _mm512_mask_sub_epi32(value, some, value, offset);
+        _mm512_mask_storeu_epi32(restore ? column + a + k : kept + k, lanes, shifted);
+    }
+}
+
+// Whether the kept tree at `kept`, of `length` tokens, has the parents of tokens from `a` (each one's less `a`).
+static bool check_attested_tree_same(const uint32_t* parents, const uint32_t* kept, uint32_t a, uint32_t length)
+{
+    const __m512i none = _mm512_set1_epi32(-1);
+    const __m512i offset = _mm512_set1_epi32((int32_t)a);
+    bool same = true;
+    for (uint32_t k = 0; same && k < length; k += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
+        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, parents + a + k);
+        const __m512i relative = _mm512_mask_sub_epi32(parent, _mm512_mask_cmpneq_epi32_mask(lanes, parent, none), parent, offset);
+        same = _mm512_mask_cmpeq_epi32_mask(lanes, relative, _mm512_maskz_loadu_epi32(lanes, kept + k)) == lanes;
+    }
+    return same;
+}
+
+// The unit's tree columns as parse_tree_columns makes them (its arguments, with the sizes), a declaration at a time from
+// the lists' cache (the section's comment): false where the unit's passes didn't run, it has no sizes or a declaration
+// isn't its own tree, and the caller then makes them whole. With --attested=verify or --twins the unit's columns are
+// made whole too, in `scratch`, and a difference is a contradiction.
+static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before,
+                                        uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
+                                        uint32_t* starts, uint32_t* sizes, Arena* scratch)
+{
+    const uint32_t declarations = census->unit_ready && count == census->token_count && sizes != NULL ? census->declaration_count : 0;
+    bool valid = declarations != 0;
+    for (uint32_t d = 0; valid && d < declarations; d += 1)
+    {
+        const uint32_t a = census->firsts[d];
+        const uint32_t b = census->lasts[d];
+        const uint32_t length = b - a + 1;
+        const uint32_t block = census->list_blocks[d];
+        const uint32_t tree = block != BUSTER_ATTESTED_NONE ? census->list_pool[block] : BUSTER_ATTESTED_NONE;
+        const uint32_t* const kept = tree != BUSTER_ATTESTED_NONE ? census->tree_pool + tree : NULL;
+        if (kept != NULL && check_attested_tree_same(parents, kept, a, length))
+        {
+            check_attested_tree_shift(positions, (uint32_t*)kept + length, a, length, true);
+            check_attested_tree_shift(postorder, (uint32_t*)kept + 2 * (uint64_t)length, a, length, true);
+            check_attested_tree_shift(ends, (uint32_t*)kept + 3 * (uint64_t)length, a, length, true);
+            check_attested_tree_shift(first_children, (uint32_t*)kept + 4 * (uint64_t)length, a, length, true);
+            check_attested_tree_shift(next_siblings, (uint32_t*)kept + 5 * (uint64_t)length, a, length, true);
+            check_attested_copy_words(sizes + a, kept + 6 * (uint64_t)length, length);
+            census->tree_hits += 1;
+        }
+        else
+        {
+            valid = check_attested_tree_own(parents, a, b);
+            if (valid)
+            {
+                check_attested_tree_range(parents, count, a, b, last_children, before, postorder, positions, ends, first_children, next_siblings, starts, sizes);
+                census->tree_made += 1;
+                census->tree_mismatches += kept != NULL ? 1 : 0;
+            }
+            if (valid && kept == NULL && block != BUSTER_ATTESTED_NONE && census->tree_pool_length + 7 * (uint64_t)length <= BUSTER_ATTESTED_TREE_POOL)
+            {
+                uint32_t* const into = census->tree_pool + census->tree_pool_length;
+                check_attested_tree_shift((uint32_t*)parents, into, a, length, false);
+                check_attested_tree_shift(positions, into + length, a, length, false);
+                check_attested_tree_shift(postorder, into + 2 * (uint64_t)length, a, length, false);
+                check_attested_tree_shift(ends, into + 3 * (uint64_t)length, a, length, false);
+                check_attested_tree_shift(first_children, into + 4 * (uint64_t)length, a, length, false);
+                check_attested_tree_shift(next_siblings, into + 5 * (uint64_t)length, a, length, false);
+                check_attested_copy_words(into + 6 * (uint64_t)length, sizes + a, length);
+                census->list_pool[block] = (uint32_t)census->tree_pool_length;
+                census->tree_pool_length += 7 * (uint64_t)length;
+                census->tree_kept += 1;
+            }
+        }
+    }
+    if (valid)
+    {
+        // parse_tree_columns' sentinels.
+        first_children[count] = BUSTER_PARSE_NONE;
+        next_siblings[count] = BUSTER_PARSE_NONE;
+        ends[count] = count;
+        positions[count] = count;
+    }
+    if (valid && (census->mode == CHECK_ATTESTED_MODE_VERIFY || census->twins))
+    {
+        // The twin: the whole unit's columns, which these must be to the word.
+        const uint64_t mark = scratch->length;
+        const uint64_t slots = (uint64_t)count + 1;
+        uint32_t* const whole = arena_push_array(scratch, 9 * slots, sizeof(uint32_t), 64);
+        if (whole != NULL)
+        {
+            parse_tree_columns(parents, count, whole, whole + slots, whole + 2 * slots, whole + 3 * slots, whole + 4 * slots, whole + 5 * slots, whole + 6 * slots, whole + 7 * slots,
+                               whole + 8 * slots);
+            const bool same = memcmp(whole + 2 * slots, postorder, (uint64_t)count * sizeof(uint32_t)) == 0 &&
+                              memcmp(whole + 3 * slots, positions, slots * sizeof(uint32_t)) == 0 && memcmp(whole + 4 * slots, ends, slots * sizeof(uint32_t)) == 0 &&
+                              memcmp(whole + 5 * slots, first_children, slots * sizeof(uint32_t)) == 0 &&
+                              memcmp(whole + 6 * slots, next_siblings, slots * sizeof(uint32_t)) == 0 && memcmp(whole + 8 * slots, sizes, (uint64_t)count * sizeof(uint32_t)) == 0;
+            census->unit_tree_mismatches += same ? 0 : 1;
+            census->contradictions += same ? 0 : 1;
+            census->tree_mismatches += same ? 0 : 1;
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return valid;
 }
 
 // Whether --attested=verify fails the unit: a contradiction in it.
@@ -2665,7 +2879,8 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
     const uint32_t count = parser->tokens.count;
     census->units_observed += 1;
     census->tokens += count;
-    census->unit_contradictions = 0;
+    census->unit_contradictions = census->unit_tree_mismatches;
+    census->unit_tree_mismatches = 0;
     census->contradicted = 0;
     uint64_t unlisted_events = 0;
     const bool ready = census->unit_ready && complete && count == census->token_count;
@@ -2853,6 +3068,8 @@ static void check_attested_report(const CheckAttested* census)
            census->range_searches);
     printf("attested: lists cached=%" PRIu64 " made=%" PRIu64 " kept=%" PRIu64 " pool-entries=%" PRIu64 " (of every run of the passes)\n", census->list_hits, census->list_misses,
            census->list_count, census->list_pool_length);
+    printf("attested: trees cached=%" PRIu64 " made=%" PRIu64 " kept=%" PRIu64 " pool-words=%" PRIu64 " mismatches=%" PRIu64 "\n", census->tree_hits, census->tree_made,
+           census->tree_kept, census->tree_pool_length, census->tree_mismatches);
     uint64_t all = 0;
     uint64_t first_all = 0;
     uint64_t ticks = 0;
@@ -2918,9 +3135,11 @@ static bool check_attested_open(CheckAttested* census)
     census->list_mask = BUSTER_ATTESTED_LIST_FIRST_SLOTS - 1;
     census->list_pool_arena = arena_reserve((uint64_t)BUSTER_ATTESTED_LIST_POOL * sizeof(uint32_t) + 4096);
     census->list_pool = arena_push_array(&census->list_pool_arena, BUSTER_ATTESTED_LIST_POOL, sizeof(uint32_t), 64);
+    census->tree_pool_arena = arena_reserve((uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint32_t) + 4096);
+    census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint32_t), 64);
     check_attested_actions(census->kind_actions, census->role_actions);
     return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL &&
-           census->list_slots != NULL && census->list_pool != NULL;
+           census->list_slots != NULL && census->list_pool != NULL && census->tree_pool != NULL;
 }
 
 static void check_attested_close(CheckAttested* census)
@@ -2931,6 +3150,7 @@ static void check_attested_close(CheckAttested* census)
     arena_release(&census->memo_arena);
     arena_release(&census->list_arena);
     arena_release(&census->list_pool_arena);
+    arena_release(&census->tree_pool_arena);
 }
 
 // The command of `count` arguments (compile options and files) run as `--lanes 1` runs it, with `census` beside it, and

@@ -16609,6 +16609,9 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
 typedef struct CheckAttested CheckAttested;
 static const uint64_t* check_attested_skips(const CheckAttested* attested);
 static const uint8_t* check_attested_token_levels(const CheckAttested* attested);
+static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before,
+                                        uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
+                                        uint32_t* starts, uint32_t* sizes, Arena* scratch);
 static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count);
 
 // The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
@@ -17158,8 +17161,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
                 parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
             }
-            else
+            else if (attested == NULL || BUSTER_SCALAR_PATH(parser->options.scalar) ||
+                     !check_attested_tree_columns(attested, parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots,
+                                                  traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, starts, sizes, scratch))
             {
+                // (Attested declarations' cache gives a cached declaration's columns, c_check_attested.c's
+                // check_attested_tree_columns, its own made as these are.)
                 parse_tree_columns(parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots, traversal + 2 * slots,
                                    traversal + 3 * slots, traversal + 4 * slots, starts, sizes);
             }
