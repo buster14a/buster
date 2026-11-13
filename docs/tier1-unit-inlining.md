@@ -2,8 +2,11 @@
 
 Status: step 0 (the splice, offered to `always_inline` callees) is
 implemented: [the inlining guide](ir-inlining.md)'s "Callees with control
-flow", measured [below](#step-0-measured). Steps 1 to 3 are design only. The
-measurements other than step 0's are main's at `c5f0efb2`, and an experiment
+flow", measured [below](#step-0-measured). Step 1 (the unit stage, summaries
+and the small class) is implemented: [the Tier 1 guide](tier1.md)'s
+"Inlining", measured [below](#step-1-measured), three of its five gates not
+met. Steps 2 and 3 are design only. The
+measurements other than steps 0's and 1's are main's at `c5f0efb2`, and an experiment
 patch kept in the record (not for merging) prototypes the central
 transformation and was run on the three programs
 ([below](#what-the-prototype-measured)). It is
@@ -874,6 +877,76 @@ the next steps' preconditions on this program, as the design's expected case
 already said of #1344. The compiler's own `--tier1` build expands 4,097 calls
 where main's expands 795, for 6.6% more records and 3.0% more user time.
 
+### Step 1, measured
+
+Step 1 landed as the unit stage and summaries in `c_check_tier1_inline.c`
+(#2641; [the Tier 1 guide](tier1.md)'s "Inlining"), with the per-lane cache and
+the per-caller reach removed. Where it departs from the design above:
+
+- **A summary is Tier 1's passes' result.** Its lowering, its calls' expansions
+  and the passes from promotion to the verified optimizer (`check_tier1_passes`,
+  factored out of the function's own pipeline: wide and vector splits, truth
+  values, threading, if-conversion, the optimizer with layout), with the
+  optimizer's verified analysis. Its own code goes on from it at selection, so
+  its optimization is moved, not repeated; callers copy that same function. A
+  first version that optimized each small summary for its callers apart from
+  its own pipeline paid 442 M instructions of sqlite3.c's compile twice.
+- **Levels are claims.** Rather than lanes meeting between levels, the first
+  lane to need a summary claims it by a compare-and-swap of its state word and
+  builds its callees' first (an explicit stack); a lane that needs one another
+  is building waits. Summaries depend only on their acyclic callees', so no wait
+  waits on itself, and the objects are the same by any lane count.
+- **The classes are two.** `always_inline` (no limit) and small (a summary of
+  at most 256 instructions, each call at an inliner cost of at most 64, which
+  takes every shrinking callee too); the caller's growth is the inliner's
+  existing bound alone. The inliner takes a limit per callee
+  (`IrInlineUnit.limits`), rewrites the caller alone (`IrInlineUnit.only`) and
+  trusts its verified inputs (`IrInlineOptions.trusted`), and the caller's runs
+  of nodes between its expansions are copied 16 a vector by their operand
+  kinds' table lookup and two masked gathers, with the per-node loop as the
+  scalar twin.
+- **SROA after an expansion only where it copied an aggregate.** SROA after
+  every expansion of a function with an address-taken slot split 449 of
+  sqlite3.c's functions for 662 M instructions and changed its `.text` by 0.05%:
+  what it split was the callers' own aggregates. It now runs where an expansion
+  copied an aggregate argument or result, or on vectors, as before.
+
+Its gate, on the 9700X against main `26f0bb0e`
+([the record](https://github.com/buster14a/buster-performance/tree/eb8d0c4dbd89a4e90dde5e7537b2a05fd936b5e9/docs/measurements/tier1-unit-inlining-step1-2541-2026-11-13)):
+
+| Gate | Result |
+| --- | --- |
+| objects equal at 1 and 8 lanes and by both twins | 72 of 72 pairs the same bytes (sqlite3.c, speedtest1.c and Lua's 34 units, by each path) |
+| speedtest1 at least 6% fewer cycles at every placement | **5.34% fewer** (4.86 to 5.82), faster at 8 of 8, 4.45 to 6.08 each: not met |
+| Lua not slower at any link order | **1.51% fewer** (-4.18 to +1.16), faster at 3 of 4, the fourth +0.14: not met |
+| the unit stage under 1% of `--tier1 -c sqlite3.c` | 0.02% of its cycles |
+| the compile's growth at most its code's plus 3 points | **+17.3% user cycles** for +12.8% `.text` (+19.7% instructions, peak memory +4.4%): not met by 1.5 points |
+
+speedtest1's expansions remove 16.9 M of its 76.2 M calls, 2.6 cycles each, the
+prototype's figure; its `.text` grows by 12.5% where the prototype's c64 grew it
+by 10.5%, since summaries that went through every pass are smaller and more of
+them fit the class. Lua's hot functions are external, which step 1's classes
+don't take: its scripts lose 4.6 M of 110.7 M calls. The gate's figures are the
+prototype's against main of 2026-11-12, which ran speedtest1 in 936.3 M cycles
+and Lua in 1,236.3 M; today's main runs them in 882.4 M and 1,117.6 M, and
+step 1's 836.5 M and 1,101.0 M are below the prototype's c64 (876.9 M and
+1,207.3 M), speedtest1's below its c128 too (854.9 M).
+
+The compile's growth is the larger IR's through the backend, at each stage's
+own share: the inliner is 1.6% of the compile and the unit stage 0.02%, but
+the IR grows about twice as fast as the code (on sqlite3.c locally, the
+optimized functions' instructions +23.4% and blocks +37% for `.text` +10.3%),
+since an expanded callee's IR is all copied where its call was one instruction.
+Merging the splice's head and continuation into their neighbours would remove
+about a third of the added blocks, but the backend's cost follows instructions,
+not blocks; dead functions (step 2) are the design's credit against it.
+
+The compiler built by `--tier1` reproduces clang -O2's build's objects, and its
+own build loses 104 M of its 283 M calls for 4.9% of its cycles. The driver's
+fixtures that measure a frame across a call (a backtrace's depth, a value kept
+in a callee-saved register across one) mark their callees `noinline`, since a
+small static helper is now expanded.
+
 ### Expected gains
 
 As changes of `--tier1`'s user cycles, with the measurements each rests on:
@@ -1039,13 +1112,18 @@ still 20 times faster to compile than clang -O2's.
 
 ### Objects that depend on the compiler's host
 
-`--tier1 -c sqlite3.c` writes one object at 1 and at 8 lanes, and another by
-the scalar host path (`--scalar`): `.text` is 1,037,736 bytes by the vector
-path and 1,037,688 by the scalar one (Lua's `lvm.c`: 30,812 and 30,788).
-Tier 0's object is the same by every path. This is #1395, open: the vector
-cover and its scalar twin pick different instructions for some multiplies. A
-default tier whose output depends on whether the build machine has AVX-512 is
-not reproducible across machines.
+When this was written, `--tier1 -c sqlite3.c` wrote one object at 1 and at 8
+lanes, and another by the scalar host path (`--scalar`): `.text` was 1,037,736
+bytes by the vector path and 1,037,688 by the scalar one (Lua's `lvm.c`: 30,812
+and 30,788), while Tier 0's object was the same by every path. That was #1395:
+the vector cover and its scalar twin picked different instructions for some
+multiplies. #1715 gave both paths the same costed cover; the frame colorer's
+scalar twin then still gave spilled values other slots (#2606), and now
+computes the vector colorer's colors exactly. Both paths now write the same
+bytes for `sqlite3.c`, Lua's 34 units and c-testsuite's 220 tests (the vector
+path's objects unchanged), and `test-ssa-source --tier1` requires the same
+executable from both. A default tier whose output depended on whether the build
+machine has AVX-512 wouldn't be reproducible across machines.
 
 ### What `--verify` covers
 

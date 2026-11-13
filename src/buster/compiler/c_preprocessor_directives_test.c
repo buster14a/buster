@@ -1466,11 +1466,19 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
             char* output = 0;
             char* errors = 0;
             const int status = pp_directive_test_command(argv, &output, &errors);
-            const bool unavailable = !BUSTER_HOST_VECTOR && strcmp(runs[r].command, "benchmark-preprocessor") == 0;
+            // benchmark-preprocessor's refusal by a scalar build, which runs no benchmark, or by Develop's stand-in, which
+            // leaves its unit out (docs/commands/build.md, "Develop"): Release's and Debug's executables check the option.
+            static const char scalar_refusal[] = "benchmarks require an AVX-512 host build; run tests with this scalar build\n";
+            static const char develop_refusal[] =
+                "buster: this command is in the Release and Debug configurations' executables; Develop's leaves c_preprocessor_benchmark.c "
+                "out (docs/commands/build.md, \"Develop\"): build Release with ./build.sh --config Release\n";
+            const bool benchmark = strcmp(runs[r].command, "benchmark-preprocessor") == 0;
+            const bool refused = status == 1 && output != 0 && output[0] == 0 && errors != 0;
+            const bool develop = benchmark && refused && strcmp(errors, develop_refusal) == 0;
+            const bool unavailable = develop || (!BUSTER_HOST_VECTOR && benchmark);
             const char* text = runs[r].status == 0 ? output : errors;
             // clang's driver reports an option it doesn't know, or a value it takes for an input, as an error.
-            const bool same = unavailable ? status == 1 && output != 0 && output[0] == 0 && errors != 0 &&
-                                                strcmp(errors, "benchmarks require an AVX-512 host build; run tests with this scalar build\n") == 0
+            const bool same = unavailable ? refused && (develop || strcmp(errors, scalar_refusal) == 0)
                                           : status == runs[r].status && text != 0 && strstr(text, runs[r].says) != 0 &&
                                                 (runs[r].status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
             if (!same)

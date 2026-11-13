@@ -17,9 +17,11 @@
 // The vector path sorts ends before starts within (rounded size, alignment) classes, scans live pressure, finds each
 // start's nearest earlier equal-or-greater pressure by pointer jumping, and inherits the slot of the intervening end.
 // Roots are new pressure maxima; a second pointer-jump resolves inherited colors. Thus each class uses exactly its
-// maximum live pressure. The scalar twin greedily takes the first free color in that same class; its colors may differ
-// but its slot counts and frame sizes must agree. Preparation, sorting, color resolution and layout are all charged
-// to the benchmark. There is no claim that a synthetic planner timing is a compiler or generated-program speedup.
+// maximum live pressure. The scalar twin computes the same colors in one ordered pass, each level's last ended color
+// (tier1_frame_color_scalar), so both paths give identical slots and offsets and a Tier 1 object doesn't depend on the
+// compiler's host (#2606); the tests check each plan independently. Preparation, sorting, color resolution and layout
+// are all charged to the benchmark. There is no claim that a synthetic planner timing is a compiler or generated-program
+// speedup.
 //
 // Input columns have column_count u32 elements, indices has count elements, and only those logical elements are read.
 // Without indices the first count rows are used; with indices, every index must be distinct and in range. No padding
@@ -558,28 +560,34 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     return error;
 }
 
-static void tier1_frame_color_scalar(const Tier1FrameRequest* request, Tier1FrameWork* work)
+// The vector colorer's exact twin, in one pass over the same sorted events (#2606): a start whose pressure is a new
+// maximum of its class takes that pressure less one; any other start takes the color of the item whose end last took
+// the class's pressure down from the start's level, which is the end right after the start's nearest earlier event of
+// equal or greater pressure. `nearest` holds each level's last such color; a start reads its level only after an end
+// of its own class wrote it, since the class's pressure rose to that level before and has fallen below it since.
+static void tier1_frame_color_scalar(Tier1FrameWork* work)
 {
     if (work->class_count != 0)
     {
         memset(work->class_colors, 0, (uint64_t)work->class_count * 4);
     }
+    // Every class's events balance, so each class starts at pressure 0.
+    uint32_t pressure = 0;
     for (uint32_t i = 0; i < work->count * 2; i += 1)
     {
+        const uint32_t item = work->event[i] >> 1;
+        const uint32_t group = work->object_class[item];
         if ((work->event[i] & 1) != 0)
         {
-            const uint32_t item = work->event[i] >> 1;
-            const uint32_t row = tier1_frame_row(&request->slots, item);
-            const uint32_t group = work->object_class[item];
-            const uint32_t colors = work->class_colors[group];
-            uint32_t color = 0;
-            while (color < colors && work->nearest[color] > request->slots.start[row])
-            {
-                color += 1;
-            }
-            work->nearest[color] = request->slots.end[row];
-            work->color[item] = color;
-            work->class_colors[group] = color == colors ? colors + 1 : colors;
+            pressure += 1;
+            const bool maximum = pressure > work->class_colors[group];
+            work->color[item] = maximum ? pressure - 1 : work->nearest[pressure];
+            work->class_colors[group] = maximum ? pressure : work->class_colors[group];
+        }
+        else
+        {
+            work->nearest[pressure] = work->color[item];
+            pressure -= 1;
         }
     }
 }
@@ -923,7 +931,7 @@ static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, A
     {
         if (BUSTER_SCALAR_PATH(scalar))
         {
-            tier1_frame_color_scalar(request, &work);
+            tier1_frame_color_scalar(&work);
         }
         else
         {

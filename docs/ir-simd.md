@@ -665,6 +665,91 @@ The tests:
 - `test-checker-driver`'s machine-rows unit: its `permutexvar` and
   `shuffle_epi8` are now the IR's, leaving 61 rows and 32 moves.
 
+## Byte shuffles by an immediate (#1840)
+
+`vpshufd`, `vpshuflw`, `vpshufhw`, `vpslldq` and `vpsrldq` move the same bytes
+within every 16-byte lane, so each of them is a `shuffle` (`vpshufb`) of its
+vector by a constant. There is no new IR operation. `vpshufd $0x55`, which puts
+doubleword 1 in every place, is:
+
+```text
+%2 = vconst.v4i32 0x07060504070605040706050407060504
+%3 = intrinsic.v4i32 %1, %2 shuffle
+```
+
+**Indices** (`ir_simd_shuffle_immediate_indices`, `ir_simd_convert_forms.c`,
+shared by the decoder and Tier 1): index i names the byte of the lane that
+result byte i takes, or is `0x80` for a zero.
+- `vpshufd`: each doubleword is the source doubleword that 2 bits of the
+  immediate name.
+- `vpshuflw`, `vpshufhw`: each low or high word is the source word that 2 bits
+  name. The other quadword is copied.
+- `vpslldq`, `vpsrldq`: the bytes move up or down by the immediate. A count of
+  16 or more zeroes the lane.
+
+**Decoder** (`ir_simd_typed_shuffle_immediate`): a row of one record of an
+`ir_simd_shuffle_immediate_forms` EVEX form, register-direct and undecorated:
+- VECTOR(0) in rm into VECTOR(0) (reg; vvvv for the byte shifts, whose reg is
+  the opcode's extension);
+- by an immediate, whose low 8 bits are the instruction's;
+- at the result's width, from one vector of that width.
+
+These are the builtins' `__builtin_ia32_pshufd` at three widths (its 32-byte
+row is AVX2's VEX form), `pshuflw`, `pshufhw`, `pslldqi` and `psrldqi`. The
+target needs AVX512F, VL below 64 bytes and the EVEX form's features: BW for
+all but `vpshufd`.
+
+**Tier 1** (`BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE`, `tier1_select_shuffle_constant`):
+- A `shuffle` whose indices are a constant matching an immediate form becomes
+  that form alone, which leaves the constant unused. The match
+  (`ir_simd_shuffle_immediate_match`) reads the indices as `vpshufb` does: the
+  zeroing bit, else the low 4 bits. Every 16-byte lane must be the same, and
+  the first kind in the order above whose indices at the immediate the first
+  lane names are the lane's wins. An identity is `vpshufd` 0xe4; every byte zero
+  is `vpslldq` 16.
+- This candidate comes first, as the shift's immediate form does. Any other
+  constant, or indices that aren't one, is `vpshufb`.
+
+**Zen 5:** the 15 EVEX register forms had no row. They were measured on the
+9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shuffle-immediates-1840-2026-11-13)):
+
+| Forms | Latency | Throughput |
+| --- | ---: | ---: |
+| `vpshufd`, `vpshuflw`, `vpshufhw`, every width | 2 cycles | 4 per cycle |
+| `vpslldq`, `vpsrldq`, every width | 2 cycles | 2 per cycle |
+
+`vpshufb` has 2 cycles of latency and runs 2 per cycle, and it loads its
+indices, so the immediate form is never slower.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Develop builds)
+compiling this change's sources, against main (`26f0bb0e`):
+
+| Unit | Rows before | Rows after | Records |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 1 | 1 | 635,525 both |
+| `main_unit_backend.c` | 268 | 170 | 1,600,450 both |
+
+The 96 `vpshufd` rows of a zmm register and 2 `vpslldq` rows were each one
+record, and are one record of the same form now, so spills and the moves
+around rows are unchanged.
+
+The tests:
+
+- **`test-ir-simd`:** each of the 15 front-end rules decodes at 8 immediates
+  to a shuffle by its kind's indices, at exactly its features (120 rows). Each
+  is refused without each feature it needs and under 9 changes. The match is
+  checked by brute force:
+  - every kind's indices at every immediate and width, with the bits `vpshufb`
+    ignores set at random, match back to the first kind and immediate with the
+    same indices;
+  - random indices match exactly where some kind's at some immediate are theirs;
+  - indices whose 16-byte lanes differ never match.
+- **`test-tier1-masks`:** the 120 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against Intel's definitions
+  of each instruction. Tier 1's code by both paths has the matched immediate
+  form's 4 records and no `vpshufb`.
+
 ## Conversions (#1840)
 
 Two more unary kinds of `intrinsic` widen or narrow integer lanes. Their
