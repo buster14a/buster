@@ -13,7 +13,8 @@
 // consumer, given the column, refuses the plan. The code is certified and runs natively with its references resolved
 // here: the PC32s and the GOT loads against a data page after the code, the thread-locals' against this thread's own.
 // A straight-line consumer's plan that claims a folded symbol is refused, which its chain rule keeps from happening
-// (tier1_emit_cfg_chain).
+// (tier1_emit_cfg_chain). A block's repeated indexed accesses of one global share its first symbol address and index
+// extension (#2601).
 
 #define BUSTER_TIER1_SYMBOL_FOLD_NODES 32
 
@@ -151,7 +152,9 @@ static uint8_t* tier1_symbol_fold_load(Tier1EmitTest* test, const Tier1EmitResul
     *bytes = code_bytes + 4096;
     uint8_t* mapping = mmap(0, *bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
-    uint32_t* ends = malloc(((uint64_t)emitted->reference_count + 1) * sizeof(uint32_t));
+    // The encoder's vector path stores each group's fixup ends 16 at a time (BUSTER_X86_ENCODER_FIXUP_CAPACITY): sized for
+    // the references alone, its last store ran past the allocation into the next chunk of the heap.
+    uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count) * sizeof(uint32_t));
     bool ready = mapping != MAP_FAILED && offsets != 0 && ends != 0;
     tier1_emit_test_expect(test, ready, "a folded symbol's code and data mapping");
     *data = ready ? mapping + code_bytes : 0;
@@ -310,6 +313,136 @@ static void tier1_symbol_fold_straight(Tier1EmitTest* test)
     arena_pop_to(&test->input, 0);
 }
 
+// #2601: three indexed accesses of one global in one block, each made by the lowering with its own symbol's address and
+// its own sign extension of the index i: t[i] += v, then t[i + 8] read, the sum of both returned. Every pattern reads
+// the block's first address and extension, so neither repeats in the code: no node computes the later ones.
+static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 17,
+        .block_count = 1,
+        .address_count = 2,
+        .parameter_count = 2,
+    };
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I32;
+        function->parameter_types[1] = IR_I64;
+        function->symbol_count = 2;
+        function->addresses[0] = (IrAddress){ .scale = 8, .offset = 0 };
+        function->addresses[1] = (IrAddress){ .scale = 8, .offset = 64 };
+        uint32_t next = 0;
+        const uint32_t index = tier1_select_test_append(function, &next, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t value = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t loaded = BUSTER_IR_NONE;
+        uint32_t sum = BUSTER_IR_NONE;
+        for (uint32_t access = 0; access < 3; access += 1)
+        {
+            const uint32_t table = tier1_select_test_append(function, &next, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t extended = tier1_select_test_append(function, &next, IR_SEXT, IR_I64, index, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t element = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, table, extended, access == 2 ? 1 : 0);
+            if (access == 0)
+            {
+                loaded = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, element, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, loaded, value, BUSTER_IR_NONE);
+            }
+            else if (access == 1)
+            {
+                tier1_select_test_append(function, &next, IR_STORE, IR_VOID, element, sum, BUSTER_IR_NONE);
+            }
+            else
+            {
+                const uint32_t other = tier1_select_test_append(function, &next, IR_LOAD, IR_I64, element, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                const uint32_t result = tier1_select_test_append(function, &next, IR_ADD, IR_I64, sum, other, BUSTER_IR_NONE);
+                tier1_select_test_append(function, &next, IR_RET, IR_VOID, result, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+        }
+        function->block_offsets[1] = next;
+        ready = next == function->instruction_count;
+    }
+    return ready;
+}
+
+static __attribute__((no_sanitize("function"))) uint64_t tier1_symbol_fold_call_two(const void* code, uint64_t a, uint64_t b)
+{
+    uint64_t (*function)(uint64_t, uint64_t);
+    memcpy(&function, &code, sizeof(function));
+    return function(a, b);
+}
+
+static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
+{
+    for (uint32_t vector = 0; vector < 2; vector += 1)
+    {
+        IrFunction function;
+        const bool created = tier1_symbol_fold_repeated_function(test, &function);
+        const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        tier1_emit_test_expect(test, valid, "the repeated indexed accesses' fixture is valid IR");
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
+        // Nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 5, 10 and 14
+        // the load, the store and the second load.
+        bool shared = planned && !plan.covered[2] && !plan.covered[3] && plan.covered[7] && plan.covered[8] && plan.covered[11] && plan.covered[12];
+        const uint32_t accesses[3] = { 5, 10, 14 };
+        for (uint32_t k = 0; shared && k < 3; k += 1)
+        {
+            const Tier1SelectPattern* pattern = &plan.patterns[accesses[k]];
+            shared = pattern->values[0] == 2 && pattern->values[1] == 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
+        }
+        tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension");
+        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths share the first address and extension");
+        const Tier1EmitOptions options = {
+            .register_mask = tier1_liveness_register_mask(),
+            .vector = vector != 0,
+            .rematerialize = true,
+            .certify = true,
+        };
+        Tier1EmitResult emitted;
+        const Tier1EmitError error = shared ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+        const bool certified = error == TIER1_EMIT_OK && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+        tier1_emit_test_expect(test, certified, "the repeated indexed accesses' code certifies");
+        uint32_t leas = 0;
+        for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[r];
+            leas += (record->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LEA_R64_M && (record->mode & BUSTER_X86_MODE_RIP) != 0;
+        }
+        tier1_emit_test_expect(test, !certified || leas == 1, "the table's address is one lea");
+        uint64_t bytes = 0;
+        uint8_t* data = 0;
+        uint8_t* mapping = certified ? tier1_symbol_fold_load(test, &emitted, &bytes, &data) : MAP_FAILED;
+        if (mapping != MAP_FAILED && tier1_emit_test_native(test, emitted.code.records, emitted.code.count))
+        {
+            for (uint32_t i = 0; i < 8; i += 1)
+            {
+                uint64_t table[16];
+                for (uint32_t k = 0; k < 16; k += 1)
+                {
+                    table[k] = UINT64_C(0x0101010101010101) * (k + 1);
+                }
+                memcpy(data, table, sizeof(table));
+                const uint64_t v = UINT64_C(0x123456789) << i;
+                const uint64_t sum = table[i] + v;
+                const uint64_t actual = tier1_symbol_fold_call_two(mapping, i, v);
+                uint64_t after[16];
+                memcpy(after, data, sizeof(after));
+                table[i] = sum;
+                tier1_emit_test_expect(test, actual == sum + table[i + 8] && memcmp(after, table, sizeof(table)) == 0, "the repeated indexed accesses load, store and return what C does");
+            }
+        }
+        if (mapping != MAP_FAILED)
+        {
+            munmap(mapping, bytes);
+        }
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->scratch, 0);
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_symbol_fold_tests(Tier1EmitTest* test)
 {
     for (uint32_t variant = 0; variant < 4; variant += 1)
@@ -397,4 +530,5 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         arena_pop_to(&test->input, 0);
     }
     tier1_symbol_fold_straight(test);
+    tier1_symbol_fold_repeated_tests(test);
 }

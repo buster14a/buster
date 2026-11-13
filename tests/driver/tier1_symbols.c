@@ -10,7 +10,8 @@
 // the unit doesn't define, nor a thread-local.
 
 // Each width's fixtures, by name and type, and the constant its comparisons take: one that needs the width's immediate
-// (an imm8 for a byte, an imm16 for a word, an imm32 for a doubleword and a quadword).
+// (an imm8 for a byte, an imm16 for a word, an imm32 for a doubleword and a quadword). Each width also compares with -7,
+// which a sign-extended imm8 holds at every width (#2600).
 #define BUSTER_SYMBOLS_WIDTHS(X) \
     X(u8, unsigned char, 0xc8) \
     X(i8, signed char, -3) \
@@ -91,6 +92,10 @@ extern _Thread_local long symbols_oracle_tls;
     __attribute__((noinline)) int symbols_less_##name(type x) \
     { \
         return symbols_record.name < x; \
+    } \
+    __attribute__((noinline)) int symbols_small_##name(void) \
+    { \
+        return symbols_g_##name == (type)-7; \
     }
 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_DEFINE)
 #undef BUSTER_SYMBOLS_DEFINE
@@ -125,6 +130,55 @@ __attribute__((noinline)) long symbols_table_sum(long i)
 {
     symbols_table[7] = symbols_table[0] + symbols_table[6];
     return symbols_table[i & 7] + symbols_table[3];
+}
+
+// Three indexed accesses of one table in one block: one lea of its address and one extension of the index (#2601),
+// which the lowering makes for each access.
+__attribute__((noinline)) long symbols_indexed(int i, long x)
+{
+    symbols_table[i & 3] += x;
+    return symbols_table[i & 3] + symbols_table[(i & 3) + 4];
+}
+
+// sqlite3LogEstAdd's shape (SQLite's autoindex5.test, #2601): a block adds `a` to an element its index `a - b` reads,
+// and the lowering extends `a` to int for each use. Those two extensions to I32 keep `a` differently above its 32 bits
+// (the addition's zero-extended, the index's sign-extended), so they must not share a register; the table's indexed
+// accesses keep its address in a register, one lea that both blocks share (#2574's hoist) or one in each.
+__attribute__((noinline)) short symbols_log_add(short a, short b)
+{
+    static const unsigned char x[] = { 10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2 };
+    short result = a;
+    if (a >= b)
+    {
+        if (a > b + 49)
+        {
+            result = a;
+        }
+        else if (a > b + 31)
+        {
+            result = a + 1;
+        }
+        else
+        {
+            result = a + x[a - b];
+        }
+    }
+    else
+    {
+        if (b > a + 49)
+        {
+            result = b;
+        }
+        else if (b > a + 31)
+        {
+            result = b + 1;
+        }
+        else
+        {
+            result = b + x[b - a];
+        }
+    }
+    return result;
 }
 
 // An address of the symbol plus an offset: one lea from rip.
@@ -219,7 +273,8 @@ struct SymbolsRecord
     void symbols_store_##name(long value); \
     int symbols_equal_##name(void); \
     long symbols_branch_##name(long x); \
-    int symbols_less_##name(type x);
+    int symbols_less_##name(type x); \
+    int symbols_small_##name(void);
 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_DECLARE)
 #undef BUSTER_SYMBOLS_DECLARE
 #define BUSTER_SYMBOLS_DECLARE_OPERATION(name, operator) \
@@ -236,6 +291,8 @@ extern volatile long symbols_taken;
 double symbols_float(double x);
 void symbols_float_store(double x);
 long symbols_table_sum(long i);
+long symbols_indexed(int i, long x);
+short symbols_log_add(short a, short b);
 long* symbols_address(void);
 void symbols_atomic(long value);
 long symbols_loop(long n);
@@ -268,6 +325,44 @@ long symbols_external = 40;
 struct SymbolsRecord symbols_external_record = { .i32 = 9, .u8 = 0xc8 };
 _Thread_local long symbols_oracle_tls = 6;
 
+// Clang's symbols_log_add, the one the subject's must match for every pair of operands.
+static short symbols_log_add_reference(short a, short b)
+{
+    static const unsigned char x[] = { 10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2 };
+    short result = a;
+    if (a >= b)
+    {
+        if (a > b + 49)
+        {
+            result = a;
+        }
+        else if (a > b + 31)
+        {
+            result = a + 1;
+        }
+        else
+        {
+            result = a + x[a - b];
+        }
+    }
+    else
+    {
+        if (b > a + 49)
+        {
+            result = b;
+        }
+        else if (b > a + 31)
+        {
+            result = b + 1;
+        }
+        else
+        {
+            result = b + x[b - a];
+        }
+    }
+    return result;
+}
+
 // Each width's sample values: the constant and its neighbors, the extremes and a few others, as the width keeps them.
 static const long symbols_samples[] = { 0, 1, -1, 2, -3, 127, 128, -128, -129, 255, 256, 999, -1000, -1001, 0x1234, 0x7fff, 0x8000, 0xffff, 0x89abcdef, 0x7edcba98, -0x12345678, -100000, 0x7fffffff, -0x7fffffffl - 1, 0x123456789abcdefl };
 
@@ -299,6 +394,10 @@ int main(void)
             symbols_record.name = stored; \
             valid = symbols_equal_##name() == (stored == (type)(constant)) && valid; \
             valid = symbols_less_##name((type)(constant)) == (stored < (type)(constant)) && symbols_less_##name(member) == (stored < member) && valid; \
+            valid = symbols_small_##name() == (stored == (type)-7) && valid; \
+            symbols_g_##name = (type)-7; \
+            valid = symbols_small_##name() == 1 && valid; \
+            symbols_g_##name = stored; \
         } while (0);
         BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_CHECK)
 #undef BUSTER_SYMBOLS_CHECK
@@ -319,6 +418,8 @@ int main(void)
         const long seven = symbols_table[0] + symbols_table[6];
         valid = symbols_table_sum((long)s) == (((long)s & 7) == 7 ? seven : symbols_table[s & 7]) + symbols_table[3] && symbols_table[7] == seven && valid;
         valid = symbols_address() == &symbols_table[5] && valid;
+        const long element = symbols_table[s & 3] + value;
+        valid = symbols_indexed((int)s, value) == element + symbols_table[(s & 3) + 4] && symbols_table[s & 3] == element && valid;
         symbols_atomic(value ^ 0x55);
         valid = symbols_g_i64 == (value ^ 0x55) && valid;
         symbols_g_i32 = (int)value;
@@ -339,6 +440,13 @@ int main(void)
         valid = symbols_nested(value) == (value ^ 7) && symbols_outer.inner.pad == value && symbols_nested_call((int)value) == 2 * (int)value && valid;
         const long tls = symbols_local_tls + symbols_oracle_tls;
         valid = symbols_tls(value) == tls + (value == 3) && symbols_local_tls == value && symbols_oracle_tls == value + 1 && valid;
+    }
+    for (int a = -70; a <= 70; a += 1)
+    {
+        for (int b = -70; b <= 70; b += 1)
+        {
+            valid = symbols_log_add((short)a, (short)b) == symbols_log_add_reference((short)a, (short)b) && valid;
+        }
     }
     puts(valid ? "Tier 1 symbols native oracle: pass" : "Tier 1 symbols native oracle: FAIL");
     return valid ? 0 : 1;
@@ -411,9 +519,10 @@ static const char* const symbols_sequences[] = {
     "R_X86_64_GOTTPOFF\tsymbols_oracle_tls-",
 };
 
-// objdump -dr's text: every function but symbols_address, symbols_got and symbols_tls without a lea from rip, and
-// symbols_address with one; every PC32 naming a symbol the unit defines and not a thread-local; each direct function
-// with at least one PC32 on a memory operand; and the GOT's and thread-locals' sequences present.
+// objdump -dr's text: every function but symbols_address, the indexed tables', symbols_got and symbols_tls without a lea
+// from rip, and symbols_address and each indexed table's with exactly one (#2601: symbols_indexed's three accesses
+// share it), symbols_log_add with one or one in each of its two indexed blocks; every PC32 naming a symbol the unit defines and not a thread-local; each direct function with at least
+// one PC32 on a memory operand; and the GOT's and thread-locals' sequences present.
 static bool symbols_shape(const char* path)
 {
     FILE* stream = fopen(path, "r");
@@ -438,10 +547,12 @@ static bool symbols_shape(const char* path)
         {
             const bool address = strcmp(function, "symbols_address") == 0;
             const bool indirect = strcmp(function, "symbols_got") == 0 || strcmp(function, "symbols_tls") == 0;
-            const bool table = strcmp(function, "symbols_table_sum") == 0;
+            const bool table = strcmp(function, "symbols_table_sum") == 0 || strcmp(function, "symbols_indexed") == 0;
+            const bool log_add = strcmp(function, "symbols_log_add") == 0;
             const bool branch = strncmp(function, "symbols_branch_", strlen("symbols_branch_")) == 0;
-            const bool leas_valid = indirect || function_leas == (address || table ? 1u : 0u);
-            const bool references_valid = indirect || address || function_references != 0;
+            const bool leas_valid = indirect || (log_add ? function_leas == 1 || function_leas == 2 : function_leas == (address || table ? 1u : 0u));
+            // symbols_indexed and symbols_log_add reach their tables through an index alone: no rip-relative operand.
+            const bool references_valid = indirect || address || log_add || strcmp(function, "symbols_indexed") == 0 || function_references != 0;
             // A branch's comparison of its symbol's memory with the constant feeds a conditional jump: no setcc or cmov.
             const bool branch_valid = !branch || (function_jumps != 0 && function_selects == 0);
             if (!leas_valid || !references_valid || !branch_valid)
@@ -516,9 +627,9 @@ static bool symbols_shape(const char* path)
             valid = false;
         }
     }
-    // Six functions of each width, two of each operation and the ten others, each seen once.
+    // Seven functions of each width, two of each operation and the twelve others, each seen once.
 #define BUSTER_SYMBOLS_COUNT(...) +1
-    const unsigned expected = 6 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 10;
+    const unsigned expected = 7 * (0 BUSTER_SYMBOLS_WIDTHS(BUSTER_SYMBOLS_COUNT)) + 2 * (0 BUSTER_SYMBOLS_OPERATIONS(BUSTER_SYMBOLS_COUNT)) + 12;
 #undef BUSTER_SYMBOLS_COUNT
     if (functions != expected || direct_references < expected - 3)
     {
