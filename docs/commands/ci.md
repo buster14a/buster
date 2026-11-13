@@ -44,15 +44,27 @@ rule change together, after the capacity gate and the owner's decision.
     its own matrix.
   It never uses the 9700X (`hardware=skip`, reason `merge-group`), and
   SQLite's full Tcl suite stays nightly.
-- **Selector.** `changes --event merge_group --workflow
+- **Selector.** `changes --event merge_group --files LIST --workflow
   .github/workflows/9700x.yml` is its profile: `code`, `measure=all` and
-  `performance`, whatever it changes.
+  `performance`, whatever it changes. LIST is the candidate's own change,
+  `HEAD^1..HEAD`, which picks its `auxiliary` workflows.
+- **Auxiliary workflows.** The candidate calls `build.yml`, `build-pgo.yml`,
+  `selfhost.yml` and `tier1-problem.yml` (job `auxiliary-NAME`) where its
+  change touches a path in that workflow's `pull_request` list. The selector
+  reads the list from the workflow. A pull request runs them from their own
+  triggers.
+- **Invalidated candidates.** The `stale` job (`bash tools/ci/nightly.sh stale
+  DIR`, decided by `nightly stale --run RUN < CANDIDATES`) cancels unfinished
+  candidate runs whose branch GitHub deleted or moved and whose commit isn't on
+  main. It never gates, and a failed read cancels nothing.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
   - every shard 1..N of every row and sanitizer;
   - the vector verdict;
   - each fuzz campaign;
+  - every job of each auxiliary workflow the selector named
+    (`--auxiliary "$AUXILIARY"`), and none of the others;
 
   all completed and successful. `qualification.c` reads the step's outcome
   (`COVERAGE_RESULT`); no other event runs the step.
@@ -61,10 +73,14 @@ rule change together, after the capacity gate and the owner's decision.
   listing and harvest accept the candidate's runs of the same commit. Once
   one is credited, the report lists the states without a passing candidate run
   as coverage gaps.
+- **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
+  passed but invalidated, failed, cancelled), with their runner-minutes and
+  the merged ones' wall time (`timings --queue`).
 - **Policy pins.** `changes --self-test` pins the trigger, the concurrency
-  group, the selector's routing and the aggregate's coverage step, with
-  mutants: a path filter, another branch or type, a shared slot, a skipped
-  selector or coverage step.
+  group, the selector's routing, the auxiliary calls and the aggregate's
+  coverage step. Its mutants include a path filter, another branch or type, a
+  shared slot, a skipped selector or coverage step, an auxiliary workflow never
+  called or not awaited, and its list unchecked.
 
 [The merge queue](../ci.md#the-merge-queue) has the details and what is still
 to come.

@@ -6,6 +6,7 @@
 #
 #   nightly.sh evidence DIRECTORY     9700x.yml's evidence job: reuse and hardware admission, to GITHUB_OUTPUT
 #   nightly.sh coverage DIRECTORY     9700x.yml's aggregate, for a merge-queue candidate: its full coverage, job by job
+#   nightly.sh stale DIRECTORY        9700x.yml's stale job, for a merge-queue candidate: cancel invalidated candidates' runs
 #   nightly.sh record DIRECTORY       9700x.yml's record job: DIRECTORY/record.tsv and the outcome
 #   nightly.sh coordinate DIRECTORY --phase prepare|window --mode run|dry-run
 #                                     nightly-backfill.yml: harvest, plan and dispatch; DIRECTORY/ledger.tsv and report.md
@@ -17,8 +18,8 @@ set -euo pipefail
 shopt -s inherit_errexit
 repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 [[ "$repository" == buster14a/buster ]]
-command=${1:?usage: nightly.sh evidence|coverage|record|coordinate DIRECTORY [OPTIONS]}
-work=${2:?usage: nightly.sh evidence|coverage|record|coordinate DIRECTORY [OPTIONS]}
+command=${1:?usage: nightly.sh evidence|coverage|stale|record|coordinate DIRECTORY [OPTIONS]}
+work=${2:?usage: nightly.sh evidence|coverage|stale|record|coordinate DIRECTORY [OPTIONS]}
 shift 2
 mkdir -p "$work"
 gh=${NIGHTLY_GH:-gh}
@@ -246,7 +247,7 @@ coverage()
     local run=${GITHUB_RUN_ID:?} tries=${NIGHTLY_COVERAGE_TRIES:-3} try verdict=1
     for (( try = 1; try <= tries; try += 1 )); do
         : > "$work/coverage.tsv"
-        if fetch_jobs "$run" > "$work/coverage-facts.tsv" && "$tool" coverage --run "$run" < "$work/coverage-facts.tsv" > "$work/coverage.tsv"; then
+        if fetch_jobs "$run" > "$work/coverage-facts.tsv" && "$tool" coverage --run "$run" --auxiliary "${AUXILIARY:-}" < "$work/coverage-facts.tsv" > "$work/coverage.tsv"; then
             verdict=0
             break
         fi
@@ -261,9 +262,71 @@ coverage()
     } | summary
     cat "$work/coverage.tsv"
     if [ "$verdict" -ne 0 ]; then
-        printf '::error title=Merge-queue coverage::the candidate'"'"'s hosted rows, vector verdict or fuzz campaigns are incomplete (above)\n'
+        printf '::error title=Merge-queue coverage::the candidate'"'"'s hosted rows, vector verdict, fuzz campaigns or auxiliary workflows are incomplete (above)\n'
     fi
     return "$verdict"
+}
+
+# --- 9700x.yml's stale job: invalidated merge-queue candidates (#1430) ---
+
+# GitHub never cancels a candidate's run: when it drops a candidate or rebuilds it, it deletes the candidate's branch or
+# points it at the rebuild. Each candidate, as it starts, lists the workflow's unfinished merge-queue runs and, for each
+# other one, whether its branch still names its commit and, if not, whether that commit is on main; nightly.c's `stale`
+# decides and this cancels what it names. A failed read is an unknown fact, which cancels nothing.
+stale()
+{
+    local own=${GITHUB_RUN_ID:?} status listing run branch sha present merged answer verdict why cancelled=0 failed=0
+    : > "$work/stale-runs.tsv"
+    for status in queued in_progress waiting pending requested; do
+        listing=$(api "repos/$repository/actions/workflows/9700x.yml/runs?event=merge_group&status=$status&per_page=100")
+        jq -r '.workflow_runs[]? | [.id, (.head_branch // "-"), .head_sha] | @tsv' <<< "${listing:-"{}"}" >> "$work/stale-runs.tsv"
+    done
+    sort -u "$work/stale-runs.tsv" | while IFS=$'\t' read -r run branch sha; do
+        present=unknown
+        merged=unknown
+        if [ "$run" != "$own" ] && [[ "$branch" =~ ^gh-readonly-queue/main/pr-[0-9]+-[0-9a-f]{40}$ ]] && sha "$sha"; then
+            if answer=$("$gh" api "repos/$repository/git/ref/heads/$branch" --jq .object.sha 2> "$work/stale-error"); then
+                present=moved
+                if [ "$answer" = "$sha" ]; then
+                    present=present
+                elif ! sha "$answer"; then
+                    present=unknown
+                fi
+            elif grep -q 'HTTP 404' "$work/stale-error"; then
+                present=gone
+            fi
+            if [ "$present" = gone ] || [ "$present" = moved ]; then
+                case "$(api "repos/$repository/compare/$sha...main" --jq .status)" in
+                    identical | ahead) merged=merged ;;
+                    behind | diverged) merged=unmerged ;;
+                esac
+            fi
+        fi
+        printf 'candidate\t%s\t%s\t%s\n' "$run" "$present" "$merged"
+    done > "$work/stale-facts.tsv"
+    "$tool" stale --run "$own" < "$work/stale-facts.tsv" > "$work/stale.tsv"
+    while IFS=$'\t' read -r verdict run why; do
+        if [ "$verdict" = cancel ]; then
+            if "$gh" api -X POST "repos/$repository/actions/runs/$run/cancel" > /dev/null; then
+                cancelled=$((cancelled + 1))
+                printf 'cancelled\t%s\n' "$run" >> "$work/stale.log"
+            else
+                failed=$((failed + 1))
+                printf 'not cancelled\t%s\n' "$run" >> "$work/stale.log"
+            fi
+        else
+            printf 'kept\t%s\t%s\n' "$run" "$why" >> "$work/stale.log"
+        fi
+    done < "$work/stale.tsv"
+    touch "$work/stale.log"
+    {
+        printf '### Invalidated merge-queue candidates\n\n```text\n'
+        cat "$work/stale.log"
+        printf '```\n'
+    } | summary
+    cat "$work/stale.log"
+    printf 'Cancelled %s invalidated candidate runs; %s cancels failed\n' "$cancelled" "$failed"
+    [ "$failed" -eq 0 ]
 }
 
 # --- 9700x.yml's record job ---
@@ -787,6 +850,7 @@ coordinate()
 case "$command" in
     evidence) evidence ;;
     coverage) coverage ;;
+    stale) stale ;;
     record) record ;;
     coordinate) coordinate "$@" ;;
     *) printf 'nightly.sh: unknown command %s\n' "$command" >&2; exit 2 ;;

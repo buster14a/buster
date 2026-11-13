@@ -62,6 +62,27 @@ JSON
     *jobs/61/logs)
         printf '\xef\xbb\xbf%s\n' "2026-11-04T09:00:20.0000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'"
         printf '%s\n' '2026-11-04T09:00:21.0000000Z buster-9700x: this job has the machine' ;;
+    # The merge queue: a merged candidate (7), one that passed but was invalidated (8), a failure (9), a cancelled one
+    # (10) and one whose fate can't be read (12); another event's run (13) and one without its times (14) are left out.
+    *workflows/9700x.yml/runs\?event=merge_group\&status=completed\&per_page=100)
+        printf '%s\n' '{"workflow_runs":[{"id":7,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000007","created_at":"2026-11-13T09:00:00Z","run_started_at":"2026-11-13T09:00:10Z","updated_at":"2026-11-13T09:37:26Z"},{"id":8,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000008","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:30:00Z"},{"id":9,"event":"merge_group","status":"completed","conclusion":"failure","head_sha":"0000000000000000000000000000000000000009","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:04:00Z"},{"id":10,"event":"merge_group","status":"completed","conclusion":"cancelled","head_sha":"0000000000000000000000000000000000000010","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":12,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000012","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":13,"event":"push","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000013","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":14,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000014","created_at":null,"updated_at":"2026-11-13T09:10:00Z"}]}' ;;
+    *compare/0000000000000000000000000000000000000007...main) echo ahead ;;
+    *compare/0000000000000000000000000000000000000008...main) echo diverged ;;
+    *compare/0000000000000000000000000000000000000009...main) echo behind ;;
+    *compare/0000000000000000000000000000000000000010...main) echo diverged ;;
+    *compare/0000000000000000000000000000000000000012...main)
+        printf '{"message":"Server Error","status":"502"}\n'
+        exit 1 ;;
+    *runs/7/jobs\?per_page=100\&filter=latest)
+        [[ "$2" == --paginate ]]
+        printf '%s\n' '{"jobs":[{"id":71,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:30:20Z"},{"id":72,"started_at":"2026-11-13T09:01:00Z","completed_at":"2026-11-13T09:01:00Z"}]}' \
+            '{"jobs":[{"id":73,"started_at":"2026-11-13T09:05:00Z","completed_at":"2026-11-13T09:15:00Z"},{"id":74,"started_at":null,"completed_at":"2026-11-13T09:15:00Z"}]}' ;;
+    *runs/8/jobs\?per_page=100\&filter=latest)
+        printf '%s\n' '{"jobs":[{"id":81,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:20:20Z"}]}' ;;
+    *runs/9/jobs\?per_page=100\&filter=latest)
+        printf '%s\n' '{"jobs":[{"id":91,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:00:50Z"}]}' ;;
+    *runs/10/jobs\?per_page=100\&filter=latest)
+        printf '%s\n' '{"jobs":[]}' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
 esac
 SH
@@ -108,6 +129,20 @@ grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work
 grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
 grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"
 grep -Fq '| PR | host-occupation | 1 | 100.0 | 100 |' "$work/report/summary.md"
+# The merge queue's candidates, each by its fate, and the time spent on those that didn't merge.
+printf '7\tmerged\t2236\t2400\n8\tpassed\t1800\t1200\n9\tfailed\t240\t30\n10\tcancelled\t600\t0\n' > "$work/expected-candidates.tsv"
+cmp "$work/expected-candidates.tsv" "$work/report/candidates.tsv" || { cat "$work/report/candidates.tsv" >&2; echo 'the candidates differ' >&2; exit 1; }
+grep -Fq '| merged | 1 | 40 |' "$work/report/summary.md"
+grep -Fq '| passed, not merged (invalidated) | 1 | 20 |' "$work/report/summary.md"
+grep -Fq '| all | 4 | 60 |' "$work/report/summary.md"
+grep -Fq "Candidates that didn't merge took 20 runner-minutes, 33.9% of the queue's" "$work/report/summary.md"
+grep -Fq 'median 37.3 min, p95 37.3 min (1 candidates)' "$work/report/summary.md"
+"$work/timings" --queue < /dev/null > "$work/empty-queue.md"
+grep -Fq 'No completed candidate runs' "$work/empty-queue.md"
+if printf '7\tmerged\t1\t1\n7\tfailed\t1\t1\n' | "$work/timings" --queue > /dev/null 2>&1; then
+    echo 'a candidate counted twice was accepted' >&2
+    exit 1
+fi
 "$work/timings" < /dev/null > "$work/empty.md"
 grep -Fq 'No eligible observations' "$work/empty.md"
 printf '%s\n' 'invalid' > "$work/invalid.tsv"
@@ -116,4 +151,4 @@ if "$work/timings" < "$work/invalid.tsv" > "$work/invalid.md" 2> /dev/null; then
     exit 1
 fi
 test ! -s "$work/invalid.md"
-printf 'timings extraction: successful, failed, missing timestamps, paginated jobs and the lock lines of job logs checked\n'
+printf 'timings extraction: successful, failed, missing timestamps, paginated jobs, the lock lines of job logs and the merge queue'"'"'s candidates checked\n'

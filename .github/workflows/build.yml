@@ -43,12 +43,15 @@ on:
       - .github/actions/hosted-tools/action.yml
       - .github/workflows/build.yml
   workflow_dispatch:
+  # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
+  # lists (9700x.yml's auxiliary-build job, which tools/ci/changes.c decides from that list; #1430).
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: buster-build-${{ github.event.pull_request.number || github.ref }}
+  group: buster-build-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

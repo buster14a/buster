@@ -3,7 +3,10 @@ name: Self-host qualification
 # The qualification runs entirely on GitHub-hosted runners, so that it never
 # takes the shared 9700X from other work. It runs when the gate, the build's
 # description or the correctness inventory changes, on the daily schedule (to catch
-# compiler drift), and on manual dispatch. It is not a required per-PR check.
+# compiler drift), and on manual dispatch. It is not a required per-PR check; a
+# merge-queue candidate whose change touches these paths calls it, and the
+# required aggregate then needs it (#1430). The daily schedule also seeds main's
+# hosted input caches through prepare-hosted-tools.yml.
 on:
   pull_request:
     paths:
@@ -43,12 +46,15 @@ on:
   schedule:
     - cron: '47 5 * * *'
   workflow_dispatch:
+  # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
+  # lists (9700x.yml's auxiliary-selfhost job, which tools/ci/changes.c decides from that list; #1430).
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: buster-selfhost-${{ github.event.pull_request.number || github.ref }}
+  group: buster-selfhost-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
