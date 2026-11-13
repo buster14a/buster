@@ -316,10 +316,10 @@ struct NodeMachine
     // columns and the history.
     uint32_t* type_complete_at;
     uint32_t type_count;
-    // Each function type's pointer type, type_pointer's (its exact twin), by type index: 0 until a call or an argument
-    // first converts a designator of the type (node_machine_function_pointer), where the type table's interning took a
-    // hash lookup each time.
-    TypeId* function_pointers;
+    // Each type's pointer type, type_pointer's (its exact twin), by type index, twice: the type unqualified, then const. 0
+    // until an array of it decays, a designator of it converts or its address is taken (node_machine_pointer), where the
+    // type table's interning took a hash lookup each time.
+    TypeId* pointers;
     // The argument memo: node_machine_argument's answers for the unit's recent argument keys, direct-mapped
     // (node_machine_argument_memo), where the rule's conversion read the type table's columns at each argument. `memo_fills`
     // counts the entries filled and `memo_rules` the arguments the rule took instead.
@@ -397,12 +397,12 @@ struct NodeMachine
     uint32_t stopped;
 };
 
-// Forgets the unit's call answers, the function types' pointers and the argument memo, as a unit starts without them:
+// Forgets the unit's call answers, the types' pointers and the argument memo, as a unit starts without them:
 // node_machine_begin, and the shadow's timing before each pass (c_check_node_census.c's node_shadow_time), so that each
 // pass pays their fills as one compile of the unit would.
 static void node_machine_forget(NodeMachine* machine)
 {
-    memset(machine->function_pointers, 0, (uint64_t)machine->type_count * sizeof(TypeId));
+    memset(machine->pointers, 0, 2 * (uint64_t)machine->type_count * sizeof(TypeId));
     memset(machine->argument_memo, 0, BUSTER_NODE_MACHINE_MEMO_ENTRIES * sizeof(NodeMachineMemo));
 }
 
@@ -438,7 +438,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     };
     machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
     machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
-    machine->function_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)machine->type_count + 64);
+    machine->pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, 2 * (uint64_t)machine->type_count + 64);
     machine->argument_memo = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineMemo, BUSTER_NODE_MACHINE_MEMO_ENTRIES);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
@@ -464,7 +464,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
                       machine->calls_at != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
-                      machine->updates != NULL && machine->function_pointers != NULL && machine->argument_memo != NULL;
+                      machine->updates != NULL && machine->pointers != NULL && machine->argument_memo != NULL;
     if (room)
     {
         node_machine_forget(machine);

@@ -605,20 +605,22 @@ static bool node_machine_plain_kind(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
 }
 
-// The pointer type of function type `function`, type_pointer's: the unit's column's (NodeMachine.function_pointers), one
-// load once the type's first designator has filled it. A type past the column, or a qualified one (which type_pointer
-// takes unqualified), asks type_pointer each time.
-static TypeId node_machine_function_pointer(NodeMachine* machine, TypeId function)
+// The pointer type to type `type`, type_pointer's: the unit's column's (NodeMachine.pointers), one load once the type's
+// first array, function or address has filled it. A type of qualifiers but none or const alone, or one past the column,
+// asks type_pointer each time.
+static TypeId node_machine_pointer(NodeMachine* machine, TypeId type)
 {
-    const uint32_t index = type_index(function);
-    const bool column = index < machine->type_count && function == (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-    TypeId pointer = column ? machine->function_pointers[index] : 0;
+    const uint32_t index = type_index(type);
+    const uint32_t qualifiers = type_qualifiers(type);
+    const bool column = index < machine->type_count && (qualifiers == 0 || qualifiers == BUSTER_TYPE_CONST);
+    const uint32_t slot = 2 * index + qualifiers;
+    TypeId pointer = column ? machine->pointers[slot] : 0;
     if (pointer == 0)
     {
-        pointer = type_pointer(machine->types, function);
+        pointer = type_pointer(machine->types, type);
         if (column)
         {
-            machine->function_pointers[index] = pointer;
+            machine->pointers[slot] = pointer;
         }
     }
     return pointer;
@@ -669,7 +671,7 @@ static inline __attribute__((always_inline)) bool node_machine_operand_value(Nod
     *conversion = (CheckConversion){ .type = type };
     if (type_kind_is_array(kind))
     {
-        const TypeId pointer = (flags & BUSTER_CHECK_REGISTER_NAME) == 0 ? type_pointer(types, type_element(types, plain)) : 0;
+        const TypeId pointer = (flags & BUSTER_CHECK_REGISTER_NAME) == 0 ? node_machine_pointer(machine, type_element(types, plain)) : 0;
         taken = pointer != 0;
         result = pointer;
         category = CHECK_RVALUE;
@@ -679,7 +681,7 @@ static inline __attribute__((always_inline)) bool node_machine_operand_value(Nod
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
-        const TypeId pointer = node_machine_function_pointer(machine, plain);
+        const TypeId pointer = node_machine_pointer(machine, plain);
         taken = pointer != 0;
         result = pointer;
         category = CHECK_RVALUE;
@@ -989,7 +991,7 @@ static bool node_machine_store_rule(NodeMachine* machine, uint32_t r, uint32_t n
                 const uint64_t source_mask = source_width == 64 ? UINT64_MAX : (UINT64_C(1) << source_width) - 1;
                 const uint64_t target_mask = target_width == 64 ? UINT64_MAX : (UINT64_C(1) << target_width) - 1;
                 uint64_t bits = source.integer & source_mask;
-                bits |= node_machine_integer_signed[source_code] && (bits >> (source_width - 1)) != 0 && target_width > source_width ? ~source_mask : 0;
+                bits |= node_machine_integer_sign(machine, source_code) && (bits >> (source_width - 1)) != 0 && target_width > source_width ? ~source_mask : 0;
                 node_machine_record_from(machine, r, source.record, target, CHECK_RVALUE, flags, CHECK_CONSTANT_INTEGER, true, bits & target_mask);
             }
             else
@@ -1025,7 +1027,7 @@ static bool node_machine_address_rule(NodeMachine* machine, uint32_t r, uint32_t
     const CheckConstantKind constant_kind = (CheckConstantKind)((standing >> 2) & 0x07u);
     uint32_t flags = machine->columns->value_flags[a];
     const TypeId pointer = (flags & (BUSTER_CHECK_VECTOR_ELEMENT | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER)) == 0 &&
-                           (category == CHECK_LVALUE || category == CHECK_FUNCTION) ? type_pointer(machine->types, machine->columns->value_types[a]) : 0;
+                           (category == CHECK_LVALUE || category == CHECK_FUNCTION) ? node_machine_pointer(machine, machine->columns->value_types[a]) : 0;
     if (pointer != 0)
     {
         // check_action_address_provenance: an automatic object's address is no constant.

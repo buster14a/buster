@@ -298,10 +298,10 @@ takes its entries.
   its rows, relative to the expression's first call.
 - **A call's per-unit answers** (`NodeMachine`, filled as T meets them and
   forgotten by `node_machine_forget`):
-  - `function_pointers`, a function type's pointer type by type index
-    (`node_machine_function_pointer`), `type_pointer` its twin: a callee's and
-    a function argument's conversion is one load once the type's first
-    designator has filled it.
+  - `pointers`, a type's pointer type by type index, unqualified and const
+    (`node_machine_pointer`), `type_pointer` its twin: a callee's and a
+    function argument's conversion, an array's decay and an address are one
+    load once the type's first has filled it.
   - `argument_memo`, 1,024 entries of 16 bytes, direct-mapped
     (`node_machine_argument_memo`): `node_machine_argument`'s answer (taken or
     refused, and the conversion) by the argument record's type, its standing

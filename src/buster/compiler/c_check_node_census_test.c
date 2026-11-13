@@ -158,11 +158,18 @@ static const char node_census_test_quiet[] =
 // under and around `&&`, `||` and `?:` too, whose labels are numbered from their subtrees' least records, a call's
 // arguments included, and whose calls' rows in the tasks' preorder. The argument memo's keys come again
 // (node_machine_argument_memo): a string and a null pointer constant for the same parameters, integer constants where a
-// value of their type filled the entry, variadic constants, and a function designator.
+// value of their type filled the entry, variadic constants, and a function designator. T's direct rules for what the
+// action typed before: integer constant folds (unary + too, comparisons and plain char constants, whose signedness the
+// -funsigned-char run turns; the census refuses constant shifts under these warnings); casts of integers and pointers to
+// void, an integer, bool and a pointer, constants among them; a static object's members and its array's subscripts,
+// constant and not; a pointer's equality with a null pointer constant; sizeof and _Alignof of a type name and an
+// expression; the comma; and stores of a null pointer constant and of a pointer to a pointer of another pointee.
 static const char node_shadow_test_text[] =
     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
     "struct __jmp_buf_tag { long b[8]; };\n"
     "int g;\n"
+    "int ga[8];\n"
+    "struct S gs;\n"
     "double gd;\n"
     "long double gl;\n"
     "int f(int);\n"
@@ -258,6 +265,31 @@ static const char node_shadow_test_text[] =
     "    x += f(a++); // machine: taken\n"
     "    y = q - r; // machine: template\n"
     "    z = z / 4; // machine: template\n"
+    "    x = -1 + 16 - ~0; // machine: taken\n"
+    "    x = 16 | 3 | +7 ^ 5 & 6; // machine: taken\n"
+    "    z = 10u / 3u % 2u + 40ul * 3ul; // machine: taken\n"
+    "    x = (5 > 3) == (2 != 2); // machine: taken\n"
+    "    x = (int)(char)200 + -(char)-56; // machine: taken\n"
+    "    y = (char)200; // machine: taken\n"
+    "    y = (long)a + (long)(unsigned char)u + (long)(_Bool)a; // machine: taken\n"
+    "    q = (int*)(void*)q; // machine: taken\n"
+    "    q = (int*)0; // machine: taken\n"
+    "    y = (long)(char*)ga; // machine: taken\n"
+    "    (void)g; // machine: taken\n"
+    "    (void)q; // machine: taken\n"
+    "    x = (int)gs.m + gs.a[1] + ga[a] + ga[3]; // machine: taken\n"
+    "    q = &gs.a[2]; // machine: taken\n"
+    "    q = ga + 2; // machine: taken\n"
+    "    x = q == 0; // machine: taken\n"
+    "    x = 0 != p; // machine: taken\n"
+    "    if (r == 0) // machine: taken\n"
+    "        x = 3; // machine: taken\n"
+    "    y = sizeof(struct S) + sizeof(int) + _Alignof(double) + sizeof g + sizeof ga; // machine: taken\n"
+    "    x = (f(a), b); // machine: taken\n"
+    "    y = (f(a), q[0]); // machine: taken\n"
+    "    r = q; // machine: taken\n"
+    "    w(0, q); // machine: taken\n"
+    "    p->cb = 0; // machine: taken\n"
     "    return y + x + (long)z; // machine: taken\n"
     "}\n";
 
@@ -430,6 +462,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-shadow: the machine takes its codes with the pipeline's values and entries, T's rows the action's, and refuses the rest by reason");
     check_test_expect(test, ready && node_shadow_test_fixture(directory, true, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow --scalar: T by the action alone gives the pipeline's values and entries");
+    // Plain char unsigned: T's rules convert a char constant by the unit's signedness, not the bake's.
+    char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+                      "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
     uint32_t unclassified = 0;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
