@@ -180,9 +180,6 @@ struct CheckUnitsRun
     uint32_t started;
 };
 
-// Whether a unit of `lane`'s run is still to be taken, which a lane that finishes its unit takes next, likely this one,
-// pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in whole huge pages
-// where none was left to take.
 static CheckAttested* check_attested_lane_open(uint8_t mode);
 static void check_attested_lane_close(CheckAttested* attested);
 static void check_attested_begin(CheckAttested* attested, bool again);
@@ -199,6 +196,9 @@ static CheckAttested* check_units_attested(const CheckUnitsLane* lane)
     return lane->attested;
 }
 
+// Whether a unit of `lane`'s run is still to be taken, which a lane that finishes its unit takes next, likely this one,
+// pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in whole huge pages
+// where none was left to take.
 static bool check_units_unit_left(const CheckUnitsLane* lane)
 {
     return lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
@@ -2234,6 +2234,33 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     check_units_memory_give(lane);
 }
 
+// The lane's functions for its unit (`errors` its stream): on the board, the unit's functions as parts that the lanes
+// without units may take (#777), and lane 0's writer's `columns`, which stay the lane's from one unit to the next, as its
+// three arenas do (check_program_lanes_settle, #442).
+static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane* lane, FILE* errors, Arena columns)
+{
+    const CheckDriverCommand* command = run->command;
+    lane->functions = (CheckProgramLanes){
+        .lanes = run->board != NULL ? run->board->lanes : 1,
+        .board = run->board,
+        .board_lane = (uint32_t)(lane - run->lanes),
+        .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
+        .tier1 = command->tier1,
+        .tier1_strict = command->tier1_strict,
+        .tier1_no_rematerialize = command->tier1_no_rematerialize,
+        .tier1_gvn = command->tier1_gvn,
+        .tier1_no_lifetimes = command->tier1_no_lifetimes,
+        .tier1_no_inline = command->tier1_no_inline,
+        .tier0_no_inline = command->tier0_no_inline,
+        .tier1_schedule = command->tier1_schedule,
+        .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+        .helper_reporting = command->helper_report != NULL,
+        .units_lane = lane,
+        .helper_forms = command->helper_forms,
+    };
+    lane->functions.arenas[0].scratch = columns;
+}
+
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
 // functions on the lane alone, its diagnostics into its own stream, and with a link to make, its link kept. The arenas
 // it reserves start with BUSTER_CHECK_UNITS_SMALL_BYTES of base pages unless its source is large. The lane's three
@@ -2264,28 +2291,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         options.diagnostics = errors;
         options.preprocessed = unit->preprocessed;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
-        // On the board, the unit's functions as parts that the lanes without units may take (#777). Lane 0's writer's
-        // columns stay the lane's from one unit to the next, as its three arenas do (check_program_lanes_settle, #442).
-        const Arena columns = lane->functions.arenas[0].scratch;
-        lane->functions = (CheckProgramLanes){
-            .lanes = run->board != NULL ? run->board->lanes : 1,
-            .board = run->board,
-            .board_lane = (uint32_t)(lane - run->lanes),
-            .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
-            .tier1 = command->tier1,
-            .tier1_strict = command->tier1_strict,
-            .tier1_no_rematerialize = command->tier1_no_rematerialize,
-            .tier1_gvn = command->tier1_gvn,
-            .tier1_no_lifetimes = command->tier1_no_lifetimes,
-            .tier1_no_inline = command->tier1_no_inline,
-            .tier0_no_inline = command->tier0_no_inline,
-            .tier1_schedule = command->tier1_schedule,
-            .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
-            .helper_reporting = command->helper_report != NULL,
-            .units_lane = lane,
-            .helper_forms = command->helper_forms,
-        };
-        lane->functions.arenas[0].scratch = columns;
+        check_units_lane_functions(run, lane, errors, lane->functions.arenas[0].scratch);
         lane->memory = run->memory;
         lane->run = run;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
@@ -2318,26 +2324,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
                 arena_pop_to(&lane->scratch, 0);
                 arena_pop_to(&lane->arena, 0);
                 arena_pop_to(&lane->functions.arenas[0].scratch, 0);
-                const Arena kept_columns = lane->functions.arenas[0].scratch;
-                lane->functions = (CheckProgramLanes){
-                    .lanes = run->board != NULL ? run->board->lanes : 1,
-                    .board = run->board,
-                    .board_lane = (uint32_t)(lane - run->lanes),
-                    .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
-                    .tier1 = command->tier1,
-                    .tier1_strict = command->tier1_strict,
-                    .tier1_no_rematerialize = command->tier1_no_rematerialize,
-                    .tier1_gvn = command->tier1_gvn,
-                    .tier1_no_lifetimes = command->tier1_no_lifetimes,
-                    .tier1_no_inline = command->tier1_no_inline,
-                    .tier0_no_inline = command->tier0_no_inline,
-                    .tier1_schedule = command->tier1_schedule,
-                    .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
-                    .helper_reporting = command->helper_report != NULL,
-                    .units_lane = lane,
-                    .helper_forms = command->helper_forms,
-                };
-                lane->functions.arenas[0].scratch = kept_columns;
+                check_units_lane_functions(run, lane, errors, lane->functions.arenas[0].scratch);
                 unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
                 unit->fatal = false;
                 memset(ticks, 0, sizeof(ticks));
