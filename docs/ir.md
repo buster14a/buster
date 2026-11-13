@@ -1043,7 +1043,16 @@ against main's:
 A symbol taken once in a loop, hoisted out of it, also cost Lua 22 M in
 `match`, `classend` and `luaV_finishset`. The last rule gains
 `jsonTranslateBlobToText` (−0.89 M) and loses `sqlite3GetToken` (+0.64 M) for
-two more passes over the takes, and isn't taken. What the hoist still costs is the allocator's: a definition before a
+two more passes over the takes, and isn't taken.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/201fb8b8aae14d797d47f7a3ace0aa754f992a91/docs/measurements/tier1-hoist-places-2593-2026-11-13),
+#2574's method), Lua's time doesn't move (0.9996, 95% interval 0.9966 to
+1.0026 over six link orders), and speedtest1's user cycles fall 0.66% over
+six layouts (0.9934, 0.9863 to 1.0006) with 0.27% fewer instructions at
+every one. The placement costs `sqlite3.c`'s `--tier1 -c` 0.14% more
+instructions, in the same time and cycles: by callgrind on a baseline build,
+7.6 M of 15,078 M, of which the dominators' analysis is 4.0 M and the CFG's
+construction and the walks 2.9 M. What the hoist still costs is the allocator's: a definition before a
 loop that reads it on few iterations takes a callee-saved register over the
 loop, or adds to its pressure (`sqlite3_str_vappendf`, 1.07 M more than
 without the hoist; `hexFunc`, `sqlite3FindFunction`). `test-ir-lowering`
