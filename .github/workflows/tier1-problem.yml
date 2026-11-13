@@ -23,12 +23,15 @@ on:
       - 'tests/tier1-problem/**'
       - '.github/workflows/tier1-problem.yml'
   workflow_dispatch:
+  # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
+  # lists (9700x.yml's auxiliary-tier1-problem job, which tools/ci/changes.c decides from that list; #1430).
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: tier1-problem-${{ github.event.pull_request.number || github.ref }}
+  group: tier1-problem-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -37,9 +40,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
-      # On a pull request, the first failing architecture cancels the other; pushes to main and dispatched runs
-      # report both.
-      fail-fast: ${{ github.event_name == 'pull_request' }}
+      # On a pull request or a merge-queue candidate, the first failing architecture cancels the other; pushes to main
+      # and dispatched runs report both.
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
         arch: [x86-64, native]
     steps:

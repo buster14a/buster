@@ -118,7 +118,18 @@ case "$method $endpoint" in
         fi
         printf '{}\n'; exit 0 ;;
     "POST repos/buster14a/buster/actions/runs/"*/cancel)
+        # $FIXTURES/uncancellable-RUN: GitHub refuses that run's cancel.
+        run=${endpoint#repos/buster14a/buster/actions/runs/}
+        if [ -f "$FIXTURES/uncancellable-${run%%/*}" ]; then
+            printf '{"message":"Cannot cancel a workflow run that is completed.","status":"409"}\n'
+            printf 'gh: Cannot cancel a workflow run that is completed. (HTTP 409)\n' >&2
+            exit 1
+        fi
         printf '{}\n'; exit 0 ;;
+    "GET repos/buster14a/buster/git/ref/heads/gh-readonly-queue/main/"*)
+        fixture="$FIXTURES/queue-ref-${endpoint##*/}.json" ;;
+    "GET repos/buster14a/buster/compare/"*)
+        sha=${endpoint#repos/buster14a/buster/compare/}; fixture="$FIXTURES/compare-${sha%%...*}.json" ;;
     *)
         printf 'fake gh: unexpected %s %s\n' "$method" "$endpoint" >&2; exit 1 ;;
 esac
@@ -395,6 +406,11 @@ full_jobs()
         fi
     done
     printf '{"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"skipped"},'
+    # The auxiliary workflows: selfhost.yml called (its jobs, a nested call's included), the others skipped.
+    printf '{"name":"Auxiliary (build.yml)","status":"completed","conclusion":"skipped"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host harness regression tests","status":"completed","conclusion":"success"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / prepare-hosted-tools / Prepare verified hosted release inputs","status":"completed","conclusion":"success"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = selfhost-failed ] && echo failure || echo success )"
     printf '{"name":"Build and execute on Ryzen 7 9700X","status":"in_progress","conclusion":null}]}\n'
 }
 coverage_case()
@@ -403,23 +419,34 @@ coverage_case()
     : > "$fixtures/calls.log"
     : > "$GITHUB_STEP_SUMMARY"
     rm -f "$fixtures"/count-*
-    GITHUB_RUN_ID=$run NIGHTLY_SLEEP=0 NIGHTLY_COVERAGE_TRIES=2 bash tools/ci/nightly.sh coverage "$work/coverage-$run" > "$work/coverage.log" 2>&1 || status=$?
+    AUXILIARY=${3-,selfhost,} GITHUB_RUN_ID=$run NIGHTLY_SLEEP=0 NIGHTLY_COVERAGE_TRIES=2 bash tools/ci/nightly.sh coverage "$work/coverage-$run" > "$work/coverage.log" 2>&1 || status=$?
     [ "$status" -eq "$expected" ] || { cat "$work/coverage.log" >&2; fail "coverage of run $run: expected $expected, got $status"; }
 }
 full_jobs > "$fixtures/jobs-9100.json"
 coverage_case 9100 0
 expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s coverage is complete'
 expect_line "$work/coverage.log" $'row\tnative memory\tok\t5' 'each row by its own shard count'
+expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t3' 'a called auxiliary workflow, every job of it'
+expect_line "$work/coverage.log" $'auxiliary\tbuild\tnot called\tok\t0' 'and one not called, which ran nothing'
 expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
 test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
 # Each way a candidate's coverage falls short fails it, after asking again.
-for odd in 'x86-64 address 3:missing' 'native memory 5:missing' 'x86-64 thread 2:cancelled' 'native none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:'; do
+for odd in 'x86-64 address 3:missing' 'native memory 5:missing' 'x86-64 thread 2:cancelled' 'native none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
     full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
     coverage_case 9101 1
     expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
     expect_match "$work/coverage.log" '::error title=Merge-queue coverage' 'and says so'
     test "$(grep -c 'actions/runs/9101/jobs' "$fixtures/calls.log")" -eq 2 || fail 'an incomplete set is asked for again'
 done
+# The selector's auxiliary list against the jobs: one it names that ran nothing, one that ran though it doesn't name it,
+# and no list at all (the selector didn't run).
+full_jobs > "$fixtures/jobs-9101.json"
+coverage_case 9101 1 ,build,selfhost,
+expect_line "$work/coverage.log" $'auxiliary\tbuild\tcalled\tmissing\t0' 'a called auxiliary workflow that ran nothing'
+coverage_case 9101 1 ,
+expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although it doesn\'t apply\t3' 'an auxiliary workflow the selector did not name'
+coverage_case 9101 1 ''
+expect_line "$work/coverage.log" $'auxiliary\t\tnot the selector\'s list' 'no selector list'
 # A shard beyond the row's count, or a row whose shards disagree.
 full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
 coverage_case 9101 1
@@ -429,6 +456,59 @@ full_jobs > "$fixtures/jobs-9102.json"
 touch "$fixtures/jobs-9102.json.1.fail"
 coverage_case 9102 0
 test "$(grep -c 'actions/runs/9102/jobs' "$fixtures/calls.log")" -eq 2 || fail 'a failed read is asked for again'
+
+# --- The stale job: invalidated merge-queue candidates' runs (#1430) ---
+
+# Unfinished candidates' runs, each listed for every status the job asks about (the fake answers each alike): this run;
+# one still queued; one dropped; one merged; one rebuilt on the same base (its branch moved); one whose branch read
+# fails; one on a branch that isn't a candidate's; and one dropped whose cancel GitHub refuses.
+queue_base=$(printf '%040d' 7)
+queue_branch() { printf 'gh-readonly-queue/main/pr-%s-%s' "$1" "$queue_base"; }
+queue_sha() { printf '%039d%s' 0 "$1"; }
+{
+    printf '{"workflow_runs":['
+    printf '{"id":9200,"head_branch":"%s","head_sha":"%s"},' "$(queue_branch 1)" "$(queue_sha 1)"
+    printf '{"id":9201,"head_branch":"%s","head_sha":"%s"},' "$(queue_branch 2)" "$(queue_sha 2)"
+    printf '{"id":9202,"head_branch":"%s","head_sha":"%s"},' "$(queue_branch 3)" "$(queue_sha 3)"
+    printf '{"id":9203,"head_branch":"%s","head_sha":"%s"},' "$(queue_branch 4)" "$(queue_sha 4)"
+    printf '{"id":9204,"head_branch":"%s","head_sha":"%s"},' "$(queue_branch 5)" "$(queue_sha 5)"
+    printf '{"id":9205,"head_branch":"%s","head_sha":"%s"},' "$(queue_branch 6)" "$(queue_sha 6)"
+    printf '{"id":9206,"head_branch":"main","head_sha":"%s"},' "$(queue_sha 7)"
+    printf '{"id":9207,"head_branch":"%s","head_sha":"%s"}' "$(queue_branch 8)" "$(queue_sha 8)"
+    printf ']}\n'
+} > "$fixtures/runs-merge_group.json"
+printf '{"object":{"sha":"%s"}}\n' "$(queue_sha 1)" > "$fixtures/queue-ref-pr-1-$queue_base.json"
+printf '{"object":{"sha":"%s"}}\n' "$(queue_sha 2)" > "$fixtures/queue-ref-pr-2-$queue_base.json"
+printf '{"object":{"sha":"%s"}}\n' "$(queue_sha 9)" > "$fixtures/queue-ref-pr-5-$queue_base.json"
+printf '{"object":{"sha":"%s"}}\n' "$(queue_sha 6)" > "$fixtures/queue-ref-pr-6-$queue_base.json"
+touch "$fixtures/queue-ref-pr-6-$queue_base.json.1.fail"
+printf '{"status":"behind"}\n' > "$fixtures/compare-$(queue_sha 3).json"
+printf '{"status":"ahead"}\n' > "$fixtures/compare-$(queue_sha 4).json"
+printf '{"status":"diverged"}\n' > "$fixtures/compare-$(queue_sha 5).json"
+printf '{"status":"behind"}\n' > "$fixtures/compare-$(queue_sha 8).json"
+touch "$fixtures/uncancellable-9207"
+: > "$fixtures/calls.log"
+: > "$GITHUB_STEP_SUMMARY"
+rm -f "$fixtures"/count-*
+status=0
+GITHUB_RUN_ID=9200 bash tools/ci/nightly.sh stale "$work/stale" > "$work/stale.out" 2>&1 || status=$?
+[ "$status" -eq 1 ] || { cat "$work/stale.out" >&2; fail "a refused cancel fails the stale job (status $status)"; }
+expect_line "$fixtures/calls.log" 'api -X POST repos/buster14a/buster/actions/runs/9202/cancel' 'a dropped candidate'"'"'s run is cancelled'
+expect_line "$fixtures/calls.log" 'api -X POST repos/buster14a/buster/actions/runs/9204/cancel' 'a candidate rebuilt on the same base: its old run is cancelled'
+test "$(grep -c '/cancel$' "$fixtures/calls.log")" -eq 3 || { cat "$fixtures/calls.log" >&2; fail 'only the invalidated candidates are cancelled'; }
+expect_line "$work/stale.out" $'kept\t9200\tthis run' 'this run is kept'
+expect_line "$work/stale.out" $'kept\t9201\tits candidate is queued' 'a queued candidate is kept'
+expect_line "$work/stale.out" $'kept\t9203\tit merged' 'a merged candidate is kept'
+expect_line "$work/stale.out" $'kept\t9205\tits branch is unknown' 'a failed branch read cancels nothing'
+expect_line "$work/stale.out" $'kept\t9206\tits branch is unknown' 'a run on another branch is kept'
+expect_line "$work/stale.out" $'not cancelled\t9207' 'a refused cancel is reported'
+expect_match "$GITHUB_STEP_SUMMARY" 'Invalidated merge-queue candidates' 'the summary lists them'
+test "$(grep -c 'git/ref/heads/gh-readonly-queue' "$fixtures/calls.log")" -eq 6 || fail 'each candidate'"'"'s branch is read once'
+# Without the refused one, the job passes.
+rm -f "$fixtures/uncancellable-9207" "$fixtures"/count-*
+GITHUB_RUN_ID=9200 bash tools/ci/nightly.sh stale "$work/stale-2" > "$work/stale.out" 2>&1 || { cat "$work/stale.out" >&2; fail 'the stale job passes once every cancel does'; }
+expect_match "$work/stale.out" 'Cancelled 3 invalidated candidate runs; 0 cancels failed' 'and counts them'
+rm -f "$fixtures/runs-merge_group.json"
 
 # --- The 9700X job's window step, as the workflow has it, with a stand-in clock ---
 
@@ -1118,4 +1198,4 @@ expect_match "$work/worker-late/ledger.tsv" "^run.*$epoch.*targeted.deferred" 's
 GITHUB_RUN_ID=9800 NIGHTLY_NOW=$(madrid '2026-11-04 07:36') NIGHTLY_PENDING=$none_pending run_coordinator "$work/worker-cutoff" window run
 expect_no_match "$fixtures/calls.log" '^workflow run .*hardware=admit' 'no new worker bypasses the global bound and 08:00 cutoff'
 
-printf 'nightly glue: evidence, records, first-parent states, the ledger, worker windows, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, pending compaction, the prepare-to-window handoff and a pin that main moved past checked\n'
+printf 'nightly glue: evidence, merge-queue coverage and stale candidates, records, first-parent states, the ledger, worker windows, the window step, dry and real coordination, overrides, failed polls, refilled preparations, refused, failed and raced branches, pending compaction, the prepare-to-window handoff and a pin that main moved past checked\n'

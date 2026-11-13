@@ -131,6 +131,7 @@ jobs:
       helpers: ${{ steps.files.outputs.helpers }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
+      auxiliary: ${{ steps.files.outputs.auxiliary }}
     steps:
       - name: Check out the triggering commit and its parents
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -169,7 +170,10 @@ jobs:
           set -euo pipefail
           workflow=.github/workflows/9700x.yml
           if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
-              "$RUNNER_TEMP/changes" --event merge_group --workflow "$workflow" --output "$GITHUB_OUTPUT"
+              # The candidate's own change, its merge against its base (main or the entry ahead), picks the auxiliary
+              # workflows it calls, by each one's pull_request paths; everything else is the full profile.
+              git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/files"
+              "$RUNNER_TEMP/changes" --event merge_group --files "$RUNNER_TEMP/files" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$NIGHTLY" != on ]; then
               "$RUNNER_TEMP/changes" --event push --workflow "$workflow" --output "$GITHUB_OUTPUT"
           else
@@ -1984,9 +1988,69 @@ jobs:
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing -o "$RUNNER_TEMP/allcore" tools/allcore/allcore.c
           "$RUNNER_TEMP/allcore" self-test
 
+  # Invalidated merge-queue candidates (#1430). GitHub never cancels a candidate's run: when it drops a candidate (its
+  # pull request is dequeued, or the entry ahead fails) or rebuilds it, it deletes the candidate's branch or points it
+  # at the rebuild, and the old run would burn the whole contract. So each candidate, as it starts, cancels the
+  # workflow's unfinished merge-queue runs whose branch no longer names their commit and whose commit isn't on main
+  # (tools/ci/nightly.sh's `stale`; nightly.c decides). A rebuild is a new candidate, so the runs it replaces go as it
+  # starts. A failed read cancels nothing, and this job never gates the candidate.
+  stale:
+    name: Cancel invalidated merge-queue candidates
+    if: github.event_name == 'merge_group' && github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Check out the sweep
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: tools/ci
+      - name: Cancel the runs of candidates GitHub dropped or rebuilt
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/nightly.sh stale "$RUNNER_TEMP/stale"
+
+  # A merge-queue candidate's auxiliary workflows (#1430), each called whole where the candidate's own change (its merge
+  # against its base) touches a path the workflow's pull_request trigger lists: tools/ci/changes.c reads those lists
+  # from the workflows themselves (changes_auxiliary_decide), so the rule is written once. A pull request runs them on
+  # their own triggers. They start after the policy job, as the rows do; the aggregate's coverage step requires every
+  # job of each one called to have succeeded, and each one not called to have run nothing.
+  auxiliary-build:
+    name: Auxiliary (build.yml)
+    needs: [changes, policy]
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}
+    uses: ./.github/workflows/build.yml
+
+  auxiliary-build-pgo:
+    name: Auxiliary (build-pgo.yml)
+    needs: [changes, policy]
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build-pgo,') }}
+    uses: ./.github/workflows/build-pgo.yml
+
+  auxiliary-selfhost:
+    name: Auxiliary (selfhost.yml)
+    needs: [changes, policy]
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}
+    uses: ./.github/workflows/selfhost.yml
+
+  auxiliary-tier1-problem:
+    name: Auxiliary (tier1-problem.yml)
+    needs: [changes, policy]
+    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}
+    uses: ./.github/workflows/tier1-problem.yml
+
   qualification:
-    # Preserve the existing required context: both hosted variants and the gated
-    # 9700X job must pass on the same revision. A pull request, draft or ready,
+    # The required context, `Integration qualification` (#1430; it replaces the
+    # hardware-named `Build and execute on Ryzen 7 9700X`, which the
+    # qualification-alias job below reports until the ruleset requires this
+    # name): both hosted variants and the gated 9700X job must pass on the same
+    # revision. A pull request, draft or ready,
     # never runs that job (#2055): the context passes on its hosted rows alone,
     # and says that native correctness and measurements run on its merged
     # first-parent state in the nightly window. A merge-queue candidate
@@ -2001,8 +2065,8 @@ jobs:
     # scheduled run (the nightly mode's) runs nothing; and a push in the
     # nightly mode defers its 9700X work to the window. None of the three has
     # this context, so none can show a 9700X qualification that didn't run.
-    name: Build and execute on Ryzen 7 9700X
-    needs: [changes, evidence, policy, test, fuzz, benchmarks]
+    name: Integration qualification
+    needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2017,8 +2081,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       # A merge-queue candidate's expected coverage, from this run's own jobs (tools/ci/nightly.c's `coverage`): every
-      # shard 1..N of every row (x86-64 and native, each sanitizer, one N per row), the vector pool's verdict and each
-      # fuzz campaign, all completed and successful. A job missing, skipped, cancelled, failed or timed out, or a row
+      # shard 1..N of every row (x86-64 and native, each sanitizer, one N per row), the vector pool's verdict, each
+      # fuzz campaign and every job of each auxiliary workflow the selector named, all completed and successful, and no
+      # job of an auxiliary workflow it didn't name. A job missing, skipped, cancelled, failed or timed out, or a row
       # whose shards disagree, fails it; so does an API failure. The predicate below reads its outcome, so that a test
       # job's result alone, which a skipped shard leaves green, can't pass a candidate.
       - name: Check a merge-queue candidate's coverage job by job
@@ -2028,6 +2093,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}
         run: bash tools/ci/nightly.sh coverage "$RUNNER_TEMP/coverage"
       - name: Require hosted and native correctness before successful qualification
         if: ${{ !cancelled() }}
@@ -2050,6 +2116,25 @@ jobs:
         run: |
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification"
+
+  # The required context's old name (#1430), reported until main's ruleset requires `Integration qualification` in
+  # its place: the replacement is installed and observed first, and the ruleset switches names in one edit, so no
+  # interval is unprotected. It passes exactly when the aggregate passes, and runs wherever the aggregate does. The
+  # change that removes main's push triggers removes this job.
+  qualification-alias:
+    name: Build and execute on Ryzen 7 9700X
+    needs: [qualification]
+    if: ${{ always() && needs.qualification.result != 'skipped' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Pass exactly when the aggregate passed
+        env:
+          QUALIFICATION_RESULT: ${{ needs.qualification.result }}
+        shell: bash
+        run: |
+          echo "Integration qualification: $QUALIFICATION_RESULT"
+          test "$QUALIFICATION_RESULT" = success
 
   record:
     # The run's coverage record (tools/ci/nightly.c's `record`, docs/ci.md): its commit, tree and first parent; the

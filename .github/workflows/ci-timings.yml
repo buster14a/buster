@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Collect hardware queue and phase durations
+      - name: Collect hardware queue and phase durations, and the merge queue's candidates
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash tools/ci/timings.sh "$RUNNER_TEMP/ci-timings"

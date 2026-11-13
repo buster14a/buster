@@ -8,7 +8,7 @@
 //   changes --event pull_request --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]
 //   changes --event push --workflow HEAD.yml [--output FILE]
 //   changes --event push --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]
-//   changes --event merge_group --workflow HEAD.yml [--output FILE]
+//   changes --event merge_group --files LIST --workflow HEAD.yml [--root DIR] [--output FILE]
 //   changes --self-test [--root DIR]
 //
 // LIST holds the merge's changed paths, one a line (`git diff --no-renames --name-only HEAD^1 HEAD`); BASE.yml is the
@@ -19,7 +19,8 @@
 // - baselines, foreign, branch_sizing, performance, preprocessor_clang, and one per module of `changes_modules`:
 //   whether the steps gated on it (`needs.changes.outputs.NAME != 'false'`) run, from the sources they measure or a
 //   change to such a step;
-// - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`.
+// - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`;
+// - auxiliary: a merge-queue candidate's auxiliary workflows, `,NAME,NAME,` by `changes_auxiliary`' names, or `,`.
 //
 // A push sets code alone and measure to all. A push given its first-parent change (the nightly mode's, docs/ci.md) is
 // targeted instead: it decides as a pull request on that change, but code is always true: every main revision runs its
@@ -27,7 +28,9 @@
 // a push of several commits can bring code that its head's own change doesn't show. A merge-queue candidate
 // (`merge_group`, #1430) runs the full integration contract whatever it changes, documentation alone included: code,
 // measure all and the performance readers' qualification, which its hosted rows' shard 1 runs; the other outputs gate
-// the 9700X job's steps, which a candidate never runs. `changes_decide` is the
+// the 9700X job's steps, which a candidate never runs. Its auxiliary output names the workflows whose own pull request
+// paths its change touches (build.yml's, selfhost.yml's...), which it calls (changes_auxiliary_decide); every other
+// event's is `,`, since those workflows run on their own triggers. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
 // main's trigger and the hosted scope the evidence job decides (changes_main_policy), the hosted rows' workflow
@@ -299,6 +302,12 @@ static const char* const changes_fixed_names[CHANGES_FIXED_COUNT] = {
     [CHANGES_PREPROCESSOR_CLANG] = "preprocessor_clang",
     [CHANGES_SQLITE_STABLE] = "sqlite_stable",
 };
+
+// The workflows a merge-queue candidate calls where they apply (#1430), by file stem: .github/workflows/NAME.yml, which
+// 9700x.yml's job auxiliary-NAME calls. Each runs on its own for a pull request that changes a path its
+// `pull_request` trigger lists; a candidate calls it on the same rule, read from that list, over its own change.
+#define BUSTER_CHANGES_AUXILIARY_COUNT 4u
+static const char* const changes_auxiliary[BUSTER_CHANGES_AUXILIARY_COUNT] = { "build", "build-pgo", "selfhost", "tier1-problem" };
 
 typedef struct ChangesModule ChangesModule;
 struct ChangesModule
@@ -1252,6 +1261,8 @@ struct ChangesResult
     bool modules[BUSTER_CHANGES_MODULE_COUNT];
     bool all;
     bool benchmarks[BUSTER_CHANGES_BENCHMARK_COUNT];
+    // A merge-queue candidate's auxiliary workflows that apply, by changes_auxiliary's order (changes_auxiliary_decide).
+    bool auxiliary[BUSTER_CHANGES_AUXILIARY_COUNT];
     // The steps the merge changes or adds, by name.
     TextList changed_steps;
 };
@@ -1442,6 +1453,28 @@ static const char* changes_measure(const ChangesResult* result)
     return measure;
 }
 
+// The auxiliary workflows that apply, `,NAME,NAME,` by changes_auxiliary's names, or `,` for none: a job calls NAME
+// where `contains(needs.changes.outputs.auxiliary, ',NAME,')`.
+static const char* changes_auxiliary_list(const ChangesResult* result)
+{
+    size_t bytes = 2;
+    for (uint32_t i = 0; i < BUSTER_CHANGES_AUXILIARY_COUNT; i += 1)
+    {
+        bytes += strlen(changes_auxiliary[i]) + 1;
+    }
+    char* list = arena_push(bytes);
+    strcpy(list, ",");
+    for (uint32_t i = 0; i < BUSTER_CHANGES_AUXILIARY_COUNT; i += 1)
+    {
+        if (result->auxiliary[i])
+        {
+            strcat(list, changes_auxiliary[i]);
+            strcat(list, ",");
+        }
+    }
+    return list;
+}
+
 static void changes_write_outputs(FILE* output, const ChangesResult* result)
 {
     fprintf(output, "code=%s\n", changes_bool(result->code));
@@ -1454,6 +1487,7 @@ static void changes_write_outputs(FILE* output, const ChangesResult* result)
         fprintf(output, "%s=%s\n", changes_modules[i].name, changes_bool(result->modules[i]));
     }
     fprintf(output, "measure=%s\n", changes_measure(result));
+    fprintf(output, "auxiliary=%s\n", changes_auxiliary_list(result));
 }
 
 static void changes_print(FILE* output, const ChangesResult* result)
@@ -1474,6 +1508,173 @@ static void changes_print(FILE* output, const ChangesResult* result)
         fprintf(output, "Changes what %s's conditioned benchmark samples measure: %s\n", changes_modules[i].name, changes_bool(result->modules[i]));
     }
     fprintf(output, "Runs the plain benchmarks: %s\n", changes_measure(result));
+    fprintf(output, "Calls the auxiliary workflows: %s\n", changes_auxiliary_list(result));
+}
+
+// --- A merge-queue candidate's auxiliary workflows (#1430) ---
+
+// GitHub's path filter patterns as the auxiliary workflows' triggers write them: `**` matches any characters, `/`
+// included; `*` any but `/`; `?` one but `/`; each matches none as well. Any other syntax (a negation, a class, a
+// brace) is refused by changes_glob_supported, so that the self-test fails a list this matcher would misread.
+static bool changes_glob(const char* pattern, const char* path)
+{
+    bool matched = false;
+    if (pattern[0] == 0)
+    {
+        matched = path[0] == 0;
+    }
+    else if (pattern[0] == '*')
+    {
+        const bool across = pattern[1] == '*';
+        const char* rest = pattern + (across ? 2 : 1);
+        bool more = true;
+        for (size_t i = 0; more && !matched; i += 1)
+        {
+            matched = changes_glob(rest, path + i);
+            more = path[i] != 0 && (across || path[i] != '/');
+        }
+    }
+    else if (pattern[0] == '?')
+    {
+        matched = path[0] != 0 && path[0] != '/' && changes_glob(pattern + 1, path + 1);
+    }
+    else
+    {
+        matched = pattern[0] == path[0] && changes_glob(pattern + 1, path + 1);
+    }
+    return matched;
+}
+
+static bool changes_glob_supported(Text pattern)
+{
+    bool supported = pattern.length != 0 && pattern.data[0] != '!';
+    for (size_t i = 0; i < pattern.length && supported; i += 1)
+    {
+        supported = strchr("[]{}+\\ '\"#", pattern.data[i]) == NULL;
+    }
+    return supported;
+}
+
+// One item of a paths list, plain or in single or double quotes, without the spaces around it.
+static bool changes_path_item(Text item, TextList* patterns)
+{
+    while (item.length != 0 && item.data[0] == ' ')
+    {
+        item.data += 1;
+        item.length -= 1;
+    }
+    while (item.length != 0 && item.data[item.length - 1] == ' ')
+    {
+        item.length -= 1;
+    }
+    const bool quoted = item.length >= 2 && (item.data[0] == '\'' || item.data[0] == '"') && item.data[item.length - 1] == item.data[0];
+    if (quoted)
+    {
+        item.data += 1;
+        item.length -= 2;
+    }
+    const bool valid = changes_glob_supported(item);
+    if (valid)
+    {
+        list_append(patterns, text_c(text_terminated(item)));
+    }
+    return valid;
+}
+
+// The `paths` list of a workflow's `pull_request` trigger, as the repository's workflows spell it: a flow list on its
+// line (`    paths: [a, 'b/**']`) or a block list after it (`      - a`, a line each). False where the trigger or the
+// list is missing or empty, an item has syntax the matcher refuses, or the trigger also has `paths-ignore`.
+static bool changes_trigger_paths(Text workflow, TextList* patterns)
+{
+    // 0: before `on:`; 1: in it; 2: in its pull_request trigger; 3: in that trigger's block list; 4: past the list.
+    uint32_t state = 0;
+    bool valid = true;
+    size_t offset = 0;
+    Text line;
+    while (valid && state < 4 && text_next_line(workflow, &offset, &line))
+    {
+        size_t indent = 0;
+        while (indent < line.length && line.data[indent] == ' ')
+        {
+            indent += 1;
+        }
+        const bool blank = indent == line.length || line.data[indent] == '#';
+        // Blank lines and comments keep the state.
+        if (state == 0)
+        {
+            state = text_equal_c(line, "on:") ? 1 : 0;
+        }
+        else if (!blank && state == 1)
+        {
+            valid = indent != 0;
+            state = text_equal_c(line, "  pull_request:") ? 2 : 1;
+        }
+        else if (!blank && state == 2 && text_starts_with(line, "    paths: [") && line.data[line.length - 1] == ']')
+        {
+            Text items = {
+                .data = line.data + 12,
+                .length = line.length - 13,
+            };
+            size_t start = 0;
+            for (size_t i = 0; i <= items.length && valid; i += 1)
+            {
+                if (i == items.length || items.data[i] == ',')
+                {
+                    Text item = {
+                        .data = items.data + start,
+                        .length = i - start,
+                    };
+                    valid = changes_path_item(item, patterns);
+                    start = i + 1;
+                }
+            }
+            state = 4;
+        }
+        else if (!blank && state == 2)
+        {
+            valid = indent >= 4 && !text_starts_with(line, "    paths-ignore:");
+            state = text_equal_c(line, "    paths:") ? 3 : 2;
+        }
+        else if (!blank && indent == 6 && text_starts_with(line, "      - "))
+        {
+            Text item = {
+                .data = line.data + 8,
+                .length = line.length - 8,
+            };
+            valid = changes_path_item(item, patterns);
+        }
+        else if (!blank)
+        {
+            state = 4;
+        }
+    }
+    return valid && state >= 3 && patterns->count != 0;
+}
+
+// Which auxiliary workflows apply to a merge-queue candidate: those whose `pull_request` paths match a file of its own
+// change (its merge against its base, HEAD^1..HEAD), as they would have matched its pull request's. Each workflow is
+// read at ROOT/.github/workflows/NAME.yml; false when one can't be read or its list can't (changes_trigger_paths).
+static bool changes_auxiliary_decide(const TextList* files, const char* root, ChangesResult* result)
+{
+    bool valid = true;
+    for (uint32_t i = 0; i < BUSTER_CHANGES_AUXILIARY_COUNT && valid; i += 1)
+    {
+        char path[BUSTER_CHANGES_PATH_BYTES];
+        snprintf(path, sizeof(path), "%s/.github/workflows/%s.yml", root, changes_auxiliary[i]);
+        Text workflow = { 0 };
+        TextList patterns = { 0 };
+        valid = read_file(path, &workflow) && changes_trigger_paths(workflow, &patterns);
+        bool applies = false;
+        for (uint32_t j = 0; j < files->count && valid; j += 1)
+        {
+            for (uint32_t k = 0; k < patterns.count; k += 1)
+            {
+                applies = applies || changes_glob(patterns.items[k].data, files->items[j].data);
+            }
+        }
+        result->auxiliary[i] = valid && applies;
+    }
+    return valid;
 }
 
 // --- The self-test ---
@@ -2201,6 +2402,139 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
 
 // The workflow and the tables must agree, and each step gated on an output must run on the pull request that changes it
 // alone, with the plain benchmarks it runs.
+// A merge-queue candidate's auxiliary workflows (#1430): the matcher, the paths reader, the real workflows' lists and
+// their calls from 9700x.yml, and the decision on the real lists.
+static void changes_test_auxiliary(ChangesTest* test, Text workflow, const char* root)
+{
+    static const struct
+    {
+        const char* pattern;
+        const char* path;
+        bool matched;
+    } globs[] = {
+        { "build.sh", "build.sh", true },
+        { "build.sh", "tools/build.sh", false },
+        { "build.sh", "build.shx", false },
+        { "cmake/**", "cmake/BusterSettings.cmake", true },
+        { "cmake/**", "cmake/a/b/c.cmake", true },
+        { "cmake/**", "cmakefile", false },
+        { "tests/tier1-problem/**", "tests/tier1-problem/test.c", true },
+        { "src/buster/compiler/tier1_problem*.c", "src/buster/compiler/tier1_problem.c", true },
+        { "src/buster/compiler/tier1_problem*.c", "src/buster/compiler/tier1_problem_wire.c", true },
+        { "src/buster/compiler/tier1_problem*.c", "src/buster/compiler/tier1_problem/x.c", false },
+        { "src/buster/compiler/tier1_problem*.c", "src/buster/compiler/tier1_problem.h", false },
+        { "tools/ci/build_ownership*.h", "tools/ci/build_ownership_units.h", true },
+        { "a?c", "abc", true },
+        { "a?c", "a/c", false },
+        { "**", "any/path/at/all", true },
+        { "*", "top", true },
+        { "*", "a/b", false },
+    };
+    for (uint32_t i = 0; i < sizeof(globs) / sizeof(globs[0]); i += 1)
+    {
+        changes_expect(test, changes_glob(globs[i].pattern, globs[i].path) == globs[i].matched, "a path pattern matches as GitHub's filter does", text_concat(text_c(globs[i].pattern), text_concat(text_c(" against "), text_c(globs[i].path))));
+    }
+    static const char* const refused[] = { "!docs/**", "src/[ab].c", "src/{a,b}.c", "a+.c", "" };
+    for (uint32_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i += 1)
+    {
+        changes_expect(test, !changes_glob_supported(text_c(refused[i])), "a pattern the matcher can't read is refused", text_c(refused[i]));
+    }
+
+    static const struct
+    {
+        const char* workflow;
+        const char* patterns;
+        bool valid;
+        const char* what;
+    } lists[] = {
+        { "on:\n  pull_request:\n    paths:\n      - build.sh\n      # a comment\n      - 'cmake/**'\n      - \"tools/x.sh\"\n  push:\n    branches: [main]\n", "build.sh cmake/** tools/x.sh", true, "a block list, plain and quoted" },
+        { "on:\n  pull_request:\n    paths: [build.sh, 'cmake/**', \"a.c\"]\n  workflow_dispatch:\n", "build.sh cmake/** a.c", true, "a flow list" },
+        { "on:\n  pull_request:\n    types: [opened]\n    paths:\n      - a.c\njobs:\n", "a.c", true, "a list after another filter, at the end of `on:`" },
+        { "on:\n  push:\n    paths:\n      - a.c\n", "", false, "no pull_request trigger" },
+        { "on:\n  pull_request:\n  push:\n    paths:\n      - a.c\n", "", false, "a pull_request trigger without paths" },
+        { "on:\n  pull_request:\n    paths-ignore:\n      - docs/**\n", "", false, "paths-ignore" },
+        { "on:\n  pull_request:\n    paths:\n  push:\n", "", false, "an empty list" },
+        { "on:\n  pull_request:\n    paths:\n      - '!docs/**'\n", "", false, "a negation" },
+    };
+    for (uint32_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i += 1)
+    {
+        TextList patterns = { 0 };
+        const bool valid = changes_trigger_paths(text_c(lists[i].workflow), &patterns);
+        TextList expected = changes_words(lists[i].patterns);
+        bool same = valid == lists[i].valid && (!valid || patterns.count == expected.count);
+        for (uint32_t j = 0; same && valid && j < expected.count; j += 1)
+        {
+            same = text_equal(patterns.items[j], expected.items[j]);
+        }
+        changes_expect(test, same, "a pull_request paths list reads as written", text_c(lists[i].what));
+    }
+
+    // Each real workflow's list reads, it can be called, and 9700x.yml calls it for candidates it applies to, and its
+    // aggregate waits for the call.
+    for (uint32_t i = 0; i < BUSTER_CHANGES_AUXILIARY_COUNT; i += 1)
+    {
+        const char* name = changes_auxiliary[i];
+        char path[BUSTER_CHANGES_PATH_BYTES];
+        snprintf(path, sizeof(path), "%s/.github/workflows/%s.yml", root, name);
+        Text auxiliary = { 0 };
+        TextList patterns = { 0 };
+        const bool readable = read_file(path, &auxiliary);
+        changes_expect(test, readable && changes_trigger_paths(auxiliary, &patterns), "an auxiliary workflow's pull_request paths read", text_c(name));
+        changes_expect(test, readable && strstr(auxiliary.data, "\n  workflow_call:\n") != NULL, "an auxiliary workflow can be called", text_c(name));
+        char line[BUSTER_CHANGES_PATH_BYTES];
+        snprintf(line, sizeof(line), "\n  auxiliary-%s:\n", name);
+        const char* job = strstr(workflow.data, line);
+        snprintf(line, sizeof(line), "\n    uses: ./.github/workflows/%s.yml\n", name);
+        const char* uses = job != NULL ? strstr(job, line) : NULL;
+        snprintf(line, sizeof(line), "contains(needs.changes.outputs.auxiliary, ',%s,')", name);
+        const char* condition = job != NULL ? strstr(job, line) : NULL;
+        const char* next = job != NULL ? strstr(job + 1, "\n  ") : NULL;
+        while (next != NULL && next[3] == ' ')
+        {
+            next = strstr(next + 1, "\n  ");
+        }
+        const bool called = uses != NULL && condition != NULL && (next == NULL || (uses < next && condition < next));
+        changes_expect(test, called, "9700x.yml calls the auxiliary workflow where it applies", text_c(name));
+        snprintf(line, sizeof(line), ", auxiliary-%s", name);
+        const char* qualification = strstr(workflow.data, "\n  qualification:\n");
+        const char* needs = qualification != NULL ? strstr(qualification, "\n    needs: [") : NULL;
+        const char* end = needs != NULL ? strchr(needs + 1, '\n') : NULL;
+        const char* waits = needs != NULL ? strstr(needs, line) : NULL;
+        changes_expect(test, waits != NULL && end != NULL && waits < end, "the required aggregate waits for the auxiliary workflow", text_c(name));
+    }
+
+    static const struct
+    {
+        const char* files;
+        const char* auxiliary;
+    } candidates[] = {
+        { "docs/ci.md", "," },
+        { "src/buster/compiler/c_lexer.c", "," },
+        { "build.sh", ",build,build-pgo,selfhost," },
+        { "cmake/BusterSettings.cmake", ",build,build-pgo,selfhost," },
+        { "tools/ci/build_regression.c", ",build," },
+        { "src/buster/compiler/host_isa.h", ",selfhost,tier1-problem," },
+        { "src/buster/compiler/tier1_problem_wire.c", ",tier1-problem," },
+        { ".github/workflows/selfhost.yml", ",selfhost," },
+        { "docs/ci.md src/buster/compiler/lane.c tools/ci/build_regression.c", ",build,tier1-problem," },
+    };
+    for (uint32_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i += 1)
+    {
+        TextList files = changes_words(candidates[i].files);
+        TextList terminated = { 0 };
+        for (uint32_t j = 0; j < files.count; j += 1)
+        {
+            list_append(&terminated, text_c(text_terminated(files.items[j])));
+        }
+        ChangesResult result = { 0 };
+        const bool decided = changes_auxiliary_decide(&terminated, root, &result);
+        changes_expect(test, decided && strcmp(changes_auxiliary_list(&result), candidates[i].auxiliary) == 0, "a candidate calls the auxiliary workflows its change touches", text_c(candidates[i].files));
+    }
+    ChangesResult missing = { 0 };
+    TextList none = { 0 };
+    changes_expect(test, !changes_auxiliary_decide(&none, "/nonexistent", &missing), "an unreadable auxiliary workflow fails the decision", (Text){ 0 });
+}
+
 static void changes_test_workflow(ChangesTest* test, Text workflow, const char* root)
 {
     for (uint32_t i = 1; i < BUSTER_CHANGES_BENCHMARK_COUNT; i += 1)
@@ -2213,12 +2547,12 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
     for (uint32_t i = 0; i < read.count; i += 1)
     {
         Text name = read.items[i];
-        bool known = text_equal_c(name, "code") || text_equal_c(name, "measure") || changes_fixed_index(name) >= 0 || changes_module_index(name) >= 0;
+        bool known = text_equal_c(name, "code") || text_equal_c(name, "measure") || text_equal_c(name, "auxiliary") || changes_fixed_index(name) >= 0 || changes_module_index(name) >= 0;
         changes_expect(test, known, "the workflow reads an output the selector writes", name);
     }
     TextList declared = { 0 };
     changes_scan_names(workflow, "${{ steps.files.outputs.", false, " }}", &declared);
-    TextList written = changes_words("code measure");
+    TextList written = changes_words("code measure auxiliary");
     for (uint32_t i = 0; i < CHANGES_FIXED_COUNT; i += 1)
     {
         list_append(&written, text_c(changes_fixed_names[i]));
@@ -2274,7 +2608,10 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
             // This output is data for the comparison inside the step, not a condition that skips the step.
             bool sqlite_data = text_equal_c(all_gates.items[j], "sqlite_stable") &&
                                strstr(text_terminated(step->body), "SQLITE_EXPECT_STABLE: ${{ needs.changes.outputs.sqlite_stable }}") != NULL;
-            changes_expect(test, code_or_measure || sqlite_data || list_contains(&gates, all_gates.items[j]) || strstr(text_terminated(step->body), text_concat(text_concat(text_c("needs.changes.outputs."), all_gates.items[j]), text_c(" == 'false'")).data) != NULL, "a gate the matcher reads", step->name);
+            // So is the auxiliary list the aggregate's coverage step checks.
+            bool auxiliary_data = text_equal_c(all_gates.items[j], "auxiliary") &&
+                                  strstr(text_terminated(step->body), "AUXILIARY: ${{ needs.changes.outputs.auxiliary }}") != NULL;
+            changes_expect(test, code_or_measure || sqlite_data || auxiliary_data || list_contains(&gates, all_gates.items[j]) || strstr(text_terminated(step->body), text_concat(text_concat(text_c("needs.changes.outputs."), all_gates.items[j]), text_c(" == 'false'")).data) != NULL, "a gate the matcher reads", step->name);
         }
         TextList names = { 0 };
         changes_scan_names(step->body, "contains(env.MEASURE, ',", true, ",')", &names);
@@ -2839,12 +3176,25 @@ static bool changes_main_policy(Text workflow)
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
         { 5, "    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')" },
         { 5, "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then" },
-        { 5, "              \"$RUNNER_TEMP/changes\" --event merge_group --workflow \"$workflow\" --output \"$GITHUB_OUTPUT\"" },
+        { 5, "              \"$RUNNER_TEMP/changes\" --event merge_group --files \"$RUNNER_TEMP/files\" --workflow \"$workflow\" --output \"$GITHUB_OUTPUT\"" },
+        { 5, "      auxiliary: ${{ steps.files.outputs.auxiliary }}" },
         { 6, "    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}" },
+        { 6, "    name: Integration qualification" },
         { 6, "      actions: read" },
         { 6, "        if: github.event_name == 'merge_group'" },
         { 6, "        run: bash tools/ci/nightly.sh coverage \"$RUNNER_TEMP/coverage\"" },
         { 6, "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}" },
+        { 6, "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}" },
+        { 6, "    needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
+        { 7, "    uses: ./.github/workflows/build.yml" },
+        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}" },
+        { 7, "    uses: ./.github/workflows/build-pgo.yml" },
+        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build-pgo,') }}" },
+        { 7, "    uses: ./.github/workflows/selfhost.yml" },
+        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}" },
+        { 7, "    uses: ./.github/workflows/tier1-problem.yml" },
+        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}" },
+        { 7, "    needs: [changes, policy]" },
         { 4, "    needs: [changes, evidence, policy]" },
         { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}" },
         { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
@@ -2920,7 +3270,7 @@ static bool changes_main_policy(Text workflow)
             }
             else if (section == 3 && indent == 2)
             {
-                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : 3;
+                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : text_starts_with(line, "  auxiliary-") ? 7 : 3;
             }
             const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
             for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
@@ -2959,7 +3309,13 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "concurrency:", " || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id))", "", "candidates share one pending slot" },
         { "  changes:", " || github.event_name == 'merge_group' || ", " || ", "a candidate skips the selector and its self-tests" },
         { "  changes:", "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then", "          if false; then", "a candidate decided by its change alone" },
-        { "  changes:", "--event merge_group --workflow", "--event push --workflow", "a candidate decided as a push" },
+        { "  changes:", "--event merge_group --files", "--event push --files", "a candidate decided as a push" },
+        { "  changes:", "      auxiliary: ${{ steps.files.outputs.auxiliary }}\n", "", "a candidate's auxiliary list dropped" },
+        { "  auxiliary-selfhost:", "contains(needs.changes.outputs.auxiliary, ',selfhost,')", "false", "an auxiliary workflow never called" },
+        { "  auxiliary-build:", "    uses: ./.github/workflows/build.yml", "    uses: ./.github/workflows/build-pgo.yml", "an auxiliary workflow called for another" },
+        { "  auxiliary-tier1-problem:", "github.event_name == 'merge_group' && ", "", "an auxiliary workflow called on every event" },
+        { "  qualification:", ", auxiliary-build-pgo, ", ", ", "the aggregate doesn't wait for an auxiliary workflow" },
+        { "  qualification:", "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}\n", "", "a candidate's auxiliary workflows unchecked" },
         { "  qualification:", " && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}", " && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
         { "  qualification:", "        if: github.event_name == 'merge_group'\n", "        if: false\n", "a candidate's coverage unchecked" },
         { "  qualification:", "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}\n", "", "the aggregate ignores the candidate's coverage" },
@@ -3551,6 +3907,7 @@ static int changes_self_test(const char* root)
     {
         changes_test_fixtures(&test, workflow, root);
         changes_test_events(&test, workflow, root);
+        changes_test_auxiliary(&test, workflow, root);
         changes_test_workflow(&test, workflow, root);
         changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
@@ -3573,7 +3930,7 @@ static const char* changes_usage =
     "usage: changes --event pull_request --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]\n"
     "       changes --event push --workflow HEAD.yml [--output FILE]\n"
     "       changes --event push --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]\n"
-    "       changes --event merge_group --workflow HEAD.yml [--output FILE]\n"
+    "       changes --event merge_group --files LIST --workflow HEAD.yml [--root DIR] [--output FILE]\n"
     "       changes --self-test [--root DIR]\n";
 
 int main(int argc, char** argv)
@@ -3633,7 +3990,7 @@ int main(int argc, char** argv)
     bool pull_request = event != NULL && strcmp(event, "pull_request") == 0;
     bool merge_group = event != NULL && strcmp(event, "merge_group") == 0;
     const bool targeted = push && files != NULL;
-    const bool profile = merge_group && files == NULL && base_workflow == NULL;
+    const bool profile = merge_group && files != NULL && base_workflow == NULL;
     valid = valid && root != NULL && (self_test ? event == NULL : ((push && (files == NULL) == (base_workflow == NULL)) || (pull_request && files != NULL && base_workflow != NULL) || profile) && head_workflow != NULL);
     int status = 2;
     if (!valid)
@@ -3654,15 +4011,31 @@ int main(int argc, char** argv)
         };
         Text list = { .data = "", .length = 0 };
         bool read = read_file(head_workflow, &input.head_workflow);
-        read = read && ((push && !targeted) || merge_group || (read_file(files, &list) && read_file(base_workflow, &input.base_workflow)));
+        if (merge_group)
+        {
+            read = read && read_file(files, &list);
+        }
+        else if (!push || targeted)
+        {
+            read = read && read_file(files, &list) && read_file(base_workflow, &input.base_workflow);
+        }
+        ChangesResult result = { 0 };
+        if (read)
+        {
+            input.files = text_lines(list);
+            result = changes_decide(&input);
+        }
+        const bool auxiliary = !read || !merge_group || changes_auxiliary_decide(&input.files, root, &result);
         if (!read)
         {
             fprintf(stderr, "changes: can't read an input: %s\n", strerror(errno));
         }
+        else if (!auxiliary)
+        {
+            fprintf(stderr, "changes: can't read an auxiliary workflow's pull_request paths under %s/.github/workflows\n", root);
+        }
         else
         {
-            input.files = text_lines(list);
-            ChangesResult result = changes_decide(&input);
             FILE* destination = output != NULL ? fopen(output, "a") : stdout;
             if (destination == NULL)
             {

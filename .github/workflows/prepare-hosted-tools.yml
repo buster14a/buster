@@ -99,22 +99,26 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+      # Main's own runs alone save the caches every branch reads: a push, a dispatch or a scheduled run on main. Once
+      # main's pushes run nothing (#1430), selfhost.yml's daily schedule, which calls this workflow, keeps them fresh;
+      # the apt closure's key changes with each runner image. A merge-queue candidate's caches would be its branch's
+      # alone, and a nightly dispatch runs on a nightly/ branch.
       - name: Seed reusable caches from the trusted default branch only
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.cache.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         continue-on-error: true
         with:
           path: ${{ runner.temp }}/hosted-release-inputs
           key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
       - name: Seed the apt closure's cache from the trusted default branch only
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.apt-cache.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && steps.apt-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         continue-on-error: true
         with:
           path: ${{ runner.temp }}/hosted-offline/apt
           key: ${{ steps.offline.outputs.apt-key }}
       - name: Seed the downloads' and mirrors' cache from the trusted default branch only
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.ci-cache.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && steps.ci-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         continue-on-error: true
         with:

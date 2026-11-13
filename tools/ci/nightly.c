@@ -8,7 +8,8 @@
 //   nightly window-times --now EPOCH                                  the cycle's date, window start and deadline
 //   nightly worker-window < SOURCE                                   immutable worker's declared window, or unknown
 //   nightly hosted --commit SHA [--exclude RUN] < FACTS               reusable plain-row hosted qualification
-//   nightly coverage --run RUN < FACTS                                a merge-queue candidate's full coverage, job by job
+//   nightly coverage --run RUN --auxiliary LIST < FACTS               a merge-queue candidate's full coverage, job by job
+//   nightly stale --run RUN < CANDIDATES                              the invalidated merge-queue candidates' runs to cancel
 //   nightly record --output FILE                                      a run's coverage record, from the environment
 //   nightly harvest --ledger FILE --facts FILE --states FILE (--records DIR | --list)
 //                                                                     completed runs' rows the ledger lacks (or which)
@@ -75,7 +76,9 @@
 #define BUSTER_NIGHTLY_WORKFLOW ".github/workflows/9700x.yml"
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
 // The required aggregate (9700x.yml's `qualification`), which passes a merge-queue candidate after its coverage check.
-#define BUSTER_NIGHTLY_AGGREGATE_JOB "Build and execute on Ryzen 7 9700X"
+#define BUSTER_NIGHTLY_AGGREGATE_JOB "Integration qualification"
+// Its name until #1430 renamed it, which earlier runs' jobs carry, and the alias job that reports it during the move.
+#define BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE "Build and execute on Ryzen 7 9700X"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"
 // The window, in Europe/Madrid local time: hardware work starts at or after 02:00 and ends by 08:00 (the owner's choice
@@ -977,14 +980,52 @@ static const char* const nightly_fuzz_entries[] = { "frontend", "elf-override", 
 #define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 #define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
 
+// The auxiliary workflows a candidate calls where its change touches their pull_request paths (tools/ci/changes.c's
+// changes_auxiliary, the same names in its order), each by 9700x.yml's job `Auxiliary (NAME.yml)`, whose called jobs
+// the API names `Auxiliary (NAME.yml) / JOB`.
+static const char* const nightly_auxiliary_names[] = { "build", "build-pgo", "selfhost", "tier1-problem" };
+
+// The selector's auxiliary output: `,` or `,NAME,NAME,` of nightly_auxiliary_names, each at most once, in their
+// order. Sets each one's flag; false for anything else, an empty list (no selector) included.
+static bool nightly_auxiliary_list(const char* list, bool* called)
+{
+    bool valid = list != NULL && list[0] == ',';
+    const char* at = valid ? list + 1 : NULL;
+    uint32_t next = 0;
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names); i += 1)
+    {
+        called[i] = false;
+    }
+    while (valid && *at != 0)
+    {
+        const char* comma = strchr(at, ',');
+        bool known = false;
+        for (uint32_t i = next; comma != NULL && i < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names) && !known; i += 1)
+        {
+            known = strlen(nightly_auxiliary_names[i]) == (size_t)(comma - at) && strncmp(at, nightly_auxiliary_names[i], (size_t)(comma - at)) == 0;
+            called[i] = known;
+            next = known ? i + 1 : next;
+        }
+        valid = known;
+        at = known ? comma + 1 : at;
+    }
+    return valid;
+}
+
 // The run's full hosted contract from its own jobs, which a test job's result alone can't show (a skipped shard or row
 // leaves it green): every shard 1..N of each row (x86-64 and native, each sanitizer, -O3; one N per row), the vector
 // pool's verdict and each fuzz campaign, every one completed and successful, and no shard of a row that didn't succeed
-// (one beyond N, say, or a second attempt's). Writes a line per row, the vector verdict and each campaign, then
-// `coverage complete` or `coverage incomplete`. Job names are their own, whatever their callers' (each row is a call
-// of the row workflow); a skipped job's name keeps its unexpanded expressions, which no row's pattern matches.
-static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, FILE* output)
+// (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must have
+// run a job and every job successful; one it doesn't name must have run none. Writes a line per row, the vector verdict,
+// each campaign and each auxiliary workflow, then `coverage complete` or `coverage incomplete`. Job names are their own,
+// whatever their callers' (each row is a call of the row workflow); a skipped job's name keeps its unexpanded
+// expressions, which no row's pattern matches.
+static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char* auxiliary, FILE* output)
 {
+    bool called[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)];
+    const bool listed = nightly_auxiliary_list(auxiliary, called);
+    uint32_t auxiliary_jobs[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
+    uint32_t auxiliary_succeeded[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
     uint64_t succeeded[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
     uint32_t counts[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
     bool inconsistent[BUSTER_NIGHTLY_ROWS_FULL] = { false };
@@ -1022,6 +1063,14 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, FILE* outp
             snprintf(name, sizeof(name), "libFuzzer (ASan + UBSan + leaks, %s)", nightly_fuzz_entries[j]);
             fuzz[j] = fuzz[j] || (success && strcmp(own, name) == 0);
         }
+        for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names); j += 1)
+        {
+            char prefix[BUSTER_NIGHTLY_NAME];
+            const int length = snprintf(prefix, sizeof(prefix), "Auxiliary (%s.yml) / ", nightly_auxiliary_names[j]);
+            const bool mine = job->run == run && strncmp(job->name, prefix, (size_t)length) == 0;
+            auxiliary_jobs[j] += mine ? 1 : 0;
+            auxiliary_succeeded[j] += mine && success ? 1 : 0;
+        }
     }
     bool complete = true;
     for (uint32_t row = 0; row < BUSTER_NIGHTLY_ROWS_FULL; row += 1)
@@ -1041,8 +1090,82 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, FILE* outp
         complete = complete && fuzz[j];
         fprintf(output, "fuzz\t%s\t%s\n", nightly_fuzz_entries[j], fuzz[j] ? "ok" : "missing or did not succeed");
     }
+    complete = complete && listed;
+    if (!listed)
+    {
+        fprintf(output, "auxiliary\t%s\tnot the selector's list\n", auxiliary != NULL ? auxiliary : "");
+    }
+    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names) && listed; j += 1)
+    {
+        const uint32_t jobs = auxiliary_jobs[j];
+        const bool ok = called[j] ? jobs != 0 && auxiliary_succeeded[j] == jobs : jobs == 0;
+        complete = complete && ok;
+        const char* why = ok ? "ok" : !called[j] ? "ran although it doesn't apply" : jobs == 0 ? "missing" : "a job did not succeed";
+        fprintf(output, "auxiliary\t%s\t%s\t%s\t%u\n", nightly_auxiliary_names[j], called[j] ? "called" : "not called", why, jobs);
+    }
     fprintf(output, "coverage\t%s\n", complete ? "complete" : "incomplete");
     return complete;
+}
+
+// --- Invalidated merge-queue candidates (#1430) ---
+
+// The other merge-queue candidates' runs to cancel. GitHub never cancels a candidate's run itself, whether it drops the
+// candidate from the queue or rebuilds it on another base (the drill of 12-13 November); it deletes the candidate's
+// branch, or points it at the rebuild when the base is the same. A run whose branch is gone or moved and whose commit is
+// not on main is cancelled. A run that merged is kept (its record may still be uploading), as are this run, a run whose
+// branch is present at its commit, and any whose facts are unknown: a doubt never cancels. Reads `candidate RUN BRANCH
+// MERGED` lines (BRANCH present, moved, gone or unknown; MERGED merged, unmerged or unknown) and writes `cancel RUN` or
+// `keep RUN WHY` for each; false, with nothing cancelled, on a line it can't read or a run listed twice.
+static const char* const nightly_branch_states[] = { "present", "moved", "gone", "unknown" };
+static const char* const nightly_merge_states[] = { "merged", "unmerged", "unknown" };
+
+static bool nightly_stale(NightlyText input, uint64_t own, FILE* output)
+{
+    uint64_t* runs = nightly_allocate(BUSTER_NIGHTLY_RUNS, sizeof(uint64_t));
+    bool* cancel = nightly_allocate(BUSTER_NIGHTLY_RUNS, sizeof(bool));
+    const char** why = nightly_allocate(BUSTER_NIGHTLY_RUNS, sizeof(const char*));
+    uint32_t count = 0;
+    size_t offset = 0;
+    char line[BUSTER_NIGHTLY_LINE];
+    bool line_valid = true;
+    bool valid = true;
+    while (valid && nightly_next_line(input, &offset, line, &line_valid))
+    {
+        char* fields[BUSTER_NIGHTLY_FIELDS];
+        const size_t fields_count = line_valid ? nightly_split(line, fields, BUSTER_NIGHTLY_FIELDS) : 0;
+        uint64_t run = 0;
+        valid = line_valid && fields_count == 4 && strcmp(fields[0], "candidate") == 0 && nightly_id(fields[1], &run) && count < BUSTER_NIGHTLY_RUNS;
+        const size_t branch = valid ? nightly_find(fields[2], nightly_branch_states, BUSTER_NIGHTLY_COUNT(nightly_branch_states)) : 0;
+        const size_t merge = valid ? nightly_find(fields[3], nightly_merge_states, BUSTER_NIGHTLY_COUNT(nightly_merge_states)) : 0;
+        valid = valid && branch < BUSTER_NIGHTLY_COUNT(nightly_branch_states) && merge < BUSTER_NIGHTLY_COUNT(nightly_merge_states);
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            valid = runs[i] != run;
+        }
+        if (valid)
+        {
+            const bool invalidated = branch == 1 || branch == 2;
+            runs[count] = run;
+            cancel[count] = run != own && invalidated && merge == 1;
+            why[count] = run == own ? "this run" : branch == 0 ? "its candidate is queued" : branch == 3 ? "its branch is unknown" : merge == 0 ? "it merged" : "unknown whether it merged";
+            count += 1;
+        }
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        if (cancel[i])
+        {
+            fprintf(output, "cancel\t%llu\n", (unsigned long long)runs[i]);
+        }
+        else
+        {
+            fprintf(output, "keep\t%llu\t%s\n", (unsigned long long)runs[i], why[i]);
+        }
+    }
+    free(runs);
+    free(cancel);
+    free(why);
+    return valid;
 }
 
 // --- Records: one run's coverage, which its `record` job writes ---
@@ -1653,7 +1776,8 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
     const NightlyJob* hardware = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_HARDWARE_JOB);
     const bool hardware_ran = hardware != NULL && hardware->completed && hardware->conclusion != NIGHTLY_CONCLUSION_SKIPPED;
     const bool hardware_success = hardware != NULL && hardware->completed && hardware->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
-    const NightlyJob* aggregate = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB);
+    const NightlyJob* renamed = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB);
+    const NightlyJob* aggregate = renamed != NULL ? renamed : nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE);
     const bool aggregate_success = aggregate != NULL && aggregate->completed && aggregate->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
     const bool queue = run->event == NIGHTLY_EVENT_MERGE_GROUP;
     row.hardware = hardware_ran ? NIGHTLY_HARDWARE_ADMIT : NIGHTLY_HARDWARE_SKIP;
@@ -4189,7 +4313,7 @@ static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const ch
     nightly_append(buffer, "job\t%llu\tcompleted\tskipped\t%s\n", (unsigned long long)run, BUSTER_NIGHTLY_HARDWARE_JOB);
 }
 
-static bool nightly_test_coverage(const char* odd, const char* conclusion, const char* extra)
+static bool nightly_test_coverage_called(const char* odd, const char* conclusion, const char* extra, const char* auxiliary)
 {
     NightlyBuffer* buffer = nightly_allocate(1, sizeof(NightlyBuffer));
     nightly_test_candidate(buffer, 60, odd, conclusion);
@@ -4199,11 +4323,106 @@ static bool nightly_test_coverage(const char* odd, const char* conclusion, const
     }
     NightlyFacts facts = nightly_facts_new();
     FILE* sink = fopen("/dev/null", "w");
-    const bool complete = nightly_facts_parse(&facts, nightly_buffer_text(buffer)) && nightly_coverage(&facts, 60, sink);
+    const bool complete = nightly_facts_parse(&facts, nightly_buffer_text(buffer)) && nightly_coverage(&facts, 60, auxiliary, sink);
     fclose(sink);
     nightly_facts_free(&facts);
     free(buffer);
     return complete;
+}
+
+static bool nightly_test_coverage(const char* odd, const char* conclusion, const char* extra)
+{
+    return nightly_test_coverage_called(odd, conclusion, extra, ",");
+}
+
+// A candidate's auxiliary workflows: those the selector named ran a job each, all successful; the others ran none.
+static void nightly_test_auxiliary(NightlyTest* test)
+{
+    const char* build = "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native)\n"
+                        "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / build.sh's now() under decimal points other than a period";
+    const char* selfhost = "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host harness regression tests\n"
+                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / prepare-hosted-tools / Prepare verified hosted release inputs\n"
+                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native)";
+    char both[1024];
+    snprintf(both, sizeof(both), "%s\n%s", build, selfhost);
+    nightly_expect(test, nightly_test_coverage_called("", NULL, build, ",build,"), "a called auxiliary workflow whose jobs succeeded");
+    nightly_expect(test, nightly_test_coverage_called("", NULL, both, ",build,selfhost,"), "two called auxiliary workflows, nested calls included");
+    nightly_expect(test, nightly_test_coverage_called("", NULL, "job\t60\tcompleted\tskipped\tAuxiliary (build.yml)", ","), "a skipped call, not called");
+    static const struct
+    {
+        const char* extra;
+        const char* auxiliary;
+        const char* what;
+    } short_of[] = {
+        { NULL, ",build,", "a called auxiliary workflow that ran nothing" },
+        { "job\t60\tcompleted\tskipped\tAuxiliary (build.yml)", ",build,", "a called auxiliary workflow skipped" },
+        { "job\t60\tcompleted\tfailure\tAuxiliary (tier1-problem.yml) / correctness (native)", ",tier1-problem,", "a failed auxiliary job" },
+        { "job\t60\tcompleted\tcancelled\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "a cancelled auxiliary job" },
+        { "job\t60\tin_progress\t-\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "an auxiliary job still running" },
+        { "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host harness regression tests", ",", "an auxiliary workflow that ran though the selector didn't name it" },
+        { NULL, "", "no selector list" },
+        { NULL, ",bogus,", "an unknown auxiliary workflow" },
+        { NULL, ",selfhost,build,", "auxiliary workflows out of order" },
+        { NULL, ",build,build,", "an auxiliary workflow named twice" },
+        { NULL, "build", "a list without its commas" },
+        { NULL, ",build", "a list without its last comma" },
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(short_of); i += 1)
+    {
+        nightly_expect(test, !nightly_test_coverage_called("", NULL, short_of[i].extra, short_of[i].auxiliary), short_of[i].what);
+    }
+    char failed[1024];
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tfailure\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (x86-64)", selfhost);
+    nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "one failed job among an auxiliary workflow's successful ones");
+    nightly_expect(test, !nightly_test_coverage_called("x86-64 none 1", NULL, build, ",build,"), "a called auxiliary workflow doesn't make up for a missing shard");
+    nightly_expect(test, nightly_test_coverage_called("", NULL, "job\t61\tcompleted\tfailure\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native)", ","), "another run's auxiliary jobs don't count");
+}
+
+static bool nightly_test_stale(const char* input, uint64_t own, const char* expected)
+{
+    char* copy = nightly_allocate(strlen(input) + 1, 1);
+    memcpy(copy, input, strlen(input));
+    NightlyText text = {
+        .data = copy,
+        .length = strlen(input),
+    };
+    char* written = NULL;
+    size_t length = 0;
+    FILE* output = open_memstream(&written, &length);
+    const bool valid = nightly_stale(text, own, output);
+    fclose(output);
+    const bool same = expected != NULL ? valid && strcmp(written, expected) == 0 : !valid && length == 0;
+    free(written);
+    free(copy);
+    return same;
+}
+
+// Invalidated candidates' runs: cancelled when their branch is gone or moved and their commit isn't on main; kept
+// otherwise, and nothing at all on input it can't read.
+static void nightly_test_stale_candidates(NightlyTest* test)
+{
+    nightly_expect(test, nightly_test_stale("candidate\t70\tgone\tunmerged\n", 99, "cancel\t70\n"), "a dropped candidate's run is cancelled");
+    nightly_expect(test, nightly_test_stale("candidate\t71\tmoved\tunmerged\n", 99, "cancel\t71\n"), "a candidate rebuilt on the same base: its old run is cancelled");
+    nightly_expect(test, nightly_test_stale("candidate\t72\tgone\tmerged\n", 99, "keep\t72\tit merged\n"), "a merged candidate's run is kept");
+    nightly_expect(test, nightly_test_stale("candidate\t73\tpresent\tunknown\n", 99, "keep\t73\tits candidate is queued\n"), "a queued candidate's run is kept");
+    nightly_expect(test, nightly_test_stale("candidate\t74\tunknown\tunknown\n", 99, "keep\t74\tits branch is unknown\n"), "a failed branch read cancels nothing");
+    nightly_expect(test, nightly_test_stale("candidate\t75\tgone\tunknown\n", 99, "keep\t75\tunknown whether it merged\n"), "a failed ancestry read cancels nothing");
+    nightly_expect(test, nightly_test_stale("candidate\t99\tgone\tunmerged\n", 99, "keep\t99\tthis run\n"), "this run is never cancelled");
+    nightly_expect(test, nightly_test_stale("", 99, ""), "no candidates");
+    nightly_expect(test, nightly_test_stale("candidate\t70\tgone\tunmerged\ncandidate\t73\tpresent\tunknown\n", 99, "cancel\t70\nkeep\t73\tits candidate is queued\n"), "several candidates");
+    static const char* const unreadable[] = {
+        "candidate\t70\tgone\n",
+        "candidate\t70\tdeleted\tunmerged\n",
+        "candidate\t70\tgone\tmaybe\n",
+        "candidate\tx\tgone\tunmerged\n",
+        "run\t70\tgone\tunmerged\n",
+        "candidate\t70\tgone\tunmerged\ncandidate\t70\tpresent\tunknown\n",
+        "candidate\t70\tgone\tunmerged\ncandidate\t71\tgone\n",
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(unreadable); i += 1)
+    {
+        nightly_expect(test, nightly_test_stale(unreadable[i], 99, NULL), "unreadable candidates cancel nothing");
+    }
 }
 
 // The merge queue (#1430): a candidate's coverage, job by job; its runs' hosted reuse, records, rows and ledger lines;
@@ -4211,6 +4430,8 @@ static bool nightly_test_coverage(const char* odd, const char* conclusion, const
 static void nightly_test_queue(NightlyTest* test)
 {
     nightly_expect(test, nightly_test_coverage("", NULL, NULL), "a full candidate's coverage is complete");
+    nightly_test_auxiliary(test);
+    nightly_test_stale_candidates(test);
     static const struct
     {
         const char* odd;
@@ -4301,6 +4522,24 @@ static void nightly_test_queue(NightlyTest* test)
     nightly_expect(test, row.outcome != NIGHTLY_OUTCOME_DEFERRED, "without a record, a failed aggregate is no pass");
     row = nightly_harvest_row(&facts, &facts.runs[1], NULL);
     nightly_expect(test, row.outcome == NIGHTLY_OUTCOME_BLOCKED_HOSTED, "without a record, a failed shard blocks it");
+    // The aggregate's name before #1430 renamed it, in an earlier run's jobs, and the alias that reports it during
+    // the move: the renamed aggregate decides wherever it ran.
+    {
+        NightlyBuffer* named = nightly_allocate(1, sizeof(NightlyBuffer));
+        nightly_test_run(named, 63, "merge_group", "completed", "success", a, 1, 2, "x");
+        nightly_test_candidate(named, 63, "", NULL);
+        nightly_append(named, "job\t63\tcompleted\tsuccess\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE);
+        nightly_test_run(named, 64, "merge_group", "completed", "failure", a, 1, 2, "x");
+        nightly_test_candidate(named, 64, "", NULL);
+        nightly_append(named, "job\t64\tcompleted\tfailure\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB);
+        nightly_append(named, "job\t64\tcompleted\tsuccess\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE);
+        NightlyFacts earlier = nightly_facts_new();
+        const bool parsed = nightly_facts_parse(&earlier, nightly_buffer_text(named));
+        nightly_expect(test, parsed && nightly_harvest_row(&earlier, &earlier.runs[0], NULL).outcome == NIGHTLY_OUTCOME_DEFERRED, "an earlier run's aggregate under its old name passes a candidate");
+        nightly_expect(test, parsed && nightly_harvest_row(&earlier, &earlier.runs[1], NULL).outcome != NIGHTLY_OUTCOME_DEFERRED, "the renamed aggregate decides over its alias");
+        nightly_facts_free(&earlier);
+        free(named);
+    }
     // Its ledger line reads back as written.
     row = nightly_harvest_row(&facts, &facts.runs[0], NULL);
     char* data = NULL;
@@ -4616,9 +4855,21 @@ int main(int argc, char** argv)
         {
             nightly_fatal("coverage needs --run ID", NULL);
         }
+        const char* auxiliary = nightly_required(argc, argv, "--auxiliary");
         NightlyFacts facts = nightly_load_facts("-");
-        status = nightly_coverage(&facts, run, stdout) ? 0 : 1;
+        status = nightly_coverage(&facts, run, auxiliary, stdout) ? 0 : 1;
         nightly_facts_free(&facts);
+    }
+    else if (strcmp(command, "stale") == 0)
+    {
+        uint64_t run = 0;
+        if (!nightly_id(nightly_required(argc, argv, "--run"), &run))
+        {
+            nightly_fatal("stale needs --run ID", NULL);
+        }
+        NightlyText input = nightly_read("-");
+        status = nightly_stale(input, run, stdout) ? 0 : 1;
+        free(input.data);
     }
     else if (strcmp(command, "record") == 0)
     {

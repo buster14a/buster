@@ -223,8 +223,14 @@ correctness (about 110 s) and the runner hook (1 to 92 s, including lock waits)
 are the other costs. `tests/ci/caches.sh` tests each cache's hit, miss,
 corruption and changed input.
 
-The hosted `qualification` job retains the ruleset's existing required context,
-`Build and execute on Ryzen 7 9700X`. It requires the `evidence` job's success,
+The hosted `qualification` job is the ruleset's required context,
+`Integration qualification` (#1430). Until then it was named
+`Build and execute on Ryzen 7 9700X`, which no longer described a job that
+qualifies most runs on hosted runners alone. The `qualification-alias` job
+reports the old name until main's ruleset requires the new one: the
+replacement is installed and observed first, and the ruleset switches names in
+the same edit that turns on the merge queue, so no interval is unprotected. It
+requires the `evidence` job's success,
 successful hosted tests and fuzzing, and the hardware job: on a push to main
 before the nightly mode and on the daily and dispatched runs, native
 correctness and the measurements. A pull request, draft or ready, never runs
@@ -240,7 +246,7 @@ the nightly mode retired.
 A push no longer reuses its pull request's native qualification: that run has
 none, and the `host-identity` job is gone. Before the nightly mode, every push
 to main runs native correctness on the landed commit. In the nightly mode it
-runs none in the daytime, and has no `Build and execute on Ryzen 7 9700X`
+runs none in the daytime, and has no `Integration qualification`
 context: its state's nightly run qualifies it on the 9700X, recorded in the
 ledger.
 
@@ -703,7 +709,26 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   stop the fuzz campaigns, nor a fuzz failure the test rows, and the aggregate
   reports when both have ended. In the full dispatch 43261314947 the longest
   campaign (`frontend`) took 19 minutes and the longest test shards about 21.
-- **Aggregate.** `Build and execute on Ryzen 7 9700X` runs for a candidate.
+- **Auxiliary workflows.** A candidate also calls `build.yml`, `build-pgo.yml`,
+  `selfhost.yml` and `tier1-problem.yml`, each whole (`workflow_call`, job
+  `auxiliary-NAME`), where its own change touches a path that workflow's
+  `pull_request` trigger lists. Its own change is its merge against its base,
+  `HEAD^1..HEAD`. The selector reads each list from the workflow itself
+  (`changes_auxiliary_decide`), so each rule is written once. Its `auxiliary`
+  output names them, as `,NAME,NAME,` or `,` for none. They start after the
+  policy job. A pull request still runs them from its own triggers.
+- **Invalidated candidates.** GitHub never cancels a candidate's run, as the
+  drill showed. When it drops a candidate, or rebuilds the entries behind a
+  failed one, it deletes the candidate's branch, or points the branch at the
+  rebuild when the base is the same. So each candidate's `stale` job
+  (`nightly.sh stale`, which `nightly stale` decides) cancels the workflow's
+  unfinished `merge_group` runs whose branch no longer names their commit and
+  whose commit isn't on main. A rebuild starts a candidate, so the runs it
+  replaces go as it starts. The job never gates. A read that fails cancels
+  nothing, and neither does a merged run, which may still be uploading its
+  record. A candidate dropped from the end of the queue has no rebuild behind
+  it, so its run goes on to the end.
+- **Aggregate.** `Integration qualification` runs for a candidate.
   It passes only when the hosted rows, the fuzz campaigns, the policy job and
   the coverage step all succeeded and the 9700X was skipped. There is no
   documentation exemption.
@@ -713,6 +738,9 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   - It requires every shard 1..N of every row and sanitizer (one N per row),
     the vector pool's verdict and each fuzz campaign to have completed
     successfully.
+  - Each auxiliary workflow the selector named must have run at least one job,
+    and every job it ran must have succeeded. One the selector didn't name must
+    have run none. A missing list (no selector) fails.
   - A missing, skipped, cancelled, failed or timed-out job fails it, and so do
     shard counts that disagree.
   - It reads the jobs up to three times, 15 s apart, since the API may not
@@ -727,30 +755,36 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   - `deferred` when the aggregate passed it: its hardware is the window's;
   - `blocked-hosted` when a hosted job failed;
   - `interrupted` otherwise.
-- **Nightly credit.** GitHub doesn't document whether main is fast-forwarded
-  to the commit the queue tested. When it is, that run is the state's own:
+- **Accounting.** `ci-timings.yml`'s daily report (`timings.sh`,
+  `timings --queue`) covers the latest 100 completed candidate runs. It
+  splits each one by what became of its candidate: merged (its commit is on
+  main), passed but invalidated, failed, or cancelled. For each it gives the
+  candidates and the runner-minutes (the sum of the jobs' own times), the
+  share spent on candidates that didn't merge (failures and rebuild waste),
+  and the merged candidates' median and p95 wall time.
+- **Nightly credit.** The drill (12–13 November, #1430) showed that main is
+  fast-forwarded to the exact commit the queue tested, with the same SHA and
+  tree. So that run is the state's own:
   - the harvest credits its row to the state;
   - its plain rows qualify the state for the window, with no hosted
     preparation;
   - a backlog dispatch reuses them.
 
-  When main's commit differs, nothing credits the run, and the nightly runs
-  the state's hosted rows itself. Once any candidate's run has been credited,
+  Should main's commit ever differ, nothing would credit the run, and the
+  nightly would run the state's hosted rows itself. Once any candidate's run has been credited,
   the report lists every later state without a passing candidate run of its
   own commit as a coverage gap, and the coordinator raises an alert for it.
 
-Still to come, each tracked in #1430:
+Main's own runs alone save the hosted input caches every branch reads: a
+push, a dispatch or a scheduled run on main. A candidate's caches would belong
+to its branch alone, and a nightly dispatch runs on a `nightly/` branch. Once
+pushes run nothing, `selfhost.yml`'s daily schedule keeps the caches fresh,
+since it calls `prepare-hosted-tools.yml`. The apt closure's key changes with
+each runner image.
 
-- The ruleset that requires the queue, and removing the `push` triggers in the
-  same change. Both wait for the capacity gate (#2030, #2031, #2034) and the
-  owner. AGENTS.md's main-push sentence changes with them.
-- A drill on a disposable branch. It checks that main keeps the candidate's
-  SHA, the queue branch's name format, and recovery from a failure.
-- Cancelling invalidated candidates. GitHub doesn't cancel their runs.
-- Integrating `build.yml`, `build-pgo.yml`, `selfhost.yml` and
-  `tier1-problem.yml` under applicability rules.
-- Reporting queue latency and rebuild waste (#2034), and seeding the hosted
-  input caches once pushes stop (#2275).
+Still to come, tracked in #1430: the ruleset that requires the queue, and the
+change that removes the checking workflows' `push` triggers. The two land
+together, and AGENTS.md's main-push sentence changes with them.
 
 ## Nightly main measurements
 
