@@ -232,6 +232,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct S { int x; };\n"
         "void f(void) { struct S s = ({ (void)(_Atomic int){1}; 3; }); (void)s; }\n"
         "void g(void) { _Atomic struct S s = ({ (_Atomic struct S){2}; }); (void)s; }\n",
+        // An outer atomic typedef's a.k.a. keeps the first value typedef, through chains on either side of _Atomic.
+        "typedef int I;\ntypedef I II;\ntypedef _Atomic(II) A;\ntypedef A AA;\n"
+        "typedef struct S { int x; } S;\ntypedef S SS;\ntypedef _Atomic(SS) AS;\n"
+        "AA a = (AA){1};\nAS s = {2};\nint after = 1 + (void)0;\n",
         // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
         // from the type attributes' session).
         "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",

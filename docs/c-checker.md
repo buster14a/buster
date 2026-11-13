@@ -10969,7 +10969,9 @@ enables, which this checker doesn't all give.
   `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. It doesn't look inside an `_Atomic`
-  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`). A typedef'd array's element keeps its
+  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`), and an outer
+  typedef's a.k.a. retains the first value typedef in its chain (`typedef
+  _Atomic(S) AS` prints `'AS' (aka '_Atomic(S)')`, #2441). A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
   the specifiers write again beside a qualified typedef prints over its name
   (`const CI twice[1]`'s `'const CI[1]' (aka 'const int[1]')`): the operand's
