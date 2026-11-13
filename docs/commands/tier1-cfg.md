@@ -39,6 +39,36 @@ requirements. [Command index](README.md).
   The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
   (#179)" have the contract and what is pending.
 
+## Edge-local phi storage (#1384)
+
+Phi operands passed only by their defining block, with no ordinary use outside
+it, are excluded from global liveness. Their intervals still reach that block's
+exit, and the forward boundary sweep retains their edge-move sources. Remote
+phi occurrences enter global liveness, including when the same value also has
+local occurrences. The four dense matrices retain the existing scalar/vector
+solver; two phi scans replace the fifth `passed` matrix.
+
+`test-tier1-cfg` checks the local/global partition, duplicate local occurrences,
+remote occurrences and uses, self-phis, undefined operands, sibling edges,
+spills, rematerialization and fixed clobbers in all three register classes.
+Small fixtures run the allocator, independent verifier, certificate and
+mutation checks. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
+within 8 MiB of scratch with zero or one global value, and every local operand
+must keep exactly its home-tail interval. These are capacity and semantic
+checks, not timing or RSS measurements.
+
+`tier1_cfg_edge_ordinals` maps each successor edge to the source's ordinal in
+the target's original predecessor row in `O(blocks + edges)`. Allocation keeps
+this column with the preparation whenever phis exist. Tests compare it against
+the original rows, including shuffled rows, self edges and empty graphs, and
+check rollback at each allocation failure. The mapping removes a repeated
+predecessor search at large joins without changing phi operand associations.
+
+`cross_block_values` counts genuinely nonlocal values, `edge_local_values`
+counts excluded phi operands, and `liveness_bytes` counts the four dense
+matrices only. The general nonlocal case remains dense; see the allocation
+guide for its storage formula and scope.
+
 ## One allocation for two problems (#2538)
 
 `tier1_cfg_allocate` is three functions in a row: `tier1_cfg_prepare`

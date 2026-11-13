@@ -821,7 +821,8 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
                                    bool input_verified)
 {
     (void)vector;
-
+    const bool rename_vector = BUSTER_VECTOR_PATH(vector);
+    bool dense = false;
     const uint64_t output_length = output == 0 ? 0 : output->length;
     const uint64_t scratch_length = scratch == 0 ? 0 : scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
@@ -858,15 +859,16 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        // Match the builder's combined reserved-frontier/temporary-matrix cap, a memory bound; and past
-        // BUSTER_SSA_IR_VECTOR_CELLS, the measured crossover, the vector path costs more than it saves (#787). Both
-        // larger cases use the independent scalar constructor. A verified promotion, a test's, takes the vector
-        // constructor past the crossover too, so that it is checked on every function its memory bound admits.
+        // Bound the complete dense workspace as well as the frontier matrix. Past BUSTER_SSA_IR_VECTOR_CELLS,
+        // the measured crossover, dense vector construction costs more than it saves (#787). Above the storage
+        // cap use the bounded predecessor reader, with either host's renaming kernel. Verified promotion also
+        // exercises dense vector construction past the crossover wherever the complete memory bound admits it.
         const uint64_t cells = (uint64_t)input->block_count * work.source.local_count;
-        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (verified != 0 || cells <= BUSTER_SSA_IR_VECTOR_CELLS);
+        dense = ssa_dense_fits(&work.source);
+        vector = dense && BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (verified != 0 || cells <= BUSTER_SSA_IR_VECTOR_CELLS);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
-        check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector)));
+        check.error = ssa_ir_error(ssa_prepare_path(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector), dense));
     }
     if (check.error == IR_OK)
     {
@@ -875,11 +877,21 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     if (check.error == IR_OK)
     {
         ssa_ir_accesses(&work);
-        check.error = ssa_ir_error(ssa_definitions(&work.work));
+        if (dense)
+        {
+            check.error = ssa_ir_error(ssa_definitions(&work.work));
+        }
     }
     if (check.error == IR_OK)
     {
-        check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
+        if (dense)
+        {
+            check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
+        }
+        else
+        {
+            check.error = ssa_ir_error(ssa_construct_bounded(&work.work, rename_vector));
+        }
     }
     if (check.error == IR_OK)
     {

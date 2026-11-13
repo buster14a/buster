@@ -340,7 +340,7 @@ static const char check_test_tier1_variadic_source[] =
     "    va_end(ap);\n"
     "    return n;\n"
     "}\n"
-    "static long tier1_bump(long x)\n"
+    "__attribute__((noinline)) static long tier1_bump(long x)\n"
     "{\n"
     "    return x * 5 + 1;\n"
     "}\n"
@@ -2213,7 +2213,8 @@ static bool check_test_tier1_variadic_overflow(const char* path, const char* nam
 // The variadic definitions' fixture (#789): by --tier1, every variadic definition Tier 1's, by each path with and without
 // rematerialization, and its program prints what clang -O0's and Tier 0's builds of it print. Each definition that calls
 // va_start saves the argument registers in its prologue; the one that doesn't has no save area. tier1_late pushes the
-// callee-saved register its call's crossing value takes, and its overflow area's address counts the push.
+// callee-saved register its call's crossing value takes, and its overflow area's address counts the push: its callee is
+// noinline, so that --tier1's inlining (#2541) keeps the call.
 static void check_test_driver_tier1_variadic(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     enum
@@ -5483,8 +5484,11 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
 // noinline one, which stays a call, beside them. #2541's helpers with control flow, whose blocks the general splice
 // places at their calls: two returns, a loop, a switch, a vector by value chosen by a branch, a local array in a loop,
-// and one that calls two of them. By each path, with --verify's certificates, the build inlines (the report's
-// `inlined`), and runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4.
+// and one that calls two of them. #2541 step 1's small class, static functions without an inline attribute, from their
+// summaries: one with two returns, one with a loop that calls it (its summary expands it first), and two that call each
+// other, which stay calls. By each path, with --verify's certificates, the build inlines (the report's `inlined`), and
+// runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4; and by each path, its object
+// by one lane is its object by eight.
 static const char check_test_tier1_inline_source[] =
     "#include <immintrin.h>\n"
     "#include <stdint.h>\n"
@@ -5498,6 +5502,11 @@ static const char check_test_tier1_inline_source[] =
     "static inline __attribute__((always_inline)) __m128i pick(__m128i a, __m128i b, int k) { if (k & 1) return _mm_add_epi32(a, b); return _mm_xor_si128(a, b); }\n"
     "static inline __attribute__((always_inline)) long walk(const int* p, int n) { int w[4] = { 1, 2, 3, 4 }; long s = 0; for (int i = 0; i < n; i += 1) s += p[i] * w[i & 3]; return s; }\n"
     "static inline __attribute__((always_inline)) int twice(int x) { return clamp(x, 0, 9) + classify(x); }\n"
+    "static int bounce(int x) { if (x & 1) return x * 3 + 1; return x / 2; }\n"
+    "static long tally(const int* p, int n) { long s = 0; for (int i = 0; i < n; i += 1) s += bounce(p[i]); return s; }\n"
+    "static int ping(int n);\n"
+    "static int pong(int n) { return n <= 0 ? 0 : 1 + ping(n - 1); }\n"
+    "static int ping(int n) { return n <= 0 ? 0 : 2 + pong(n - 1); }\n"
     "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
     "{\n"
     "    __m512i x = _mm512_add_epi32(a, b);\n"
@@ -5537,6 +5546,13 @@ static const char check_test_tier1_inline_source[] =
     "    _mm_storeu_si128((__m128i*)lanes, v);\n"
     "    return r + walk(data, 8) + lanes[0] + lanes[3];\n"
     "}\n"
+    "__attribute__((noinline)) long small(int n)\n"
+    "{\n"
+    "    int d[6] = { 7, 12, 5, 30, 1, 8 };\n"
+    "    long r = tally(d, 6);\n"
+    "    for (int i = 0; i < n; i += 1) r += bounce(i * 5 + 3) + ping(i & 7);\n"
+    "    return r;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    uint8_t buffer[640];\n"
@@ -5546,7 +5562,7 @@ static const char check_test_tier1_inline_source[] =
     "    __m512i c = _mm512_set1_epi8(9);\n"
     "    long long out[8];\n"
     "    _mm512_storeu_si512(out, mix(a, b, c));\n"
-    "    printf(\"%llx %llx %llu %lld %lld %lld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9), control(13), control(4));\n"
+    "    printf(\"%llx %llx %llu %lld %lld %lld %ld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9), control(13), control(4), small(11));\n"
     "    return 0;\n"
     "}\n";
 
@@ -5595,15 +5611,34 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
         uint64_t internal = UINT64_MAX;
         const bool reported = built && check_test_tier1_field(text, "inlined", &inlined) && check_test_tier1_field(text, "internal_failures", &internal);
         free(text);
-        // 34: the straight-line wrappers' and the struct helper's calls are 26, which the straight-line splice alone took
-        // (main before #2541), and the helpers with control flow's are 8.
-        snprintf(message, sizeof(message), "--tier1 %s the wrappers', the struct helper's and the control flow helpers' calls, not the noinline one's (build %u)", inlining ? "inlines" : "keeps",
-                 build);
-        check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 34 : inlined == 0), message);
+        // 37: the straight-line wrappers' and the struct helper's calls are 26, which the straight-line splice alone took
+        // (main before #2541), the always_inline helpers with control flow's are 8, and the small class's 3: bounce in
+        // tally's summary, and tally and bounce in small.
+        snprintf(message, sizeof(message), "--tier1 %s the wrappers', the struct helper's, the control flow helpers' and the small ones' calls (build %u)", inlining ? "inlines" : "keeps", build);
+        check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 37 : inlined == 0), message);
         char actual[256] = { 0 };
         snprintf(message, sizeof(message), "the inlining fixture by --tier1 runs as clang -O0's build does (build %u)", build);
         check_test_expect(test, built && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
         unlink(program);
+    }
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        // The unit's summaries are built by whichever lane needs each first (#2541): the object is the same by any count.
+        char objects[2][512];
+        bool compiled = true;
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            snprintf(objects[k], sizeof(objects[k]), "%s/tier1-inline-lanes-%u.o", directory, k);
+            char* arguments[12] = { (char*)executable, "--tier1", "-march=x86-64-v4", "--lanes", k == 0 ? "1" : "8", "-c", "-o", objects[k], unit, path != 0 ? "--scalar" : NULL, NULL };
+            text = NULL;
+            compiled = check_test_driver_spawn(arguments, &text) == 0 && compiled;
+            free(text);
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "the inlining fixture's --tier1 object by one lane is its object by eight (%s path)", path != 0 ? "scalar" : "vector");
+        check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), message);
+        unlink(objects[0]);
+        unlink(objects[1]);
     }
     unlink(reference);
     unlink(unit);

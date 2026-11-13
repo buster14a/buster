@@ -67,6 +67,10 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   lines), and appends them to `/var/lib/buster-9700x/busy.log`. Keep those
   lines in a record, and trace a listed process as "A command by hand" says.
   Nothing is printed when there are none (#2555).
+- `./build.sh` there builds with the 9700X job's own toolchain, the official
+  Clang 23.1.4 staged in `~/.cache/buster/benchpress-clang/` and CMake and
+  Ninja beside it, not the host's clang 23.1.1 ([the
+  toolchain](build.md#the-toolchain), #2628); build Release for every timing.
 - Keep a task's trees and results in `~/buster-fast-bench/<issue>-<agent>/`
   (`1282-claude`, `615-codex`): a clone of the repository at the commit it
   measures, its scripts and its results. Don't build in another session's

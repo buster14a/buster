@@ -63,6 +63,26 @@ static void check_test_warning_policy(CheckTest* test)
         check_test_expect(test, actual.severity == cases[i].expected, "sparse warning options follow independently observed Clang group and global policy");
     }
     const PPOptions empty = { 0 };
+    static const struct
+    {
+        const char* option;
+        CheckWarningSeverity mapped;
+    } atomic[] = {
+        { NULL, CHECK_WARNING_ERROR },
+        { "-w", CHECK_WARNING_ERROR },
+        { "-Wno-error=atomic-access", CHECK_WARNING_WARNING },
+        { "-Wno-atomic-access", CHECK_WARNING_IGNORE },
+        { "-Werror=atomic-access", CHECK_WARNING_ERROR },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(atomic); i += 1)
+    {
+        const PPOptions options = {
+            .semantic_warning_options = &atomic[i].option,
+            .semantic_warning_option_count = atomic[i].option != NULL ? 1 : 0,
+        };
+        const CheckWarningCommandLine actual = check_warning_command_line(&options, CHECK_WARNING_ID_ATOMIC_ACCESS, false, true);
+        check_test_expect(test, actual.mapped == atomic[i].mapped, "atomic member access has Clang's default-error, demotion and suppression mappings");
+    }
     for (uint32_t id = CHECK_WARNING_ID_NON_LITERAL_NULL; id < CHECK_WARNING_ID_COUNT; id += 1)
     {
         const CheckWarningCommandLine enabled = check_warning_command_line(&empty, id, false, false);

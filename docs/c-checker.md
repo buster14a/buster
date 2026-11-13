@@ -304,7 +304,14 @@ needs a pointer, is refused), written or a typedef's, with clang's
 (`-Wunderlying-cv-qualifier-ignored`, #1952) once, at the base's first token
 that isn't a qualifier; they aren't the declaration's own, so a declaration of
 the enum alone gives no "'const' ignored on this declaration" for them. An
-integer type of any width but `_BitInt` takes it. GNU attributes among the base's specifiers are the base type's, as
+integer type of any width but `_BitInt` takes it. A formed non-integral base
+reports "non-integral type 'T' is an invalid underlying type" with its full
+typedef spelling, at the retained type specifier (#2492). Clang's recovered
+enum stays fixed with `int` as its base, so its body and later declarations
+are still checked. An atomic base is stripped first, with
+`-Wunderlying-atomic-qualifier-ignored` (an error by default, demotable or
+suppressible); CV warnings precede an invalid-base error too.
+GNU attributes among the base's specifiers are the base type's, as
 clang has them: ignored, but one that would make it a vector's (`vector_size`,
 `ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
 declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
@@ -1925,6 +1932,28 @@ initializer-field fixtures (`check_test_driver_initializer_fields`) compare
 each with clang on both paths, `-fsyntax-only` and `-c`. Differences left: an
 array of unknown bound's error still stops the unit's later initializers'
 checks, as an unknown field's in one does.
+
+An atomic object's braced initializer, including a compound literal's, retains
+its atomic type and the opening brace in `CHECK_INIT_ATOMIC_BRACES` (#2441,
+item 5). The driver prints "illegal initializer type 'T'" there, preserving
+typedef spelling. A compound literal with this error does not produce another
+error from the enclosing initializer that uses it; independent later
+initializers are still diagnosed. A GNU statement expression whose sole
+statement is the rejected literal, through parentheses, is an exception:
+Clang drops the invalid statement and gives its empty body a void value. The
+diagnostic scan records that separate value in `CheckInitFailure.recovered_type`
+and the driver uses the ordinary initialization-conversion wording, preserving
+the target's spelling. Its completion is the enclosing initializer's end, so
+this error follows the literal's own error despite its earlier caret location.
+The checked graph and initializer plans remain unchanged and rejected. A
+preceding usable statement makes a rejected final statement invalidate the
+whole statement expression instead; this exception does not apply then. An
+earlier rejected statement does not invalidate an expression's separate valid
+final value. The semantic-recovery fixtures compare full
+diagnostics with Clang for scalars, records, unions, typedefs, member and array
+initializers, empty-body recovery and a preceding-statement control on both
+paths and with deferred bodies. Atomic-brace errors during
+unknown-array-bound inference still use its generic declaration diagnostic.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
@@ -5273,11 +5302,14 @@ writes again where the original has it publishes its deferred warnings before
 the parse error, and one the error left open after it, without its flow
 analysis (`check_driver_flushed_bodies`) or `-Wreturn-type`. A reading's
 fresh error at a synthetic or incomplete statement isn't taken, and nor is a
-program failure there. `c_check_repaired_view_driver_test.c` compares
-fixtures with clang 23 as the structural ones are. Differences left: an
-unused variable of a scope the parse error leaves open is still given
-(clang's isn't), and one of a body the repair closes again publishes after
-the parse error; both predate the repaired view's common warnings.
+program failure there. Scope-pop unused-variable and label events
+require an original scope closer (#2515); their publication uses its original
+lookahead, so a closed body's warnings precede a later parse error and a scope
+the error leaves open has none. Unused parameters retain their function-end
+warning even when its closing brace is missing. `CheckRepair.original_closed` supplies the
+same closure boundary to these events and `CheckCommonView`.
+`c_check_repaired_view_driver_test.c` compares fixtures with clang 23 as the
+structural ones are, including unused-variable suppression and promotion.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -5402,12 +5434,16 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   its uses, so a name its complete declarations before the error don't declare
   the whole unit doesn't either, and a graph error past the name (`x = 1, y =
   x()`'s called `int`, `3 + (void)0`'s operands) is clang's, an unsized
-  array's list error giving way to its initializer's own. Differences left: an
-  error the prefix's first reading doesn't reach, which a unit without the
-  parse error takes from its second readings (`check_driver_rejected_common`,
-  which a prefix view doesn't run), such as one in a function body or a
-  struct's initializer list after the name, and one past the parse error
-  (#2509).
+  array's list error giving way to its initializer's own. Complete prefix
+  declarations also take the rejected unit's subsequent readings
+  (`check_driver_rejected_common`, #2509), including function bodies and
+  aggregate initializers. A diagnosed unknown type whose specifier and
+  declaration tree survive is recovered as `int` in the private view; it
+  does not cut off the declarations after it. Its declaration remains invalid:
+  the existing invalid-declaration path skips initializer conversions and
+  quiets its invalid uses, with that status carried across comma declarators.
+  An actual structural error
+  still cuts the view, and the original error always rejects the unit.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5437,7 +5473,7 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   reads it as `int` (`Parser.recovered_parameter_types`); where a unit's first
   error is one, the driver takes that view, with every declaration before the
   first other error, before a repair view, which would end at its declaration
-  (`check_prefix_parameter_view`), and the recovery rounds read past it. The
+  (`check_prefix_type_view`), and the recovery rounds read past it. The
   reader searches each such `int` whose source still spells the name, among the
   declarations visible there, a block's own typedefs too
   (`check_input_parameter_typo`, `check_typo_parameter`), and lists what it
@@ -5639,9 +5675,7 @@ Still stopping the reader:
 
 - a storage class's conflict (`register _Thread_local int r;` in a block);
 - a type of no keyword dropped in an operand reader's type name
-  (`typeof(int typeof(int))`);
-- an enum's base of no integer type (`enum E : float`, clang's "non-integral
-  type 'float' is an invalid underlying type").
+  (`typeof(int typeof(int))`).
 
 Error-free lists never reach this. The semantic-recovery fixtures cover each
 kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
@@ -10833,9 +10867,10 @@ enables, which this checker doesn't all give.
     them once every argument is built (#2481): each error is published at the
     call's token with the warnings (`check_driver_pointer_arguments`), and
     each takes its argument's first token's place among them
-    (`pp_diagnostic_suborder`). Still apart: a parenthesized argument's
-    conversion diagnostics are at its first token inside the parentheses,
-    where clang's are at its `(`;
+    (`pp_diagnostic_suborder`). Each conversion uses the whole argument's
+    beginning, including its enclosing parentheses (#2521,
+    `check_semantic_argument_begin`); the argument's inner expressions keep
+    their own diagnostic locations;
   - the types as written: an array's and a function's unconverted, a qualified
     lvalue's qualified, with their typedefs;
   - clang's fix-it words (`check_driver_conversion_hint`,
@@ -10951,7 +10986,9 @@ enables, which this checker doesn't all give.
   `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. It doesn't look inside an `_Atomic`
-  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`). A typedef'd array's element keeps its
+  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`), and an outer
+  typedef's a.k.a. retains the first value typedef in its chain (`typedef
+  _Atomic(S) AS` prints `'AS' (aka '_Atomic(S)')`, #2441). A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
   the specifiers write again beside a qualified typedef prints over its name
   (`const CI twice[1]`'s `'const CI[1]' (aka 'const int[1]')`): the operand's
@@ -11219,8 +11256,20 @@ else warns "#pragma options align=reset failed: stack empty". A malformed one
 is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
 'align' following '#pragma options'", "expected '='", "expected identifier",
 "invalid alignment option", "extra tokens"), as the options and pragmas map
-it. `mac68k`, clang's error on this target, is refused by name, as are other
-unsupported semantic effects.
+it. `mac68k` gives clang's target error without changing the stack; later
+declarations are still checked, and an emitting command preserves any existing
+output after the error (#2449). This error cannot be suppressed by warning
+options or diagnostic pragmas. The driver merges it with other retained pragma
+diagnostics in source order, including after a parse error.
+On a failed parse, the original-token view retains this state-free error at
+proven declaration, statement and record-member boundaries without reading the
+discarded parse tree or reconstructing packing state. It excludes expression,
+initializer and enum interiors, missing-semicolon lookaheads, and ambiguous
+boundaries from that semantic error history. The same view retains state-free
+alignment syntax warnings wherever they occur, including when recovery skips a
+nearby annotation, and appends their specific messages and carets through the
+ordinary lexical warning events. Only histories with a nonzero `error_count`
+enter the driver's target-error merge.
 
 `#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
 `check_input_pack_align_warnings`) are clang's, whole output on both paths:

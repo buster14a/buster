@@ -3372,12 +3372,15 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
     const CheckGraph* graph = &program->input->graph;
     for (uint32_t i = 0; i < count; i += 1)
     {
+        // Each entry's node pushed without a branch (#892): an entry without one marks the marks' last slot, which names no
+        // node, and a node marked already is stored past the stack's top, which has room for one more. Tested an entry at a
+        // time, the push was missed at most of the entries it took on the 9700X.
         const uint32_t node = controls[i].node;
-        if (node != BUSTER_CHECK_NONE && nodes[node] != epoch)
-        {
-            nodes[node] = epoch;
-            stack[(*depth)++] = node;
-        }
+        const uint32_t mark = node != BUSTER_CHECK_NONE ? node : graph->count;
+        const bool fresh = (node != BUSTER_CHECK_NONE) & (nodes[mark] != epoch);
+        nodes[mark] = epoch;
+        stack[*depth] = node;
+        *depth += fresh;
         if (controls[i].kind == CHECK_CONTROL_ASM)
         {
             const CheckInputAsm* assembly = program->input->asm_statements + controls[i].target;

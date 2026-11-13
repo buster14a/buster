@@ -52,8 +52,168 @@ static const char check_driver_gnu_designator_source[] =
     "    return e[0] + r.a + s[1];\n"
     "}\n";
 
+static const char check_driver_atomic_access_source[] =
+    "struct A { int x; int y; };\n"
+    "_Atomic struct A a1;\n"
+    "_Atomic(struct A) *pa;\n"
+    "int f(void) { return a1.x + pa->y; }\n"
+    "int g(void) { return sizeof(a1.x); }\n"
+    "void h(void) { a1.y = 3; int q = undeclared; (void)q; }\n"
+    "int k(void) { return (&a1)->x; }\n"
+    "int u = sizeof(pa->x);\n";
+
+static const char check_driver_atomic_access_valid_source[] =
+    "struct A { int x; int y; };\n"
+    "union U { int x; double d; };\n"
+    "_Atomic(struct A) a;\n_Atomic(struct A) *p;\n_Atomic(union U) u;\n"
+    "_Atomic(struct A *) ordinary_pointer;\n"
+    "_Atomic(struct A) array[1];\n"
+    "extern _Atomic(struct A) incomplete[];\n"
+    "const _Atomic(struct A) fixed;\n"
+    "int f(void) { return a.x + p->y + u.x; }\n"
+    "void g(void) { a.y = 3; fixed.x = 2; }\n"
+    "int pointer(void) { return ordinary_pointer->x; }\n"
+    "int decayed(void) { return array->x; }\n"
+    "int incomplete_decay(void) { return incomplete->x; }\n"
+    "int size = sizeof(a.x);\n"
+    "int bound[sizeof(p->x)];\n"
+    "typedef __typeof__(p->x) Member;\n"
+    "_Static_assert(__builtin_types_compatible_p(Member, int), \"member type\");\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
+    {
+        .name = "atomic record accesses default to errors after the body's structural errors",
+        .source = check_driver_atomic_access_source,
+        .errors = 5,
+        .syntax_only = true,
+    },
+    {
+        .name = "C23 atomic record accesses default to deferred errors",
+        .source = check_driver_atomic_access_source,
+        .errors = 5,
+        .c23 = true,
+        .syntax_only = true,
+    },
+    {
+        .name = "atomic record accesses can be demoted independently of structural errors",
+        .source = check_driver_atomic_access_source,
+        .options = { "-Wno-error=atomic-access" },
+        .warnings = 4,
+        .errors = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "atomic record warning suppression keeps structural recovery",
+        .source = check_driver_atomic_access_source,
+        .options = { "-Wno-atomic-access" },
+        .errors = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "demoted atomic struct and union accesses retain their member types and compile",
+        .source = check_driver_atomic_access_valid_source,
+        .options = { "-Wno-error=atomic-access" },
+        .warnings = 7,
+    },
+    {
+        .name = "suppressed atomic accesses retain member types in code and unevaluated queries",
+        .source = check_driver_atomic_access_valid_source,
+        .options = { "-Wno-atomic-access" },
+    },
+    {
+        .name = "atomic member errors follow a file initializer's own constant error",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\nint use = a.x;\n",
+        .errors = 2,
+        .syntax_only = true,
+    },
+    {
+        .name = "an atomic member's constant address still queues its runtime diagnostic",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\nint *p = &a.x;\n",
+        .errors = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "atomic member lookup errors name the underlying record before the atomic diagnostic",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\nint f(void) { return a.missing; }\n",
+        .errors = 2,
+        .syntax_only = true,
+    },
+    {
+        .name = "nested ordinary members do not repeat an enclosing atomic access diagnostic",
+        .source = "struct B { int x; };\nstruct A { struct B b; };\n_Atomic(struct A) a;\n"
+                  "_Atomic(union U { int x; double d; }) u;\nint f(void) { return a.b.x + u.x; }\n",
+        .errors = 2,
+        .syntax_only = true,
+    },
+    {
+        .name = "atomic member diagnostics follow runtime reachability",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n_Atomic(struct A) *p;\n"
+                  "int f(int n) { if (0) return a.x; if (n) return p->x; return 0; a.x = 1; }\n"
+                  "int g(void) { return 0 && a.x; }\nint h(void) { return 1 ? 0 : p->x; }\n",
+        .errors = 3,
+        .syntax_only = true,
+    },
+    {
+        .name = "demoted atomic diagnostics retain CFG reachability in later bodies",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n_Atomic(struct A) *p;\n"
+                  "int f(int n) { if (0) return a.x; if (n) return p->x; return 0; a.x = 1; }\n"
+                  "int g(void) { return 0 && a.x; }\nint h(void) { return 1 ? 0 : p->x; }\n",
+        .options = { "-Wno-error=atomic-access" },
+        .warnings = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "a structural error flushes unreachable atomic member diagnostics",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n"
+                  "void f(void) { if (0) a.x = 0; int q = undeclared; (void)q; }\n",
+        .errors = 2,
+        .syntax_only = true,
+    },
+    {
+        .name = "atomic member diagnostic pragmas preserve ignored warning and error mappings",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n"
+                  "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Watomic-access\"\n"
+                  "int ignored(void) { return a.x; }\n#pragma clang diagnostic pop\n"
+                  "#pragma clang diagnostic warning \"-Watomic-access\"\nint warning(void) { return a.x; }\n"
+                  "#pragma clang diagnostic error \"-Watomic-access\"\nint error(void) { return a.x; }\n",
+        .warnings = 1,
+        .errors = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "quiet bodies skip their atomic queue while global addresses retain the default error",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n"
+                  "int f(void) { return a.x; }\nint *p = &a.x;\n",
+        .options = { "-w" },
+        .errors = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "a quiet source error pragma re-enables a global atomic access but not a valid body's queue",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n"
+                  "#pragma clang diagnostic error \"-Watomic-access\"\n"
+                  "int f(void) { return a.x; }\nint *p = &a.x;\n",
+        .options = { "-w", "-Wno-atomic-access" },
+        .errors = 1,
+        .syntax_only = true,
+    },
+    {
+        .name = "a global atomic error flushes a later quiet body's queued accesses",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\nint *p = &a.x;\n"
+                  "int f(void) { return 0 && a.x; }\n",
+        .options = { "-w" },
+        .errors = 2,
+        .syntax_only = true,
+    },
+    {
+        .name = "a prior common semantic error flushes a later atomic queue",
+        .source = "struct A { int x; };\n_Atomic(struct A) a;\n"
+                  "int f(int x, int y, int z) { return x < y < z; }\n"
+                  "int g(void) { return 0 && a.x; }\n",
+        .errors = 2,
+        .syntax_only = true,
+    },
     {
         // A failed static assertion's requirement and its operands' values (#1447, check_semantic_assert): the first
         // false term of a conjunction, literals printed as clang's StmtPrinter prints them (`2147483648U`, `'\x00'`,
@@ -1125,6 +1285,31 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "enum underlying type qualifiers disabled",
         .source = "enum H : const int { D };\n",
         .options = { "-Wno-underlying-cv-qualifier-ignored" },
+    },
+    {
+        .name = "enum underlying atomic qualifier is a default error",
+        .source = "typedef _Atomic(int) Atomic; enum E : _Atomic int { E0 }; enum F : Atomic { F0 };\n"
+                  "_Static_assert(sizeof(enum E)==4 && sizeof(enum F)==4, \"atomic base stripped\");\n",
+        .errors = 2,
+    },
+    {
+        .name = "enum underlying atomic qualifier can be demoted",
+        .source = "typedef _Atomic(int) Atomic; enum E : _Atomic int { E0 }; enum F : Atomic { F0 };\n"
+                  "_Static_assert(sizeof(enum E)==4 && sizeof(enum F)==4, \"atomic base stripped\");\n",
+        .options = { "-Wno-error=underlying-atomic-qualifier-ignored" },
+        .warnings = 2,
+    },
+    {
+        .name = "enum underlying atomic qualifier can be suppressed",
+        .source = "typedef _Atomic(int) Atomic; enum E : _Atomic int { E0 }; enum F : Atomic { F0 };\n"
+                  "_Static_assert(sizeof(enum E)==4 && sizeof(enum F)==4, \"atomic base stripped\");\n",
+        .options = { "-Wno-underlying-atomic-qualifier-ignored" },
+    },
+    {
+        .name = "enum underlying atomic qualifier stays an error under -w",
+        .source = "enum E : _Atomic int { E0 };\n",
+        .options = { "-w" },
+        .errors = 1,
     },
     {
         // An enum's fixed base in a declaration with a declarator (#2213): clang's -Welaborated-enum-base, an error by default,

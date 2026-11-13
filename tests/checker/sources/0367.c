@@ -1,0 +1,1 @@
+typedef int V __attribute__((vector_size(64)));V f(V a,int*p){return __builtin_ia32_alignd512(a,a,((*p)++,3));}

@@ -78,7 +78,8 @@ if [ -s "$output/locks.tsv" ]; then
         }' >> "$output/observations.tsv"
     done < "$output/locks.tsv"
 fi
-# The merge queue's candidates (#1430): each completed merge_group run, what became of its candidate (merged when its
+# The merge queue's candidates (#1430): each completed merge_group run of main's queue (not another branch's, such as
+# the drill's, whose candidates never land on main), what became of its candidate (merged when its
 # commit is on main; otherwise its own conclusion: passed but invalidated, failed or cancelled), its wall time from its
 # start to its last update, and the sum of its jobs' own times. Then its hosted jobs' waits for a runner (#2031), each
 # from its creation to its start, of the jobs a runner took (a skipped job, or one cancelled before it started, has
@@ -88,7 +89,7 @@ gh api "repos/$repository/actions/workflows/9700x.yml/runs?event=merge_group&sta
 jq -e '.workflow_runs | type == "array"' "$output/queue-runs.json" > /dev/null
 jq -r '
     def epoch: if type == "string" then try fromdateiso8601 catch null else null end;
-    .workflow_runs[] | select(.event == "merge_group" and .status == "completed")
+    .workflow_runs[] | select(.event == "merge_group" and .status == "completed" and ((.head_branch // "") | startswith("gh-readonly-queue/main/")))
     | ((.run_started_at // .created_at) | epoch) as $start | (.updated_at | epoch) as $end
     | select($start != null and $end != null and $end >= $start)
     | [.id, .head_sha, (.conclusion // "-"), ($end - $start)] | @tsv' "$output/queue-runs.json" > "$output/queue-list.tsv"

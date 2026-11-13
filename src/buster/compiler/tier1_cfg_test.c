@@ -1424,6 +1424,344 @@ static uint32_t tier1_cfg_test_edge_moves(const Tier1CfgInput* input, const Tier
     return moves;
 }
 
+static void tier1_cfg_test_ordinals(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* scratch)
+{
+    const uint64_t saved = scratch->length;
+    uint32_t* ordinals = 0;
+    const bool built = tier1_cfg_input_valid(input, scratch) && tier1_cfg_edge_ordinals(input, scratch, &ordinals);
+    tier1_cfg_test_expect(tally, built, "successor edges map to their original predecessor ordinals");
+    const uint64_t retained = scratch->length;
+    if (built)
+    {
+        bool matched = true;
+        for (uint32_t b = 0; matched && b < input->block_count; b += 1)
+        {
+            for (uint32_t e = input->successor_offsets[b]; matched && e < input->successor_offsets[b + 1]; e += 1)
+            {
+                const uint32_t target = input->successors[e];
+                const uint32_t first = input->predecessor_offsets[target];
+                matched = ordinals[e] < input->predecessor_offsets[target + 1] - first && input->predecessors[first + ordinals[e]] == b;
+            }
+        }
+        tier1_cfg_test_expect(tally, matched, "the ordinal mapping preserves unsorted rows and self edges");
+        tier1_cfg_test_expect(tally, retained - saved <= ((uint64_t)input->edge_count + 1) * sizeof(uint32_t) + _Alignof(uint32_t) - 1, "only edge ordinals remain in scratch after mapping");
+    }
+    arena_pop_to(scratch, saved);
+    const uint64_t capacities[] = {
+        saved,
+        retained,
+        retained + ((uint64_t)input->block_count + 1) * sizeof(uint32_t),
+    };
+    for (uint32_t stage = 0; built && stage < BUSTER_ARRAY_LENGTH(capacities); stage += 1)
+    {
+        uint32_t sentinel = 1384;
+        uint32_t* refused = &sentinel;
+        Arena bounded = *scratch;
+        bounded.capacity = capacities[stage];
+        const bool mapped = tier1_cfg_edge_ordinals(input, &bounded, &refused);
+        tier1_cfg_test_expect(tally, !mapped && bounded.length == saved && refused == &sentinel && sentinel == 1384, "edge-map capacity failure restores scratch and leaves its output unchanged");
+    }
+}
+
+// #1384: a phi use belongs to its predecessor, not its successor. One home value may feed several edges and phis
+// without global liveness; a single remote occurrence (ordinary or phi) must still make it global. The operands have
+// no ordinary use at their home's tail, including across a fixed clobber, so forgetting the edge use truncates them.
+static void tier1_cfg_test_local_phis(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    for (uint32_t class = 0; class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+    {
+        for (uint32_t mode = 0; mode < 7; mode += 1)
+        {
+            memset(&builder, 0, sizeof(builder));
+            builder.block_count = mode == 6 ? 3 : 5;
+            for (uint32_t b = 0; b < builder.block_count; b += 1)
+            {
+                builder.instructions[b] = 5;
+            }
+            builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0xf;
+            builder.registers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0xf;
+            builder.registers[BUSTER_TIER1_ALLOCATE_MASK] = 0x1e;
+            builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+            builder.scratch[BUSTER_TIER1_ALLOCATE_VECTOR] = 15;
+            builder.scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+            const uint32_t registers = builder.registers[class];
+            const uint32_t x = tier1_cfg_test_value(&builder, 0, 0, (uint8_t)class, mode == 3 || mode == 4 ? 0 : registers);
+            builder.remat[x] = mode == 4;
+            uint32_t self = BUSTER_TIER1_CFG_NONE;
+            if (mode == 6)
+            {
+                tier1_cfg_test_edge(&builder, 0, 1);
+                tier1_cfg_test_edge(&builder, 1, 1);
+                tier1_cfg_test_edge(&builder, 1, 2);
+                const uint32_t operands[] = {
+                    x,
+                    builder.value_count,
+                };
+                self = tier1_cfg_test_phi(&builder, 1, (uint8_t)class, operands);
+                tier1_cfg_test_use(&builder, self, 1, 0, true);
+            }
+            else
+            {
+                tier1_cfg_test_edge(&builder, 0, 2);
+                tier1_cfg_test_edge(&builder, 0, 1);
+                tier1_cfg_test_edge(&builder, 0, 4);
+                // The join's predecessor order is deliberately the reverse of layout order.
+                tier1_cfg_test_edge(&builder, 2, 3);
+                tier1_cfg_test_edge(&builder, 1, 3);
+                const uint32_t operands[] = { x };
+                const uint32_t left = tier1_cfg_test_phi(&builder, 1, (uint8_t)class, operands);
+                const uint32_t right = tier1_cfg_test_phi(&builder, 2, (uint8_t)class, operands);
+                const uint32_t repeated = tier1_cfg_test_phi(&builder, 2, (uint8_t)class, operands);
+                const uint32_t undefined_operands[] = { BUSTER_TIER1_CFG_NONE };
+                const uint32_t undefined = tier1_cfg_test_phi(&builder, 2, (uint8_t)class, undefined_operands);
+                const uint32_t joined_operands[] = {
+                    right,
+                    mode == 1 ? x : left,
+                };
+                const uint32_t joined = tier1_cfg_test_phi(&builder, 3, (uint8_t)class, joined_operands);
+                tier1_cfg_test_use(&builder, repeated, 2, 0, true);
+                tier1_cfg_test_use(&builder, undefined, 2, 1, false);
+                tier1_cfg_test_use(&builder, joined, 3, 0, true);
+                if (mode == 2)
+                {
+                    tier1_cfg_test_use(&builder, x, 3, 1, true);
+                }
+                if (mode == 5)
+                {
+                    tier1_cfg_test_definition_use(&builder, x);
+                    builder.fixed_block[0] = 0;
+                    builder.fixed_instruction[0] = 2;
+                    builder.fixed_class[0] = (uint8_t)class;
+                    builder.fixed_register[0] = registers;
+                    builder.fixed_count = 1;
+                }
+            }
+            const uint64_t saved = output->length;
+            Tier1CfgInput input = { 0 };
+            const bool built = tier1_cfg_test_build(&builder, output, &input);
+            tier1_cfg_test_expect(tally, built, "edge-local phi fixture builds");
+            if (built)
+            {
+                tier1_cfg_test_ordinals(tally, &input, scratch);
+            }
+            for (uint32_t path = 0; built && path < 2; path += 1)
+            {
+                const uint64_t mark = output->length;
+                const uint64_t scratch_mark = scratch->length;
+                Tier1CfgAllocation result = { 0 };
+                const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+                tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "edge-local phi fixture allocates");
+                if (error == TIER1_CFG_OK)
+                {
+                    const uint32_t global = mode == 1 || mode == 2 ? 1 : 0;
+                    const uint32_t local = mode == 1 ? 1 : mode == 2 || mode == 6 ? 2 : 3;
+                    tier1_cfg_test_expect(tally, result.cross_block_values == global, "only remote ordinary or phi uses need global liveness");
+                    tier1_cfg_test_expect(tally, result.edge_local_values == local, "repeated home phi occurrences count each local operand once");
+                    tier1_cfg_test_expect(tally, global != 0 || result.liveness_bytes == 0, "edge-local operands alone allocate no dense liveness matrix");
+                    const uint32_t exit = input.block_starts[1] - 1;
+                    const uint32_t interval = tier1_cfg_interval_oracle(&result, x, exit);
+                    tier1_cfg_test_expect(tally, interval != BUSTER_TIER1_CFG_NONE && result.intervals.ends[interval] >= input.block_starts[1], "a phi operand's home interval reaches the outgoing edge");
+                    if (mode == 6)
+                    {
+                        const uint32_t self_interval = tier1_cfg_interval_oracle(&result, self, input.block_starts[2] - 1);
+                        tier1_cfg_test_expect(tally, self_interval != BUSTER_TIER1_CFG_NONE, "a self-phi's home interval reaches its backedge");
+                        tier1_cfg_test_expect(tally, tier1_cfg_test_edge_moves(&input, &result, 1, 2) == 0, "a self-phi's unused sibling edge copies nothing");
+                    }
+                    else
+                    {
+                        tier1_cfg_test_expect(tally, tier1_cfg_test_edge_moves(&input, &result, 0, 4) == 0, "an edge without a phi use copies no home operand");
+                    }
+                    Tier1CfgCheck check;
+                    tier1_cfg_test_expect(tally, tier1_cfg_verify(&input, &result, scratch, &check), "the independent checker accepts local phi edge moves");
+                }
+                tier1_cfg_test_expect(tally, scratch->length == scratch_mark, "edge-local allocation restores scratch");
+                arena_pop_to(output, mark);
+            }
+            if (built)
+            {
+                tier1_cfg_test_case(tally, &input, output, scratch, "edge-local phi operands", true, 0, 0, true);
+            }
+            arena_pop_to(output, saved);
+        }
+    }
+    // Empty edge columns and a disconnected self edge exercise the map independently of phi allocation.
+    const uint32_t starts[] = {
+        0,
+        1,
+        2,
+    };
+    const uint32_t offsets[] = {
+        0,
+        0,
+        1,
+    };
+    const uint32_t phis[] = {
+        0,
+        0,
+        0,
+    };
+    const uint32_t self[] = { 1 };
+    Tier1CfgInput input =
+    {
+        .block_starts = starts,
+        .successor_offsets = offsets,
+        .successors = self,
+        .predecessor_offsets = offsets,
+        .predecessors = self,
+        .phi_offsets = phis,
+        .phi_operand_offsets = phis,
+        .block_count = 2,
+        .edge_count = 1,
+        .position_count = 2,
+    };
+    tier1_cfg_test_ordinals(tally, &input, scratch);
+    input.block_count = 1;
+    input.edge_count = 0;
+    input.position_count = 1;
+    input.successors = 0;
+    input.predecessors = 0;
+    tier1_cfg_test_ordinals(tally, &input, scratch);
+}
+
+// A wide join with one distinct local operand per predecessor, and optionally one value live through all arms.
+// The fixed scratch allowance admits preparation proportional to the blocks and actual live memberships. At 8,193
+// arms the old four matrices alone exceed 32 MiB; the allowance is 8 MiB. This checks capacity, not elapsed time.
+static void tier1_cfg_test_phi_storage(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    const uint32_t widths[] = {
+        8,
+        65,
+        513,
+        8193,
+    };
+    const uint64_t allowance = 8ull << 20;
+    for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(widths); size += 1)
+    {
+        const uint64_t saved = output->length;
+        const uint32_t width = widths[size];
+        const uint32_t blocks = width + 2;
+        const uint32_t edges = width * 2;
+        const uint32_t values = width + 2;
+        const uint32_t join = width + 1;
+        uint32_t* starts = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* successor_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* successors = arena_push_array(output, edges, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* predecessor_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* predecessors = arena_push_array(output, edges, sizeof(uint32_t), _Alignof(uint32_t));
+        uint8_t* classes = arena_push(output, values, 1);
+        uint32_t* allowed = arena_push_array(output, values, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* definitions = arena_push_array(output, values, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* use_offsets = arena_push_array(output, values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* phi_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* operands = arena_push_array(output, width, sizeof(uint32_t), _Alignof(uint32_t));
+        const bool built = starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && use_offsets != 0 && phi_offsets != 0 && operands != 0;
+        tier1_cfg_test_expect(tally, built, "wide phi fixture memory");
+        if (built)
+        {
+            for (uint32_t b = 0; b <= blocks; b += 1)
+            {
+                starts[b] = b * 4;
+                successor_offsets[b] = b == 0 ? 0 : b <= join ? width + b - 1 : edges;
+                predecessor_offsets[b] = b <= 1 ? 0 : b <= join ? b - 1 : edges;
+                phi_offsets[b] = b <= join ? 0 : 1;
+            }
+            for (uint32_t j = 0; j < width; j += 1)
+            {
+                successors[j] = width - j;
+                successors[width + j] = join;
+                predecessors[j] = 0;
+                predecessors[width + j] = width - j;
+                operands[j] = width - j;
+            }
+            for (uint32_t v = 0; v < values; v += 1)
+            {
+                classes[v] = BUSTER_TIER1_ALLOCATE_GPR;
+                allowed[v] = 0xf;
+                definitions[v] = starts[v] + (v == join ? 0 : 1);
+            }
+            const uint32_t phi_values[] = { join };
+            const uint32_t phi_operand_offsets[] = { 0, width };
+            const uint32_t use_positions[] = { starts[join] + 1, starts[join] + 2 };
+            for (uint32_t global = 0; global < 2; global += 1)
+            {
+                use_offsets[0] = 0;
+                for (uint32_t v = 1; v < values; v += 1)
+                {
+                    use_offsets[v] = global;
+                }
+                use_offsets[values] = global + 1;
+                const Tier1CfgInput input =
+                {
+                    .block_starts = starts,
+                    .successor_offsets = successor_offsets,
+                    .successors = successors,
+                    .predecessor_offsets = predecessor_offsets,
+                    .predecessors = predecessors,
+                    .classes = classes,
+                    .allowed_registers = allowed,
+                    .definitions = definitions,
+                    .use_offsets = use_offsets,
+                    .use_positions = use_positions + (global == 0 ? 1 : 0),
+                    .phi_offsets = phi_offsets,
+                    .phi_values = phi_values,
+                    .phi_operand_offsets = phi_operand_offsets,
+                    .phi_operands = operands,
+                    .block_count = blocks,
+                    .edge_count = edges,
+                    .value_count = values,
+                    .use_count = global + 1,
+                    .phi_count = 1,
+                    .position_count = starts[blocks],
+                    .registers = {
+                        0xf,
+                        0,
+                        0,
+                    },
+                    .scratch_registers = {
+                        11,
+                        15,
+                        0,
+                    },
+                };
+                tier1_cfg_test_ordinals(tally, &input, scratch);
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    const uint64_t mark = output->length;
+                    Arena bounded = *scratch;
+                    bounded.capacity = bounded.length + allowance < bounded.capacity ? bounded.length + allowance : bounded.capacity;
+                    Tier1CfgPrepared prepared = { 0 };
+                    const Tier1CfgError error = tier1_cfg_prepare(&input, output, &bounded, path == 0, &prepared);
+                    tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "wide local-phi preparation fits bounded scratch");
+                    if (error == TIER1_CFG_OK)
+                    {
+                        const Tier1CfgAllocation* result = &prepared.candidate;
+                        tier1_cfg_test_expect(tally, result->cross_block_values == global, "wide phi operands do not widen global liveness");
+                        tier1_cfg_test_expect(tally, result->edge_local_values == width, "wide phi operands count once per home");
+                        tier1_cfg_test_expect(tally, result->liveness_bytes <= (uint64_t)blocks * 256 && (global != 0 || result->liveness_bytes == 0), "wide phi matrix storage grows only with blocks");
+                        bool tails = true;
+                        for (uint32_t v = 1; tails && v <= width; v += 1)
+                        {
+                            const uint32_t first = result->value_interval_offsets[v];
+                            const uint32_t end = result->value_interval_offsets[v + 1];
+                            tails = end == first + 1 && result->intervals.starts[first] == definitions[v] && result->intervals.ends[first] == starts[v + 1];
+                        }
+                        tier1_cfg_test_expect(tally, tails, "every wide phi operand has exactly its home-tail interval");
+                        tier1_cfg_release(&prepared, &bounded);
+                    }
+                    tier1_cfg_test_expect(tally, bounded.length == scratch->length, "bounded preparation restores scratch");
+                    arena_pop_to(output, mark);
+                }
+                if (width == widths[0])
+                {
+                    tier1_cfg_test_case(tally, &input, output, scratch, "wide phi operand semantics", true, 0, 0, true);
+                }
+            }
+        }
+        arena_pop_to(output, saved);
+    }
+}
+
 // #2553's fixtures, each allocated by both paths and checked by the checker, then as a case (tier1_cfg_test_case):
 // - A join's phi takes its operand's register at the exit of its immediate dominator, a predecessor: 0 -> 1, 0 -> 2,
 //   1 -> 2, c and t defined in 0, z = phi(t, r) at 2, r defined in 1 while u holds t's former register. The critical edge
@@ -2036,6 +2374,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_dominance(&tally, &output, &scratch);
+            tier1_cfg_test_local_phis(&tally, &output, &scratch);
+            tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
             tier1_cfg_test_wide_edges(&tally, &output, &scratch);

@@ -178,21 +178,180 @@ static bool dependency_identities_overlap(const DependencyIdentity* a, const Dep
             strcmp(a->base, b->base) == 0);
 }
 
+typedef enum DependencyIdentityKey
+{
+    DEPENDENCY_IDENTITY_PATH,
+    DEPENDENCY_IDENTITY_FILE,
+    DEPENDENCY_IDENTITY_PARENT,
+    DEPENDENCY_IDENTITY_KEY_COUNT,
+} DependencyIdentityKey;
+
+// The three alias relations are independent: an existing file still has a textual and a parent/basename key.
+// Each column holds pointers to immutable, caller-owned identities and borrows their argv or arena-derived paths.
+// The records and NUL-terminated strings remain live and disjoint from the index/arena allocations throughout use.
+// Its capacity is count; only counts[key] entries are initialized. No padding or sentinel entries are read.
+typedef struct DependencyIndex DependencyIndex;
+struct DependencyIndex
+{
+    const DependencyIdentity** entries;
+    uint64_t count;
+    uint64_t counts[DEPENDENCY_IDENTITY_KEY_COUNT];
+    bool dangling;
+};
+
+static int dependency_identity_order(const DependencyIdentity* a, const DependencyIdentity* b, DependencyIdentityKey key, uint64_t* comparisons)
+{
+    if (comparisons != NULL)
+    {
+        *comparisons += 1;
+    }
+    int result;
+    if (key == DEPENDENCY_IDENTITY_PATH)
+    {
+        result = strcmp(a->path, b->path);
+    }
+    else
+    {
+        const dev_t a_device = key == DEPENDENCY_IDENTITY_FILE ? a->device : a->parent_device;
+        const dev_t b_device = key == DEPENDENCY_IDENTITY_FILE ? b->device : b->parent_device;
+        const ino_t a_inode = key == DEPENDENCY_IDENTITY_FILE ? a->inode : a->parent_inode;
+        const ino_t b_inode = key == DEPENDENCY_IDENTITY_FILE ? b->inode : b->parent_inode;
+        result = (a_device > b_device) - (a_device < b_device);
+        if (result == 0)
+        {
+            result = (a_inode > b_inode) - (a_inode < b_inode);
+        }
+        if (result == 0 && key == DEPENDENCY_IDENTITY_PARENT)
+        {
+            result = strcmp(a->base, b->base);
+        }
+    }
+    return result;
+}
+
+static void dependency_index_sift(const DependencyIdentity** entries, uint64_t count, uint64_t root, DependencyIdentityKey key, uint64_t* comparisons)
+{
+    const DependencyIdentity* const value = entries[root];
+    bool placed = false;
+    while (!placed && root < count / 2)
+    {
+        uint64_t child = root * 2 + 1;
+        if (child + 1 < count && dependency_identity_order(entries[child], entries[child + 1], key, comparisons) < 0)
+        {
+            child += 1;
+        }
+        placed = dependency_identity_order(value, entries[child], key, comparisons) >= 0;
+        if (!placed)
+        {
+            entries[root] = entries[child];
+            root = child;
+        }
+    }
+    entries[root] = value;
+}
+
+// Iterative heapsort bounds comparisons even for equal/adversarial keys, without callbacks or another array.
+static void dependency_index_sort(const DependencyIdentity** entries, uint64_t count, DependencyIdentityKey key, uint64_t* comparisons)
+{
+    for (uint64_t start = count / 2; start != 0;)
+    {
+        start -= 1;
+        dependency_index_sift(entries, count, start, key, comparisons);
+    }
+    for (uint64_t end = count; end > 1;)
+    {
+        end -= 1;
+        const DependencyIdentity* const value = entries[end];
+        entries[end] = entries[0];
+        entries[0] = value;
+        dependency_index_sift(entries, end, 0, key, comparisons);
+    }
+}
+
+static bool dependency_index_prepare(DependencyIndex* index, const DependencyIdentity* identities, uint64_t count, Arena* arena, uint64_t* comparisons)
+{
+    *index = (DependencyIndex){ 0 };
+    bool result = count <= SIZE_MAX / (DEPENDENCY_IDENTITY_KEY_COUNT * sizeof(*index->entries));
+    const DependencyIdentity** entries = result && count != 0 ? arena_push(arena, count * DEPENDENCY_IDENTITY_KEY_COUNT * sizeof(*entries), _Alignof(const DependencyIdentity*)) : NULL;
+    result = result && (count == 0 || entries != NULL);
+    if (result && count != 0)
+    {
+        uint64_t counts[DEPENDENCY_IDENTITY_KEY_COUNT] = { 0 };
+        bool dangling = false;
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            const DependencyIdentity* const identity = &identities[i];
+            entries[counts[DEPENDENCY_IDENTITY_PATH]++] = identity;
+            if (identity->found)
+            {
+                entries[count + counts[DEPENDENCY_IDENTITY_FILE]++] = identity;
+            }
+            if (identity->parent_found)
+            {
+                entries[2 * count + counts[DEPENDENCY_IDENTITY_PARENT]++] = identity;
+            }
+            dangling = dangling || identity->dangling;
+        }
+        for (uint32_t key = 0; key < DEPENDENCY_IDENTITY_KEY_COUNT; key += 1)
+        {
+            dependency_index_sort(entries + key * count, counts[key], (DependencyIdentityKey)key, comparisons);
+            index->counts[key] = counts[key];
+        }
+        index->entries = entries;
+        index->count = count;
+        index->dangling = dangling;
+    }
+    return result;
+}
+
+static bool dependency_index_overlaps(const DependencyIndex* index, const DependencyIdentity* identity, uint64_t* comparisons)
+{
+    const uint64_t count = index->count;
+    const DependencyIdentity* const* const columns = index->entries;
+    const bool found = count != 0 && identity->found;
+    const bool parent_found = count != 0 && identity->parent_found;
+    bool result = count != 0 && (index->dangling || identity->dangling);
+    for (uint32_t key = 0; count != 0 && !result && key < DEPENDENCY_IDENTITY_KEY_COUNT; key += 1)
+    {
+        const bool available = key == DEPENDENCY_IDENTITY_PATH || (key == DEPENDENCY_IDENTITY_FILE ? found : parent_found);
+        if (available)
+        {
+            const DependencyIdentity* const* const entries = columns + key * count;
+            uint64_t first = 0;
+            uint64_t end = index->counts[key];
+            while (!result && first < end)
+            {
+                const uint64_t middle = first + (end - first) / 2;
+                const int order = dependency_identity_order(entries[middle], identity, (DependencyIdentityKey)key, comparisons);
+                result = order == 0;
+                if (order < 0)
+                {
+                    first = middle + 1;
+                }
+                else
+                {
+                    end = middle;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Refuse destructive overlaps before opening primary outputs, including a depfile naming a different input unit.
 // Shared -MF destinations are allowed: the argv-last unit replaces the earlier complete rule, as Clang does.
 static bool dependency_check_destinations_counted(const DependencyOptions* options, char** sources, uint32_t count, const char* primary, bool objects, bool executable,
-                                                Arena* arena, uint64_t* probes)
+                                                Arena* arena, uint64_t* probes, uint64_t* comparisons)
 {
     bool result = true;
-    // Names and options remain immutable during admission. Only multiple distinct destinations need stored
-    // observations: a shared destination already examines each source and artifact just once.
+    // The first destination collects and checks each protected path once. Only multiple destinations need an
+    // index; a shared destination keeps the streaming scan. Options and collected identities/names stay immutable.
     const bool enabled = options->enabled;
     const bool only = options->only;
     const bool shared = options->path != NULL || only || primary != NULL;
     const uint32_t destinations = shared && count != 0 ? 1 : count;
-    const char** artifacts = NULL;
-    DependencyIdentity* inputs = NULL;
-    DependencyIdentity* outputs = NULL;
+    const uint32_t output_count = only ? 0 : primary != NULL || (!objects && executable) ? 1 : objects ? count : 0;
+    DependencyIndex index = { 0 };
     for (uint32_t i = 0; enabled && result && i < destinations; i += 1)
     {
         const char* destination = dependency_destination(options, sources[i], primary, arena);
@@ -200,49 +359,54 @@ static bool dependency_check_destinations_counted(const DependencyOptions* optio
         if (result && strcmp(destination, "-") != 0)
         {
             const DependencyIdentity target = dependency_identity(destination, probes);
-            if (destinations > 1 && inputs == NULL)
+            if (i == 0)
             {
-                inputs = arena_push(arena, (uint64_t)count * sizeof(*inputs), _Alignof(DependencyIdentity));
-                result = inputs != NULL;
-            }
-            for (uint32_t j = 0; result && j < count; j += 1)
-            {
-                if (strcmp(sources[j], "-") != 0)
-                {
-                    const DependencyIdentity input = i == 0 ? dependency_identity(sources[j], probes) : inputs[j];
-                    if (inputs != NULL && i == 0)
-                    {
-                        inputs[j] = input;
-                    }
-                    result = !dependency_identities_overlap(&target, &input);
-                }
-            }
-            // Materialize implicit object names only when a non-stdout destination needs them.
-            if (result && !only && objects && primary == NULL && artifacts == NULL)
-            {
-                artifacts = arena_push(arena, (uint64_t)count * sizeof(*artifacts), _Alignof(const char*));
-                result = artifacts != NULL;
+                const uint64_t capacity = (uint64_t)count + output_count;
+                DependencyIdentity* identities = destinations > 1 ? arena_push(arena, capacity * sizeof(*identities), _Alignof(DependencyIdentity)) : NULL;
+                result = destinations <= 1 || identities != NULL;
+                uint64_t identity_count = 0;
                 for (uint32_t j = 0; result && j < count; j += 1)
                 {
-                    artifacts[j] = dependency_filename(arena, sources[j], NULL, 'o');
-                    result = artifacts[j] != NULL;
+                    if (strcmp(sources[j], "-") != 0)
+                    {
+                        const DependencyIdentity input = dependency_identity(sources[j], probes);
+                        if (identities != NULL)
+                        {
+                            identities[identity_count++] = input;
+                        }
+                        if (comparisons != NULL)
+                        {
+                            *comparisons += 1;
+                        }
+                        result = !dependency_identities_overlap(&target, &input);
+                    }
                 }
-            }
-            const uint32_t output_count = only ? 0 : primary != NULL || (!objects && executable) ? 1 : objects ? count : 0;
-            if (result && destinations > 1 && output_count != 0 && outputs == NULL)
-            {
-                outputs = arena_push(arena, (uint64_t)output_count * sizeof(*outputs), _Alignof(DependencyIdentity));
-                result = outputs != NULL;
-            }
-            for (uint32_t j = 0; result && j < output_count; j += 1)
-            {
-                const char* artifact = primary != NULL ? primary : objects ? artifacts[j] : "a.out";
-                const DependencyIdentity output = i == 0 ? dependency_identity(artifact, probes) : outputs[j];
-                if (outputs != NULL && i == 0)
+                for (uint32_t j = 0; result && j < output_count; j += 1)
                 {
-                    outputs[j] = output;
+                    const char* artifact = primary != NULL ? primary : objects ? dependency_filename(arena, sources[j], NULL, 'o') : "a.out";
+                    result = artifact != NULL;
+                    if (result)
+                    {
+                        const DependencyIdentity output = dependency_identity(artifact, probes);
+                        if (identities != NULL)
+                        {
+                            identities[identity_count++] = output;
+                        }
+                        if (comparisons != NULL)
+                        {
+                            *comparisons += 1;
+                        }
+                        result = !dependency_identities_overlap(&target, &output);
+                    }
                 }
-                result = !dependency_identities_overlap(&target, &output);
+                if (result && destinations > 1)
+                {
+                    result = dependency_index_prepare(&index, identities, identity_count, arena, comparisons);
+                }
+            }
+            else
+            {
+                result = !dependency_index_overlaps(&index, &target, comparisons);
             }
         }
         if (!result)
@@ -255,7 +419,7 @@ static bool dependency_check_destinations_counted(const DependencyOptions* optio
 
 static bool dependency_check_destinations(const DependencyOptions* options, char** sources, uint32_t count, const char* primary, bool objects, bool executable, Arena* arena)
 {
-    return dependency_check_destinations_counted(options, sources, count, primary, objects, executable, arena, NULL);
+    return dependency_check_destinations_counted(options, sources, count, primary, objects, executable, arena, NULL, NULL);
 }
 
 // Named destinations are replaced only after a complete successful write and close. A temporary sibling makes rename

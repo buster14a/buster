@@ -46,6 +46,24 @@ static uint64_t check_test_typo_stress(char* text, uint64_t capacity)
 static void check_test_driver_semantic_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
+        // #2498: an invalid prototype parameter storage class is diagnosed at its keyword and dropped, while the
+        // parameter's type and the following parameters/declarations remain available to semantic checking.
+        "int a(static int value);\n"
+        "int b(extern int value);\n"
+        "int c(int first, static int second, extern int third);\n"
+        "int after = \"text\";\n"
+        "int later(void) { return undeclared; }\n",
+        // Type-name correction to a declaration-specifier keyword must expose the keyword's own parameter error.
+        "int a(stati int value);\n"
+        "int b(exter int value);\n"
+        "int after = \"text\";\n",
+        // C17's identifier lists are allowed only on definitions. The first listed name owns the diagnostic, and a
+        // rejected declaration must not stop diagnostics from later declarations or function bodies.
+        "/* gnu17 only */\n"
+        "int a(voi);\n"
+        "int b(first, second);\n"
+        "int after = \"text\";\n"
+        "int later(void) { return undeclared; }\n",
         // patchable_function_entry's offset past its count, on separate declarations, twice in one list, and on a shared
         // record, which each declarator's handler refuses again (#1734).
         "__attribute__((patchable_function_entry(1, 2))) void f(void) {}\n"
@@ -210,6 +228,39 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
         "    char c[1] = 7;\n    (void)b; (void)q; (void)c;\n}\nstatic int *sp = { 1.5 };\nint n = undeclared;\nstruct P r = { 1, 2, 3 };\nint e[3] = 8;\n",
         "int k;\nstatic int s1 = k;\nint a[2] = 5;\nstruct Q { char *p; } qs = { 4 };\nstatic struct Q qq = { 5L };\nint u(void) { int w; return 0; }\n",
+        // An illegal atomic compound literal's initializer (#2441 item 5) is diagnosed once, at its `{` and with its
+        // actual type. Its enclosing initializer has no value to convert; later independent errors still appear.
+        "struct S { int x; };\n_Atomic struct S t = (_Atomic struct S){1};\nint after = 1 + (void)0;\n",
+        // Atomic scalars, direct braces and typedef spelling, including a type name whose value type is a typedef.
+        "typedef int I;\ntypedef _Atomic(int) A;\nA a = (A){1};\n_Atomic(I) b = (_Atomic(I)){2};\n"
+        "_Atomic int c = {3};\nA d = {4};\nint after = 1 + (void)0;\n",
+        // Unions, a record typedef, parenthesized literals, and several independent declarations in one unit.
+        "union U { int x; double y; };\ntypedef struct S { int x; } S;\ntypedef _Atomic(S) AS;\n"
+        "_Atomic union U u = (_Atomic union U){1};\nAS s = ((AS){2});\n"
+        "void local(void) { _Atomic struct S a = (_Atomic struct S){3}; AS b = (AS){4}; (void)a; (void)b; }\n"
+        "int after = 1 + (void)0;\n",
+        // Array elements and member initializers: plain lists containing atomic scalar elements and ordinary compound
+        // literals remain valid, while an element's own atomic braces fail. A later initializer keeps its own error.
+        "struct S { int x; };\nstruct T { _Atomic int x; };\n_Atomic int good_array[2] = {1, 2};\n"
+        "struct T good_record = {3};\nstruct S good_literal = (struct S){4};\n"
+        "_Atomic int bad_array[1] = {(_Atomic int){5}};\nstruct T bad_record = {{6}};\n"
+        "int *after = 1.5;\n",
+        // An earlier discarded statement-expression statement does not poison its final value: the final int still
+        // gives the record's independent conversion error. A sole rejected literal leaves an empty void-valued body.
+        "struct S { int x; };\n"
+        "void f(void) { struct S s = ({ (void)(_Atomic int){1}; 3; }); (void)s; }\n"
+        "void g(void) { _Atomic struct S s = ({ (_Atomic struct S){2}; }); (void)s; }\n",
+        // An outer atomic typedef's a.k.a. keeps the first value typedef, through chains on either side of _Atomic.
+        "typedef int I;\ntypedef I II;\ntypedef _Atomic(II) A;\ntypedef A AA;\n"
+        "typedef struct S { int x; } S;\ntypedef S SS;\ntypedef _Atomic(SS) AS;\n"
+        "AA a = (AA){1};\nAS s = {2};\nint after = 1 + (void)0;\n",
+        // The empty-body recovery passes through parentheses and applies to scalar literals too. A preceding usable
+        // statement instead makes the whole statement expression invalid, so only its literal's error remains.
+        "struct S { int x; };\n"
+        "void parenthesized(void) { _Atomic struct S s = (({ ((_Atomic struct S){1}); })); (void)s; }\n"
+        "void scalar(void) { _Atomic int s = ({ (_Atomic int){2}; }); (void)s; }\n"
+        "void preceding(void) { _Atomic struct S s = ({ (void)0; (_Atomic struct S){3}; }); (void)s; }\n"
+        "int after = 1 + (void)0;\n",
         // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
         // from the type attributes' session).
         "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",
@@ -241,6 +292,42 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int c = undecl_n;\nint y = 3 + (void)0;\nunknown_type z;\n",
         "int c = undecl_n, d[] = 1 + (void)0;\nunknown_type z;\n",
         "int c = undecl_n;\nint f(int);\nint y = f(1, 2);\nunknown_type z;\n",
+        // A recoverable unknown type preserves the complete declarations on both sides (#2509), including graphs
+        // in function bodies and aggregate initializers and the rejected unit's subsequent readings.
+        "int c = undecl_n;\nint g(void) { return 1 + (void)0; }\nunknown_type z;\n",
+        "int c = undecl_n;\nstruct S { int a; } s = { 1 + (void)0 };\nunknown_type z;\n",
+        "int a = undecl;\nfoo bar;\nint c = 1 + (void)0;\n",
+        "unknown_type z;\nint g(void) { return 1 + (void)0; }\n",
+        "unknown_type z;\nstruct S { int a; } s = { 1 + (void)0 };\n",
+        "unknown_type z;\nint c = undecl_n;\nint y = 1 + (void)0;\n",
+        "unknown_type z = \"x\";\nint y = 1 + (void)0;\n",
+        "void f(void) { unknown_type z = \"x\"; }\nint y = 1 + (void)0;\n",
+        "unknown_type a = \"x\";\nint b = a + 1;\nint y = 1 + (void)0;\n",
+        "unknown_type z = \"x\";\nint g(void) { return 1 + (void)0; }\nint h(void) { return 2 + (void)0; }\n",
+        // Later declarators of an unknown type never reach clang's initializer handler (#2640). Its missing ';'
+        // follows the later declarator, and the skipped names cannot hide errors in subsequent declarations.
+        "unknown_type a = \"x\", b = \"y\";\nint y = 1 + (void)0;\n",
+        "unknown_type a, b = 2;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b, c = 2;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b = (1, (2 + (void)0)), c = absent;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b[] = { 2, 3 };\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, (*b)(void) = 0;\nint y = 1 + (void)0;\n",
+        // The discarded declarators can already have diagnosed their parameters. Keep those diagnostics once,
+        // including after another recovery round has shifted all their token indices.
+        "unknown_type a = 1, (*b)(other_type p) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, (*b)(const p) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b = 2;\nunknown_type c = 3, (*d)(other_type p, another_type q) = 0;\nint y = 1 + (void)0;\n",
+        "void f(void) {\nunknown_type a = 1, b = 2;\nunknown_type c = 3, (*d)(other_type p) = 0;\nint y = 1 + (void)0;\n}\n",
+        "unknown_type first = 1, never_declared = 2;\nint *use = &never_declared;\nint y = 1 + (void)0;\n",
+        "void f(void) { unknown_type a = 1, b = 2; int y = 1 + (void)0; }\nint z = 2 + (void)0;\n",
+        "unknown_type a = 1, b = 2;\nunknown_type c = 3, d = 4;\nint y = 1 + (void)0;\n",
+        // A missing initializer on later declarators is no missing ';', and the declaration's state must not leak.
+        "unknown_type a = 1, b, c;\nint x = 2, y = 3;\nint z = 1 + (void)0;\n",
+        "void f(unknown_type p, int x);\nint a = 1, b = 2;\nint z = 1 + (void)0;\n",
+        "#define Unknown unknown_type\nUnknown a = 1, b = 2;\nint y = 1 + (void)0;\n",
+        // Original pragma errors and atomic literal diagnostics survive the comma-declaration recovery together.
+        "#pragma options align=mac68k\nunknown_type a = \"x\", b = \"y\";\n"
+        "struct S { int x; };\n_Atomic struct S t = (_Atomic struct S){1};\nint after = 1 + (void)0;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its
@@ -686,6 +773,32 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int float char x;\nint a1 = u1;\n_Complex _Bool int y;\nint a2 = u2;\n_Complex _Bool _Atomic _Bool y2;\nint a3 = u3;\n"
         "long long long long w;\nint a4 = u4;\nsigned unsigned float v;\nint a5 = u5;\nunsigned long float double d;\nint a6 = u6;\n"
         "unsigned unsigned float uu;\nint a7 = u7;\nlong double long double ldd;\nint a8 = u8;\n",
+        // A formed non-integral enum base (#2492): clang reports its full type and recovers a fixed int enum, so its
+        // enumerators, later uses, redeclarations and unrelated diagnostics remain checked. A dropped sign's error
+        // precedes the recovered float base's, at the original specifier sequence's type location.
+        "enum E : float { A };\nint b3 = v3;\nenum G : unsigned float { B };\nint b4 = v4;\n"
+        "enum E : int;\n_Static_assert(sizeof(enum E) == sizeof(int) && sizeof(enum G) == sizeof(int), \"int recovery\");\n"
+        "enum K : double { K0 = sizeof(enum K) };\n_Static_assert(K0 == sizeof(int), \"complete recovery\");\n"
+        "int f(void) { enum L : long double { L0 }; return L0 + absent; }\n",
+        // CV qualifiers precede the underlying type's error, with the stripped type's spelling; typedef sugar and each
+        // noninteger type class survive the report. No tag's forward-declaration note belongs to this diagnostic.
+        "typedef float Float;\ntypedef Float Real;\ntypedef void *Pointer;\ntypedef int Array[3];\ntypedef int Function(void);\n"
+        "struct S; typedef struct S Record;\nenum Source { Source0 }; typedef enum Source OtherEnum;\n"
+        "enum C : const float { C0 };\nenum V : volatile double { V0 };\nenum T : Real { T0 };\n"
+        "enum P : Pointer { P0 };\nenum R : Record { R0 };\nenum A : Array { A0 };\nenum F : Function { F0 };\n"
+        "enum N : void { N0 };\nenum Q : OtherEnum { Q0 };\nint x = later;\n",
+        // Clang strips atomic before deciding the base: the atomic qualifier's own default error is demotable, an
+        // atomic integer keeps its integer base, and an atomic float still gets the non-integral type error.
+        "typedef _Atomic(int) AtomicInt;\ntypedef _Atomic(float) AtomicFloat;\n"
+        "enum AI : _Atomic int { AI0 };\nenum AT : AtomicInt { AT0 };\nenum AF : AtomicFloat { AF0 };\n"
+        "enum AC : _Atomic const float { AC0 };\n"
+        "_Static_assert(sizeof(enum AI) == sizeof(int) && sizeof(enum AT) == sizeof(int), \"atomic stripped\");\nint x = after_atomic;\n",
+        // Other parser-admitted scalar bases retain their actual types; valid integer bases and GNU specifier
+        // recovery preserve the complete original widths rather than adopting the error stand-in.
+        "enum H : __fp16 { H0 };\nenum F : _Float16 { F0 };\nenum B : __bf16 { B0 };\nenum Q : __float128 { Q0 };\n"
+        "enum Z : _Complex double { Z0 };\ntypedef _BitInt(17) Bits;\nenum I : Bits { I0 };\n"
+        "enum U : unsigned short { U0 };\nenum W : unsigned __int128 { W0 };\nenum O : _Bool { O0 };\n"
+        "_Static_assert(sizeof(enum U) == 2 && sizeof(enum W) == 16 && sizeof(enum O) == 1, \"valid bases\");\nint x = after_types;\n",
         // The same in the operand readers' type names, a parameter, a body, a cast, sizeof, _Alignof and members.
         "typeof(unsigned unsigned float) q1;\nint b1 = v1;\ntypeof(int float char) q2;\nint b2 = v2;\n"
         "enum F : long long long long { B };\nint b4 = v4;\n_Atomic(unsigned long float double) q3;\nint b5 = v5;\n"
@@ -1112,6 +1225,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     snprintf(object, sizeof(object), "%s/semantic-recovery.o", directory);
     for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
+        bool mismatch_reported = false;
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool stress = strncmp(fixtures[f], "/* typo stress */", 17) == 0;
         const uint64_t stress_length = stress ? check_test_typo_stress(stress_text, sizeof(stress_text)) : 0;
@@ -1177,7 +1291,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
                              options[o] != NULL ? options[o] : "", mode, status, oracle, actual_lines, expected_lines);
-                    check_test_expect(test, same && (status != 0) == (oracle != 0) && !written, description);
+                    const bool correct = same && (status != 0) == (oracle != 0) && !written;
+                    if (!correct && !mismatch_reported)
+                    {
+                        // One fixture can exhaust the shared failure-detail limit across its language and reader
+                        // variants. Keep the first difference of every later fixture visible in hosted logs too.
+                        fprintf(stderr, "semantic recovery first mismatch: %s\n", description);
+                        mismatch_reported = true;
+                    }
+                    check_test_expect(test, correct, description);
                     free(actual);
                 }
                 free(expected);
