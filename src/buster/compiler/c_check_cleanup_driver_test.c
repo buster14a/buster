@@ -144,18 +144,22 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
 // Cleanups' shared chains (#1370): each exit runs one copy of each cleanup's call, the one at its scope's end, and goes
 // on to its own destination. A program of every kind of path through a chain (a goto back before a declaration of its
 // own block, which stops in the middle of a scope's run; exits through three scopes with a fall at each; a continue, a
-// break and a fall at one record, and a switch's break; a statement expression's break, continue, goto and return,
-// which keep their runs where they leave its block's records, and its exits through the records within its block, which
-// take their chain, out of it and within it; kept, named and void returns; an array of a runtime length whose cleanup
-// reads it, left by a break; a for statement's own variables; and a cleanup that longjmps out, then the same chain's
-// fall) and the issue's four shapes of many cleanups, each followed by an exit, and a fifth in a statement expression's
-// block, run against clang -O0's build by Tier 0 and Tier 1, on both paths. The shapes' objects at 300 and 600 cleanups
-// take linear room: past 85, the run at each exit exhausted the call rows.
+// break and a fall at one record, and a switch's break; statement expressions' exits through inner, own and outer
+// records, their values kept before mutating cleanups and earlier operands restored only on a fall; nested regions
+// that stop inside an outer region then fall through its cleanup, and unevaluated regions with a shared destination;
+// target clones that share a cleanup plan while their bodies lower on separate lanes;
+// kept, named and void returns; arrays of runtime length whose cleanups read them before an exit restores their stack;
+// a for statement's own variables; and a cleanup that longjmps out, then the same chain's fall) and the issue's shapes
+// of many cleanups, each followed by an exit, run against clang -O0's build by Tier 0 and Tier 1, on both paths. The
+// shapes include a statement expression's inner and own records, and regions leaving enclosing records. Their objects
+// at 300 and 600 cleanups take linear room: past 85, the original run at each exit exhausted the call rows.
 static const char check_test_cleanup_chain_paths[] =
     "#include <setjmp.h>\n"
     "#include <stdio.h>\n"
     "static unsigned trace;\n"
     "static void note(int *p) { trace = trace * 31u + (unsigned)*p; }\n"
+    "static void replace(int *p) { note(p); *p = -500; }\n"
+    "static int pair(int a, int b) { return 37 * a + b; }\n"
     "static int midrun(int n) { int r = 0; int k = 0; { int a __attribute__((cleanup(note))) = 1;\n"
     "again:; int b __attribute__((cleanup(note))) = 10 + k; int c __attribute__((cleanup(note))) = 20 + k; k++; if (k < n) goto again; r += b + c; } return r; }\n"
     "static int three(int n) { int r = 0; { int a __attribute__((cleanup(note))) = 1; { int b __attribute__((cleanup(note))) = 2; { int c __attribute__((cleanup(note))) = 3;\n"
@@ -175,8 +179,25 @@ static const char check_test_cleanup_chain_paths[] =
     "out: s += ({ int v9 __attribute__((cleanup(note))) = 9; int t = 0; do { int v5 __attribute__((cleanup(note))) = 5;\n"
     "{ int v6 __attribute__((cleanup(note))) = 6; if (k & 1) break; t += v6; } { int v7 __attribute__((cleanup(note))) = 7; if (k & 2) continue; t += v7; } } while (0); t; });\n"
     "return s; }\n"
+    "static int region_values(int n) { int outer __attribute__((cleanup(note))) = 40 + n; int r = 5;\n"
+    "r += pair(50 + n, ({ int v __attribute__((cleanup(replace))) = 60 + n; if (n == 0) return v; if (n == 1) goto out; v; }));\n"
+    "out: return r; }\n"
+    "static int region_back(int n) { return pair(10 + n, ({ int a __attribute__((cleanup(note))) = 20 + n; int k = 0;\n"
+    "again:; int b __attribute__((cleanup(replace))) = ++k; if (k < n) goto again; b; })); }\n"
+    "static int nested_regions(int n) { int r = 0; for (int i = 0; i < 4; i++) { int a __attribute__((cleanup(note))) = 70 + i;\n"
+    "r += pair(2 + i, ({ int b __attribute__((cleanup(replace))) = 80 + i; int v = 0;\n"
+    "v += ({ int c __attribute__((cleanup(replace))) = 90 + i; if (n == i) goto resumed; if (n == i + 1) continue;\n"
+    "if (n == 8 && i == 2) goto out; if (n == 9 && i == 1) return c; c; }); resumed:; b + v; })); } out: return r; }\n"
+    "static void absent_regions(int n) { int a __attribute__((cleanup(note))) = 100 + n; (void)(0 && ({ return; 1; }));\n"
+    "(void)(0 ? ({ return; 1; }) : ({ if (n & 1) return; 2; })); note(&n); }\n"
+    "__attribute__((target_clones(\"default\", \"sse4.2\", \"avx2\"))) static int cloned_regions(int n) { int a __attribute__((cleanup(note))) = 180 + n;\n"
+    "return ({ int b __attribute__((cleanup(replace))) = 190 + n; if (n & 1) return b; b; }); }\n"
     "struct S { int a, b; };\n"
     "static void sn(struct S *p) { trace = trace * 31u + (unsigned)p->a; p->a = -5; }\n"
+    "static int region_aggregate(int n) { int r = 7; struct S s = ({ struct S v __attribute__((cleanup(sn))) = { 110 + n, 120 + n };\n"
+    "if (n == 2) goto out; v; }); r += s.a + 3 * s.b; out: return r; }\n"
+    "static struct S region_return(int n) { int outer __attribute__((cleanup(note))) = 130 + n;\n"
+    "struct S r = ({ struct S v __attribute__((cleanup(sn))) = { 140 + n, 150 + n }; if (n == 3) return v; v; }); return (struct S){ r.a + 1, r.b }; }\n"
     "static struct S named(int n) { int x __attribute__((cleanup(note))) = n; if (n == 1) { struct S s __attribute__((cleanup(sn))) = { 1, 2 }; if (n) return s; }\n"
     "struct S t __attribute__((cleanup(sn))) = { 3, n }; if (n == 2) return t; { int y __attribute__((cleanup(note))) = 9; if (n == 3) return t; } return t; }\n"
     "static int kept(int n) { int x __attribute__((cleanup(note))) = n; { int y __attribute__((cleanup(note))) = n + 1; if (n == 1) return x + y; if (n == 2) return y; }\n"
@@ -185,6 +206,10 @@ static const char check_test_cleanup_chain_paths[] =
     "static void array(int (*p)[]) { trace = trace * 31u + (unsigned)(*p)[0] + (unsigned)(*p)[1]; }\n"
     "static int lengths(int n) { int r = 0; for (int i = 0; i < 5; i++) { int v[n + 2] __attribute__((cleanup(array))); v[0] = i; v[1] = n;\n"
     "{ int w __attribute__((cleanup(note))) = i; if (i == n) break; if (i == 1) continue; r += v[0]; } } return r; }\n"
+    "static int region_lengths(int n) { int r = 0; for (int i = 0; i < 4; i++) { int outside[n + 2] __attribute__((cleanup(array)));\n"
+    "outside[0] = n; outside[1] = 160 + i; r += ({ int inside[n + 3] __attribute__((cleanup(array))); inside[0] = i; inside[1] = 170 + n;\n"
+    "if (n == i) break; if (n == i + 1) continue; if (n == 8 && i == 2) goto out; if (n == 9 && i == 2) return inside[0] + outside[0];\n"
+    "inside[0] + outside[0]; }); } out: return r; }\n"
     "static int owned(int n) { int r = 0; for (int a __attribute__((cleanup(note))) = 1, b __attribute__((cleanup(note))) = 2; a < 6; a++) {\n"
     "int c __attribute__((cleanup(note))) = a; if (a == n) break; if (a == n + 2) return r; r += c; } return r + 100; }\n"
     "static jmp_buf jumps; static int jumpy;\n"
@@ -194,14 +219,18 @@ static const char check_test_cleanup_chain_paths[] =
     "int main(void) {\n"
     "    for (int n = 0; n < 10; n++) {\n"
     "        trace = 0; int r = midrun(n) + 3 * three(n) + 5 * loops(n) + 7 * expressions(n) + 11 * kept(n) + 13 * lengths(n) + 17 * owned(n) + 23 * regions(n);\n"
+    "        r += 29 * region_values(n); r += 31 * nested_regions(n); r += 37 * region_aggregate(n); r += 41 * region_lengths(n); absent_regions(n);\n"
+    "        r += 47 * cloned_regions(n);\n"
+    "        r += 53 * region_back(n);\n"
+    "        struct S value = region_return(n); r += value.a + 43 * value.b;\n"
     "        struct S s = named(n); none(n); jumpy = 1; if (setjmp(jumps) == 0) { jumped(n); } r += 19 * jumped(n);\n"
     "        printf(\"%d %d %d %d %u\\n\", n, r, s.a, s.b, trace);\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
 
-// The issue's shapes (#1370) of `count` cleanups, each followed by an exit, one of them in a statement expression's block,
-// and a main that runs each over every exit.
+// The issue's shapes (#1370) of `count` cleanups, each followed by an exit, including a statement expression's inner and
+// own records and expressions leaving enclosing records, and a main that runs each over every exit.
 static bool check_test_cleanup_chain_shapes(char* text, size_t capacity, uint32_t count)
 {
     size_t used = 0;
@@ -238,7 +267,19 @@ static bool check_test_cleanup_chain_shapes(char* text, size_t capacity, uint32_
         BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) goto done; s += c%u;\n", i, i, i, i);
     }
     BUSTER_CHECK_TEST_CHAIN_PRINT("} done:; s; }); }\n");
+    BUSTER_CHECK_TEST_CHAIN_PRINT("static int region_own(int a) { return ({ int s = 0;\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) return s; s += c%u;\n", i, i, i, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("s; }); }\nstatic int region_outer(int a) { int s = 0;\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; s += ({ if (a == %u) return s; c%u; });\n", i, i, i, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("return s; }\n");
     BUSTER_CHECK_TEST_CHAIN_PRINT("int main(void) { unsigned h = 0; for (int a = -1; a < %u; a++) { trace = 0; int r = returns(a) + 3 * nested(a) + 5 * loop(a) + 7 * jumps(a) + 11 * region(a);\n"
+                                  "r += 13 * region_own(a); r += 17 * region_outer(a);\n"
                                   "h = h * 31u + (unsigned)r + trace; } printf(\"%%u\\n\", h); return 0; }\n", count + 3);
 #undef BUSTER_CHECK_TEST_CHAIN_PRINT
     return valid;
@@ -284,6 +325,11 @@ static void check_test_driver_cleanup_chains(CheckTest* test, const char* clang,
             {
                 arguments[count++] = "--tier1";
                 arguments[count++] = "--verify";
+            }
+            if (program == 0)
+            {
+                arguments[count++] = "--lanes";
+                arguments[count++] = "3";
             }
             arguments[count++] = "-o";
             arguments[count++] = outputs[mode];

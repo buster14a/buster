@@ -4042,7 +4042,7 @@ What the lowering covers past scalars (#145's programs):
   function's end, and a statement expression's end, after its value is kept
   (`CheckProgramRegion.cleanups`). Each variable's call is written once
   (#1370), as clang's is: `CHECK_CONTROL_CLEANUP` (whose target is the record)
-  at its scope's end. An exit of the function's statements is one
+  at its scope's end. An exit of the function's or a statement expression's statements is one
   `CHECK_CONTROL_EXIT` instead of a run of calls, which names its first and
   last record (`CheckProgramExit`); its tail (its restore, lifetime ends and
   jump, or its return) follows it, so every walk of the controls sees the
@@ -4050,26 +4050,39 @@ What the lowering covers past scalars (#145's programs):
   body's chains in linear passes (`CheckProgramChain`): the lowering jumps
   from the exit to its first record's call, and after each call a dispatch
   goes on to the destinations that stop there (exits with the same last
-  record and the same tail share one, whose tail the first of them keeps in
+  record and the same tail share one, whose tail the first emitted exit keeps in
   place; a lone jump's is its target), to the parent's call for exits that go
   on, and to the next control. Only a dispatch of two continuations or more
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression's statements takes
-  the chain through the records within its block, whose calls its region
-  lowers with its statements, from the empty evaluation stack the region
-  starts with: the dispatch's jumps and the exit's agree on the stack, out of
-  the region as within it. An exit that leaves the block's own records (their
-  calls run after its END, once its value is kept) or records outside it, one
-  through a record whose scope's end a constant switch's kept statements leave
-  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
+  variables' count. Statement expressions share the chain through their own
+  block's records and enclosing records too. Their own calls run after their
+  `END`, once the value has been kept (and an aggregate copied), before any
+  saved outer expression operands are restored. Both a normal completion and
+  an exit therefore reach the calls with an empty evaluation stack. The
+  post-value run has a natural fall, which stores zero when its dispatch
+  needs it; a nested region's earlier exit cannot leave a stale destination.
+  Destinations become active when their exits are lowered
+  (`CheckLowerWriter.chain_destinations`), and a dispatch only names active
+  destinations. This matters when a constant expression skips a region:
+  its return tail is never emitted, and an enclosing cleanup must neither
+  branch to that absent tail nor make an emitted exit share it.
+  An exit through a record whose scope's end a constant switch's kept
+  statements leave out, and one whose jump no path reaches, keeps its run
+  in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
   target; the planner finds its last record in one preorder sweep, and a
   scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
-  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  planning is linear too. Control room reserves at most one `RESULT` and
+  `EXIT` per jump and one `CLEANUP` per variable, including regions; inline
+  fallbacks expand during lowering and need no repeated control entries.
+  `c_check_cleanup_driver_test.c` checks region-own and enclosing-chain
+  growth, cleanup traces against Clang in both tiers and both reader paths,
+  retained scalar and aggregate values, nested regions, skipped return
+  destinations and VLA cleanup before release. On the 9700X, 10,000 cleanups with an early return
   each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
   unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
   The planner stays scalar. It runs only for a body with an exit through a

@@ -73,8 +73,8 @@ struct CheckProgramConstraint
 // record it runs and the outermost. The controls after it (its tail: its STACK_RESTORE, its LIFETIME ends and its JUMP,
 // or its RETURN) are what follows the calls, so every walk of the controls sees the path it saw when the calls were
 // there. The lowering runs each record's call once, at its CLEANUP at its scope's end, the chain the exit enters
-// (check_program_chains, CheckProgramChain). An exit from a statement expression does so through the records within its
-// block, apart from the block's own; one that leaves the block's records keeps its run of CLEANUPs.
+// (check_program_chains, CheckProgramChain). Statement expressions share these chains too: their block's own entries
+// run after the value is kept, and exits through enclosing records abandon the region's saved operands.
 // A block's objects' lifetimes (#177, c_check_program_lifetime.c), in a program asked for them: CHECK_CONTROL_LIFETIME
 // (`target` the block's closing brace, whose locals CheckProgram.lifetime_first lists, `node` 0 for their start and 1 for
 // their end, `token` where) where the block's statements begin, where they end, after its cleanups, and before each
@@ -158,12 +158,11 @@ struct CheckProgramRegion
 
 // An exit through cleanups' chain (#1370, CHECK_CONTROL_EXIT's `target`): the innermost record it runs (`first`) and the
 // outermost (`last`), both CheckInput.cleanups' records; the destination slot's value it stores before it jumps to its
-// first record's entry, BUSTER_CHECK_NONE where no dispatch on its path tests it; and how many of the controls after it,
-// its tail, the lowering leaves out: where its destination's tail is another exit's, or its target the dispatch's own.
-// A `skip` of BUSTER_CHECK_NONE marks an exit that runs its calls in place: one through a record without a CLEANUP at its
-// scope's end (a constant switch's kept statements leave their compounds' ends out, and a statement expression's block's
-// own records run after its END), one from a statement expression whose records leave its block, or one no path
-// completes (its JUMP unreached, an END now).
+// first record's entry, BUSTER_CHECK_NONE where no dispatch on its path tests it; its destination's CheckProgramStop;
+// and how many controls after it form its tail. The first emitted exit keeps that tail unless the destination is a
+// lone JUMP's target; subsequent emitted exits leave theirs out. A `tail_count` of BUSTER_CHECK_NONE marks an exit that
+// runs its calls in place: one through a record without a CLEANUP at its scope's end (a constant switch's kept
+// statements leave their compounds' ends out), or one no path completes (its JUMP unreached, an END now).
 typedef struct CheckProgramExit CheckProgramExit;
 struct CheckProgramExit
 {
@@ -173,13 +172,8 @@ struct CheckProgramExit
     // child on the path from `first`, which the planner finds.
     uint32_t hold;
     uint32_t value;
-    uint32_t skip;
-    // An exit from a statement expression's statements: the closing token of the region's block, whose own records'
-    // cleanups run after its END, and the token that opens it; BUSTER_CHECK_NONE for an exit of the function's statements.
-    // Only one whose records' scopes all lie within the block, apart from the block's own records, goes through their
-    // chain; any other keeps its run in place (check_program_chains).
-    uint32_t region_open;
-    uint32_t region_close;
+    uint32_t destination;
+    uint32_t tail_count;
 };
 
 // A record's place in its body's chain of cleanups (#1370, check_program_chains), by its index in CheckInput.cleanups:
@@ -210,8 +204,9 @@ struct CheckProgramChain
     uint8_t flags;
 };
 
-// A destination of a record's dispatch (#1370): the slot's value its exits store, and the body-relative control its
-// tail starts at (a lone JUMP's own target).
+// A destination of a record's dispatch (#1370): the slot's value its exits store, and a lone JUMP's body-relative target,
+// or BUSTER_CHECK_NONE for a tail chosen from the first emitted exit. An unevaluated region may contain the first exit
+// in control order, so the planner cannot choose its tail as the dispatch's destination.
 typedef struct CheckProgramStop CheckProgramStop;
 struct CheckProgramStop
 {
@@ -746,14 +741,10 @@ struct CheckControlWriter
     uint32_t* cleanup_scope_last;
     uint32_t cleanup_first;
     uint32_t cleanup_count;
-    // CheckProgram.exits while the bodies are written, `exit_capacity` of them, and whether a statement expression's
-    // region is being written, the tokens that open and close its block (CheckProgramExit.region_open, region_close).
+    // CheckProgram.exits while the bodies are written, `exit_capacity` of them.
     CheckProgramExit* exits;
     uint32_t exit_count;
     uint32_t exit_capacity;
-    bool in_region;
-    uint32_t region_open;
-    uint32_t region_close;
     // The statement expression's last statement while its region is written: the region's result, never a statement of
     // its own, also where it is a label's (CheckInputRegion.final_statement).
     uint32_t region_final;
@@ -1613,7 +1604,7 @@ static void check_control_cleanups(CheckControlWriter* writer, uint32_t position
     // the innermost whose scope holds where it goes (`hold`, none for a return's), an ancestor of the first, as no jump
     // enters a cleanup's scope. Its last, the hold's child on the path, check_program_chains finds in one sweep, where a
     // climb here took each exit's whole path.
-    // An exit from a statement expression's statements too, whose records the planner checks lie within its block.
+    // An exit from a statement expression's statements uses the same plan, including its own and enclosing scopes.
     const bool chained = scope == BUSTER_CHECK_NONE;
     const uint32_t hold = chained && record != BUSTER_CHECK_NONE && target != BUSTER_CHECK_NONE ? check_control_cleanup_at(writer, target) : BUSTER_CHECK_NONE;
     if (chained && record != BUSTER_CHECK_NONE && record != hold && writer->exit_count < writer->exit_capacity)
@@ -1622,9 +1613,8 @@ static void check_control_cleanups(CheckControlWriter* writer, uint32_t position
                                                                 .last = BUSTER_CHECK_NONE,
                                                                 .hold = hold,
                                                                 .value = BUSTER_CHECK_NONE,
-                                                                .skip = 0,
-                                                                .region_open = writer->in_region ? writer->region_open : BUSTER_CHECK_NONE,
-                                                                .region_close = writer->in_region ? writer->region_close : BUSTER_CHECK_NONE };
+                                                                .destination = BUSTER_CHECK_NONE,
+                                                                .tail_count = 0 };
         check_control_entry(writer, CHECK_CONTROL_EXIT, position, BUSTER_CHECK_NONE, writer->exit_count);
         writer->exit_count += 1;
     }
@@ -2769,9 +2759,6 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
         }
         else
         {
-            writer->in_region = true;
-            writer->region_open = check_control_opening(writer, source->block, PARSE_ROLE_OPEN_BLOCK);
-            writer->region_close = source->block;
             writer->region_final = source->final_statement;
             for (uint32_t child = writer->last[source->block]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
             {
@@ -2783,7 +2770,6 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
             check_control_drain(writer);
             check_control_end(writer, source->closing);
             writer->region_final = BUSTER_CHECK_NONE;
-            writer->in_region = false;
             // Its block's cleanups, after its END: they run once its value is computed (check_lower_region), and then its
             // variable-length arrays' release (#1447), as a block's end has them.
             const uint32_t ended = writer->count;
@@ -3078,7 +3064,7 @@ static bool check_program_tails_equal(const CheckControl* controls, uint32_t a, 
 // runs its call once, at its CLEANUP at its scope's end (its entry); an exit (CHECK_CONTROL_EXIT) jumps to its first
 // record's entry, and after each record's call its dispatch goes on to (CheckProgramChain):
 // - its destinations' tails, of the exits whose last record it is: exits with the same last record and the same tail
-//   share one, whose tail the first of them keeps in place (the others leave theirs out), or for a lone JUMP its target;
+//   share one, whose tail the first emitted exit keeps in place (the others leave theirs out), or for a lone JUMP its target;
 // - its parent's entry, for the exits that go past it from its scope's outermost record (OUTWARD);
 // - the next control (NATURAL): its parent's CLEANUP in its scope's run, which every path through it takes, or after the
 //   run's outermost record, what follows the scope, which only the scope's fall takes.
@@ -3108,7 +3094,7 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
     const uint64_t mark = scratch->length;
     uint64_t* targeted = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count / 64 + 1);
     uint32_t* places = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, exit_count);
-    uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, exit_count);
+    uint32_t* destination_stop = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, exit_count);
     uint32_t* destination_of = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, exit_count);
     // The destinations: each one's last record, its tail's first control, its length and its label.
     uint32_t* destination_last = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, exit_count);
@@ -3120,7 +3106,7 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
     uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body->cleanup_count + 1);
     uint32_t* path_first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body->cleanup_count + 1);
     uint32_t* path_next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)exit_count + 1);
-    if (targeted == 0 || absent == 0 || path == 0 || path_first == 0 || path_next == 0 || places == 0 || ends == 0 || destination_of == 0 || destination_last == 0 || destination_tail == 0 || destination_length == 0 ||
+    if (targeted == 0 || absent == 0 || path == 0 || path_first == 0 || path_next == 0 || places == 0 || destination_stop == 0 || destination_of == 0 || destination_last == 0 || destination_tail == 0 || destination_length == 0 ||
         destination_label == 0 || table == 0)
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, body->opening);
@@ -3179,19 +3165,17 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
         }
         // The controls that branches go to, the records' entries and the exits' places. An asm goto or a label whose
         // address is taken may go to any: every fall is then reached.
-        // A statement expression's region's CLEANUPs past the function's controls are entries too, but for its block's
-        // own, the run after its END, which the region lowers after its value (check_lower_region).
+        // A statement expression's region's CLEANUPs past the function's controls are entries too, including its block's
+        // run after its END: check_lower_region keeps its value before lowering that run, with an empty evaluation stack.
         bool anywhere = false;
-        bool ended = false;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckControl* control = controls + i;
-            ended = control->kind == CHECK_CONTROL_END || (ended && control->kind == CHECK_CONTROL_CLEANUP);
             if (control->kind >= CHECK_CONTROL_BRANCH_FALSE && control->target < count)
             {
                 check_program_bit_set(targeted, control->target);
             }
-            else if (control->kind == CHECK_CONTROL_CLEANUP && (i < body->entry_count || !ended) && control->target >= record_first && control->target < record_end)
+            else if (control->kind == CHECK_CONTROL_CLEANUP && control->target >= record_first && control->target < record_end)
             {
                 chains[control->target].entry = i;
             }
@@ -3218,7 +3202,10 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
                                cleanups[before->target].scope != cleanups[r].scope);
             const bool transfers = before != NULL && (before->kind == CHECK_CONTROL_RETURN || before->kind == CHECK_CONTROL_JUMP ||
                                                       before->kind == CHECK_CONTROL_JUMP_INDIRECT || before->kind == CHECK_CONTROL_END);
-            const bool falls = head && (anywhere || !transfers || check_program_bit(targeted, entry));
+            // A region's END precedes its value, not a transfer. Its ordinary completion reaches the post-value run
+            // and must reset the destination slot, even if evaluating that value used another cleanup chain.
+            const bool region_end = before != NULL && before->kind == CHECK_CONTROL_END && entry >= body->entry_count;
+            const bool falls = head && (anywhere || !transfers || region_end || check_program_bit(targeted, entry));
             if (head)
             {
                 chains[r].flags |= BUSTER_CHECK_CHAIN_HEAD;
@@ -3249,19 +3236,14 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
             }
             const bool held = exit->first >= record_first && exit->first < record_end && exit->last >= record_first && exit->last < record_end;
             const uint32_t missing = held ? absent[exit->first - record_first] : 0;
-            // A statement expression's exit, only through records within its block, not of the block itself: their entries
-            // are its statements' controls, lowered with its region.
-            const bool within = exit->region_open == BUSTER_CHECK_NONE ||
-                                (held && cleanups[exit->last].declaration > exit->region_open && cleanups[exit->last].end < exit->region_close);
-            const bool live = held && within && end < count && (controls[end].kind == CHECK_CONTROL_RETURN || controls[end].kind == CHECK_CONTROL_JUMP) &&
+            const bool live = held && end < count && (controls[end].kind == CHECK_CONTROL_RETURN || controls[end].kind == CHECK_CONTROL_JUMP) &&
                               (missing == 0 || missing - 1 < chains[exit->last].depth);
             if (!held)
             {
                 check_program_fail(program, CHECK_PROGRAM_INVALID, body->opening);
             }
             destination_of[k] = BUSTER_CHECK_NONE;
-            ends[k] = end;
-            exit->skip = live ? 0 : BUSTER_CHECK_NONE;
+            exit->tail_count = live ? end - place : BUSTER_CHECK_NONE;
             exit->value = BUSTER_CHECK_NONE;
             if (live)
             {
@@ -3290,14 +3272,8 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
                     destination_last[found] = exit->last;
                     destination_tail[found] = tail;
                     destination_length[found] = length;
-                    destination_label[found] = lone ? controls[end].target : tail;
+                    destination_label[found] = lone ? controls[end].target : BUSTER_CHECK_NONE;
                     chains[exit->last].stop_count += 1;
-                    // The first exit keeps its tail, which the dispatch goes to; a lone JUMP's dispatch goes to its target.
-                    exit->skip = lone ? 1 : 0;
-                }
-                else
-                {
-                    exit->skip = length;
                 }
                 destination_of[k] = found;
                 chains[exit->first].reach = chains[exit->first].reach < chains[exit->last].depth ? chains[exit->first].reach : chains[exit->last].depth;
@@ -3314,7 +3290,8 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
         for (uint32_t d = 0; d < destination_count; d += 1)
         {
             CheckProgramChain* chain = chains + destination_last[d];
-            program->chain_stops[chain->stop_first + chain->tested] = (CheckProgramStop){ .value = d + 1, .label = destination_label[d] };
+            destination_stop[d] = chain->stop_first + chain->tested;
+            program->chain_stops[destination_stop[d]] = (CheckProgramStop){ .value = d + 1, .label = destination_label[d] };
             chain->tested += 1;
         }
         program->chain_stop_count = stop;
@@ -3348,6 +3325,7 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
             CheckProgramExit* exit = exits + exit_start + k;
             const uint32_t tested = destination_of[k] != BUSTER_CHECK_NONE ? chains[exit->first].tested : 0;
             exit->value = tested != 0 && tested - 1 >= chains[exit->last].depth ? destination_of[k] + 1 : BUSTER_CHECK_NONE;
+            exit->destination = destination_of[k] != BUSTER_CHECK_NONE ? destination_stop[destination_of[k]] : BUSTER_CHECK_NONE;
         }
         for (uint32_t r = record_first; r < record_end; r += 1)
         {
@@ -3410,7 +3388,7 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
                 needed[object] = 1;
                 references[reference_count++] = (uint64_t)object << 32;
             }
-            const bool more = exits && record != program->exits[controls[i].target].last && program->exits[controls[i].target].skip == BUSTER_CHECK_NONE;
+            const bool more = exits && record != program->exits[controls[i].target].last && program->exits[controls[i].target].tail_count == BUSTER_CHECK_NONE;
             record = more ? program->chains[record].parent : BUSTER_CHECK_NONE;
         }
     }
@@ -4469,55 +4447,23 @@ static void check_program_needed_number(const uint8_t* needed, uint32_t objects,
 #include "c_check_program_lifetime.c"
 
 // The entries that cleanups add at most (#147, #1370): at each jump (whose keyword has the role RETURN) a RESULT and an
-// EXIT, at each variable's scope's end its CLEANUP, and at each jump in a statement expression's region inside its scope,
-// whose exit keeps its run, a CLEANUP more; counted from running counts of those tokens. `jumps` takes the count of
-// jumps, the room of the program's exits. UINT64_MAX where the counts' room can't be taken.
-static uint64_t check_program_cleanup_room(const Parser* parser, const CheckInput* input, Arena* scratch, uint32_t* jumps_out)
+// EXIT, and at each variable's scope's end its CLEANUP. Statement expressions use the same compact exits; a fallback
+// through a missing scope end expands only during lowering. No exit needs a run's worth of control entries.
+static uint64_t check_program_cleanup_room(const Parser* parser, const CheckInput* input, uint32_t* jumps_out)
 {
     uint64_t room = 0;
     *jumps_out = 0;
     if (input->cleanup_count != 0)
     {
-        const uint64_t mark = scratch->length;
         const uint32_t count = input->token_count;
-        uint32_t* jumps = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
-        int32_t* nesting = input->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, int32_t, (uint64_t)count + 1) : 0;
-        room = jumps == NULL || (input->region_count != 0 && nesting == NULL) ? UINT64_MAX : 0;
-        if (room == 0)
+        const uint8_t* const roles = parser->tree.roles;
+        uint32_t jumps = 0;
+        for (uint32_t token = 0; token < count; token += 1)
         {
-            // The regions' tokens: a running sum of +1 at each one's opening and -1 past its closing.
-            if (nesting != NULL)
-            {
-                memset(nesting, 0, ((uint64_t)count + 1) * sizeof(int32_t));
-                for (uint32_t r = 0; r < input->region_count; r += 1)
-                {
-                    const CheckInputRegion* region = input->regions + r;
-                    if (region->opening < region->closing && region->closing < count)
-                    {
-                        nesting[region->opening] += 1;
-                        nesting[region->closing + 1] -= 1;
-                    }
-                }
-            }
-            jumps[0] = 0;
-            int32_t inside = 0;
-            uint64_t all = 0;
-            for (uint32_t token = 0; token < count; token += 1)
-            {
-                inside += nesting != NULL ? nesting[token] : 0;
-                const bool jump = parser->tree.roles[token] == PARSE_ROLE_RETURN;
-                all += jump;
-                jumps[token + 1] = jumps[token] + (jump && inside > 0);
-            }
-            room = all * 2;
-            *jumps_out = all <= UINT32_MAX ? (uint32_t)all : UINT32_MAX;
-            for (uint32_t r = 0; r < input->cleanup_count; r += 1)
-            {
-                const CheckInputCleanup* cleanup = input->cleanups + r;
-                room += cleanup->declaration < cleanup->end && cleanup->end <= count ? (uint64_t)jumps[cleanup->end] - jumps[cleanup->declaration] + 1 : 0;
-            }
+            jumps += roles[token] == PARSE_ROLE_RETURN;
         }
-        arena_pop_to(scratch, mark);
+        *jumps_out = jumps;
+        room = (uint64_t)jumps * 2 + input->cleanup_count;
     }
     return room;
 }
@@ -4562,7 +4508,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     uint32_t exit_capacity = 0;
-    const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, scratch, &exit_capacity) : 0;
+    const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, &exit_capacity) : 0;
     // The exits through cleanups' chains, their records' plans and their dispatches' destinations (#1370).
     program->exits = valid && exit_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramExit, exit_capacity) : 0;
     program->chain_stops = valid && exit_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramStop, exit_capacity) : 0;
