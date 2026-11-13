@@ -3540,8 +3540,9 @@ static uint32_t check_program_call_computed(const CheckProgram* program, uint32_
 // Whether a call has a plain library builtin's semantics of its own, which the node machine and its census leave to the
 // pipeline: the reader marked it (BUSTER_CHECK_LIBRARY_CALL), and its row folds (where its arguments are constants) or
 // the code computes it (check_program_call_computed). Any other marked call, a memcpy of a size that is no small constant,
-// is an ordinary call of its declaration.
-static bool check_program_call_library(const CheckProgram* program, uint32_t node)
+// is an ordinary call of its declaration. The checker unit's alone call it (c_check_node_machine_type.c,
+// c_check_node_census.c).
+static __attribute__((unused)) bool check_program_call_library(const CheckProgram* program, uint32_t node)
 {
     const uint32_t member = program->input->graph.members[node];
     const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
