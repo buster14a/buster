@@ -3178,7 +3178,7 @@ static bool changes_main_policy(Text workflow)
         { 5, "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then" },
         { 5, "              \"$RUNNER_TEMP/changes\" --event merge_group --files \"$RUNNER_TEMP/files\" --workflow \"$workflow\" --output \"$GITHUB_OUTPUT\"" },
         { 5, "      auxiliary: ${{ steps.files.outputs.auxiliary }}" },
-        { 6, "    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}" },
+        { 6, "    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}" },
         { 6, "    name: Integration qualification" },
         { 6, "      actions: read" },
         { 6, "        if: github.event_name == 'merge_group'" },
@@ -3286,6 +3286,101 @@ static bool changes_main_policy(Text workflow)
     return valid && pushes == 1 && branches == 1 && queues == 1 && queue_types == 1 && queue_branches == 1;
 }
 
+// The hotfix entry (.github/workflows/hotfix.yml, #1430): a pull request labeled `hotfix` gets the required aggregate's
+// context reported as passed, so that it can enter the merge queue without waiting for its own rows. It must run for that
+// label on a pull request alone: never for a merge-queue candidate, a push or another event, whose aggregate is the
+// gate, and never under the context's name for another label (a skipped job's check run keeps its expression's name, or
+// evaluates it to the other one). This pins the file's spelling, as the main policy does.
+#define BUSTER_CHANGES_HOTFIX_WORKFLOW ".github/workflows/hotfix.yml"
+static bool changes_hotfix_policy(Text hotfix)
+{
+    static const char* const required[] = {
+        "permissions: {}",
+        "    name: ${{ github.event.label.name == 'hotfix' && 'Integration qualification' || 'Hotfix entry (another label)' }}",
+        "    if: github.event.label.name == 'hotfix'",
+    };
+    bool seen[sizeof(required) / sizeof(required[0])] = { false };
+    bool valid = true;
+    uint32_t section = 0;
+    uint32_t triggers = 0;
+    uint32_t types = 0;
+    uint32_t jobs = 0;
+    size_t offset = 0;
+    Text line;
+    while (text_next_line(hotfix, &offset, &line))
+    {
+        size_t indent = 0;
+        while (indent < line.length && line.data[indent] == ' ')
+        {
+            indent += 1;
+        }
+        if (indent != line.length && line.data[indent] != '#')
+        {
+            if (indent == 0)
+            {
+                section = text_equal_c(line, "on:") ? 1 : text_equal_c(line, "jobs:") ? 2 : 0;
+            }
+            else if (section == 1 && indent == 2)
+            {
+                // One trigger: a pull request's label.
+                triggers += 1;
+                valid = valid && text_equal_c(line, "  pull_request:");
+            }
+            else if (section == 1)
+            {
+                types += 1;
+                valid = valid && text_equal_c(line, "    types: [labeled]");
+            }
+            else if (section == 2 && indent == 2)
+            {
+                jobs += 1;
+            }
+            for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+            {
+                seen[i] |= text_equal_c(line, required[i]);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+    {
+        valid = valid && seen[i];
+    }
+    return valid && triggers == 1 && types == 1 && jobs == 1;
+}
+
+static void changes_test_hotfix_policy(ChangesTest* test, Text hotfix)
+{
+    changes_expect(test, changes_hotfix_policy(hotfix), "hotfix policy: a pull request's hotfix label alone reports the aggregate's context", (Text){ 0 });
+    static const struct
+    {
+        const char* before;
+        const char* after;
+        const char* name;
+    } mutants[] = {
+        { "  pull_request:\n", "  merge_group:\n    types: [checks_requested]\n  pull_request:\n", "a hotfix context for a merge-queue candidate" },
+        { "  pull_request:\n", "  push:\n    branches: [main]\n  pull_request:\n", "a hotfix context for a push" },
+        { "    types: [labeled]", "    types: [labeled, synchronize]", "a hotfix context on every push to a pull request" },
+        { "    types: [labeled]\n", "", "a hotfix context on every pull request event" },
+        { "    if: github.event.label.name == 'hotfix'\n", "", "a hotfix context for any label" },
+        { "    if: github.event.label.name == 'hotfix'", "    if: github.event.label.name != ''", "a hotfix context for another label" },
+        { "    name: ${{ github.event.label.name == 'hotfix' && 'Integration qualification' || 'Hotfix entry (another label)' }}", "    name: Integration qualification", "the context's name for a skipped job" },
+        { "permissions: {}", "permissions: write-all", "a hotfix entry with write access" },
+        { "jobs:\n", "jobs:\n  other:\n    runs-on: ubuntu-26.04\n    steps:\n      - run: true\n", "a second job in the hotfix entry" },
+    };
+    const char* original = text_terminated(hotfix);
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        const char* found = strstr(original, mutants[i].before);
+        Text changed = { 0 };
+        if (found != NULL)
+        {
+            const size_t start = (size_t)(found - original);
+            changed = text_concat(text_concat((Text){ .data = original, .length = start }, text_c(mutants[i].after)), text_c(found + strlen(mutants[i].before)));
+        }
+        changes_expect(test, found != NULL && !changes_hotfix_policy(changed), "hotfix policy rejects a wider hotfix entry", text_c(mutants[i].name));
+    }
+}
+
 static void changes_test_main_policy(ChangesTest* test, Text workflow)
 {
     changes_expect(test, changes_main_policy(workflow), "main policy: unfiltered pushes, independent runs and full hosted coverage", (Text){ 0 });
@@ -3316,7 +3411,8 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  auxiliary-tier1-problem:", "github.event_name == 'merge_group' && ", "", "an auxiliary workflow called on every event" },
         { "  qualification:", ", auxiliary-build-pgo, ", ", ", "the aggregate doesn't wait for an auxiliary workflow" },
         { "  qualification:", "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}\n", "", "a candidate's auxiliary workflows unchecked" },
-        { "  qualification:", " && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}", " && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
+        { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
+        { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !contains(github.event.pull_request.labels.*.name, 'hotfix') }}", "a hotfix label that could skip more than a pull request's aggregate" },
         { "  qualification:", "        if: github.event_name == 'merge_group'\n", "        if: false\n", "a candidate's coverage unchecked" },
         { "  qualification:", "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}\n", "", "the aggregate ignores the candidate's coverage" },
         { "  qualification:", "      actions: read\n", "", "the coverage step can't read the run's jobs" },
@@ -3902,6 +3998,13 @@ static int changes_self_test(const char* root)
     changes_expect(&test, isa_readable, "the host predicate", text_c(BUSTER_CHANGES_HOST_ISA));
     bool settings_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_SETTINGS)), &settings);
     changes_expect(&test, settings_readable, "the build's settings", text_c(BUSTER_CHANGES_SETTINGS));
+    Text hotfix;
+    bool hotfix_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_HOTFIX_WORKFLOW)), &hotfix);
+    changes_expect(&test, hotfix_readable, "the hotfix entry", text_c(BUSTER_CHANGES_HOTFIX_WORKFLOW));
+    if (hotfix_readable)
+    {
+        changes_test_hotfix_policy(&test, hotfix);
+    }
     changes_test_split(&test);
     if (readable && row_readable)
     {
