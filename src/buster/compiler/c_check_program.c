@@ -506,6 +506,10 @@ struct CheckProgram
     // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
     // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
     uint8_t* object_returns_twice;
+    // Per object, whether a declaration of it has an asm label, not ignored: clang's code calls a library builtin's
+    // declaration of one by its label rather than compute it (#1373, check_program_call_computed). Made before the
+    // references' pass (check_program_labelled_objects); null where no declaration has one.
+    uint8_t* object_labelled;
     // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
     // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
     // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
@@ -3498,17 +3502,53 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
     return constant;
 }
 
+// CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
+// by one scan of the tokens
+// with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
+static bool check_program_labelled_objects(CheckProgram* program, Arena* output, bool scalar)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    bool room = true;
+    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count, scalar) : count; room && first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    {
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        for (uint32_t selected = lanes; room && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const uint32_t object = input->objects[token];
+            const CheckInputAttribute* label = object != 0 && object <= count && input->declarations[token] == token ?
+                                               check_input_attribute_of(check_input_attributes_at(input, token), CHECK_ATTRIBUTE_ASM_LABEL) : NULL;
+            if (label != NULL && program->object_labelled == NULL)
+            {
+                program->object_labelled = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_labelled != NULL;
+                if (room)
+                {
+                    memset(program->object_labelled, 0, (uint64_t)count + 1);
+                }
+            }
+            if (label != NULL && room)
+            {
+                program->object_labelled[object] = 1;
+            }
+        }
+    }
+    return room;
+}
+
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
 // makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
 // its prototype's arguments, memcpy, memmove and memset with a constant size of at most
 // BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES; but of one with an asm label on a declaration, which clang's code calls by its
-// label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it). The label's search reads the callee's declarations, in a
-// unit with an asm keyword alone, for the few calls the reader marked.
+// label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
+// the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
+// took sqlite3.c's -c from 126 to 187 ms on the 9700X.
 static uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node)
 {
-    const CheckInput* input = program->input;
-    const CheckGraph* graph = &input->graph;
+    const CheckGraph* graph = &program->input->graph;
     const uint32_t member = graph->members[node];
     const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
     const bool library = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
@@ -3523,17 +3563,9 @@ static uint32_t check_program_call_computed(const CheckProgram* program, uint32_
         const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
         marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
     }
-    const uint32_t callee = marked ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
-    bool labelled = false;
-    for (uint32_t token = 0; marked && object != 0 && input->asm_capacity != 0 && !labelled && token < input->token_count; token += 1)
-    {
-        const CheckInputAttributes* attributes = input->objects[token] == object && input->declarations[token] == token ? check_input_attributes_at(input, token) : NULL;
-        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-        {
-            labelled |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
-        }
-    }
+    const bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
     return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
 }
 
@@ -4942,6 +4974,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
                                     check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
+    // The labelled library declarations, which a computed call's test reads in the references' pass below.
+    valid = valid && check_program_labelled_objects(program, output, BUSTER_SCALAR_PATH(options.scalar));
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {
