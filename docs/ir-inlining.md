@@ -279,7 +279,7 @@ and nested calls, by each path, with `--verify`.
 name and currently accepts none. `./build/compiler test-ir-inline` runs it,
 and the 9700X job's test step runs that command with the other optimizer tests.
 
-Local optimized runs pass **106,873 checks**, including **14,256 independent
+Local optimized runs pass **106,889 checks**, including **14,256 independent
 interpreter executions** (94,759 and 6,432 before #2541's fixtures; 59,741
 checks, with ASan/UBSan too, before the side-table growth case below).
 The interpreter executes calls using an explicit frame stack, and a call with
@@ -319,9 +319,17 @@ call of a callee that never returns, and from a switch's targets). Each unit is
 inlined without `control_flow` (every such call `IR_INLINE_BODY`) and with it
 (every call expanded but the external one's), and runs on the shared IR
 interpreter before inlining, after it, and after SROA and promotion of the
-caller, 24 argument pairs each, with memory compared. A by-value callee whose
+caller, 24 argument pairs each, with memory compared (a run is bounded at 2²⁰
+steps, so that a wrong branch that loops fails at once). A by-value callee whose
 two returns give the addresses of two objects of its own runs the same way with
-vector and integer copies.
+vector and integer copies, and its continuation's lifetime ends must follow the
+loads that copy the result out of those objects, which the interpreter, giving
+each slot bytes of its own, can't see. Each of ten mutants of the splice fails
+the suite: one return's phi operand, a callee phi's block base, the caller's
+predecessor remap, a switch case's constant rebase, a parameter's binding, the
+vector path's value shift and one entry of its kind tables, the scalar twin's
+`cbr` block base, the lifetime ends before the result's copy, and a caller
+branch's remap.
 
 ## Reach in `--tier1`
 
