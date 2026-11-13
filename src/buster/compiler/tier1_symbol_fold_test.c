@@ -105,8 +105,8 @@ static bool tier1_symbol_fold_folded(const Tier1SelectPattern* pattern, uint32_t
 }
 
 // The plan's shape with the access column: node 10 is the entry's branch on symbol 1's word at 4, 12 and 19 symbol 1's
-// load and store at 8, 26 its byte comparison (or the truth value 27 that takes it), 13, 14 and 15 the other symbols'
-// loads, 20, 21 and 28 their stores.
+// load and store at 8, 26 its byte comparison (or the truth value 27 that takes it), 13 and 14 the other symbols' loads,
+// 20, 21 and 28 their stores, and 18 the sum that takes 15, the initial-exec load, as its memory operand (#2602).
 static bool tier1_symbol_fold_shape(const Tier1SelectPlan* plan)
 {
     const Tier1SelectPattern* patterns = plan->patterns;
@@ -118,11 +118,13 @@ static bool tier1_symbol_fold_shape(const Tier1SelectPlan* plan)
     shape = shape && patterns[19].rule == TIER1_RULE_STORE_ADDRESS && tier1_symbol_fold_folded(&patterns[19], 0, 8) && patterns[19].values[2] == 0;
     shape = shape && patterns[compare].compare_memory && patterns[compare].compare_immediate && patterns[compare].width == 1 && patterns[compare].immediate == 3 &&
             tier1_symbol_fold_folded(&patterns[compare], 1, 0);
-    const uint32_t accesses[6] = { 13, 14, 15, 20, 21, 28 };
+    shape = shape && plan->covered[15] && patterns[18].rule == TIER1_RULE_LOAD_OPERAND && patterns[18].values[0] == 17;
+    const uint32_t accesses[6] = { 13, 14, 18, 20, 21, 28 };
     const uint32_t bases[6] = { 2, 3, 4, 2, 3, 4 };
     for (uint32_t k = 0; k < 6; k += 1)
     {
-        shape = shape && !patterns[accesses[k]].rip && patterns[accesses[k]].stack_object == BUSTER_IR_NONE && patterns[accesses[k]].values[0] == bases[k];
+        const uint32_t first = accesses[k] == 18 ? 1 : 0;
+        shape = shape && !patterns[accesses[k]].rip && patterns[accesses[k]].stack_object == BUSTER_IR_NONE && patterns[accesses[k]].values[first] == bases[k];
     }
     // No node reads symbol 1's address or its members': none is an effective use.
     for (uint32_t use = 0; use < plan->effective_use_count; use += 1)
@@ -383,14 +385,16 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
         const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
-        // Nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 5, 10 and 14
-        // the load, the store and the second load.
-        bool shared = planned && !plan.covered[2] && !plan.covered[3] && plan.covered[7] && plan.covered[8] && plan.covered[11] && plan.covered[12];
-        const uint32_t accesses[3] = { 5, 10, 14 };
+        // Nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 10 the store,
+        // and 6 and 15 the additions that take the loads 5 and 14 as their memory operands (#2602).
+        bool shared = planned && !plan.covered[2] && !plan.covered[3] && plan.covered[7] && plan.covered[8] && plan.covered[11] && plan.covered[12] && plan.covered[5] &&
+                      plan.covered[14] && plan.patterns[6].rule == TIER1_RULE_LOAD_OPERAND && plan.patterns[15].rule == TIER1_RULE_LOAD_OPERAND;
+        const uint32_t accesses[3] = { 6, 10, 15 };
         for (uint32_t k = 0; shared && k < 3; k += 1)
         {
             const Tier1SelectPattern* pattern = &plan.patterns[accesses[k]];
-            shared = pattern->values[0] == 2 && pattern->values[1] == 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
+            const uint32_t first = k == 1 ? 0 : 1;
+            shared = pattern->values[first] == 2 && pattern->values[first + 1] == 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
         }
         tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension");
         tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths share the first address and extension");
@@ -443,6 +447,101 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
     }
 }
 
+// #2602: x + g and g + x, g symbol 1's I32 or I64 at 8, by both paths. The addition takes g as its memory operand,
+// rip-relative: no node loads it or computes its address, and the code's one memory access is the addition's, with the
+// symbol's one PC32. It runs natively against the sum C gives.
+static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
+{
+    for (uint32_t variant = 0; variant < 8; variant += 1)
+    {
+        const bool vector = (variant & 1) != 0;
+        const uint32_t order = (variant >> 1) & 1;
+        const uint8_t type = (variant & 4) != 0 ? IR_I64 : IR_I32;
+        const IrSizes sizes = {
+            .instruction_count = 6,
+            .block_count = 1,
+            .address_count = 1,
+            .parameter_count = 1,
+        };
+        IrFunction function;
+        bool ready = ir_create(&test->input, &sizes, &function) == IR_OK;
+        if (ready)
+        {
+            function.result_type = type;
+            function.parameter_types[0] = type;
+            function.symbol_count = 2;
+            function.addresses[0] = (IrAddress){ .scale = 1, .offset = 8 };
+            uint32_t next = 0;
+            const uint32_t x = tier1_select_test_append(&function, &next, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t symbol = tier1_select_test_append(&function, &next, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t member = tier1_select_test_append(&function, &next, IR_ADDRESS, IR_PTR, symbol, BUSTER_IR_NONE, 0);
+            const uint32_t loaded = tier1_select_test_append(&function, &next, IR_LOAD, type, member, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t sum = tier1_select_test_append(&function, &next, IR_ADD, type, order == 0 ? loaded : x, order == 0 ? x : loaded, BUSTER_IR_NONE);
+            tier1_select_test_append(&function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.block_offsets[1] = next;
+            ready = next == function.instruction_count;
+        }
+        const bool valid = ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        tier1_emit_test_expect(test, valid, "the symbol addition's fixture is valid IR");
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        const Tier1SelectPattern* pattern = planned ? &plan.patterns[4] : 0;
+        const bool folded = planned && plan.covered[1] && plan.covered[2] && plan.covered[3] && pattern->rule == TIER1_RULE_LOAD_OPERAND && pattern->values[0] == 0 &&
+                            tier1_symbol_fold_folded(pattern, 1, 8);
+        tier1_emit_test_expect(test, folded, "an addition takes a symbol's load as its rip-relative memory operand");
+        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths fold the symbol's load into the addition");
+        const Tier1EmitOptions options = {
+            .register_mask = tier1_liveness_register_mask(),
+            .vector = vector,
+            .rematerialize = true,
+            .certify = true,
+        };
+        Tier1EmitResult emitted;
+        const Tier1EmitError error = folded ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+        const bool certified = error == TIER1_EMIT_OK && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+        tier1_emit_test_expect(test, certified, "the symbol addition's code certifies");
+        uint32_t accesses = 0;
+        bool added = false;
+        for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[r];
+            const uint16_t form = record->form & BUSTER_X86_FORM_NUMBER;
+            const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && form != X86_FORM_LEA_R32_M && form != X86_FORM_LEA_R64_M;
+            accesses += memory;
+            added |= memory && (record->mode & BUSTER_X86_MODE_RIP) != 0 && form == (type == IR_I64 ? X86_FORM_ADD_R64_RM64 : X86_FORM_ADD_R32_RM32);
+        }
+        const bool referenced = certified && emitted.reference_count == 1 && emitted.references[0].kind == BUSTER_LINK_FIXUP_PC32 && emitted.references[0].target == 1 &&
+                                emitted.references[0].addend == 8;
+        tier1_emit_test_expect(test, !certified || (accesses == 1 && added && referenced), "the code's one access is the addition's from the symbol, by one PC32");
+        uint64_t bytes = 0;
+        uint8_t* data = 0;
+        uint8_t* mapping = certified ? tier1_symbol_fold_load(test, &emitted, &bytes, &data) : MAP_FAILED;
+        if (mapping != MAP_FAILED && tier1_emit_test_native(test, emitted.code.records, emitted.code.count))
+        {
+            const uint64_t mask = type == IR_I64 ? UINT64_MAX : UINT32_MAX;
+            for (uint32_t s = 0; s < 4; s += 1)
+            {
+                const uint64_t symbol[2] = {
+                    UINT64_C(0x5a5a5a5a5a5a5a5a),
+                    UINT64_C(0xfedcba9876543210) >> s,
+                };
+                memcpy(data, symbol, sizeof(symbol));
+                const uint64_t x = UINT64_C(0x0123456789abcdef) << s;
+                const uint64_t actual = tier1_symbol_fold_call(mapping, x) & mask;
+                tier1_emit_test_expect(test, actual == ((symbol[1] + x) & mask), "a symbol's addition adds what C does");
+            }
+        }
+        if (mapping != MAP_FAILED)
+        {
+            munmap(mapping, bytes);
+        }
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->scratch, 0);
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_symbol_fold_tests(Tier1EmitTest* test)
 {
     for (uint32_t variant = 0; variant < 4; variant += 1)
@@ -468,7 +567,8 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         Tier1SelectPlan all;
         uint32_t node = BUSTER_IR_NONE;
         const bool unreached = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &all, &node) == TIER1_SELECT_OK;
-        const bool every = unreached && all.patterns[13].rip && all.patterns[13].stack_object == 2 && all.patterns[14].rip && all.patterns[15].rip && all.covered[2];
+        const bool every = unreached && all.patterns[13].rip && all.patterns[13].stack_object == 2 && all.patterns[14].rip && all.covered[15] && all.patterns[18].rip && all.patterns[18].stack_object == 4 &&
+                           all.covered[2];
         tier1_emit_test_expect(test, every, "without the access column every symbol folds");
         Tier1EmitResult refused;
         const Tier1EmitError mismatch = every ? tier1_emit_function(&all, &options, test->allowed, &test->output, &test->scratch, &refused, &node) : TIER1_EMIT_OK;
@@ -531,4 +631,5 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
     }
     tier1_symbol_fold_straight(test);
     tier1_symbol_fold_repeated_tests(test);
+    tier1_symbol_fold_addition_tests(test);
 }

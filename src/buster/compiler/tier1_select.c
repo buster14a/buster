@@ -2007,22 +2007,30 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_LOAD_OPERAND:
     {
         X86Instruction memory = holes->memory;
-        // Moving the left input must not destroy the address before its one memory access.
+        // Moving the left input must not destroy the address before its one memory access. A commutative operation loads
+        // into the destination instead, then takes the left input from its register, two records as the grammar prices
+        // them (#2602); a subtraction keeps the address in the scratch register.
         const bool aliases_base = (memory.mode & BUSTER_X86_MODE_BASE) != 0 && memory.rm == destination;
         const bool aliases_index = (memory.mode & BUSTER_X86_MODE_INDEX) != 0 && memory.index == destination;
-        if (destination != holes->left && (aliases_base || aliases_index))
+        const bool aliased = destination != holes->left && (aliases_base || aliases_index);
+        const bool commuted = aliased && tier1_select_commutative(holes->operation);
+        if (aliased && !commuted)
         {
             tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, destination));
             memory.rm = aliases_base ? BUSTER_TIER1_SELECT_SCRATCH : memory.rm;
             memory.index = aliases_index ? BUSTER_TIER1_SELECT_SCRATCH : memory.index;
         }
-        if (destination != holes->left)
+        if (destination != holes->left && !commuted)
         {
             tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
         memory.reg = destination;
-        memory.form = tier1_select_binary_form(holes->operation, width);
+        memory.form = commuted ? (width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32) : tier1_select_binary_form(holes->operation, width);
         tier1_select_append(&result, memory);
+        if (commuted)
+        {
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_binary_form(holes->operation, width), destination, holes->left));
+        }
         break;
     }
     case TIER1_RULE_STORE:
@@ -6142,7 +6150,9 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[2] = BUSTER_IR_NONE;
             tier1_select_fold(forest, node, load, &folded);
             tier1_select_memory(forest, node, function->a[load], &folded, 1);
-            folded.intrinsic_cost = 3;
+            // Two records at most for an addition, and, or or xor (tier1_select_expand), as the grammar prices them (#2602);
+            // a subtraction's three, and a multiplication's #1217's imul penalty.
+            folded.intrinsic_cost = op == IR_SUB || op == IR_MUL ? 3 : 2;
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }

@@ -403,6 +403,9 @@ static void tier1_select_test_patterns(Tier1SelectTest* test)
     }
 }
 
+// A load, a load's memory operand of each operation and a store, by a base and an index, its destination elsewhere, the
+// base's, the index's or (an operation's) its left operand's. A commutative operation's is two records at most and never
+// the scratch register's (#2602): where the destination is in the address, it loads into it, then takes the left.
 static void tier1_select_test_memory(Tier1SelectTest* test)
 {
     uint8_t bytes[512];
@@ -415,6 +418,15 @@ static void tier1_select_test_memory(Tier1SelectTest* test)
         X86_REGISTER_RSI,
         X86_REGISTER_RDX,
     };
+    static const X86Operation operations[] =
+    {
+        X86_OPERATION_SUB,
+        X86_OPERATION_ADD,
+        X86_OPERATION_AND,
+        X86_OPERATION_OR,
+        X86_OPERATION_XOR,
+        X86_OPERATION_IMUL,
+    };
     for (uint32_t i = 0; i < sizeof(bytes); i += 1)
     {
         bytes[i] = (uint8_t)tier1_select_test_random(&random);
@@ -425,12 +437,14 @@ static void tier1_select_test_memory(Tier1SelectTest* test)
         {
             for (uint32_t scale = 0; scale < 4; scale += 1)
             {
-                for (uint32_t mode = 0; mode < 3; mode += 1)
+                for (uint32_t step = 0; step < 2 + BUSTER_ARRAY_LENGTH(operations); step += 1)
                 {
+                    const uint32_t mode = step == 0 ? 0 : step == 1 ? 2 : 1;
+                    const X86Operation operation = mode == 1 ? operations[step - 2] : X86_OPERATION_SUB;
                     Tier1SelectHoles holes =
                     {
                         .rule = mode == 0 ? TIER1_RULE_LOAD_ADDRESS : mode == 1 ? TIER1_RULE_LOAD_OPERAND : TIER1_RULE_STORE_ADDRESS,
-                        .operation = X86_OPERATION_SUB,
+                        .operation = operation,
                         .memory =
                         {
                             .displacement = -17,
@@ -444,6 +458,17 @@ static void tier1_select_test_memory(Tier1SelectTest* test)
                         .right = X86_REGISTER_RDX,
                     };
                     Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
+                    if (mode == 1 && operation != X86_OPERATION_SUB)
+                    {
+                        bool scratched = false;
+                        for (uint32_t r = 0; r < selected.count; r += 1)
+                        {
+                            scratched |= selected.records[r].reg == BUSTER_TIER1_SELECT_SCRATCH || selected.records[r].rm == BUSTER_TIER1_SELECT_SCRATCH ||
+                                         selected.records[r].index == BUSTER_TIER1_SELECT_SCRATCH;
+                        }
+                        const uint32_t wanted = holes.destination == holes.left ? 1 : 2;
+                        tier1_select_test_expect(test, selected.count == wanted && !scratched, "a commutative memory operand is one record in its left's register and two elsewhere, without the scratch register");
+                    }
                     X86Instruction records[16];
                     uint32_t count = selected.count;
                     memcpy(records, selected.records, count * sizeof(*records));
@@ -466,7 +491,7 @@ static void tier1_select_test_memory(Tier1SelectTest* test)
                                 memcpy(expected + offset, &value, width);
                             }
                             const uint64_t actual = tier1_select_test_call(test, (uintptr_t)(bytes + 128), index, value);
-                            const uint64_t wanted = mode == 0 ? loaded : tier1_select_test_binary(X86_OPERATION_SUB, width, value, loaded);
+                            const uint64_t wanted = mode == 0 ? loaded : tier1_select_test_binary(operation, width, value, loaded);
                             tier1_select_test_expect(test, mode == 2 || actual == wanted, "folded memory operand including register/address overlap");
                             tier1_select_test_expect(test, memcmp(expected, bytes, sizeof(bytes)) == 0, "exact memory access width and store position");
                         }
