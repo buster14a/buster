@@ -1,18 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #2531's step 0, the census (docs/attested-declarations.md, "The steps and their gates"): what attested declarations
-// would skip, counted on the pipeline as it is. measure-attested runs a command of several units as `--lanes 1` runs
-// it, and beside it, at two places of each unit that check_driver_unit gives it (one test of check_driver_attested a
-// place, which only this command sets):
+// #2531's attested declarations (docs/attested-declarations.md): the passes, a lane's memo, step 0's census and steps 1
+// and 2's compile.
+//
+// The compile (--attested, c_checker_driver.c's CheckAttestedMode): each units lane of a command of several source files
+// has a CheckAttested of its own (check_attested_lane_open, CheckUnitsLane.attested), whose memo and names' states its
+// units share. Before each unit's reader the passes run untimed (check_attested_decide); with --attested=on the reader's
+// walk passes the declarations attested and not reached (check_attested_skips, check_input_skip), and with verify a hit
+// whose reading contradicts its memo fails the unit (check_attested_contradiction). The reader tests each reading's
+// binding events against its list as it ends (check_attested_events); the unit's end records each reading and teaches the
+// memo (check_attested_after), and says whether a unit that skipped is read again with nothing skipped
+// (check_attested_again, check_units_compile). The compile's reach takes no runtime functions' names (check_attested_decide
+// says why).
+//
+// The census, step 0: what attested declarations would skip, counted on the pipeline as it is. measure-attested runs a
+// command of several units as `--lanes 1` runs it, and beside it, at two places of each unit that check_driver_unit gives
+// it (one test of check_driver_attested a place, which only this command sets):
 //
 //   - check_attested_input, the reader's call: before the reader, the design's passes over the parser's tree, timed by
 //     this thread's user-mode cycles: the lists (each file-scope declaration's range, and each identifier's class by its
 //     role and the brackets around it), the declarations' own hashes, the chain (each one's semantic hash from its own
 //     and its names' current hashes, the memo's probe, its declared names' new hashes), the reach (from the roots, by
-//     two cursors a name) and the marks (the skipped ranges' bits). Then the reader, check_input_run as -c calls it but
-//     with its environment published, which copies the binding events past the reader and changes nothing it reads or
-//     writes.
+//     two cursors a name) and the marks (the skipped ranges' bits). Then the reader, check_input_run as -c calls it, which
+//     tests each reading's binding events against its declaration's list as it ends (check_attested_events).
 //   - check_attested_after, the unit's end: what each declaration's reading did, from what the reader and the later
 //     stages left. Silent: no diagnostic of the driver's collected ones (PPOptions.collect_diagnostics, every stage's)
 //     is placed at one of its tokens by its output position. Pure: no token of it has a definition, a tentative
@@ -39,8 +50,7 @@
 // check_attested_input, the record (check_attested_after), check_attested_report and run_attested_census. Include after
 // c_checker_units.c: c_checker_driver.c declares the two calls and check_driver_attested.
 //
-// This is a measurement beside the compile: the passes are the design's in scalar code, one declaration's chain at a
-// time, and their figures are what a vector path must beat.
+// The census is a measurement beside the compile; the passes are the compile's.
 #ifndef BUSTER_C_CHECK_ATTESTED_INCLUDED
 #define BUSTER_C_CHECK_ATTESTED_INCLUDED
 
@@ -1578,7 +1588,7 @@ static __attribute__((noinline)) void check_attested_marks(CheckAttested* census
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The unit before its reader: its arrays, the passes timed, then the reader with its environment published.
+// The unit before its reader: its arrays, the passes timed, then the reader.
 
 // The counter's value: with rdpmc from its page under the page's sequence lock, as linux/perf_event.h describes (the
 // parser benchmark's reader), or with read() where the kernel doesn't allow rdpmc.
@@ -1875,8 +1885,8 @@ static void check_attested_twins(CheckAttested* census, const Parser* parser, Pr
     arena_pop_to(&census->unit_arena, mark);
 }
 
-// check_driver_unit's reader for a census's unit: the passes, then check_input_run as check_input_compile calls it, with
-// the reader's environment published (its binding events kept past it). A view of a failed parse runs no passes.
+// check_driver_unit's reader for a census's unit: the passes, then check_input_run as check_input_compile calls it, which
+// tests each reading's binding events as it ends (check_attested_events). A view of a failed parse runs no passes.
 static bool check_attested_input(CheckAttested* census, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, const char* path)
 {
@@ -2052,8 +2062,8 @@ static bool check_attested_decide(CheckAttested* attested, const Parser* parser,
 
 // check_driver_unit's reader for a unit of a lane with attested declarations: the passes (none for a unit read again,
 // whose first reading skipped and must not, nor for a view of a failed parse), then check_input_run as check_input_compile
-// calls it, with its environment published (check_attested_after tests each reading's binding events against its list)
-// and, with --attested=on, the marks of the declarations attested and not reached, which its walk passes.
+// calls it, which tests each reading's binding events against its list as it ends (check_attested_events), and, with
+// --attested=on, the marks of the declarations attested and not reached, which its walk passes.
 static bool check_attested_read(CheckAttested* attested, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {

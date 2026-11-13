@@ -1,10 +1,10 @@
 # Attested declarations: a file-scope declaration is read once per command (#2531): design
 
 Status: step 0, the census, is built and measured
-([below](#step-0-the-census)); the rest is design. Its skip has been run in
-the compiler's own reader by a measurement patch, with the decisions made
-outside; the rest of its gains are estimates that its first two steps exist to
-confirm or refute. It is
+([below](#step-0-the-census)), and so are steps 1 and 2, the shadow and the
+skip in the compile ([below](#steps-1-and-2-the-skip-in-the-compile)): a
+command of several source files skips by default (`--attested=on`). Steps 3
+and 4 are design. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -266,7 +266,14 @@ labels and alias attributes. Each counts as spelled by a root, so a
 declaration of one is always read. The emulation has no such rule, and musl's
 and the generated units' objects didn't need one; step 0 lists the by-name
 lookups outside the reader's walk, each of which is in this set or a reason to
-widen it.
+widen it. Step 2 drops the lowering's runtime functions from the set (the
+census still counts what they reach): a runtime call takes a declaration's
+symbol only for an object the selection numbered
+(`check_lower_declared_runtime`, `check_program_needed_number`), and the
+selection numbers only the objects its selected code references, a reading's
+that spells the name or its builtin, which reaches the declaration. A runtime
+call of a name whose declaration nothing read takes the lowering's own symbol
+whether the declaration was skipped or not.
 
 ### Where it sits
 
@@ -331,7 +338,7 @@ reach doesn't run.
   already requires each unit's object of a command of several units to be the
   unit's alone at every lane count. A unit alone has no memo and skips
   nothing, so that test is the claim's own test, on every fixture it has.
-- **`--verify` reads what it would skip.** The passes decide; the reader reads
+- **`--verify` reads what it would skip** (`--attested=verify`). The passes decide; the reader reads
   every declaration; for each one that would have been skipped it fails on a
   diagnostic, an event for an unlisted name, or a change to any counter but
   the bindings' and the types'. Step 1 is this mode run on the corpora.
@@ -669,8 +676,11 @@ Each ends the work with a record.
   corpus comparison is what finds it.
 - **`-g`.** A unit's DWARF must not describe a skipped declaration, as clang's
   describes no unused one; if `check_debug_type_reference`'s rule reaches
-  them some other way, `-g` units don't skip until it doesn't. Step 1 runs
-  with `-g`.
+  them some other way, `-g` units don't skip until it doesn't. Step 1 found it
+  does: `c_check_debug_values.c` describes every type the unit's table holds
+  (a header's unused `struct` among them, unlike clang), so the objects of
+  `test-check-units`' `-g` programs differed. `-g` skips nothing; `--attested=verify`
+  runs with it.
 - **Hash collisions.** 128 bits, keyed; a collision could only skip the
   checking of a declaration nothing names.
 - **Order of the lane's units.** A unit's output can't depend on the memo
