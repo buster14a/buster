@@ -2018,7 +2018,20 @@ static void check_driver_pack_report(const Parser* parser, Preprocessor* pp, con
 {
     if (record->handled == 1 && record->error)
     {
-        const uint32_t publication = check_driver_publication_position(parser, pp, record->token, pp->output.count);
+        uint32_t publication = check_driver_publication_position(parser, pp, record->token, pp->output.count);
+        // Sema handles this annotation before consuming it, hence before lexing the following retained directive.
+        // Its ordinary-token insertion point may be shared with that directive's preprocessing warnings. Use the
+        // original pragma metadata, including malformed directives absent from an error-only recovery history.
+        // Preserve the body-end ordering exception without consulting a failed parse tree.
+        const uint32_t next = record->pragma + 1u;
+        const bool after_brace = record->token != 0 && record->token <= parser->tokens.count &&
+                                 parser->tokens.kinds[record->token - 1] == PARSE_KIND_R_BRACE;
+        if (!after_brace && next < parser->tokens.pragma_count && parser->tokens.pragma_positions[next] == record->token &&
+            parser->tokens.pragma_sources[next] > record->source_begin)
+        {
+            const uint32_t following = parser->tokens.pragma_sources[next] - 1u;
+            publication = following < publication ? following : publication;
+        }
         pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, record->diagnostic_source, publication, PP_DIAGNOSTIC_SEMANTIC,
                                  "mac68k alignment pragma is not supported on this target");
     }

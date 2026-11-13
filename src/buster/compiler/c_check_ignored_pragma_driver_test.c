@@ -684,6 +684,7 @@ static void check_test_driver_pack_errors(CheckTest* test, const char* clang, co
     } cases[] = {
         { "#pragma options align=mac68k\nint value;\n", NULL, 1 },
         { "#pragma options align=mac68k\n#pragma options foo\nint value;\n", NULL, 1 },
+        { "int prior = ;\n#pragma options align=mac68k\n#pragma options foo\nint value;\n", NULL, 2 },
         { "#pragma align=mac68k\n#pragma align=reset\nint value;\n", NULL, 1 },
         { "#pragma pack(push,1)\n#pragma options align=mac68k\nstruct S{char c;int x;};\n"
           "_Static_assert(sizeof(struct S)==5,\"unchanged\");\n#pragma options align=reset\n"
