@@ -23,6 +23,7 @@ jobs:
       - name: Run independent diagnostic probes
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           clang --version
           for source in tests/checker-warning-probes/*.c; do
