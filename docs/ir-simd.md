@@ -1777,8 +1777,11 @@ destination's opmask register. A `bitshuffle` ANDed with another mask, as its
 only use, is `vpshufbitqmb` under that mask (`{k}`), as #1847 folds a
 comparison's AND (`tier1_select_masked_compare` takes both).
 
-**Zen 5:** the 6 forms (register and masked, at 3 widths) had no row. They are
-to be measured on the 9700X.
+**Zen 5:** the 6 forms (register and masked, at 3 widths) had no row. They were
+measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-bitshuffle-quadword-1840-2026-11-13)):
+3 cycles at 16 bytes, 4 at 32 and 6 at 64, 2 per cycle, the same under a
+writemask.
 
 Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
 byte shuffles and the carriers above: `main_unit_backend.c` 132 → 105. No
@@ -1827,7 +1830,9 @@ are one record of `ir_simd_quadword_op_forms`' form at the result's width:
 
 **Tier 1** (`BUSTER_TIER1_VECTOR_QUADWORD_OP`) selects the same form back.
 
-**Zen 5:** the 6 forms had no row. They are to be measured on the 9700X.
+**Zen 5:** the 6 forms had no row. They were measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-bitshuffle-quadword-1840-2026-11-13)):
+`vpmultishiftqb` and `vpsadbw` take 3 cycles at every width and run 2 per cycle.
 
 Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
 families above: `main_unit_backend.c` 105 → 96. No `vpmultishiftqb` or
