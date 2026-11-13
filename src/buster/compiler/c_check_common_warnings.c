@@ -195,8 +195,13 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
     // (An error by default names its group alone, as clang's does.)
     const bool promoted = error && !check_common_default_error(id);
     const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) : promoted ? " [-Werror]" : "";
-    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
-                                   error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+    // A default error inhibits later analysis; a warning promoted to an error does not. Preserve the source
+    // pragma's ordinary error under -Wfatal-errors, as the driver's other default-error publications do.
+    const bool default_error = check_common_default_error(id);
+    const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
+    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? (default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
+        error ? (default_error && !source_error ? (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) :
+                 PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
     PPOutputDiagnosticNote attached[8];
     const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
     for (uint32_t i = 0; i < used; i += 1)
@@ -2105,6 +2110,30 @@ static bool check_common_atomic_member(const CheckGraph* graph, const CheckStrea
     return result;
 }
 
+// An atomic member's runtime queue, shared with a failed lookup's diagnostic publication: recovery removes that
+// erroneous expression, so the successful common-warning reading cannot visit the original operator again.
+static void check_common_atomic_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t node, bool flushed, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t token = graph->tokens[node];
+    const uint32_t boundary = check_common_function_boundary(parser, token);
+    const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    // -w skips a valid body's analysis-based warning queue, even a default error. An erroneous body instead
+    // flushes that queue, and a file-scope initializer never uses the body's analysis gate.
+    const bool report = !pp->options.suppress_warnings || boundary == token || flushed;
+    const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    if (report)
+    {
+        check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                      declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_ATOMIC_ACCESS,
+                                      false, "accessing a member of an atomic structure or union is undefined behavior", NULL, 0, scratch);
+        if (declarator != BUSTER_CHECK_NONE && graph->source_positions != NULL)
+        {
+            pp_diagnostic_suborder(pp, previous, (uint64_t)graph->source_positions[node] + 1);
+        }
+    }
+}
+
 // The arithmetic-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
 // too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
 // evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
@@ -2117,23 +2146,8 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
     {
         const Parser* parser = emission->parser;
         const uint32_t token = graph->tokens[node];
-        const uint32_t boundary = check_common_function_boundary(parser, token);
-        const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
-        // -w skips a valid body's analysis-based warning queue, even a default error. An erroneous body instead
-        // flushes that queue, and a file-scope initializer never uses the body's analysis gate.
         const bool flushed = emission->flushed != NULL && token < parser->tokens.count && emission->flushed[token] != 0;
-        const bool report = !emission->pp->options.suppress_warnings || boundary == token || flushed;
-        const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
-        if (report)
-        {
-            check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
-                                          declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_ATOMIC_ACCESS,
-                                          false, "accessing a member of an atomic structure or union is undefined behavior", NULL, 0, emission->scratch);
-            if (declarator != BUSTER_CHECK_NONE && graph->source_positions != NULL)
-            {
-                pp_diagnostic_suborder(emission->pp, previous, (uint64_t)graph->source_positions[node] + 1);
-            }
-        }
+        check_common_atomic_report(parser, emission->pp, emission->input, node, flushed, emission->scratch);
     }
     else if (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, emission->stream, emission->types, node))
     {

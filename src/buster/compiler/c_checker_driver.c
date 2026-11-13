@@ -6385,6 +6385,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         check_driver_diagnose(parser, pp, located, message);
                     }
+                    if (types->atomic_records && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_ACTION &&
+                        stream->reports[index].diagnostic == CHECK_DIAG_MEMBER && node < input->graph.count &&
+                        check_common_atomic_member(&input->graph, stream, types, node))
+                    {
+                        // The erroneous lookup is removed by the common-warning recovery reading. Its atomic
+                        // diagnostic still belongs to the original expression's queue, flushed by this error.
+                        check_common_atomic_report(parser, pp, input, node, true, scratch);
+                    }
                 }
                 report += 1;
             }
