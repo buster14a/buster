@@ -148,6 +148,10 @@ struct IrSimdTypedOperation
     // A byte shuffle by an immediate (#1840, ir_simd_typed_shuffle_immediate): its kind (BUSTER_IR_SHUFFLE_IMMEDIATE_*)
     // plus one, 0 for any other row, its immediate in `immediate`: the IR's shuffle of the vector by that kind's indices.
     uint8_t shuffle_immediate;
+    // A bit shuffle into a mask (#1840, ir_simd_typed_bitshuffle): whether the row is one, its bytes' mask ANDed with its
+    // third operand, the writemask, as a comparison's (`lane` the bytes'), left out where the typed stream's writemask
+    // has every lane.
+    bool bitshuffle;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -2195,11 +2199,53 @@ static IrSimdTypedStatus ir_simd_typed_cvtt(const Tier0Operation* source, uint64
     return status;
 }
 
+// A bit shuffle into a mask (#1840): the vpshufbitqmb builtins' row as the opmask conversion leaves it
+// (c_check_program_x86.c's MASK_BINARY), two vectors of one width (16, 32 or 64 bytes) and a writemask of their bytes'
+// lanes, one record of its form at that width from VECTOR(0) (vvvv, the quadwords) and VECTOR(1) (rm, the byte indices)
+// into MASK_RESULT, register-direct, MASK(2) its only decoration. It is the IR's bitshuffle ANDed with the writemask,
+// left out where the typed stream's writemask has every lane. Its features are its form's (BITALG, BW), AVX512F's, VL's
+// below 64 bytes and the mask width's moves and kand (BW for 32 and 64 lanes); otherwise it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_bitshuffle(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint16_t forms[3] = { X86_FORM_VPSHUFBITQMB_K_X_XM128, X86_FORM_VPSHUFBITQMB_K_Y_YM256, X86_FORM_VPSHUFBITQMB_K_Z_ZM512 };
+    const uint32_t bytes = source->operand_bytes[0];
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_MASK && source->result_bytes == bytes / 8 && source->record_count == 1 && source->operand_count == 3 &&
+                          source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
+                          source->operand_bytes[1] == bytes && (bytes == 16 || bytes == 32 || bytes == 64) && source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK &&
+                          source->operand_bytes[2] == source->result_bytes;
+    const X86Instruction expected = {
+        .form = forms[width],
+        .reg = BUSTER_TIER0_ROLE_MASK_RESULT,
+        .vvvv = BUSTER_TIER0_ROLE_VECTOR(0),
+        .rm = BUSTER_TIER0_ROLE_VECTOR(1),
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .decorations = BUSTER_TIER0_DECORATION_MASK(2),
+    };
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    candidate.bitshuffle = admitted && memcmp(&source->records[0], &expected, sizeof(expected)) == 0;
+    candidate.required_features = (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN) | BUSTER_X86_FEATURE(AVX512F) |
+                                  (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (bytes >= 32 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+    const IrSimdTypedStatus status = candidate.bitshuffle && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
+                                                                                                                                           IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.lane = IR_SIMD_LANE_I8;
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 3;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
 // comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, byte shuffles by an
 // immediate, conversions and shifts by a scalar count, lane operations, masks to vectors and back, masked loads and
 // stores, one lane's moves, reductions, the lanes' unary operations, floating operations at their own rounding and
-// truncating conversions of lane 0 (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic
+// truncating conversions of lane 0, bit shuffles into a mask (#1840), then exact scalar splats; other admitted forms
+// stay machine rows. A semantic
 // match whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
 // vector, a width change, a permute, a byte shuffle by an immediate, a conversion or a shift, whose machine row a target
 // may still run, stays one.
@@ -2222,6 +2268,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_MASK)
     {
         status = ir_simd_typed_compare_mask(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_MASK)
+    {
+        status = ir_simd_typed_bitshuffle(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && (source->result_class == BUSTER_TYPED_CLASS_MASK || source->result_class == BUSTER_TYPED_CLASS_VECTOR))
     {

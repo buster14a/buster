@@ -1048,7 +1048,8 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
         // queued again by each incoming edge and value, and would otherwise meet all of them on every visit (#1729).
         if (work->states[i] != IROPT_OVERDEFINED)
         {
-            if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+            if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])) ||
+                (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_BITSHUFFLE))
             {
                 changed = ir_optimize_simd_visit(work, i, queue);
             }

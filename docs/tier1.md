@@ -437,6 +437,9 @@ The compresses and expands are its `compress` and `expand` (#1840, its
 the mask into the destination, which takes the passthrough first.
 The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES`:
 `vaesenc` or `vaesenclast`, EVEX, or VEX where the target has no VL.
+The bit shuffles into a mask are its `bitshuffle` (#1840, its "Bit shuffles into
+a mask"), `BUSTER_TIER1_VECTOR_BITSHUFFLE`: `vpshufbitqmb`, under the writemask
+where a mask's AND takes it.
 
 ### Inlining (#1282)
 

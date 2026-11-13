@@ -353,6 +353,10 @@ typedef enum Tier1SelectRule
 // A unary operation of each of values[0]'s lanes (#1840): `immediate` the IR's flags, one record of
 // ir_simd_lane_unary_forms' (vpopcntb to vpopcntq, vplzcntd, vplzcntq, vpconflictd, vpconflictq).
 #define BUSTER_TIER1_VECTOR_LANE_UNARY 28
+// A bit shuffle into a mask (#1840): vpshufbitqmb of values[0]'s quadwords (vvvv) by values[1]'s byte indices (rm) into
+// the destination's opmask register, under values[2]'s as its writemask where it is a mask's AND (#1847's compare's
+// way), at the vectors' width.
+#define BUSTER_TIER1_VECTOR_BITSHUFFLE 29
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -2523,6 +2527,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .rm = complement ? left : right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .immediate = complement ? 0x55 : 0,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_BITSHUFFLE)
+        {
+            static const uint16_t forms[3] = { X86_FORM_VPSHUFBITQMB_K_X_XM128, X86_FORM_VPSHUFBITQMB_K_Y_YM256, X86_FORM_VPSHUFBITQMB_K_Z_ZM512 };
+            const X86Instruction record = {
+                .form = forms[width == 16 ? 0 : width == 32 ? 1 : 2],
+                .reg = (uint8_t)(destination & 7),
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = (uint8_t)(holes->third & BUSTER_X86_DECORATION_MASK),
             };
             tier1_select_append(&result, record);
         }
@@ -5031,8 +5048,9 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
 static bool tier1_select_masked_compare(const Tier1SelectForest* forest, uint32_t node, uint32_t value)
 {
     const IrFunction* function = forest->function;
-    const bool compare = value < function->instruction_count && function->op[value] == IR_VCMP && function->type[value] == function->type[node] &&
-                         function->c[value] < IR_PREDICATE_COUNT && function->a[value] < function->instruction_count;
+    const bool compare = value < function->instruction_count && function->type[value] == function->type[node] && function->a[value] < function->instruction_count &&
+                         ((function->op[value] == IR_VCMP && function->c[value] < IR_PREDICATE_COUNT) ||
+                          (function->op[value] == IR_INTRINSIC && function->c[value] == BUSTER_IR_INTRINSIC_BITSHUFFLE));
     return compare && tier1_select_vector_width(function->type[function->a[value]]) != 0 && tier1_select_tree_child(forest, node, value);
 }
 
@@ -5090,7 +5108,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's (#141): the stored vector's width for a store, the result's for the others, and a comparison's operands';
     // none in a function without vectors.
     const uint32_t vector_width = forest->vectors ? tier1_select_vector_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type) : 0;
-    const uint32_t compare_width = forest->vectors && op == IR_VCMP && a < function->instruction_count ? tier1_select_vector_width(function->type[a]) : 0;
+    // A comparison's operands' width, and a bit shuffle's into a mask (#1840).
+    const uint32_t compare_width = forest->vectors && (op == IR_VCMP || (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_BITSHUFFLE)) && a < function->instruction_count ?
+                                       tier1_select_vector_width(function->type[a]) :
+                                       0;
     // The vector class's value's width, a floating value's or a vector's: its loads', stores' and phis' rules are one.
     const uint32_t class_width = float_width != 0 ? float_width : vector_width;
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
@@ -5369,7 +5390,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
         }
-        else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
+        else if (compare_width != 0 && mask_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_BITSHUFFLE)
+        {
+            // A bit shuffle into a mask (#1840): vpshufbitqmb of values[0]'s quadwords by values[1]'s bytes.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)compare_width;
+            base.scale = BUSTER_TIER1_VECTOR_BITSHUFFLE;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (compare_width != 0 && mask_width != 0 && op == IR_VCMP && c < IR_PREDICATE_COUNT)
         {
             // A comparison of signed integer lanes less than a zero vector (#1840: a vector's sign bits as a mask,
             // vpmovb2m to vpmovq2m), first, as the bottom-up path takes its kind's first candidate.
@@ -5483,15 +5515,17 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // ir_simd_typed_compare_mask, whose writemask isn't every lane, ir_typed_unmasked): the comparison under that mask
         // as its writemask, `{k}`, which leaves 0 in the lanes the writemask doesn't have, one vpcmp or vcmpps as the
         // row's was. The comparison is the AND's tree child, either operand, the left one first.
+        // A bit shuffle into a mask (#1840) ANDed with another is vpshufbitqmb under it the same way.
         const uint32_t compared = op != IR_AND ? BUSTER_IR_NONE : tier1_select_masked_compare(forest, node, a) ? a : tier1_select_masked_compare(forest, node, b) ? b : BUSTER_IR_NONE;
         if (compared != BUSTER_IR_NONE)
         {
+            const bool shuffle = function->op[compared] == IR_INTRINSIC;
             Tier1SelectPattern masked = base;
             masked.rule = TIER1_RULE_VECTOR;
             masked.width = (uint8_t)tier1_select_vector_width(function->type[function->a[compared]]);
-            masked.scale = BUSTER_TIER1_VECTOR_COMPARE;
-            masked.condition = (uint8_t)function->c[compared];
-            masked.source_width = function->flags[compared];
+            masked.scale = shuffle ? BUSTER_TIER1_VECTOR_BITSHUFFLE : BUSTER_TIER1_VECTOR_COMPARE;
+            masked.condition = shuffle ? 0 : (uint8_t)function->c[compared];
+            masked.source_width = shuffle ? 0 : function->flags[compared];
             masked.values[0] = function->a[compared];
             masked.values[1] = function->b[compared];
             masked.values[2] = compared == a ? b : a;

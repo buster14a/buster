@@ -340,7 +340,11 @@ typedef enum IrOp
 // gives its smallest value, x86's integer indefinite, where C's fptosi would be undefined (vcvttss2si, vcvttsd2si:
 // _mm_cvttss_si32 to _mm_cvttsd_si64).
 #define BUSTER_IR_INTRINSIC_CVTT 37u
-#define BUSTER_IR_INTRINSIC_COUNT 38u
+// A bit shuffle of a vector's quadwords by its byte indices into a mask of its bytes (#1840), binary, a and b vectors of
+// one type, the result the mask of its bytes' lanes (m16, m32 or m64): bit i the bit of a's quadword i / 8 that b's byte
+// i's low 6 bits name (vpshufbitqmb, _mm512_bitshuffle_epi64_mask; its writemask is an AND of the result).
+#define BUSTER_IR_INTRINSIC_BITSHUFFLE 38u
+#define BUSTER_IR_INTRINSIC_COUNT 39u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -901,6 +905,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_unary",
     "fround",
     "cvtt",
+    "bitshuffle",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1286,7 +1291,7 @@ typedef enum IrRule
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
     X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
-    X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | (1u << IR_F32) | (1u << IR_F64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
+    X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | (1u << IR_F32) | (1u << IR_F64) | (1u << IR_M16) | (1u << IR_M32) | (1u << IR_M64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0) \
     X(IR_MASKED_LOAD,   7, 7, BUSTER_IR_VECTORS, IR_RULE_MASKED_LOAD, 0) \
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0)
@@ -2229,6 +2234,11 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 else if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
                 {
                     check = ir_check(IR_ERROR_OPERAND, i, 1);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_BITSHUFFLE)
+                {
+                    // Two vectors of one type into the mask of their bytes' lanes.
+                    valid = ir_vector_type(ta) && f->type[b] == ta && type == ir_lane_mask(ta, IR_SIMD_LANE_I8);
                 }
                 else
                 {

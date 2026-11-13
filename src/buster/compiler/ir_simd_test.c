@@ -1274,6 +1274,75 @@ static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's reductions are C's");
 }
 
+// The bit shuffles into a mask (#1840): both verifiers admit bitshuffle exactly of two vectors of one type into the mask
+// of their bytes (m16, m32 or m64) with flags 0, refusing another vector's operand, another mask and flags; and the
+// model gives each byte's bit of its quadword, as vpshufbitqmb's definition, written out here, on random vectors.
+static void ir_test_bitshuffles(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrType masks[3] = { IR_M16, IR_M32, IR_M64 };
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x3c6ef372a54ff53a);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t change = 0; change < 5; change += 1)
+        {
+            // 0 the rule's; 1 b of another width; 2 a mask of another width; 3 flags 1; 4 a vector result.
+            const IrType vector = (IrType)(IR_V4I32 + width);
+            const IrType other = (IrType)(IR_V4I32 + (width + 1) % 3);
+            const IrType result = change == 2 ? masks[(width + 1) % 3] : change == 4 ? vector : masks[width];
+            const bool admitted = change == 0;
+            IrFunction function = {0};
+            const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+            if (ir_create(output, &sizes, &function) != IR_OK)
+            {
+                ir_test_expect(test, false, "bit shuffle verifier fixture allocation");
+                continue;
+            }
+            function.result_type = IR_VOID;
+            function.block_offsets[1] = 4;
+            ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_UNDEF, change == 1 ? other : vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, IR_INTRINSIC, result, 0, 1, BUSTER_IR_INTRINSIC_BITSHUFFLE);
+            ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.flags[2] = change == 3 ? 1 : 0;
+            ir_test_pair(test, &function, scratch, NULL, admitted, "a bit shuffle is admitted exactly of two vectors of one type into their bytes' mask");
+            admitted_count += admitted;
+            arena_pop_to(output, mark);
+        }
+    }
+    ir_test_expect(test, admitted_count == 3, "bit shuffles are admitted at every width");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 16; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t bytes = 16u << width;
+        IrSimdValue a = {0};
+        IrSimdValue b = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+            b.words[w] = ir_test_random(&state);
+        }
+        // vpshufbitqmb: bit i of the mask is bit (b's byte i & 63) of a's quadword i / 8.
+        const uint8_t* indices = (const uint8_t*)b.words;
+        uint64_t wanted = 0;
+        for (uint32_t i = 0; i < bytes; i += 1)
+        {
+            uint64_t quadword = 0;
+            memcpy(&quadword, (const uint8_t*)a.words + 8 * (i / 8), 8);
+            wanted |= ((quadword >> (indices[i] % 64)) & 1) << i;
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &a, &b, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_BITSHUFFLE, .result = ir_simd_shape(masks[width]), .operands = { shape, shape, IR_SIMD_NONE } };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && value.words[0] == wanted;
+    }
+    ir_test_expect(test, exact, "the model's bit shuffle gives each byte its quadword's indexed bit");
+}
+
 // The lanes' unary operations (#1840): both verifiers admit lane_unary exactly where its operand is of its type and its
 // flags a population count of any lanes, or a leading zero count or conflicts of doublewords or quadwords, for every
 // flags byte at each width; and the model gives C's counts and conflicts of each lane on random vectors whose lanes
@@ -1888,6 +1957,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_lane_moves(test, output, scratch);
     ir_test_reductions(test, output, scratch);
     ir_test_lane_unaries(test, output, scratch);
+    ir_test_bitshuffles(test, output, scratch);
     ir_test_frounds(test, output, scratch);
     ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);

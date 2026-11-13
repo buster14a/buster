@@ -1745,6 +1745,61 @@ The tests:
   interpreter and Tier 1 natively on values of every magnitude around both
   ranges, infinities and NaNs.
 
+## Bit shuffles into a mask (#1840)
+
+One more binary `intrinsic` kind, `bitshuffle` (`BUSTER_IR_INTRINSIC_BITSHUFFLE`),
+picks a bit for each byte of a vector, into a mask:
+
+```text
+%6 = intrinsic.m64 %3, %4 bitshuffle
+```
+
+- **Operands:** a and b are vectors of one type, any width. The result is the
+  mask of their bytes' lanes (`m16`, `m32` or `m64`). Its flags are 0.
+- **Semantics:** bit i is the bit of a's quadword i / 8 that b's byte i's low
+  6 bits name (`vpshufbitqmb`, BITALG).
+- **Model and passes:** `IR_SIMD_BITSHUFFLE`. The interpreter runs it as it runs
+  a comparison into a mask. SCCP folds two constant vectors by the model, and
+  GVN and LICM take it as pure and total.
+
+**Decoder** (`ir_simd_typed_bitshuffle`): the vpshufbitqmb builtins' rows
+(`__builtin_ia32_vpshufbitqmb128_mask` to 512's) as the opmask conversion
+leaves them, as a comparison into a mask is:
+- one record of the form at the vectors' width, `VECTOR(0)` in vvvv and
+  `VECTOR(1)` in rm, into `MASK_RESULT` under `MASK(2)`;
+- the IR's `bitshuffle`, ANDed with the writemask, the third operand, which
+  the lowering leaves out where the typed stream's writemask has every lane
+  (`ir_typed_unmasked`);
+- the target needs BITALG, BW, AVX512F and VL below 64 bytes.
+
+**Tier 1** (`BUSTER_TIER1_VECTOR_BITSHUFFLE`): `vpshufbitqmb` into the
+destination's opmask register. A `bitshuffle` ANDed with another mask, as its
+only use, is `vpshufbitqmb` under that mask (`{k}`), as #1847 folds a
+comparison's AND (`tier1_select_masked_compare` takes both).
+
+**Zen 5:** the 6 forms (register and masked, at 3 widths) had no row. They are
+to be measured on the 9700X.
+
+Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
+byte shuffles and the carriers above: `main_unit_backend.c` 132 → 105. No
+`vpshufbitqmb` row is left.
+
+The tests:
+
+- **`test-ir`:**
+  - both verifiers admit `bitshuffle` exactly of two vectors of one type into
+    their bytes' mask, at flags 0;
+  - they refuse another width's b, another mask and a vector result;
+  - the model is checked against the instruction's definition on random
+    vectors.
+- **`test-ir-parse`:** `tests/ir/bitshuffle.ir` round-trips.
+- **`test-ir-simd`:** the 3 rules' rows decode at exactly their features, each
+  refused without each and under 6 changes.
+- **`test-tier1-masks`:** the 3 run, under an input word's writemask and under
+  every lane, through both lowering paths, the interpreter at every stage and
+  Tier 1 natively. Both paths' code has the form's 8 records and no `kand`.
+  With the fold left out, the 8 `kand`s fail it.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

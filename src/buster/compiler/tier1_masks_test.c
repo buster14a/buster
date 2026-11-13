@@ -180,6 +180,10 @@ struct Tier1MasksTest
     // lane_extract into a carrier and extend of one.
     uint32_t carrier_attempts;
     uint32_t carrier_rows;
+    // The bit shuffles into a mask (#1840, tier1_masks_test_bitshuffles): those tried, and those through every stage as the
+    // IR's bitshuffle under the writemask.
+    uint32_t bitshuffle_attempts;
+    uint32_t bitshuffle_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -7250,6 +7254,136 @@ static void tier1_masks_test_conversions(Tier1MasksTest* test)
     free(program);
 }
 
+// The bit shuffles into a mask through the IR to Tier 1 (#1840): each vpshufbitqmb builtin's row (16, 32 and 64 bytes, its
+// masks in the mask class by check_x86_lower_masks), as the program's only row in 8 statements: the input's vectors at
+// 16k and 16k + 64 under the input word k in the odd statements and every lane in the even ones, its mask stored into
+// the output's quadword k. tier1_masks_test_typed_pipeline takes it through the interpreter at every stage and Tier 1
+// natively, against vpshufbitqmb's definition written out here: bit i the bit of the first vector's quadword i / 8 that
+// the second's byte i's low 6 bits name, where the writemask has bit i. Tier 1's code by both paths has the form's 8
+// records, the writemask's AND folded into the odd ones: no kand.
+static void tier1_masks_test_bitshuffles(Tier1MasksTest* test)
+{
+    static const uint16_t forms[3] = { X86_FORM_VPSHUFBITQMB_K_X_XM128, X86_FORM_VPSHUFBITQMB_K_Y_YM256, X86_FORM_VPSHUFBITQMB_K_Z_ZM512 };
+    static const uint16_t ands[3] = { X86_FORM_KANDW_K_K_K, X86_FORM_KANDD_K_K_K, X86_FORM_KANDQ_K_K_K };
+    // The bit shuffles are BITALG's, past x86-64-v4: their output target has it too, and a host that runs Tier 1's code
+    // natively must have it, or they are left to test-ir-simd's decoding.
+    const uint64_t v4 = test->v4_features;
+    uint8_t* const v4_forms = test->v4;
+    const uint64_t bitalg = BUSTER_X86_FEATURE(AVX512BITALG);
+    const X86Target target = { .features = v4 | bitalg };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    uint8_t* shuffled_forms = malloc(X86_FORM_COUNT);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && shuffled_forms != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the bit shuffles' memory");
+    if (ready)
+    {
+        x86_target_forms(&target, shuffled_forms);
+    }
+    const bool runs = !test->native || (x86_target_native().features & bitalg) != 0;
+    uint64_t state = test->random ^ UINT64_C(0xbb67ae8584caa73b);
+    for (uint32_t i = 0; ready && runs && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        if (strncmp(rule->name, "__builtin_ia32_vpshufbitqmb", sizeof("__builtin_ia32_vpshufbitqmb") - 1) != 0)
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->bitshuffle_attempts += 1;
+        test->v4_features = v4 | bitalg;
+        test->v4 = shuffled_forms;
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &target);
+        const uint32_t bytes = rule->bytes;
+        const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+        bool ok = tier1_masks_test_expect(test, made && row.operand_count == 3 && row.result_class == BUSTER_TYPED_CLASS_MASK, "the front end's bit shuffle row, in the mask class");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 8; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, 2 * k);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k == 7 ? 2 * k : 2 * k + 8);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            if ((k & 1) != 0)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            else
+            {
+                tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_MAX);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[2]);
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, row.result_bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the bit shuffle's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t k = 0; k < 8; k += 1)
+            {
+                const uint8_t* a = (const uint8_t*)in + 16 * k;
+                const uint8_t* b = (const uint8_t*)in + (k == 7 ? 16 * k : 16 * k + 64);
+                const uint64_t writemask = (k & 1) != 0 ? in[k] : UINT64_MAX;
+                uint64_t value = 0;
+                for (uint32_t bit = 0; bit < bytes; bit += 1)
+                {
+                    uint64_t quadword = 0;
+                    memcpy(&quadword, a + 8 * (bit / 8), 8);
+                    value |= ((quadword >> (b[bit] & 63)) & 1 & (writemask >> bit)) << bit;
+                }
+                memcpy(wanted + 8 * k, &value, row.result_bytes);
+            }
+        }
+        test->watched_forms[0] = forms[width];
+        test->watched_forms[1] = ands[width];
+        test->watched_records[0] = 0;
+        test->watched_records[1] = 0;
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 2 * 8 && test->watched_records[1] == 0,
+                                           "a bit shuffle is the IR's bitshuffle, one vpshufbitqmb by both paths, its writemask folded");
+        if (!ok)
+        {
+            printf("test-tier1-masks: %s: %u vpshufbitqmb, %u kand\n", rule->name, test->watched_records[0], test->watched_records[1]);
+        }
+        test->watched_forms[0] = X86_FORM_NONE;
+        test->watched_forms[1] = X86_FORM_NONE;
+        test->bitshuffle_rows += ok;
+        test->v4_features = v4;
+        test->v4 = v4_forms;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the bit shuffles return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(shuffled_forms);
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The SSE carriers through the IR to Tier 1 (#1840, #1280: vectors of 4 or 8 bytes, an F32 or F64 in the IR), each in 4
 // statements of the input buffer's vectors stored into the output's:
 // - every whole-lane extension of a carrier (__builtin_convertvector's row from check_vector_convert_row of a vector of 4
@@ -7633,6 +7767,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_shuffle_immediates(&test);
             tier1_masks_test_conversions(&test);
             tier1_masks_test_carriers(&test);
+            tier1_masks_test_bitshuffles(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
             tier1_masks_test_lane_ops(&test);
@@ -7660,7 +7795,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
-                                                                               test.shuffle_rows + test.carrier_rows),
+                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -7678,6 +7813,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // 3 widths and the two shuffles of lanes at 2, at 8 immediates.
             tier1_masks_test_expect(&test, test.permute_attempts == 6 + 3 + 6 * 8 + 4 * 8 && test.permute_rows == test.permute_attempts,
                                     "every front-end permute goes through the IR and Tier 1 as the IR's permute");
+            // The bit shuffles into a mask (#1840): vpshufbitqmb at 3 widths, on a host that runs them.
+            tier1_masks_test_expect(&test, test.bitshuffle_attempts == (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512BITALG)) != 0 ? 3u : 0u) &&
+                                               test.bitshuffle_rows == test.bitshuffle_attempts,
+                                    "every bit shuffle into a mask goes through the IR and Tier 1 as the IR's bitshuffle under its writemask");
             // The SSE carriers (#1840): 18 extensions of a cast and 18 of a load, 6 casts stored and 6 of a live vector.
             tier1_masks_test_expect(&test, test.carrier_attempts == 18 + 18 + 6 + 6 && test.carrier_rows == test.carrier_attempts,
                                     "every carrier's cast and extension goes through the IR and Tier 1 as the IR's lane_extract and extend");
@@ -7750,6 +7889,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
                "shuffle_lanes\n",
                test.permute_rows);
+        printf("test-tier1-masks: the bit shuffles into a mask: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its bitshuffle\n",
+               test.bitshuffle_rows);
         printf("test-tier1-masks: the SSE carriers: %u casts and extensions through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its lane_extract "
                "and extend\n",
                test.carrier_rows);

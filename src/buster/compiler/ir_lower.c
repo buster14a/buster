@@ -956,6 +956,13 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->bitshuffle)
+    {
+        // A bit shuffle into a mask (#1840), `type` the mask of the vectors' bytes, ANDed with its writemask, the third
+        // operand, but where the typed stream's writemask has every lane.
+        const uint32_t mask = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_BITSHUFFLE, 0);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
     else if (operation->shuffle_immediate != 0)
     {
         // A byte shuffle by an immediate (#1840): the IR's shuffle of the vector by its kind's indices at the immediate,
@@ -1010,8 +1017,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
-    const uint32_t lanes = operation->compare_mask                                    ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+    // A comparison's lanes or a bit shuffle's bytes, or a masked extract's or truncation's (#1840): its result's, the
+    // merged operand's.
+    const uint32_t lanes = operation->compare_mask || operation->bitshuffle           ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->merge_mask || operation->masked_memory != 0 ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
                                                                                      0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;

@@ -1425,6 +1425,76 @@ static void ir_simd_typed_test_shifts(IrTestTally* tally)
     printf("  IR SIMD rows: the front end's %u shifts by an int decode to the IR's shift\n", decoded_rows);
 }
 
+// The bit shuffles into a mask (#1840): the vpshufbitqmb builtins' rows (__builtin_ia32_vpshufbitqmb128_mask to 512's, by
+// the real producer, their masks moved into the mask class by check_x86_lower_masks) decode as the IR's bitshuffle under
+// the writemask at exactly BITALG's, BW's, AVX512F's and VL's below 64 bytes; refused without each and under 6 changes.
+static void ir_simd_typed_test_bitshuffles(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512BITALG) };
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        if (strncmp(rule->name, "__builtin_ia32_vpshufbitqmb", sizeof("__builtin_ia32_vpshufbitqmb") - 1) != 0)
+        {
+            continue;
+        }
+        Tier0Operation row;
+        char description[192];
+        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &every);
+        snprintf(description, sizeof(description), "%s: its row is the front end's, its masks the mask class's", rule->name);
+        ir_test_expect(tally, made, description);
+        if (!made)
+        {
+            continue;
+        }
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512BITALG) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        snprintf(description, sizeof(description), "%s: the IR's bitshuffle under the writemask at exactly its features", rule->name);
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.bitshuffle && !decoded.compare_mask && decoded.lane == IR_SIMD_LANE_I8 &&
+                        decoded.required_features == expected;
+        ir_test_expect(tally, ok, description);
+        decoded_rows += ok;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            ir_test_expect(tally, (expected & features[f]) != 0 ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.bitshuffle,
+                           "a bit shuffle without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 6; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* first = &changed.records[0];
+            switch (m)
+            {
+            case 0: first->decorations = 0; break;
+            case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: first->rm = first->vvvv; break;
+            case 3: changed.operand_bytes[1] = (uint8_t)(rule->bytes == 64 ? 32 : 64); break;
+            case 4: changed.result_bytes = (uint8_t)(changed.result_bytes == 8 ? 4 : 8); break;
+            case 5:
+                changed.records[1] = changed.records[0];
+                changed.record_count = 2;
+                break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            snprintf(description, sizeof(description), "%s (change %u): not the IR's bitshuffle", rule->name, m);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && !decoded.bitshuffle && !decoded.machine), description);
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 3, "every bit shuffle into a mask decodes");
+    printf("  IR SIMD rows: %u bit shuffles into a mask decode to the IR's bitshuffle\n", decoded_rows);
+}
+
 // The casts into an SSE carrier (#1840): a row of no record of a vector of 16, 32 or 64 bytes into one of 4 or 8 bytes,
 // as c_check_program_vector_builtins.c's shuffle of a vector's first elements makes it (check_vector_shuffle_row, in the
 // checker's unit: written out here), decodes as the IR's lane_extract of lane 0 of doublewords or quadwords at exactly
@@ -2776,6 +2846,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_permutes(tally);
     ir_simd_typed_test_shuffle_immediates(tally);
     ir_simd_typed_test_carrier_casts(tally);
+    ir_simd_typed_test_bitshuffles(tally);
     ir_simd_typed_test_shuffle_matches(tally);
     ir_simd_typed_test_shifts(tally);
     ir_simd_typed_test_mask_vectors(tally);
