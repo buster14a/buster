@@ -6291,6 +6291,13 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             true,
         },
         {
+            "opaque assembly keeps a grouped K&R system body checked",
+            "#pragma GCC system_header\nstatic int (unused(a))int a;{return missing;}\n",
+            "#include \"lazy.h\"\n__asm__(\"\");int f(void){return 3;}\n",
+            true,
+            true,
+        },
+        {
             "unused system static syntax error is always parsed",
             "#pragma GCC system_header\nstatic int unused(void){int x=; return 1;}\n",
             "#include \"lazy.h\"\nint f(void){return 3;}\n",
@@ -8520,9 +8527,9 @@ static int run_checker_driver_tests(int argc, char** argv)
     check_test_expect(&test, pp_test_clang_reference(), "clang reference: version comparison and mismatch reporting");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
-    // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below and
-    // the six sections that take `lazy` (check_test_driver_named_ucns, _loop_hints, _gnu_scopes, _section_pragmas,
-    // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
+    // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below,
+    // check_test_driver_lazy's system-header policy checks and the sections that take `lazy`, whose gates below have
+    // no `!lazy`. Every other check runs the same commands
     // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
     // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
     if (!focused && !lazy && check_test_driver_takes())
@@ -9273,7 +9280,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_packed_members(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (check_test_driver_takes())
         {
             check_test_driver_lazy(&test, clang, executable, directory);
         }

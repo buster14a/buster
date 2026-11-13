@@ -10846,11 +10846,36 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         CheckLazy lazy = { 0 };
         if (ready && lazy_system_headers && !prefix_only)
         {
-            ready = check_lazy_plan(&lazy, checking, checking_pp, arena, scratch, scalar);
+            uint32_t eager_bodies = 0;
+            const bool eager = check_lazy_eager(checking, checking_pp, scalar, &eager_bodies);
+            if (eager)
+            {
+                lazy = (CheckLazy)
+                {
+                    .token_count = tokens,
+                    .body_count = eager_bodies,
+                    .selected_count = eager_bodies,
+                    .tree_tokens = tokens,
+                    .tree_all_selected = true,
+                    .status = CHECK_LAZY_OK,
+                };
+            }
+            else
+            {
+                ready = check_lazy_plan(&lazy, checking, checking_pp, arena, scratch, scalar);
+            }
             if (!ready)
             {
                 fprintf(errors, "fatal error: system-header checking selection failed\n");
                 driver_fatal = true;
+            }
+            else if (stage_clock != NULL)
+            {
+                // Planning remains charged to check-input. These structural counters make an unsupported
+                // tree certificate's whole-unit grammar fallback visible in opt-in measurements (#1364).
+                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u references=%u retained-bytes=%llu\n",
+                        eager ? "eager" : lazy.replay_tokens != 0 ? "bindings" : "tree", tokens, lazy.replay_tokens, lazy.body_count, lazy.selected_count,
+                        lazy.deferred_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
             }
         }
         if (ready)
