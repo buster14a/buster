@@ -707,11 +707,12 @@ struct CheckLowerWriter
     uint32_t* switch_locals;
     // The cleanups' chains (#1370, CheckProgramChain): the label of each record's entry past its run's fall's store, by
     // its CheckInput.cleanups index (BUSTER_CHECK_NONE where its CLEANUP control's own is its entry); the body's
-    // destination slot, an I32 temporary, BUSTER_CHECK_NONE until an exit or a fall stores it; and how many controls,
-    // an exit's tail, are left to leave out.
+    // destination slot, an I32 temporary, BUSTER_CHECK_NONE until an exit or a fall stores it.
     uint32_t* chain_labels;
     uint32_t chain_slot;
-    uint32_t chain_skip;
+    // How many controls an exit's shared tail or a completed sparse-switch dispatch has consumed, with no incoming
+    // edges. One counter keeps the ordinary control loop's skip check unchanged.
+    uint32_t control_skip;
     // The switch whose CASE controls come next (the last SWITCH control's token), its jump table or BUSTER_CHECK_NONE
     // where its cases' compares dispatch it (check_lower_table_of, by its control), and whether its first CASE control is
     // still to write the table's dispatch (check_lower_switch_dispatch); the tables, `table_count` of them, and the
@@ -723,7 +724,6 @@ struct CheckLowerWriter
     uint32_t table_count;
     SymbolId provisional_tables;
     const CheckLowerSwitchTrees* switch_trees;
-    uint32_t switch_skip;
     uint32_t* extent_locals;
     // Each variable-length array's identity plus one, by its bound's first token (0 for none), for its extent's local;
     // each block's local that holds the stack's position its arrays came after (CHECK_CONTROL_STACK_SAVE's), by its
@@ -15420,8 +15420,8 @@ static CheckLowerCaseRange* check_lower_sort_cases(CheckLowerCaseRange* cases, C
 // BUSTER_CHECK_LOWER_MAX_TABLE values. The switch's CASE controls follow it, then its JUMP to its default or its end;
 // an empty GNU range among them (`case 5 ... 3`) counts for nothing. A table joins `lowered`'s (room for `capacity`),
 // its entries and labels from `output` and its labels numbered after the tables' before it. `cases` and `sorted` are room
-// for the program's cases. Returns false only when `output` has no room. This is per switch, with the cases sorted: a
-// scalar pass over a few cases.
+// for the program's cases. A large sparse switch retains the same sorted intervals in `scratch` for its tree, when
+// requested; neither plan sorts again. Returns false when an output or retained-plan allocation has no room.
 static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capacity, CheckLowerSwitchTrees* trees, const CheckProgram* program, uint32_t b,
                                      uint32_t index, uint8_t class, CheckLowerCaseRange* cases_room, CheckLowerCaseRange* sorted_room, Arena* output, Arena* scratch)
 {
@@ -16502,7 +16502,7 @@ static void check_lower_exit(CheckLowerWriter* writer, CheckControl control)
             check_lower_chain_store(writer, exit->value);
         }
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, check_lower_chain_entry(writer, exit->first));
-        writer->chain_skip = exit->skip;
+        writer->control_skip = exit->skip;
     }
 }
 
@@ -16565,9 +16565,8 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     // An exit's unused tail (#1370), or the CASE/JUMP controls whose complete tree was emitted at the first CASE
     // (#1371), writes nothing and has no incoming branch. Merely number its label: placing it would resurrect an
     // empty tracked stack after the dispatch, losing a statement expression's pending operands.
-    const bool skipped = writer->chain_skip != 0 || writer->switch_skip != 0;
-    writer->chain_skip -= writer->chain_skip != 0;
-    writer->switch_skip -= writer->switch_skip != 0;
+    const bool skipped = writer->control_skip != 0;
+    writer->control_skip -= skipped;
     if (skipped)
     {
         writer->labels[index] = writer->count;
@@ -16704,7 +16703,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         if (tree != NULL)
         {
             check_lower_switch_tree(writer, tree, item->owner);
-            writer->switch_skip = tree->controls;
+            writer->control_skip = tree->controls;
             writer->table_current = BUSTER_CHECK_NONE;
         }
         else if (writer->table_current == BUSTER_CHECK_NONE || item->owner != writer->table_switch)
@@ -18045,8 +18044,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         memset(writer->labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
         // Its cleanups' chains (#1370): an entry label past each fall's store, which the exits jump to.
         writer->chain_slot = BUSTER_CHECK_NONE;
-        writer->chain_skip = 0;
-        writer->switch_skip = 0;
+        writer->control_skip = 0;
         for (uint32_t r = body.cleanup_first; body.chains && r < body.cleanup_first + body.cleanup_count; r += 1)
         {
             writer->chain_labels[r] = (program->chains[r].flags & BUSTER_CHECK_CHAIN_FALL_STORE) != 0 ? check_lower_label(writer) : BUSTER_CHECK_NONE;
