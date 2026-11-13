@@ -2241,16 +2241,27 @@ static void check_configurations(void)
     char* bfd[] = { "sh", "-c", "command -v ld.bfd", 0 };
     if (run("/dev/null", 0, bfd) == 0)
     {
+        // The parts' joins keep the merge flags for a link that merges constants itself, every linker but lld at -O0
+        // (BusterCodegenMerge.cmake's MERGES, #2639): they run again where the switch changes that, and only there.
+        char graph[PATH_MAX];
+        snprintf(graph, sizeof(graph), "%s/CMakeFiles/impl-Release.ninja", tree);
+        Text graph_before = read_file(graph);
+        const bool merged_before = strstr(graph_before.data, "-DMERGES=1") != 0;
+        const bool joined = strstr(graph_before.data, "-DMERGES=") != 0;
+        free(graph_before.data);
         const char* const linker[] = { "BUSTER_LINKER=bfd", 0 };
         snapshot(&before);
         BUILD_ENV(linker, "build");
         ran_since(&before, names, sizeof(names));
-        if (strcmp(compiler_outputs(names), "compiler compiler.link ") != 0)
+        Text graph_after = read_file(graph);
+        const bool rejoined = joined && merged_before != (strstr(graph_after.data, "-DMERGES=1") != 0);
+        free(graph_after.data);
+        if (strcmp(compiler_outputs(names), rejoined ? "compiler compiler.link native.o " : "compiler compiler.link ") != 0)
         {
             fail("BUSTER_LINKER=bfd ran %s", names);
         }
         BUILD("build");
-        pass("BUSTER_LINKER relinks alone");
+        pass("BUSTER_LINKER relinks alone, and joins the parts again where it changes whether the link merges constants");
     }
     // A static link never by wild (#652): wild 0.10.0's static executables fault at their first TLS access, so wild by
     // any name, ld.wild through a symlink among them, links dynamically, and its units compile without

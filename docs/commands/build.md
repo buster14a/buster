@@ -140,7 +140,9 @@ or the toolchain changed since it last did (`build.sh.configuration` in the
 tree). A different `clang` (its path, its file or its version) starts the tree
 afresh, since its objects and CMake's cache can't be reused; any other change
 reconfigures in place, and Ninja reruns exactly the steps whose commands
-changed: `BUSTER_BUILD_DEFINES` recompiles every unit, `BUSTER_LINKER` relinks,
+changed: `BUSTER_BUILD_DEFINES` recompiles every unit, `BUSTER_LINKER` relinks
+(and joins the split units' parts again where it changes whether the link merges
+constants, below),
 and `BUSTER_BAKE` reruns the post-link step alone. A tree that a preset
 configured is reused when its clang is the one it records
 (`buster-toolchain.txt`). CMake alone notices a compiler at another path, but
