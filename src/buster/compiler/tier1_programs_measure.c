@@ -7,7 +7,7 @@
 //
 //   build/compiler measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR
 //                                         [--runs N] [--warmups N] [--directory DIR] [--keep] [--uncounted]
-//                                         [--variant OPTION]...
+//                                         [--variant OPTION]... [--check-code-size] [--sizes-only]
 //
 // The programs and their inputs are #1189's (buster-performance's tier1-gap-1189-2026-11-03, after the cc3387f record's):
 // - speedtest1: DIR/sqlite3.c (--sqlite: the frozen corpus's SQLite 3.53.2 amalgamation) and DIR/speedtest1.c
@@ -36,6 +36,12 @@
 // the sum of Lua's five scripts' medians by build, and each against clang -O2's and -O0's. DIR is a new directory under
 // --directory ($TMPDIR, or /tmp: a tmpfs on the 9700X, which takes speedtest1's database and SQLite's temporary
 // files), removed at the end unless --keep. docs/tier1.md has the 9700X's numbers.
+//
+// #1116: paired relocatable objects also compare the exact source bodies compiled by Tier 1 against clang -O0.
+// SQLite is sqlite3.c alone with the flags below; Lua includes luac.c as well as the interpreter's 33 sources.
+// Matching stays within each translation unit, so local names and the runtime's unity build cannot skew the sums.
+// --check-code-size requires each corpus's matched Tier 1 function bytes <= clang -O0's, with complete evidence and
+// a nonempty match. --sizes-only needs only --clang, --sqlite and --lua, and performs no runtime measurements.
 
 #include <dirent.h>
 
@@ -96,6 +102,8 @@ struct Tier1Programs
     // --uncounted: a run need not be counted (a host without the counters, as a virtual machine's), its cycles and
     // instructions then 0.
     bool uncounted;
+    bool check_code_size;
+    bool sizes_only;
     char directory[PATH_MAX];
     // Each build's executables, and the errors of every build's commands.
     char speedtests[BUSTER_TIER1_PROGRAMS_MAX_BUILDS][PATH_MAX];
@@ -261,6 +269,103 @@ static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
     ok = ok && c.count < BUSTER_TIER1_PROGRAMS_ARGUMENTS && tier1_programs_spawn(c.arguments, NULL, p->errors);
     printf("measure-tier1-programs: %s's builds %s\n", p->names[b], ok ? "built" : "FAILED");
     return ok;
+}
+
+// One object's size experiment, with the same source options for the two compilers. Its report belongs to this
+// invocation alone; the general errors file must not accumulate manifests from different translation units.
+static bool tier1_programs_size_object(const Tier1Programs* p, uint32_t build, bool lua, const char* source, const char* object, const char* report)
+{
+    Tier1ProgramsCommand c = { 0 };
+    tier1_programs_compiler(p, build, &c);
+    const bool tier1 = p->kinds[build] == TIER1_PROGRAMS_TIER1;
+    if (tier1)
+    {
+        tier1_programs_add(&c, "--tier1-function-sizes");
+    }
+    if (lua)
+    {
+        tier1_programs_add(&c, "-std=gnu99");
+        tier1_programs_add(&c, "-DLUA_COMPAT_5_3");
+        tier1_programs_add(&c, "-DLUA_USE_LINUX");
+    }
+    else
+    {
+        for (uint32_t f = 0; f < BUSTER_TIER1_PROGRAMS_SQLITE_FLAGS; f += 1)
+        {
+            tier1_programs_add(&c, tier1_programs_sqlite_flags[f]);
+        }
+    }
+    tier1_programs_add(&c, "-c");
+    tier1_programs_add(&c, source);
+    tier1_programs_add(&c, "-o");
+    tier1_programs_add(&c, object);
+    const bool ok = c.count < BUSTER_TIER1_PROGRAMS_ARGUMENTS && tier1_programs_spawn(c.arguments, NULL, report);
+    if (!ok)
+    {
+        fprintf(stderr, "measure-tier1-programs: code-size compile failed: %s by %s; see %s\n", source, p->names[build], report);
+    }
+    return ok;
+}
+
+// Each corpus has its own gate: a small Lua result cannot hide a SQLite regression, nor can a fallback or a helper
+// be mistaken for a Tier 1 body. Clang's object of a source is shared by the baseline and all requested variants.
+static bool tier1_programs_sizes(Arena* arena, const Tier1Programs* p)
+{
+    bool ok = true;
+    bool qualified = true;
+    for (uint32_t corpus = 0; ok && corpus < 2; corpus += 1)
+    {
+        const bool lua = corpus != 0;
+        const char* label = lua ? "lua" : "sqlite";
+        const uint32_t sources = lua ? BUSTER_TIER1_PROGRAMS_LUA_SOURCES + 1 : 1;
+        Tier1CodeSize totals[BUSTER_TIER1_PROGRAMS_MAX_BUILDS] = { 0 };
+        for (uint32_t s = 0; ok && s < sources; s += 1)
+        {
+            const char* name = !lua ? "sqlite3" : s < BUSTER_TIER1_PROGRAMS_LUA_SOURCES ? tier1_programs_lua_sources[s] : "luac";
+            char source[PATH_MAX];
+            char oracle[PATH_MAX];
+            char oracle_log[PATH_MAX];
+            ok = snprintf(source, sizeof(source), "%s/%s.c", lua ? p->lua : p->sqlite, name) < (int)sizeof(source) &&
+                 snprintf(oracle, sizeof(oracle), "%s/size-%s-%s-clang0.o", p->directory, label, name) < (int)sizeof(oracle) &&
+                 snprintf(oracle_log, sizeof(oracle_log), "%s/size-%s-%s-clang0.txt", p->directory, label, name) < (int)sizeof(oracle_log);
+            ok = ok && tier1_programs_size_object(p, TIER1_PROGRAMS_CLANG_O0, lua, source, oracle, oracle_log);
+            for (uint32_t b = 0; ok && b < p->build_count; b += 1)
+            {
+                if (p->kinds[b] == TIER1_PROGRAMS_TIER1)
+                {
+                    char object[PATH_MAX];
+                    char report[PATH_MAX];
+                    char detail[256] = { 0 };
+                    ok = snprintf(object, sizeof(object), "%s/size-%s-%s-%s.o", p->directory, label, name, p->files[b]) < (int)sizeof(object) &&
+                         snprintf(report, sizeof(report), "%s/size-%s-%s-%s.txt", p->directory, label, name, p->files[b]) < (int)sizeof(report);
+                    ok = ok && tier1_programs_size_object(p, b, lua, source, object, report);
+                    const uint64_t mark = arena->length;
+                    Tier1CodeSize unit = { 0 };
+                    ok = ok && tier1_code_size_read(&unit, object, oracle, report, arena, detail, sizeof(detail));
+                    if (ok)
+                    {
+                        tier1_code_size_add(&totals[b], &unit);
+                    }
+                    else
+                    {
+                        fprintf(stderr, "measure-tier1-programs: invalid code-size evidence for %s by %s: %s\n", source, p->names[b], detail);
+                    }
+                    arena_pop_to(arena, mark);
+                }
+            }
+        }
+        for (uint32_t b = 0; ok && b < p->build_count; b += 1)
+        {
+            if (p->kinds[b] == TIER1_PROGRAMS_TIER1)
+            {
+                char name[128];
+                snprintf(name, sizeof(name), "%s/%s", label, p->files[b]);
+                const bool passed = tier1_code_size_report(&totals[b], name, p->check_code_size);
+                qualified = qualified && passed;
+            }
+        }
+    }
+    return ok && qualified;
 }
 
 // speedtest1's database's files and SQLite's temporary directory removed, and the directory made again: a fresh database
@@ -525,7 +630,8 @@ static int run_tier1_programs_measure(int argc, char** argv)
     {
         uint64_t value = 0;
         const bool pair = i + 1 < argc;
-        const bool flag = strcmp(argv[i], "--keep") == 0 || strcmp(argv[i], "--uncounted") == 0;
+        const bool flag = strcmp(argv[i], "--keep") == 0 || strcmp(argv[i], "--uncounted") == 0 ||
+                          strcmp(argv[i], "--check-code-size") == 0 || strcmp(argv[i], "--sizes-only") == 0;
         if (strcmp(argv[i], "--runs") == 0 && pair && profile_count_option(argv[i + 1], &value) && value <= BUSTER_TIER1_PROGRAMS_MAX_RUNS)
         {
             p.runs = (uint32_t)value;
@@ -570,6 +676,14 @@ static int run_tier1_programs_measure(int argc, char** argv)
         {
             p.uncounted = true;
         }
+        else if (strcmp(argv[i], "--check-code-size") == 0)
+        {
+            p.check_code_size = true;
+        }
+        else if (strcmp(argv[i], "--sizes-only") == 0)
+        {
+            p.sizes_only = true;
+        }
         else if (strcmp(argv[i], "--variant") == 0 && pair && variant_count < BUSTER_TIER1_PROGRAMS_VARIANTS)
         {
             variant_options[variant_count] = argv[i + 1];
@@ -581,7 +695,8 @@ static int run_tier1_programs_measure(int argc, char** argv)
         }
         i += flag ? 1 : 2;
     }
-    valid = valid && p.clang != NULL && p.sqlite != NULL && p.speedtest != NULL && p.lua != NULL && p.scripts != NULL;
+    valid = valid && p.clang != NULL && p.sqlite != NULL && p.lua != NULL &&
+            (p.sizes_only || (p.speedtest != NULL && p.scripts != NULL));
     p.build_count = p.tcc != NULL ? BUSTER_TIER1_PROGRAMS_BUILDS : BUSTER_TIER1_PROGRAMS_BUILDS - 1;
     for (uint32_t b = 0; b < p.build_count; b += 1)
     {
@@ -605,7 +720,8 @@ static int run_tier1_programs_measure(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep] "
-                        "[--uncounted] [--variant OPTION]...\n");
+                        "[--uncounted] [--variant OPTION]... [--check-code-size] [--sizes-only]\n"
+                        "       measure-tier1-programs --sizes-only --clang PATH --sqlite DIR --lua DIR [--check-code-size] [--variant OPTION]... [--directory DIR] [--keep]\n");
     }
     else if (!made)
     {
@@ -616,44 +732,59 @@ static int run_tier1_programs_measure(int argc, char** argv)
         char unity[PATH_MAX];
         bool ok = tier1_programs_path(p.errors, "%s/%s", p.directory, "errors.txt") && tier1_programs_path(p.database, "%s/%s", p.directory, "speedtest1.db") &&
                   tier1_programs_path(p.temporary, "%s/%s", p.directory, "tmp") && tier1_programs_path(unity, "%s/%s", p.directory, "speedtest1-unity.c");
-        for (uint32_t s = 0; ok && s < BUSTER_TIER1_PROGRAMS_SCRIPTS; s += 1)
+        for (uint32_t s = 0; ok && !p.sizes_only && s < BUSTER_TIER1_PROGRAMS_SCRIPTS; s += 1)
         {
             ok = snprintf(p.script_paths[s], PATH_MAX, "%s/%s.lua", p.scripts, tier1_programs_scripts[s]) < PATH_MAX;
         }
         // The direct path's one file: SQLite's amalgamation, then speedtest1.c, whose static randomFunc would redefine
         // sqlite3.c's static function of that name (#136's speedtest1-unity.c).
-        static const char unity_text[] = "#include \"sqlite3.c\"\n#define randomFunc speedtest1_randomFunc\n#include \"speedtest1.c\"\n";
-        const int unity_file = ok ? open(unity, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
-        ok = unity_file != -1 && write(unity_file, unity_text, sizeof(unity_text) - 1) == (ssize_t)(sizeof(unity_text) - 1);
-        if (unity_file != -1)
+        if (ok && !p.sizes_only)
         {
-            close(unity_file);
+            static const char unity_text[] = "#include \"sqlite3.c\"\n#define randomFunc speedtest1_randomFunc\n#include \"speedtest1.c\"\n";
+            const int unity_file = open(unity, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+            ok = unity_file != -1 && write(unity_file, unity_text, sizeof(unity_text) - 1) == (ssize_t)(sizeof(unity_text) - 1);
+            if (unity_file != -1)
+            {
+                ok = close(unity_file) == 0 && ok;
+            }
+            // SQLite's temporary files in a directory of their own, made fresh with the database before each run.
+            ok = ok && setenv("SQLITE_TMPDIR", p.temporary, 1) == 0;
         }
-        // SQLite's temporary files in a directory of their own, made fresh with the database before each run.
-        ok = ok && setenv("SQLITE_TMPDIR", p.temporary, 1) == 0;
-        printf("measure-tier1-programs: %u warm-ups, %u runs, %u builds, in %s\n", p.warmups, p.runs, p.build_count, p.directory);
-        for (uint32_t b = 0; ok && b < p.build_count; b += 1)
+        if (p.sizes_only)
+        {
+            printf("measure-tier1-programs: function sizes only, in %s\n", p.directory);
+        }
+        else
+        {
+            printf("measure-tier1-programs: %u warm-ups, %u runs, %u builds, in %s\n", p.warmups, p.runs, p.build_count, p.directory);
+        }
+        for (uint32_t b = 0; ok && !p.sizes_only && b < p.build_count; b += 1)
         {
             ok = tier1_programs_build(&p, b);
         }
-        ok = ok && tier1_programs_check(&arena, &p);
+        ok = ok && (p.sizes_only || tier1_programs_check(&arena, &p));
+        ok = ok && tier1_programs_sizes(&arena, &p);
         Tier1ProgramsMedians medians[BUSTER_TIER1_PROGRAMS_MAX_BUILDS * BUSTER_TIER1_PROGRAMS_LISTS] = { 0 };
-        ok = ok && tier1_programs_time(&arena, &p, medians) == 0;
-        if (ok)
+        ok = ok && (p.sizes_only || tier1_programs_time(&arena, &p, medians) == 0);
+        if (ok && !p.sizes_only)
         {
             tier1_programs_report(&p, medians);
         }
-        else
+        else if (!ok)
         {
             // What the builds and runs wrote to their standard errors.
             const char* errors = measure_compile_read(&arena, p.errors);
             fprintf(stderr, "measure-tier1-programs: FAILED; the commands' errors:\n%s\n", errors != NULL ? errors : "");
         }
         result = ok ? 0 : 1;
-        if (!keep)
+        if (!keep && ok)
         {
             char* remove[] = { "rm", "-rf", p.directory, NULL };
             tier1_programs_spawn(remove, NULL, "/dev/null");
+        }
+        else
+        {
+            printf("measure-tier1-programs: retained files in %s\n", p.directory);
         }
     }
     arena_release(&arena);

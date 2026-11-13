@@ -730,9 +730,33 @@ every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
 
 The `cc3387f` record had `--tier1` at 1.70× -O2's time on speedtest1 and 1.71×
 on Lua, before #1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1 and
-before the depth slots above. The 9700X job runs the measurement on its daily
-and dispatched runs, and on pull requests that change Tier 1's input or
-pipeline.
+before the depth slots above. The 9700X job runs the measurement on its nightly
+and dispatched qualifications under the current [CI policy](commands/ci.md).
+
+### Function-size qualification (#1116)
+
+PR #1159 removed the redundant call moves and repeated call saves described
+by #1116. Its remaining size criterion is now an explicit corpus gate:
+`test-c-testsuite --tier1 --check-code-size` and
+`measure-tier1-programs --check-code-size` require the sum of Tier 1 function
+bytes to be no greater than the matching Clang `-O0` sum. The gate applies
+separately to c-testsuite, SQLite's `sqlite3.c` and Lua's 34 sources, with
+`luac.c` included. The program command also offers `--sizes-only`, which
+requires no runtime scripts or hardware counters.
+
+An opt-in, versioned `--tier1-function-sizes` manifest identifies source bodies
+by exact emitted symbol names and their actual tier after publication. The
+reader checks those names and sizes against each relocatable ELF object and
+matches only within the same translation unit. It reports fallback and
+unmatched functions separately, along with remaining executable bytes and executable
+section bytes. Function sizes exclude alignment padding; the executable
+section total is a separate quantity. Missing, malformed, duplicate or
+inconsistent evidence cannot pass, and an empty comparison cannot qualify.
+This is an aggregate size bound, not a bound on every function or a claim
+about execution time. The [command guide](commands/tier1.md) describes the
+flags and reporting. Hosted correctness exercises all three corpus gates
+before merge, with the real Lua release acquired once in its verified offline
+input bundle and the existing frozen SQLite amalgamation.
 
 #1216 keeps dispatch loops' loop-carried values in registers and their phi
 webs in one slot ([the allocation guide](tier1-allocation.md)). From its merge

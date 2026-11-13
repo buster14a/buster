@@ -9057,6 +9057,10 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
             fprintf(errors, "error: could not write object file %s\n", output_path);
         }
     }
+    if (valid && lanes != NULL)
+    {
+        check_program_print_tier1_sizes(lanes->tier1_function_sizes, &code);
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
     arena_pop_to(scratch, mark);
     // A units' lane keeps lane 0's writer's columns for its next unit (check_program_lanes_settle, #442); a command of one
@@ -9884,6 +9888,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 check_driver_executable_failure(&code.link, &runtime, units != NULL ? unit_count : 1, output_path, &write.result, stderr);
             }
         }
+        if (valid && units == NULL && lanes != NULL)
+        {
+            check_program_print_tier1_sizes(lanes->tier1_function_sizes, &code);
+        }
         check_clock_mark(stage_clock, CHECK_STAGE_WRITE);
         if (again && cached)
         {
@@ -10074,6 +10082,7 @@ struct CheckDriverCommand
     uint8_t tier1_schedule;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
+    FILE* tier1_function_sizes;
     // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
     // option, when no unit makes its report; and --helper-forms' families, whose operations take their helpers
     // (CheckProgramOptions.helper_forms).
@@ -12136,6 +12145,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool pinned_cpus_seen = false;
     bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
+    // --tier1-function-sizes implies --tier1-report and adds a versioned body manifest after successful publication.
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
     // function Tier 0 compiled with the step that refused it, on standard error; --tier1-no-rematerialize compiles Tier
     // 1's functions spilling the values it would recompute (#178's comparison: the report's spills and frames).
@@ -12328,6 +12338,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (match.exact == C_OPTION_TIER1_REPORT)
         {
+            tier1_report = true;
+        }
+        else if (match.exact == C_OPTION_TIER1_FUNCTION_SIZES)
+        {
+            lanes->tier1_function_sizes = stderr;
             tier1_report = true;
         }
         else if (match.exact == C_OPTION_TIER1_REFUSALS)
@@ -12690,6 +12705,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,
+        .tier1_function_sizes = lanes->tier1_function_sizes,
         .helper_report = helper_report ? &lanes->helper_report : NULL,
         .helper_forms = lanes->helper_forms,
     };
@@ -12722,7 +12738,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
@@ -12744,7 +12760,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (invalid_tier1)
     {
-        fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
+        fprintf(stderr, "error: %s needs --tier1\n", lanes->tier1_strict ? "--tier1-strict" : lanes->tier1_function_sizes != NULL ? "--tier1-function-sizes" :
+                                                    tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
                                                     lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : lanes->tier1_no_inline ? "--tier1-no-inline" :
                                                     "--tier1-schedule");

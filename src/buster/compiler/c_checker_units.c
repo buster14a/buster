@@ -2254,6 +2254,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier0_no_inline = command->tier0_no_inline,
         .tier1_schedule = command->tier1_schedule,
         .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+        .tier1_function_sizes = command->tier1_function_sizes != NULL ? errors : NULL,
         .helper_reporting = command->helper_report != NULL,
         .units_lane = lane,
         .helper_forms = command->helper_forms,
