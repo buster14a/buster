@@ -2115,6 +2115,9 @@ struct CheckInputReader
     // check_attested_skips), which the walk passes and the unit-wide passes that size or prepare what the walk reads leave
     // out; null where nothing is skipped.
     const uint64_t* skips;
+    // Each token's system level as attested declarations' passes mapped it before the reader (check_attested_token_levels),
+    // which the system tokens take instead of mapping the preprocessor's levels again; null without them.
+    const uint8_t* token_levels;
     // A bit a token, (count + 64) / 64 words: whether one of the sparse columns the expressions' walk tests first has an
     // entry for it (check_input_expression_sparse), kept by every write of those columns (check_input_sparse_mark). The
     // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
@@ -14853,7 +14856,10 @@ static uint8_t check_input_expression_class(const CheckInputReader* reader, uint
 // act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path skips
 // it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
 // reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
-// (CheckInput.visit_misses). Returns the number of tokens the walk acts at.
+// (CheckInput.visit_misses). A token of a declaration attested declarations skip (CheckInputReader.skips) takes no class
+// on either path: each such declaration is a whole file-scope tree whose tokens are ignored, whose leaves would drop and
+// whose other tokens would pass on their children's empty lists, so that no value of it reaches a token read (#2531).
+// Returns the number of tokens the walk acts at.
 static uint32_t check_input_expression_classes(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -14882,8 +14888,10 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t taken = (skipped & _mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_LIST))) |
                                (~skipped & (_mm512_test_epi8_mask(role_tests, _mm512_set1_epi8(BUSTER_CHECK_ROLE_EXPRESSION)) |
                                             _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_EXPRESSION))));
-        // The 64 tokens' sparse entries, a word of their marks (CheckInputReader.sparse_marks).
-        const uint64_t sparse = reader->sparse_marks[token >> 6] & lanes;
+        // The 64 tokens' sparse entries, a word of their marks (CheckInputReader.sparse_marks), and those attested
+        // declarations skip, which take no class.
+        const uint64_t passed = reader->skips != NULL ? reader->skips[token >> 6] : 0;
+        const uint64_t sparse = reader->sparse_marks[token >> 6] & lanes & ~passed;
         // The classes: the role's, an operand's by its kind, a role no test takes a DROP but for the refused kinds, and an
         // ignored token's a LIST of a list role and a DROP otherwise.
         const __m512i role_codes = _mm512_permutex2var_epi8(role_codes_low, role, role_codes_high);
@@ -14921,7 +14929,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const __mmask16 parts = (__mmask16)_bzhi_u32(UINT32_MAX, length - part < 16 ? length - part : 16);
             const uint32_t at = token + part;
             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
-            const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
+            const __mmask16 part_acts = (__mmask16)((children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part)) & ~(__mmask16)(passed >> part));
             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
             // The type queries that finish at the tokens, 8 pointers at a time.
             const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, check_input_rare_line(reader, reader->specifier_finishes + at));
@@ -14955,7 +14963,8 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const bool coded = !parser->options.scalar;
     for (; token < count; token += 1)
     {
-        reader->visits[token] = check_input_expression_class(reader, token, coded);
+        const bool passed = reader->skips != NULL && ((reader->skips[token >> 6] >> (token & 63)) & 1) != 0;
+        reader->visits[token] = passed ? 0 : check_input_expression_class(reader, token, coded);
         if ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
         {
             reader->first_value[token] = BUSTER_CHECK_NONE;
@@ -16115,12 +16124,34 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     const uint64_t mark = reader->scratch->length;
     // With three bytes past the last token, which the transitions' gathers of four bytes at it read.
     uint8_t* tokens = (system && pp->output.locations != NULL) || relaxed ? arena_push_array(arena, (uint64_t)count + 4, sizeof(uint8_t), 64) : NULL;
+    // The tokens' levels that attested declarations' passes mapped (CheckInputReader.token_levels), the preprocessor's for
+    // every token: each one's mark from its byte, 64 at a time.
+    const uint8_t* const mapped = tokens != NULL && system && pp->output.locations != NULL ? reader->token_levels : NULL;
     // With three bytes past the entry after them all, which the vector path's gathers of four bytes at it read.
-    uint8_t* levels = tokens != NULL && system && pp->output.locations != NULL ? arena_push_array(reader->scratch, (uint64_t)pp->output.count + 4, sizeof(uint8_t), 64) : NULL;
-    reader->output->resource |= (((system && pp->output.locations != NULL) || relaxed) && tokens == NULL) || (system && pp->output.locations != NULL && levels == NULL);
-    if (tokens != NULL && levels == NULL)
+    uint8_t* levels = tokens != NULL && system && pp->output.locations != NULL && mapped == NULL ?
+                      arena_push_array(reader->scratch, (uint64_t)pp->output.count + 4, sizeof(uint8_t), 64) : NULL;
+    reader->output->resource |= (((system && pp->output.locations != NULL) || relaxed) && tokens == NULL) ||
+                                (system && pp->output.locations != NULL && mapped == NULL && levels == NULL);
+    if (tokens != NULL && levels == NULL && mapped == NULL)
     {
         memset(tokens, 0, (uint64_t)count + 4);
+    }
+    if (mapped != NULL)
+    {
+        // The vector path 64 tokens at a time; the loop after it, the scalar path, its twin, takes the last ones.
+        uint32_t token = 0;
+        for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && count - token >= 64; token += 64)
+        {
+            const __m512i level = _mm512_loadu_si512(mapped + token);
+            const __mmask64 marked = _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
+                                     _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_EXTERN_C_FILE));
+            _mm512_storeu_si512(tokens + token, _mm512_maskz_set1_epi8(marked, 1));
+        }
+        for (; token < count; token += 1)
+        {
+            tokens[token] = mapped[token] == BUSTER_PP_SYSTEM_FILE || mapped[token] == BUSTER_PP_EXTERN_C_FILE;
+        }
+        memset(tokens + count, 0, 4);
     }
     if (levels != NULL)
     {
@@ -16142,7 +16173,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         check_input_system_token_map(tokens, sources, count, levels, limit, parser->options.scalar);
         memset(tokens + count, 0, 4);
     }
-    if (tokens != NULL && (levels != NULL || relaxed))
+    if (tokens != NULL && (levels != NULL || mapped != NULL || relaxed))
     {
         if (relaxed)
         {
@@ -16713,6 +16744,10 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
 // each reading's binding events against its declaration's list, made as the reader ends, while it has them.
 typedef struct CheckAttested CheckAttested;
 static const uint64_t* check_attested_skips(const CheckAttested* attested);
+static const uint8_t* check_attested_token_levels(const CheckAttested* attested);
+static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before,
+                                        uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
+                                        uint32_t* starts, uint32_t* sizes, Arena* scratch);
 static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count);
 
 // The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
@@ -16859,6 +16894,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .syntax = syntax,
         .visits = visits,
         .skips = attested != NULL ? check_attested_skips(attested) : NULL,
+        .token_levels = attested != NULL ? check_attested_token_levels(attested) : NULL,
     };
     for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
     {
@@ -17261,8 +17297,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
                 parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
             }
-            else
+            else if (attested == NULL || BUSTER_SCALAR_PATH(parser->options.scalar) ||
+                     !check_attested_tree_columns(attested, parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots,
+                                                  traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, starts, sizes, scratch))
             {
+                // (Attested declarations' cache gives a cached declaration's columns, c_check_attested.c's
+                // check_attested_tree_columns, its own made as these are.)
                 parse_tree_columns(parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots, traversal + 2 * slots,
                                    traversal + 3 * slots, traversal + 4 * slots, starts, sizes);
             }
