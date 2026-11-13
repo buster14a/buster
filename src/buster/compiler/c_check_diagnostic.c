@@ -163,6 +163,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
     [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
+    [CHECK_WARNING_ID_UNDERLYING_ATOMIC_QUALIFIER] = { "-Wunderlying-atomic-qualifier-ignored", NULL, "'_Atomic' qualifier ignored; operations involving the enumeration type will be non-atomic" },
     [CHECK_WARNING_ID_PRAGMA_PACK] = { "-Wpragma-pack", "-Wpragmas", "unterminated '#pragma pack (push, ...)' at end of file" },
     [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = { NULL, NULL, "value of #pragma pack(show)" },
     [CHECK_WARNING_ID_POINTER_TO_INT_CAST] = { "-Wpointer-to-int-cast", NULL, "cast to smaller integer type" },
@@ -212,6 +213,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES] = { "-Wincompatible-function-pointer-types", "-Wincompatible-pointer-types",
                                                                "incompatible function pointer types" },
     [CHECK_WARNING_ID_RETURN_MISMATCH] = { "-Wreturn-mismatch", "-Wreturn-type", "void function should not return a value" },
+    [CHECK_WARNING_ID_ATOMIC_ACCESS] = { "-Watomic-access", NULL, "accessing a member of an atomic structure or union is undefined behavior" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

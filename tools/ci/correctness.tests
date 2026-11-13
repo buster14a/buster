@@ -27,7 +27,7 @@ fi
 # Captures the translation units' LLVM IR in the build's tree (its call-graph-ir target) and fails on any cycle not in
 # the allowlist; the check runs BUSTER_COMPILER.
 "$BUSTER_COMPILER" test-call-graph
-./build.sh check-call-graph
+./build.sh check-call-graph --config Release
 == Test the calling convention [8 CPUs]
 # --cross-check also links random signatures between our side, encoded and written as objects, and C that
 # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
@@ -162,8 +162,9 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
 # others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
 # both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
-# The declared subset must pass.
-"$BUSTER_COMPILER" test-c-testsuite --tier1 --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+# The declared subset must pass. #1116 also reports all Tier 1 function bytes against clang -O0's matching bytes;
+# --code-size implies the object/Clang cross-check and validates the evidence. Lua below is the required size corpus.
+"$BUSTER_COMPILER" test-c-testsuite --tier1 --code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
@@ -298,7 +299,7 @@ test "${#host_flags[@]}" -gt 0
 # its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
 flags_file=$(mktemp)
 sources_file=$(mktemp)
-BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags > "$flags_file"
+BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags --config Release > "$flags_file"
 ./build.sh print-sources > "$sources_file"
 mapfile -d '' -t flags < "$flags_file"
 mapfile -d '' -t sources < "$sources_file"
@@ -416,7 +417,7 @@ musl="$corpus/libc/musl"
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
-  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags --config Release)
 test "${#flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 else
@@ -448,7 +449,7 @@ musl="$corpus/libc/musl"
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
-  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags --config Release)
 test "${#flags[@]}" -gt 0
 objects=$(mktemp -d)
 "$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
@@ -772,7 +773,26 @@ grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
 if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$directory/none" --speedtest "$directory/none" --lua "$directory/none" \
     --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
 grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
+if "$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite "$directory/none" --lua "$directory/none" \
+    --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q '^measure-tier1-programs: code-size compile failed:' "$errors"
+grep -q '^measure-tier1-programs: retained files in ' "$errors"
 rm -rf "$errors" "$directory"
+# #1116: original tiny sources stand in for SQLite and all 34 Lua units. Exact per-unit matching keeps their
+# identical function names distinct. Missing luac.c, a failed oracle and an invalid producer option must fail.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_code_size.c -o build/test-driver-tier1-code-size
+./build/test-driver-tier1-code-size "$BUSTER_COMPILER" clang
+# #1116 is a deterministic object-size bound, independent of the machine's timing. Reuse this row's compiler and
+# frozen SQLite, and Lua 5.4.8 from the run's verified offline input bundle; include luac.c, not only the interpreter.
+# Enforce the issue's Lua corpus bound. SQLite's size status remains visible with enforced=0.
+directory=$(mktemp -d)
+bash tools/ci/hosted-offline.sh lua "$directory/lua"
+"$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite "$BUSTER_CORPUS/sqlite" \
+    --lua "$directory/lua/src" --directory "$directory"
+rm -rf "$directory"
 == Measure the frames and keep the frame pointer on request
 # #177: measure-frames reads each function's frame from an object's code, and -fno-omit-frame-pointer keeps one in every
 # function, by Tier 0 and by Tier 1, a leaf among them, which -momit-leaf-frame-pointer leaves out; without the option

@@ -271,14 +271,12 @@ static bool pp_warning_group_named(uint32_t w, const char* name, uint32_t length
     return result;
 }
 
-// The severity a warning of `warning` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
-// First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
-// without -Wsystem-headers, unless its kind is seen there (PPWarningKind.system). Then the command line's: its last -W or
-// -Wno- of its group's names (pp_warning_group_named), or for an extension off by default -pedantic, -Wpedantic or
-// -pedantic-errors, promoted by -Werror (unless -Werror leaves it alone), -Werror= of the group, or -pedantic-errors of an
-// extension, unless -Wno-error= of it demotes it. The source's #pragma clang diagnostic for it replaces that
-// (Preprocessor.warning_mappings).
-static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint32_t location)
+// The severity the command line gives a warning of `warning` (#1934), wherever it is; BUSTER_PP_IGNORED for none: its
+// last -W or -Wno- of its group's names (pp_warning_group_named), or for an extension off by default -pedantic,
+// -Wpedantic or -pedantic-errors, promoted by -Werror (unless -Werror leaves it alone), -Werror= of the group, or
+// -pedantic-errors of an extension, unless -Wno-error= of it demotes it. Read once a unit, at the warning's first use
+// (pp_warning_command_read), and only for the warnings a unit reaches: each reading compares every option's string.
+static PPSeverity pp_warning_command(const Preprocessor* pp, PPWarning warning)
 {
     const PPWarningKind* info = pp_warnings + warning;
     bool enabled = info->on;
@@ -303,8 +301,47 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint3
         errors = strcmp(option, "-Werror") == 0 ? !info->no_werror : strcmp(option, "-Wno-error") == 0 ? false : errors;
         pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
     }
-    PPSeverity result = !enabled ? BUSTER_PP_IGNORED :
-                        group_error || ((errors || (pedantic_errors && info->extension)) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+    return !enabled ? BUSTER_PP_IGNORED : group_error || ((errors || (pedantic_errors && info->extension)) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+}
+
+_Static_assert(BUSTER_PP_WARNINGS <= sizeof(((Preprocessor*)0)->warning_commands), "a command line's severity for each warning");
+_Static_assert(BUSTER_PP_WARNINGS <= sizeof(((Preprocessor*)0)->warnings_possible) * 8, "a bit for each warning");
+
+// Preprocessor.warning_commands' byte for a warning whose command-line severity the unit hasn't read yet.
+#define BUSTER_PP_COMMAND_UNREAD 0xFF
+
+// The severity the command line gives a warning of `warning` (pp_warning_command), read at its first use in the unit
+// (Preprocessor.warning_commands, #2547).
+static PPSeverity pp_warning_command_read(Preprocessor* pp, PPWarning warning)
+{
+    if (pp->warning_commands[warning] == BUSTER_PP_COMMAND_UNREAD)
+    {
+        pp->warning_commands[warning] = (uint8_t)pp_warning_command(pp, warning);
+    }
+    return (PPSeverity)pp->warning_commands[warning];
+}
+
+// Whether a warning of `warning` could be given somewhere from here on (#2547): not under -w, and a #pragma clang
+// diagnostic maps it to other than ignored, or none maps it and the command line gives it. Where not, it clears the
+// warning's bit of Preprocessor.warnings_possible, which stays clear until the next #pragma clang diagnostic push, pop
+// or mapping.
+static bool pp_warning_possible(Preprocessor* pp, PPWarning warning)
+{
+    const uint8_t mapping = pp->warning_mappings[warning];
+    const bool possible = !pp->options.suppress_warnings &&
+                          (mapping == PP_PRAGMA_MAPPING_NONE ? pp_warning_command_read(pp, warning) != BUSTER_PP_IGNORED : mapping != PP_PRAGMA_MAPPING_IGNORED);
+    pp->warnings_possible &= possible ? UINT32_MAX : ~(1u << warning);
+    return possible;
+}
+
+// The severity a warning of `warning` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
+// First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
+// without -Wsystem-headers, unless its kind is seen there (PPWarningKind.system). Then the command line's
+// (pp_warning_command_read). The source's #pragma clang diagnostic for it replaces that (Preprocessor.warning_mappings).
+static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint32_t location)
+{
+    const PPWarningKind* info = pp_warnings + warning;
+    PPSeverity result = pp_warning_command_read(pp, warning);
     const uint8_t mapping = pp->warning_mappings[warning];
     result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
              mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
@@ -317,14 +354,14 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint3
 
 // The severity a warning of `warning` at `location` is given with (pp_warning_severity), PP_SEVERITY_WARNING_ALWAYS for a
 // warning seen in system headers too, and its flag as clang prints it after the message, into `flag`: " [-Wgroup]", or
-// " [-Werror,-Wgroup]" where promoted; for one of no group " [-Werror]" where promoted, else nothing.
+// " [-Werror,-Wgroup]" where promoted; for one of no group " [-Werror]" where promoted, else nothing, as for an ignored one.
 static PPSeverity pp_warning_flag(Preprocessor* pp, PPWarning warning, uint32_t location, char flag[BUSTER_PP_WARNING_FLAG_BYTES])
 {
     const PPWarningKind* kind = pp_warnings + warning;
     const PPSeverity severity = pp_warning_severity(pp, warning, location);
     const bool promoted = severity == PP_SEVERITY_ERROR || severity == PP_SEVERITY_MAPPED_ERROR;
     flag[0] = 0;
-    if (kind->name != NULL)
+    if (severity != BUSTER_PP_IGNORED && kind->name != NULL)
     {
         snprintf(flag, BUSTER_PP_WARNING_FLAG_BYTES, " [%s-W%s]", promoted ? "-Werror," : "", kind->name);
     }
@@ -346,16 +383,22 @@ static __attribute__((noinline, cold)) void pp_diagnose_group_text(Preprocessor*
     }
 }
 
-// A warning of `warning` at `location` (pp_diagnose_group_text), its message formatted from `format`.
+// A warning of `warning` at `location` (pp_diagnose_group_text), its message formatted from `format`: its severity first,
+// and the text only for one that is given (#2547), so that an ignored warning formats nothing.
 static __attribute__((noinline, cold, format(printf, 4, 5))) void pp_diagnose_group(Preprocessor* pp, PPWarning warning, uint32_t location, const char* format, ...)
 {
-    char message[512];
-    va_list arguments;
-    va_start(arguments, format);
-    const int written = vsnprintf(message, sizeof(message), format, arguments);
-    va_end(arguments);
-    const uint32_t length = written < 0 ? 0 : (uint32_t)written < sizeof(message) ? (uint32_t)written : (uint32_t)sizeof(message) - 1;
-    pp_diagnose_group_text(pp, warning, location, message, length);
+    char flag[BUSTER_PP_WARNING_FLAG_BYTES];
+    const PPSeverity severity = pp_warning_flag(pp, warning, location, flag);
+    if (severity != BUSTER_PP_IGNORED)
+    {
+        char message[512];
+        va_list arguments;
+        va_start(arguments, format);
+        const int written = vsnprintf(message, sizeof(message), format, arguments);
+        va_end(arguments);
+        const uint32_t length = written < 0 ? 0 : (uint32_t)written < sizeof(message) ? (uint32_t)written : (uint32_t)sizeof(message) - 1;
+        pp_diagnose(pp, severity, location, "%.*s%s", (int)length, message, flag);
+    }
 }
 
 // The line marker's note that a location in range `range` is in (#1954), defined below; the history's include stacks
@@ -1866,37 +1909,91 @@ BUSTER_INLINE bool pp_define_parameters_tiny(const PPFileData* data, PPMacro* ma
     return result;
 }
 
-// #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
-// constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
+// The feature-test macros clang's isFeatureTestMacro lists (#2222, pp_reserved_macro_check), each its length and bytes.
+typedef struct PPFeatureMacro PPFeatureMacro;
+struct PPFeatureMacro
+{
+    uint8_t length;
+    char bytes[40];
+};
+
+#define BUSTER_PP_FEATURE_MACRO(name) { sizeof(name) - 1, name }
+
+static const PPFeatureMacro pp_feature_macros[] =
+{
+    BUSTER_PP_FEATURE_MACRO("_ATFILE_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_BSD_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_CRT_NONSTDC_NO_WARNINGS"),
+    BUSTER_PP_FEATURE_MACRO("_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES"),
+    BUSTER_PP_FEATURE_MACRO("_CRT_SECURE_NO_WARNINGS"),
+    BUSTER_PP_FEATURE_MACRO("_FILE_OFFSET_BITS"),
+    BUSTER_PP_FEATURE_MACRO("_FORTIFY_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_ASSERTIONS"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_CONCEPT_CHECKS"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_DEBUG"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_DEBUG_PEDANTIC"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_PARALLEL"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_PARALLEL_ASSERTIONS"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_SANITIZE_VECTOR"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_USE_CXX11_ABI"),
+    BUSTER_PP_FEATURE_MACRO("_GLIBCXX_USE_DEPRECATED"),
+    BUSTER_PP_FEATURE_MACRO("_GNU_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_ISOC11_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_ISOC95_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_ISOC99_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_LARGEFILE64_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_POSIX_C_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_REENTRANT"),
+    BUSTER_PP_FEATURE_MACRO("_SVID_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_THREAD_SAFE"),
+    BUSTER_PP_FEATURE_MACRO("_XOPEN_SOURCE"),
+    BUSTER_PP_FEATURE_MACRO("_XOPEN_SOURCE_EXTENDED"),
+    BUSTER_PP_FEATURE_MACRO("__STDCPP_WANT_MATH_SPEC_FUNCS__"),
+    BUSTER_PP_FEATURE_MACRO("__STDC_FORMAT_MACROS"),
+};
+
+#undef BUSTER_PP_FEATURE_MACRO
+
 // -Wreserved-macro-identifier (#2222, clang's Preprocessor::CheckMacroName): a #define's or #undef's name `name` reserved in
 // every context, `__x` or `_X`, "macro name is a reserved identifier" at it, before the directive's other checks. A
-// #define of a feature-test macro clang's isFeatureTestMacro lists (`_GNU_SOURCE`) gives none, nor does a name in the
-// predefines or the command line's definitions, which are virtual files, as clang's are its <built-in> buffer.
-static void pp_reserved_macro_name(Preprocessor* pp, const PPFileData* data, IdentId name, uint32_t location, bool define)
+// #define of a feature-test macro clang's isFeatureTestMacro lists (`_GNU_SOURCE`, pp_feature_macros) gives none, nor
+// does a name in the predefines or the command line's definitions, which are virtual files, as clang's are its <built-in>
+// buffer. First whether the warning could be given at all (pp_warning_possible): a unit without it reaches this once,
+// and again only after a #pragma clang diagnostic changes a mapping (pp_reserved_macro_name). The table's scan stays
+// scalar, on a path no default compile takes.
+static __attribute__((noinline, cold)) void pp_reserved_macro_check(Preprocessor* pp, const PPFileData* data, IdentId name, uint32_t location, bool define)
 {
-    static const char* const features[] =
+    if (pp_warning_possible(pp, PP_WARNING_RESERVED_MACRO_IDENTIFIER))
     {
-        "_ATFILE_SOURCE", "_BSD_SOURCE", "_CRT_NONSTDC_NO_WARNINGS", "_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES", "_CRT_SECURE_NO_WARNINGS",
-        "_FILE_OFFSET_BITS", "_FORTIFY_SOURCE", "_GLIBCXX_ASSERTIONS", "_GLIBCXX_CONCEPT_CHECKS", "_GLIBCXX_DEBUG", "_GLIBCXX_DEBUG_PEDANTIC",
-        "_GLIBCXX_PARALLEL", "_GLIBCXX_PARALLEL_ASSERTIONS", "_GLIBCXX_SANITIZE_VECTOR", "_GLIBCXX_USE_CXX11_ABI", "_GLIBCXX_USE_DEPRECATED",
-        "_GNU_SOURCE", "_ISOC11_SOURCE", "_ISOC95_SOURCE", "_ISOC99_SOURCE", "_LARGEFILE64_SOURCE", "_POSIX_C_SOURCE", "_REENTRANT",
-        "_SVID_SOURCE", "_THREAD_SAFE", "_XOPEN_SOURCE", "_XOPEN_SOURCE_EXTENDED", "__STDCPP_WANT_MATH_SPEC_FUNCS__", "__STDC_FORMAT_MACROS",
-    };
-    const uint32_t length = intern_length(pp->table, name);
-    const char* bytes = (const char*)intern_bytes(pp->table, name);
-    const bool reserved = length >= 2 && bytes[0] == '_' && (bytes[1] == '_' || (bytes[1] >= 'A' && bytes[1] <= 'Z'));
-    const bool virtual_file = data->inode >= UINT64_MAX - BUSTER_PP_MAX_FILES;
-    bool feature = false;
-    for (uint32_t i = 0; reserved && define && !feature && i < BUSTER_ARRAY_LENGTH(features); i += 1)
-    {
-        feature = strlen(features[i]) == length && memcmp(features[i], bytes, length) == 0;
-    }
-    if (reserved && !feature && !virtual_file)
-    {
-        pp_diagnose_group(pp, PP_WARNING_RESERVED_MACRO_IDENTIFIER, location, "macro name is a reserved identifier");
+        const uint32_t length = intern_length(pp->table, name);
+        const char* bytes = (const char*)intern_bytes(pp->table, name);
+        const bool reserved = length >= 2 && bytes[0] == '_' && (bytes[1] == '_' || (bytes[1] >= 'A' && bytes[1] <= 'Z'));
+        const bool virtual_file = data->inode >= UINT64_MAX - BUSTER_PP_MAX_FILES;
+        bool feature = false;
+        for (uint32_t i = 0; reserved && define && !feature && i < BUSTER_ARRAY_LENGTH(pp_feature_macros); i += 1)
+        {
+            feature = pp_feature_macros[i].length == length && memcmp(pp_feature_macros[i].bytes, bytes, length) == 0;
+        }
+        if (reserved && !feature && !virtual_file)
+        {
+            pp_diagnose_group(pp, PP_WARNING_RESERVED_MACRO_IDENTIFIER, location, "macro name is a reserved identifier");
+        }
     }
 }
 
+// pp_reserved_macro_check at every #define and #undef where the warning, off by default, may still be given (#2547,
+// Preprocessor.warnings_possible): a compile without it pays this bit's test a directive, and reads neither the name
+// nor the options.
+BUSTER_INLINE void pp_reserved_macro_name(Preprocessor* pp, const PPFileData* data, IdentId name, uint32_t location, bool define)
+{
+    if (((pp->warnings_possible >> PP_WARNING_RESERVED_MACRO_IDENTIFIER) & 1u) != 0)
+    {
+        pp_reserved_macro_check(pp, data, name, location, define);
+    }
+}
+
+// #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
+// constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
 {
     const PPFileData* data = &pp->datas[data_index];
@@ -10609,6 +10706,7 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
             pp->warning_mappings[g] = *slot;
         }
         pp->diagnostic_depth = push ? pp->diagnostic_depth + 1 : pp->diagnostic_depth - 1;
+        pp->warnings_possible = UINT32_MAX;
         printed = true;
         if (begin + 1 < end)
         {
@@ -10648,6 +10746,7 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         {
             pp->warning_mappings[g] = pp_warning_group_named(g, (const char*)name + 2, length - 2) ? mapping : pp->warning_mappings[g];
         }
+        pp->warnings_possible = UINT32_MAX;
     }
     else
     {
@@ -13565,6 +13664,9 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
+    // No warning's command-line severity read yet, and each may be given (#2547).
+    memset(pp->warning_commands, BUSTER_PP_COMMAND_UNREAD, sizeof(pp->warning_commands));
+    pp->warnings_possible = UINT32_MAX;
     // A deferred history records nothing until pp_history_ensure (PPOptions.defer_history); its run prints no
     // diagnostic (pp_run), but this setup's are printed, its fatal errors among them.
     pp->history_deferred = options->defer_history && !options->no_history && !options->show_includes;

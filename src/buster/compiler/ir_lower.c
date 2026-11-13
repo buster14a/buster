@@ -954,6 +954,20 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->shuffle_immediate != 0)
+    {
+        // A byte shuffle by an immediate (#1840): the IR's shuffle of the vector by its kind's indices at the immediate,
+        // the same in every 16-byte lane, a constant.
+        uint8_t lane[BUSTER_IR_SHUFFLE_LANE_BYTES];
+        ir_simd_shuffle_immediate_indices(operation->shuffle_immediate - 1u, operation->immediate, lane);
+        uint64_t words[8] = {0};
+        for (uint32_t at = 0; at < ir_type_bits[type] / 8; at += BUSTER_IR_SHUFFLE_LANE_BYTES)
+        {
+            memcpy((uint8_t*)words + at, lane, sizeof(lane));
+        }
+        const uint32_t indices = ir_typed_vector_constant(sink, type, words);
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], indices, BUSTER_IR_INTRINSIC_SHUFFLE, 0);
+    }
     else if (operation->width_change != 0)
     {
         // A width change (#1840), its part in its flags; a masked extract's merged into its second operand under its third

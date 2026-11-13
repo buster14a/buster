@@ -294,8 +294,11 @@ typedef enum Tier1SelectRule
 // `immediate` its part (tier1_select_width_change).
 #define BUSTER_TIER1_VECTOR_WIDTH_CHANGE 10
 // A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
-// shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
+// shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form); or BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE, a
+// shuffle by a constant whose indices a byte shuffle by an immediate's are, `condition` its kind
+// (BUSTER_IR_SHUFFLE_IMMEDIATE_*) and `immediate` its immediate (tier1_select_shuffle_constant).
 #define BUSTER_TIER1_VECTOR_PERMUTE 11
+#define BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE 4
 // A conversion (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTEND (0 extend, 1 truncate), `immediate` the
 // IR's flags, `source_width` the source's bytes (tier1_select_convert_form).
 #define BUSTER_TIER1_VECTOR_CONVERT 12
@@ -1327,9 +1330,6 @@ static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_
     return form;
 }
 
-// A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
-// indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
-// and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits).
 // The conversions' and the scalar shifts' forms (#1840), shared with the decoder.
 #include "buster/compiler/ir_simd_convert_forms.c"
 
@@ -1420,21 +1420,57 @@ static uint32_t tier1_select_vector_fill(const IrFunction* function, uint32_t va
     return fill;
 }
 
+// Whether `value` is a vector constant whose bytes, vpshufb's indices at `width` bytes, are a byte shuffle by an
+// immediate's (#1840, ir_simd_shuffle_immediate_match): its kind and immediate into `kind` and `immediate`.
+static bool tier1_select_shuffle_constant(const IrFunction* function, uint32_t value, uint32_t width, uint32_t* kind, uint32_t* immediate)
+{
+    bool result = false;
+    if (value < function->instruction_count && function->op[value] == IR_VCONST && function->a[value] < function->vector_constant_count)
+    {
+        const IrSimdValue* payload = &function->vector_constants[function->a[value]];
+        result = ir_simd_shuffle_immediate_match((const uint8_t*)payload->words, width, kind, immediate);
+    }
+    return result;
+}
+
+// A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
+// indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
+// and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits). A shuffle by a constant as its
+// byte shuffle by an immediate (BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE) is that form of values[0] (rm) into the
+// destination (reg, or vvvv for the byte shifts) by the immediate.
 static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t kind = (uint32_t)holes->operation;
     const uint32_t flags = (uint32_t)holes->immediate;
     const uint8_t left = holes->left & 15;
     const uint8_t right = holes->right & 15;
-    const X86Instruction record = {
-        .form = tier1_select_permute_form(kind, flags, holes->width),
-        .reg = holes->destination & 15,
-        .vvvv = kind == 0 ? right : left,
-        .rm = kind == 0 ? left : right,
-        .mode = BUSTER_X86_REGISTER_DIRECT,
-        .immediate = kind == 2 ? (int32_t)(flags & 15) : kind == 3 ? (int32_t)flags : 0,
-    };
-    tier1_select_append(result, record);
+    const uint8_t x = holes->destination & 15;
+    if (kind == BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE)
+    {
+        const uint32_t shuffle = holes->condition < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS ? holes->condition : 0;
+        const bool shift = shuffle == BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES || shuffle == BUSTER_IR_SHUFFLE_IMMEDIATE_RIGHT_BYTES;
+        const X86Instruction record = {
+            .form = ir_simd_shuffle_immediate_forms[shuffle][holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2],
+            .reg = shift ? 0 : x,
+            .vvvv = shift ? x : 0,
+            .rm = left,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = (int32_t)(flags & 0xff),
+        };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const X86Instruction record = {
+            .form = tier1_select_permute_form(kind, flags, holes->width),
+            .reg = x,
+            .vvvv = kind == 0 ? right : left,
+            .rm = kind == 0 ? left : right,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = kind == 2 ? (int32_t)(flags & 15) : kind == 3 ? (int32_t)flags : 0,
+        };
+        tier1_select_append(result, record);
+    }
 }
 
 // A permute of two tables (#1840): vpermt2b to vpermt2q (ir_simd_permute2_forms) overwrite their first table, and
@@ -5116,8 +5152,21 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_PERMUTE);
             base.immediate = function->flags[node];
             base.values[0] = a;
-            base.values[1] = b;
             base.intrinsic_cost = 1;
+            uint32_t shuffle = 0;
+            uint32_t shuffle_immediate = 0;
+            if (c == BUSTER_IR_INTRINSIC_SHUFFLE && tier1_select_shuffle_constant(function, b, vector_width, &shuffle, &shuffle_immediate))
+            {
+                // A shuffle by a constant that a byte shuffle by an immediate's indices are (vpshufd, vpshuflw, vpshufhw,
+                // vpslldq, vpsrldq): that form alone, which leaves the constant unused, first, as the bottom-up path's rule
+                // takes its kind's first candidate (tier1_burs_pick) and munch's ranks tie.
+                Tier1SelectPattern immediate = base;
+                immediate.operation = BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE;
+                immediate.condition = (uint8_t)shuffle;
+                immediate.immediate = shuffle_immediate;
+                tier1_select_add_candidate(forest, node, &candidates, immediate);
+            }
+            base.values[1] = b;
             if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);

@@ -15,6 +15,7 @@ struct CheckCommonNote
 };
 
 static uint32_t check_common_address_root(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node, bool members);
+static uint64_t check_driver_first_error(const Parser* original, const Preprocessor* pp);
 
 // A test's hook, in every build, as BUSTER_TEST_LANE_FAIL_AT is: the common warnings' scratch allocation of
 // this index, counted from 0 across one unit's passes, fails as an exhausted arena would, so a test reaches
@@ -116,10 +117,10 @@ static uint32_t check_common_sparse_get(CheckSparseColumn column, uint32_t token
     return result;
 }
 
-// The common warnings clang makes errors by default (DefaultError): a chained comparison's (#2264).
+// The common warnings clang makes errors by default (DefaultError): a chained comparison's and atomic member access.
 static bool check_common_default_error(uint32_t id)
 {
-    return id == CHECK_WARNING_ID_CHAINED_COMPARISON;
+    return id == CHECK_WARNING_ID_CHAINED_COMPARISON || id == CHECK_WARNING_ID_ATOMIC_ACCESS;
 }
 
 static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser* parser, const CheckInput* input, uint32_t token, uint32_t id, bool default_ignored)
@@ -156,7 +157,7 @@ static bool check_common_enabled(const Preprocessor* pp, const CheckInput* input
     const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, default_error);
     bool enabled = default_error ? command.mapped != CHECK_WARNING_IGNORE : !command.quiet && command.severity != CHECK_WARNING_IGNORE;
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
-    for (uint32_t i = 0; !command.quiet && !enabled && history != NULL && i < history->count; i += 1)
+    for (uint32_t i = 0; (!command.quiet || id == CHECK_WARNING_ID_ATOMIC_ACCESS) && !enabled && history != NULL && i < history->count; i += 1)
     {
         const CheckInputDiagnosticPragma* record = history->records + i;
         enabled = record->operation != CHECK_DIAGNOSTIC_IGNORED && check_warning_option(id, record->option);
@@ -194,8 +195,13 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
     // (An error by default names its group alone, as clang's does.)
     const bool promoted = error && !check_common_default_error(id);
     const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) : promoted ? " [-Werror]" : "";
-    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
-                                   error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+    // A default error inhibits later analysis; a warning promoted to an error does not. Preserve the source
+    // pragma's ordinary error under -Wfatal-errors, as the driver's other default-error publications do.
+    const bool default_error = check_common_default_error(id);
+    const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
+    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? (default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
+        error ? (default_error && !source_error ? (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) :
+                 PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
     PPOutputDiagnosticNote attached[8];
     const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
     for (uint32_t i = 0; i < used; i += 1)
@@ -910,7 +916,8 @@ static bool check_common_runtime_id(uint32_t id)
                         id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_DIVISION_BY_ZERO ||
                         id == CHECK_WARNING_ID_ARRAY_BOUNDS || id == CHECK_WARNING_ID_SIGN_COMPARE || id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE ||
                         id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || id == CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE ||
-                        id == CHECK_WARNING_ID_NULL_DEREFERENCE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE;
+                        id == CHECK_WARNING_ID_NULL_DEREFERENCE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
+                        id == CHECK_WARNING_ID_ATOMIC_ACCESS;
     return result;
 }
 
@@ -1101,6 +1108,8 @@ struct CheckCommonEnabled
     // Whether the unit names a tagged enumeration's enumerator or variable (CheckInput.enum_names), which an implicit
     // conversion between enumerations needs (check_common_enum_cast).
     bool enum_cast;
+    // A table without atomic records adds no member candidates to the existing runtime walk.
+    bool atomic_access;
     // The const objects' initializer receipts a divisor's read may give zero from (check_common_zero_divisor), or null.
     const CheckConstValues* const_values;
 };
@@ -1651,7 +1660,9 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 #define BUSTER_CHECK_REACH_CONVERSION 0x20u
 // An index's bound the tree walk may warn of, which orders a comma's marker after it (check_common_comma_bound_operands).
 #define BUSTER_CHECK_REACH_BOUND 0x40u
-#define BUSTER_CHECK_REACH_ALL 0x7fu
+// Atomic accesses are also arithmetic candidates; this bit keeps their queued diagnostics in failed roots.
+#define BUSTER_CHECK_REACH_ATOMIC 0x80u
+#define BUSTER_CHECK_REACH_ALL 0xffu
 
 static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind);
 static void check_common_emit_run(CheckCommonEmission* emission);
@@ -2078,6 +2089,51 @@ static bool check_common_zero_divisor(const CheckGraph* graph, const CheckStream
     return result;
 }
 
+// Whether a member's operand is an atomic struct or union. An arrow's pointer has its lvalue conversion first: an
+// atomic pointer to an ordinary record is not an atomic record access. Ordinary members never ask this on the vector
+// path unless the table has an atomic record and its warning may report.
+static bool check_common_atomic_member(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const uint32_t base = graph->operand0[node];
+    TypeId record = base < graph->count && base < stream->count ? check_stream_type(stream, base) : 0;
+    if (op == CHECK_OP_ARROW && record != 0)
+    {
+        record = type_strip_aligned(types, type_conversion_operand(types, record));
+        const uint8_t kind = type_kind(types, record);
+        record = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, record) : 0;
+    }
+    record = record != 0 ? type_strip_aligned(types, record) : 0;
+    const TypeId element = record != 0 && type_kind(types, record) == BUSTER_TYPE_KIND_ATOMIC ? type_strip_aligned(types, type_element(types, record)) : 0;
+    const uint8_t kind = element != 0 ? type_kind(types, element) : BUSTER_TYPE_KIND_NONE;
+    const bool result = (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
+    return result;
+}
+
+// An atomic member's runtime queue, shared with a failed lookup's diagnostic publication: recovery removes that
+// erroneous expression, so the successful common-warning reading cannot visit the original operator again.
+static void check_common_atomic_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t node, bool flushed, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t token = graph->tokens[node];
+    const uint32_t boundary = check_common_function_boundary(parser, token);
+    const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    // -w skips a valid body's analysis-based warning queue, even a default error. An erroneous body instead
+    // flushes that queue, and a file-scope initializer never uses the body's analysis gate.
+    const bool report = !pp->options.suppress_warnings || boundary == token || flushed;
+    const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    if (report)
+    {
+        check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                      declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_ATOMIC_ACCESS,
+                                      false, "accessing a member of an atomic structure or union is undefined behavior", NULL, 0, scratch);
+        if (declarator != BUSTER_CHECK_NONE && graph->source_positions != NULL)
+        {
+            pp_diagnostic_suborder(pp, previous, (uint64_t)graph->source_positions[node] + 1);
+        }
+    }
+}
+
 // The arithmetic-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
 // too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
 // evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
@@ -2086,7 +2142,14 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
 {
     const CheckGraph* graph = &emission->input->graph;
     const CheckOp op = graph->ops[node];
-    if (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, emission->stream, emission->types, node))
+    if ((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && emission->types->atomic_records && check_common_atomic_member(graph, emission->stream, emission->types, node))
+    {
+        const Parser* parser = emission->parser;
+        const uint32_t token = graph->tokens[node];
+        const bool flushed = emission->flushed != NULL && token < parser->tokens.count && emission->flushed[token] != 0;
+        check_common_atomic_report(parser, emission->pp, emission->input, node, flushed, emission->scratch);
+    }
+    else if (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, emission->stream, emission->types, node))
     {
         const uint32_t parent = emission->parents != NULL ? emission->parents[node] : BUSTER_CHECK_NONE;
         const CheckOp parent_op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
@@ -4471,6 +4534,13 @@ static inline __attribute__((always_inline)) void check_common_root_frames(Check
             check_common_root_push(emission, node);
         }
     }
+    else if (parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] != CHECK_DIAG_NONE && evaluated[node] != 0 &&
+             (emission->reach[node] & BUSTER_CHECK_REACH_ATOMIC) != 0)
+    {
+        // Sema queued an atomic access before discovering its missing member or a surrounding expression error.
+        // Its primary diagnostic does not discard those runtime diagnostics; only their arithmetic walk is needed.
+        check_common_emit_reach(emission, node, BUSTER_CHECK_EMIT_ARITHMETIC_SCAN, BUSTER_CHECK_REACH_ARITHMETIC);
+    }
     else if (parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] == CHECK_DIAG_NONE && extra == NULL)
     {
         // A dead ordinary owner still supplies a source position for its detached arms. Enter only their
@@ -4478,6 +4548,10 @@ static inline __attribute__((always_inline)) void check_common_root_frames(Check
         check_common_emit_reach(emission, node, BUSTER_CHECK_EMIT_DETACHED_SCAN, BUSTER_CHECK_REACH_DETACHED);
     }
 }
+
+// check_common_next_op's and check_common_next_token's items listed at once, at least this many unless the scan reaches its
+// end (#892).
+#define BUSTER_CHECK_SCAN_ITEMS 64u
 
 // A pass's walk over the items its own test needs first (check_common_next_token, check_common_next_op and
 // check_common_next_reach): a group of them at a time, each a bit of the group's mask until visited. Zeroed, it starts at 0.
@@ -4489,7 +4563,30 @@ struct CheckCommonScan
     uint32_t next;
     // The group's items still to visit, a bit each.
     uint64_t pending;
+    // check_common_next_op's and check_common_next_token's: their groups' items, listed in order (`listed` of them, room for
+    // a group past BUSTER_CHECK_SCAN_ITEMS), of which `taken` were visited. Each scan reads a column no pass writes, the
+    // graph's operators or the tokens' roles and kinds, so it lists items ahead of the pass.
+    uint32_t taken;
+    uint32_t listed;
+    uint32_t items[BUSTER_CHECK_SCAN_ITEMS + 64];
 };
+
+// The listed scan's next item, or `count` where its groups are done.
+static uint32_t check_common_scan_listed(CheckCommonScan* scan, uint32_t count)
+{
+    const bool left = scan->taken < scan->listed;
+    const uint32_t result = left ? scan->items[scan->taken] : count;
+    scan->taken += left;
+    return result;
+}
+
+// Appends the items of `selected` from `first` (16 lanes) to the scan's list.
+static void check_common_scan_list(CheckCommonScan* scan, uint32_t first, __mmask16 selected)
+{
+    const __m512i items = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+    _mm512_storeu_si512(scan->items + scan->listed, _mm512_maskz_compress_epi32(selected, items));
+    scan->listed += (uint32_t)__builtin_popcount(selected);
+}
 
 // The scan's group's lowest pending item, which it then takes off, or `count` where the groups are done.
 static uint32_t check_common_scan_take(CheckCommonScan* scan, uint32_t count)
@@ -4501,35 +4598,44 @@ static uint32_t check_common_scan_take(CheckCommonScan* scan, uint32_t count)
 
 // The scan's next token below `count` whose role is one of the `role_count` `roles` and, unless `kind` is BUSTER_CHECK_NONE,
 // whose kind is `kind`, or `count`: what a token pass's own test needs first. The vector path tests 64 tokens at a time;
-// the scalar path, its twin, gives every token, so that its caller tests each.
+// the scalar path, its twin, gives every token, so that its caller tests each. Both take the tokens from the scan's list.
 static uint32_t check_common_next_token(const Parser* parser, uint32_t count, uint32_t kind, const uint8_t* roles, uint32_t role_count,
                                         CheckCommonScan* scan, bool vector)
 {
-    while (scan->pending == 0 && scan->next < count)
+    // Groups listed until BUSTER_CHECK_SCAN_ITEMS tokens or the end, once the list is taken (#892): a group at a time, the
+    // test of whether the group's tokens were all visited was missed at most groups on the 9700X.
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = count - first < 64 ? count - first : 64;
-        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
-        uint64_t selected = lanes;
-        if (vector)
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
         {
-            const __m512i role_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + first);
-            selected = 0;
-            for (uint32_t r = 0; r < role_count; r += 1)
+            const uint32_t first = scan->next;
+            const uint32_t live = count - first < 64 ? count - first : 64;
+            const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+            uint64_t selected = lanes;
+            if (vector)
             {
-                selected |= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, role_bytes, _mm512_set1_epi8((char)roles[r]));
+                const __m512i role_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + first);
+                selected = 0;
+                for (uint32_t r = 0; r < role_count; r += 1)
+                {
+                    selected |= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, role_bytes, _mm512_set1_epi8((char)roles[r]));
+                }
+                if (kind != BUSTER_CHECK_NONE)
+                {
+                    const __m512i kind_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + first);
+                    selected &= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)kind));
+                }
             }
-            if (kind != BUSTER_CHECK_NONE)
+            scan->next = first + live;
+            for (uint32_t part = 0; part < 64; part += 16)
             {
-                const __m512i kind_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + first);
-                selected &= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)kind));
+                check_common_scan_list(scan, first + part, (__mmask16)(selected >> part));
             }
         }
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = selected;
     }
-    const uint32_t result = check_common_scan_take(scan, count);
+    const uint32_t result = check_common_scan_listed(scan, count);
     return result;
 }
 
@@ -4567,18 +4673,24 @@ static uint32_t check_common_op_lanes(const CheckCommonOps* set, __m512i ops, __
 // caller tests each.
 static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonOps* set, CheckCommonScan* scan, bool vector)
 {
-    while (scan->pending == 0 && scan->next < graph->count)
+    // Groups listed until BUSTER_CHECK_SCAN_ITEMS nodes or the end, once the list is taken (#892), as
+    // check_common_next_token's.
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-        const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
-        const uint32_t selected = vector ? check_common_op_lanes(set, _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first), (__mmask16)lanes) :
-                                           lanes;
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = selected;
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < graph->count)
+        {
+            const uint32_t first = scan->next;
+            const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+            const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+            const uint32_t selected = vector ? check_common_op_lanes(set, _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first), (__mmask16)lanes) :
+                                               lanes;
+            scan->next = first + live;
+            check_common_scan_list(scan, first, (__mmask16)selected);
+        }
     }
-    const uint32_t result = check_common_scan_take(scan, graph->count);
+    const uint32_t result = check_common_scan_listed(scan, graph->count);
     return result;
 }
 
@@ -6616,9 +6728,11 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
                             (enabled->sign_compare || (enabled->out_of_range && check_common_range_out(graph, stream, types, node)));
     // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
     const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
+    const bool atomic = enabled->atomic_access && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && check_common_atomic_member(graph, stream, types, node);
     // (A self-assignment is no walk's: check_common_self_assigns gives it, in unreachable code too.)
     const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, false, enabled->enum_cast) |
-                                     (division || shift || comma ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
+                                     (division || shift || comma || atomic ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
+                                     (atomic ? BUSTER_CHECK_REACH_ATOMIC : 0u) |
                                      (shift ? BUSTER_CHECK_REACH_SHIFT : 0u));
     return result;
 }
@@ -9326,16 +9440,22 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
         }
         check_common_body_reached(program, body, seen, queue);
         const CheckControl* entries = program->controls + body->first;
+        // The kinds whose `node` is a source expression's value, a bit each.
+        const uint64_t expressions = UINT64_C(1) << CHECK_CONTROL_EVALUATE | UINT64_C(1) << CHECK_CONTROL_VLA | UINT64_C(1) << CHECK_CONTROL_RETURN |
+                                     UINT64_C(1) << CHECK_CONTROL_SWITCH | UINT64_C(1) << CHECK_CONTROL_BRANCH_FALSE |
+                                     UINT64_C(1) << CHECK_CONTROL_BRANCH_TRUE | UINT64_C(1) << CHECK_CONTROL_JUMP_INDIRECT |
+                                     UINT64_C(1) << CHECK_CONTROL_RESULT;
+        _Static_assert(CHECK_CONTROL_RESULT < 64 && CHECK_CONTROL_JUMP_INDIRECT < 64, "the expressions' kinds are bits of a 64-bit mask");
         for (uint32_t i = 0; i < body->count; i += 1)
         {
             const uint8_t kind = entries[i].kind;
-            const bool expression = kind == CHECK_CONTROL_EVALUATE || kind == CHECK_CONTROL_VLA || kind == CHECK_CONTROL_RETURN ||
-                                    kind == CHECK_CONTROL_SWITCH || kind == CHECK_CONTROL_BRANCH_FALSE || kind == CHECK_CONTROL_BRANCH_TRUE ||
-                                    kind == CHECK_CONTROL_JUMP_INDIRECT || kind == CHECK_CONTROL_RESULT;
-            if (expression && seen[i] == 0 && entries[i].node < graph->count)
-            {
-                evaluated[entries[i].node] = 0;
-            }
+            // An unreached expression's root cleared without a branch (#892): where the entry clears none, the store writes its
+            // own mark again. Tested by its kind, its mark and its node in turn, the entries' test was missed at nearly half
+            // the entries on the 9700X.
+            const bool expression = kind < 64 && (expressions >> kind & 1) != 0;
+            const bool cleared = expression & (seen[i] == 0) & (entries[i].node < graph->count);
+            uint8_t* root = cleared ? evaluated + entries[i].node : seen + i;
+            *root = cleared ? 0 : seen[i];
             if (kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
                 entries[i].target < program->initializers->count && *blocked == NULL)
             {
@@ -10185,7 +10305,12 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         memset(reach, 0, count);
         // The comparisons, last in the list, only where -Wsign-compare may warn: it takes every one. Otherwise only those
         // -Wtautological-constant-out-of-range-compare may warn of reach their roots, in batches after the scan.
-        const CheckCommonOps own = check_common_ops(check_common_reach_ops, BUSTER_ARRAY_LENGTH(check_common_reach_ops) - (enabled->sign_compare ? 0u : 6u));
+        CheckCommonOps own = check_common_ops(check_common_reach_ops, BUSTER_ARRAY_LENGTH(check_common_reach_ops) - (enabled->sign_compare ? 0u : 6u));
+        if (enabled->atomic_access)
+        {
+            own.words[CHECK_OP_MEMBER >> 5] |= 1u << (CHECK_OP_MEMBER & 31);
+            own.words[CHECK_OP_ARROW >> 5] |= 1u << (CHECK_OP_ARROW & 31);
+        }
         CheckCommonScan owners = { 0 };
         uint32_t* comparisons = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
         uint32_t listed = 0;
@@ -10278,6 +10403,77 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed, .self_assigns = self_assigns };
     const bool result = count == 0 || evaluated != NULL;
     return result;
+}
+
+// An atomic-access error published at one body's end changes how Clang ends later bodies: it flushes their queued
+// runtime diagnostics instead of building a CFG. Determine that first publication before the ordinary walk, then
+// extend its existing flush facts. Only units whose atomic warning can report take this scan or allocate a map.
+static void check_common_atomic_flush(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                      const TypeTable* types, const CheckProgram* program, CheckCommonFacts* facts, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    static const CheckOp members[] = { CHECK_OP_MEMBER, CHECK_OP_ARROW };
+    const CheckCommonOps set = check_common_ops(members, BUSTER_ARRAY_LENGTH(members));
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    CheckCommonScan scan = { 0 };
+    uint32_t first = BUSTER_CHECK_NONE;
+    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); facts->evaluated != NULL && node < graph->count && !pp->fatal;
+         node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        const uint32_t token = graph->tokens[node];
+        if (facts->evaluated[node] != 0 && token < parser->tokens.count && check_common_atomic_member(graph, stream, types, node))
+        {
+            const uint32_t boundary = check_common_function_boundary(parser, token);
+            const bool flushed = facts->flushed != NULL && facts->flushed[token] != 0;
+            const bool reports = !pp->options.suppress_warnings || boundary == token || flushed;
+            if (reports && check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_ATOMIC_ACCESS, false) >= CHECK_WARNING_ERROR &&
+                !check_common_unevaluated(parser, pp, input, token, scratch) && !check_common_bound(parser, pp, input, token, scratch))
+            {
+                const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+                const uint32_t publication = declarator != BUSTER_CHECK_NONE ? declarator : boundary;
+                first = publication < first ? publication : first;
+            }
+        }
+    }
+    // Other semantic common passes have completed too. Their errors may precede an atomic-only body's queue.
+    const uint64_t existing = check_driver_first_error(parser, pp);
+    uint8_t* flushed = NULL;
+    for (uint32_t b = 0; (first != BUSTER_CHECK_NONE || existing != UINT64_MAX) && program != NULL && b < program->body_count && !pp->fatal; b += 1)
+    {
+        const uint32_t opening = program->bodies[b].opening;
+        const uint32_t close = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
+        const uint32_t publication = close < parser->tokens.count ? check_common_publication_source(parser, pp, close + 1u) : pp->output.count;
+        const uint64_t position = (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RETURN;
+        if ((opening >= first || position >= existing) && close < parser->tokens.count && close > opening)
+        {
+            if (flushed == NULL)
+            {
+                flushed = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, parser->tokens.count);
+                if (flushed == NULL)
+                {
+                    check_common_exhausted(pp);
+                }
+                else if (facts->flushed != NULL)
+                {
+                    memcpy(flushed, facts->flushed, parser->tokens.count);
+                }
+                else
+                {
+                    memset(flushed, 0, parser->tokens.count);
+                }
+            }
+            for (uint32_t token = opening; flushed != NULL && token <= close; token += 1)
+            {
+                // Preserve 2, which marks a body whose recovered reading lacked its erroneous expressions.
+                flushed[token] = flushed[token] != 0 ? flushed[token] : 1;
+            }
+        }
+    }
+    if (flushed != NULL)
+    {
+        facts->flushed = flushed;
+        check_common_flush(graph, facts->parents, flushed, parser->tokens.count, facts->evaluated);
+    }
 }
 
 // Mark an address computation's, a void cast's or a write target's operand chain in `mask`. A subscript or
@@ -11782,6 +11978,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
         .enum_cast = input->enum_names,
+        .atomic_access = types->atomic_records && check_common_enabled(pp, input, CHECK_WARNING_ID_ATOMIC_ACCESS, false),
         .const_values = &input->const_values,
     };
     check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);
@@ -11803,6 +12000,10 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_string_plus_int(parser, pp, input, stream, types, &spell, scratch);
     check_common_sizeof_array_decay(parser, pp, input, stream, types, &spell, scratch);
     check_common_shift_sign_overflow(parser, pp, input, stream, types, &spell, scratch);
+    if (enabled.atomic_access && !pp->fatal)
+    {
+        check_common_atomic_flush(parser, pp, input, stream, types, program, &facts, scratch);
+    }
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);

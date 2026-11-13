@@ -46,6 +46,24 @@ static uint64_t check_test_typo_stress(char* text, uint64_t capacity)
 static void check_test_driver_semantic_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
+        // #2498: an invalid prototype parameter storage class is diagnosed at its keyword and dropped, while the
+        // parameter's type and the following parameters/declarations remain available to semantic checking.
+        "int a(static int value);\n"
+        "int b(extern int value);\n"
+        "int c(int first, static int second, extern int third);\n"
+        "int after = \"text\";\n"
+        "int later(void) { return undeclared; }\n",
+        // Type-name correction to a declaration-specifier keyword must expose the keyword's own parameter error.
+        "int a(stati int value);\n"
+        "int b(exter int value);\n"
+        "int after = \"text\";\n",
+        // C17's identifier lists are allowed only on definitions. The first listed name owns the diagnostic, and a
+        // rejected declaration must not stop diagnostics from later declarations or function bodies.
+        "/* gnu17 only */\n"
+        "int a(voi);\n"
+        "int b(first, second);\n"
+        "int after = \"text\";\n"
+        "int later(void) { return undeclared; }\n",
         // patchable_function_entry's offset past its count, on separate declarations, twice in one list, and on a shared
         // record, which each declarator's handler refuses again (#1734).
         "__attribute__((patchable_function_entry(1, 2))) void f(void) {}\n"
@@ -241,6 +259,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int c = undecl_n;\nint y = 3 + (void)0;\nunknown_type z;\n",
         "int c = undecl_n, d[] = 1 + (void)0;\nunknown_type z;\n",
         "int c = undecl_n;\nint f(int);\nint y = f(1, 2);\nunknown_type z;\n",
+        // A recoverable unknown type preserves the complete declarations on both sides (#2509), including graphs
+        // in function bodies and aggregate initializers and the rejected unit's subsequent readings.
+        "int c = undecl_n;\nint g(void) { return 1 + (void)0; }\nunknown_type z;\n",
+        "int c = undecl_n;\nstruct S { int a; } s = { 1 + (void)0 };\nunknown_type z;\n",
+        "int a = undecl;\nfoo bar;\nint c = 1 + (void)0;\n",
+        "unknown_type z;\nint g(void) { return 1 + (void)0; }\n",
+        "unknown_type z;\nstruct S { int a; } s = { 1 + (void)0 };\n",
+        "unknown_type z;\nint c = undecl_n;\nint y = 1 + (void)0;\n",
+        "unknown_type z = \"x\";\nint y = 1 + (void)0;\n",
+        "void f(void) { unknown_type z = \"x\"; }\nint y = 1 + (void)0;\n",
+        "unknown_type a = \"x\";\nint b = a + 1;\nint y = 1 + (void)0;\n",
+        "unknown_type z = \"x\";\nint g(void) { return 1 + (void)0; }\nint h(void) { return 2 + (void)0; }\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its
@@ -686,6 +716,32 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int float char x;\nint a1 = u1;\n_Complex _Bool int y;\nint a2 = u2;\n_Complex _Bool _Atomic _Bool y2;\nint a3 = u3;\n"
         "long long long long w;\nint a4 = u4;\nsigned unsigned float v;\nint a5 = u5;\nunsigned long float double d;\nint a6 = u6;\n"
         "unsigned unsigned float uu;\nint a7 = u7;\nlong double long double ldd;\nint a8 = u8;\n",
+        // A formed non-integral enum base (#2492): clang reports its full type and recovers a fixed int enum, so its
+        // enumerators, later uses, redeclarations and unrelated diagnostics remain checked. A dropped sign's error
+        // precedes the recovered float base's, at the original specifier sequence's type location.
+        "enum E : float { A };\nint b3 = v3;\nenum G : unsigned float { B };\nint b4 = v4;\n"
+        "enum E : int;\n_Static_assert(sizeof(enum E) == sizeof(int) && sizeof(enum G) == sizeof(int), \"int recovery\");\n"
+        "enum K : double { K0 = sizeof(enum K) };\n_Static_assert(K0 == sizeof(int), \"complete recovery\");\n"
+        "int f(void) { enum L : long double { L0 }; return L0 + absent; }\n",
+        // CV qualifiers precede the underlying type's error, with the stripped type's spelling; typedef sugar and each
+        // noninteger type class survive the report. No tag's forward-declaration note belongs to this diagnostic.
+        "typedef float Float;\ntypedef Float Real;\ntypedef void *Pointer;\ntypedef int Array[3];\ntypedef int Function(void);\n"
+        "struct S; typedef struct S Record;\nenum Source { Source0 }; typedef enum Source OtherEnum;\n"
+        "enum C : const float { C0 };\nenum V : volatile double { V0 };\nenum T : Real { T0 };\n"
+        "enum P : Pointer { P0 };\nenum R : Record { R0 };\nenum A : Array { A0 };\nenum F : Function { F0 };\n"
+        "enum N : void { N0 };\nenum Q : OtherEnum { Q0 };\nint x = later;\n",
+        // Clang strips atomic before deciding the base: the atomic qualifier's own default error is demotable, an
+        // atomic integer keeps its integer base, and an atomic float still gets the non-integral type error.
+        "typedef _Atomic(int) AtomicInt;\ntypedef _Atomic(float) AtomicFloat;\n"
+        "enum AI : _Atomic int { AI0 };\nenum AT : AtomicInt { AT0 };\nenum AF : AtomicFloat { AF0 };\n"
+        "enum AC : _Atomic const float { AC0 };\n"
+        "_Static_assert(sizeof(enum AI) == sizeof(int) && sizeof(enum AT) == sizeof(int), \"atomic stripped\");\nint x = after_atomic;\n",
+        // Other parser-admitted scalar bases retain their actual types; valid integer bases and GNU specifier
+        // recovery preserve the complete original widths rather than adopting the error stand-in.
+        "enum H : __fp16 { H0 };\nenum F : _Float16 { F0 };\nenum B : __bf16 { B0 };\nenum Q : __float128 { Q0 };\n"
+        "enum Z : _Complex double { Z0 };\ntypedef _BitInt(17) Bits;\nenum I : Bits { I0 };\n"
+        "enum U : unsigned short { U0 };\nenum W : unsigned __int128 { W0 };\nenum O : _Bool { O0 };\n"
+        "_Static_assert(sizeof(enum U) == 2 && sizeof(enum W) == 16 && sizeof(enum O) == 1, \"valid bases\");\nint x = after_types;\n",
         // The same in the operand readers' type names, a parameter, a body, a cast, sizeof, _Alignof and members.
         "typeof(unsigned unsigned float) q1;\nint b1 = v1;\ntypeof(int float char) q2;\nint b2 = v2;\n"
         "enum F : long long long long { B };\nint b4 = v4;\n_Atomic(unsigned long float double) q3;\nint b5 = v5;\n"

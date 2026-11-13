@@ -35,11 +35,16 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 ```
 
-- **build** (the default) builds Release unless `--config Debug` or
-  `--config Develop`, the executable unless `--target` names CMake targets, then publishes the
+- **build** (the default) builds Develop, the edit loop's configuration
+  (the owner's default since #2559), unless `--config Release` or `--config
+  Debug`, the executable unless `--target` names CMake targets, then publishes the
   configuration's executable, `build/cmake/VARIANT/CONFIG/compiler`, as
   `build/compiler` and its compile commands as `build/compile_commands.json`.
-  Plain `./build.sh` is the optimized build it has always been.
+  **Every timing, benchmark and `perf` run measures Release**: build it with
+  `./build.sh --config Release`. `shifts` and `lexer-variant`, which exist to
+  measure, and a `BUSTER_PGO` tree, which has Release alone, default to
+  Release; so do the CI jobs, which name `--config Release` wherever they
+  build, print the compile flags or check the call graph.
 - **test** builds and publishes as `build` does, then runs the tree's CTest
   tests for the configuration (below) without holding the tree's lock.
 - **clean** removes this environment's tree; with `--config`, that
@@ -81,8 +86,8 @@ compiled, its time and the three longest compiles, from Ninja's log.
 
 One tree holds **Release**, **Debug** and **Develop**, in `CONFIG/`
 subdirectories of their own; switching between them builds nothing that is up to
-date. Release is for the product and every timing, Develop for edits and tests,
-Debug for a debugger.
+date. Release is for the product and every timing, Develop for edits and tests
+(and the default), Debug for a debugger.
 
 - **Release** is the production build, with the flags the build has always had:
   `-g` (none with `BUSTER_DEBUG_INFO=0`), the host target (`-march=$BUSTER_HOST_ARCH`), `-Isrc
@@ -122,6 +127,45 @@ relative to the source directory, as it is when clang runs from there. With
 byte (the CI configuration, checked at `x86-64`); with `-g`, its allocated
 sections are, and only `.debug_str` and `.debug_line_str` (source paths) and
 the build ID, a hash over the whole file, differ.
+
+## The toolchain
+
+`build.sh` builds with CI's toolchain (#2628): the official LLVM release, CMake
+and Ninja that `tools/ci/hosted-tools.lock` pins (LLVM 23.1.4, CMake 4.4.3,
+Ninja 1.13.2), so that a session's executable is the product CI builds and
+measures, and its build is faster: a Release build without debug information
+took 54.9 s with the release's clang on the 9700X, and 69.5 s with the host's
+23.1.1 ([buster-performance#482](https://github.com/buster14a/buster-performance/pull/482)).
+
+- **Where `PATH`'s clang is the release's** (its `--version` names the
+  release's commit), `build.sh` builds with `PATH`'s tools as they are: CI's
+  setup steps (`setup-hosted.sh`, `setup-benchpress.sh`) put them first.
+- **Elsewhere `tools/ci/session-toolchain.sh stage`** finds or stages them under
+  `${XDG_CACHE_HOME:-~/.cache}/buster`, and `build.sh` puts its directories
+  first on `PATH` for its own commands. On the 9700X that is the job's own tree,
+  `benchpress-clang/DIGEST` with `build-tools/`, and the host's linkers, as the
+  9700X job builds. Elsewhere it is the hosted rows' layout, `toolchain/KEY`
+  (`install-hosted-tools.sh`: clang and LLVM's tools, CMake, Ninja, mold and
+  wild), staged once from the verified inputs (`hosted-release.sh prepare`:
+  the pinned GHCR mirror, then upstream, each file checked against the lock's
+  SHA-256): 1.27 GB to download, 1.9 GB staged, 91 s in a cloud container.
+  Staging needs `curl`, `zstd`, `tar`, `sha256sum` and `flock`, and the network
+  once; afterwards a staged tree is used by its marker, about 30 ms a command.
+- **`BUSTER_TOOLCHAIN=path`** builds with `PATH`'s tools as found, as
+  `build.sh` did before: for a stand-in clang (the PGO refusals' workflow), an
+  offline host with nothing staged, or another compiler on purpose.
+
+The configure step names the toolchain it configures with, CI's or `PATH`'s,
+and a tree configured with another clang starts afresh, as below: the first
+build after the switch rebuilds the tree. `BUSTER_PGO`'s `llvm-profdata` is
+the one beside clang or on `PATH`; the staged release leaves it out, so a
+profile-guided build merges with `PATH`'s. The tools a session runs itself
+(`clang` oracles, `llvm-*`) are still `PATH`'s; `PATH="$(bash
+tools/ci/session-toolchain.sh stage):$PATH"` gives a shell CI's, and so
+the presets ([Presets and CTest](#presets-and-ctest)), which configure with
+`PATH`'s clang: with another first, they and `build.sh` start each other's
+tree afresh. `build-regression` puts CI's first on its own `PATH` for that
+reason, and checks the selection with a stand-in release in a cache of its own.
 
 ## Trees, settings and publication
 
@@ -165,6 +209,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
+| `BUSTER_TOOLCHAIN` | `ci` | `build.sh`'s alone: `ci` builds with CI's clang, CMake and Ninja ([The toolchain](#the-toolchain)), staged once where `PATH` hasn't them; `path` with `PATH`'s as found |
 | `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code (a sanitizer build's too), and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
@@ -187,7 +232,7 @@ build publishes nothing, and an unchanged one nothing again. CI runs the configu
 as `BUSTER_COMPILER`) and checks that `build/compiler` is that file. Ninja
 Multi-Config's `compile_commands.json` has every unit once per configuration;
 `build/compile_commands.json` has the published configuration's alone, which
-editors and static analyzers read (Release after a plain `./build.sh`). Ninja
+editors and static analyzers read (Develop's after a plain `./build.sh`). Ninja
 keeps that filtered database in `CONFIG/compile_commands.json`, rebuilding it
 when CMake regenerates the multi-config database, its filter changes, or the
 cached file is missing. Unchanged builds and source edits reuse it. Publication
@@ -286,6 +331,16 @@ compiler, and before the homes a unit for any one of them took 84 to 88% of its
 time (clang 18, locally).
 
 ### Unity test dependencies
+
+**Regression programs are runtime data** (#2053): a suite's ordinary inputs,
+expected outputs and case list live under `tests/`, which the tests read when
+they run, so that editing a case or adding one compiles, links and bakes
+nothing. A new ordinary regression program goes there, not into a C string.
+The first suite is the checker's shared source fixtures,
+`tests/checker/sources/` ([the checker guide](checker.md#runtime-fixtures)).
+C keeps what isn't data: independent oracles, generated inputs, guarded
+memory and the checks themselves. Nothing under `tests/` is a build input:
+no generated C array, `#include` or `#embed` brings it back.
 
 The eleven `main.c` units share the compiler interfaces and the fixtures
 used across test families. Production bodies are limited to their consumers,
@@ -707,7 +762,10 @@ where `llvm-config` finds them, else static, as the official release's
 archives do in CI, hosted and on the 9700X. A system library `llvm-config`
 names by a path the host lacks links by its name instead: the release names
 Ubuntu's `/usr/lib/x86_64-linux-gnu/libzstd.a`, and the 9700X, an Arch host,
-links `-lzstd`. The Debug configuration compiles
+links `-lzstd`; a host with zstd's runtime library alone, no development file
+(`libzstd.so` or `.a`), as a session's container can be, links the runtime file
+by its path, `libzstd.so.1` (#2628: without it, CI's toolchain there turned
+the parts off). The Debug configuration compiles
 the units as before; the final link still uses any supported `BUSTER_LINKER`.
 
 An unrelated edit reuses both units' native objects. A change to a split unit
@@ -802,8 +860,9 @@ fixed-address ASan executable, the moved data's addresses.
 
 ## Develop
 
-The edit loop's configuration (#2559; [A faster stage 1 build](../stage1-build-design.md)
-is its design, with the measurements that sized it). A Release edit waits for one
+The edit loop's configuration, and `./build.sh`'s default since 2026-11-13 (#2559;
+[A faster stage 1 build](../stage1-build-design.md) is its design, with the
+measurements that sized it); time and benchmark Release, never Develop. A Release edit waits for one
 clang process, a unit's front end and `-O3` pipeline, whatever the edit: the
 checker's unit's took 56.6 s on the 9700X. Develop stops each `main.c` unit's
 compile before LLVM's optimizer and optimizes it in parts, at once, so that an
@@ -860,18 +919,21 @@ them in full; `--report` prints a plan's parts, files and largest functions):
   executable is the one a clean build of the same sources makes.
 
 **The benchmark units are built on demand**: Develop's executable leaves out
-the 27 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
+the 28 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
 (`cmake/BusterSettings.cmake`) names, whose only entry is a benchmark command's
 `run_*` function and that no test runs: the correctness inventory runs none of
 them. Their object
 libraries have no source in Develop, so Develop's executable doesn't wait for
 them, and `cmake/BusterDevelopAbsent.cmake` writes `Develop/develop/absent.o`
 from their sources, a stand-in for each `run_*` entry, which says that the
-command is Release's and Debug's and fails. `floors_benchmark.c` also holds
-`test-floors-input`'s tests and stays, as does `c_preprocessor_benchmark.c`,
-whose `benchmark-preprocessor` `test-preprocessor` runs for its location
-option, and `tier1_model_measure.c` and the two test units. A test that comes to
-run another benchmark command needs its unit taken off the list.
+command is Release's and Debug's and fails. `test-preprocessor`'s location
+option runs `benchmark-preprocessor` and takes that stand-in's refusal as it
+takes a scalar build's: `c_preprocessor_benchmark.c` was Develop's longest
+compile (7.4 s of a 27.5 s clean build on the 9700X), and the unit an edit of
+the preprocessor waited for (#2624). `floors_benchmark.c` also holds
+`test-floors-input`'s tests and stays, as do `tier1_model_measure.c` and the
+two test units. A test that comes to run another benchmark command needs its
+unit taken off the list, or to accept the stand-in where Release covers it.
 
 **Measured** on the 9700X, eight jobs, the host's clang 23.1.1 ([the record](https://github.com/buster14a/buster-performance/tree/ba33a36de7aecf915f9ffceb48ea9d5cf666ae8a/docs/measurements/develop-configuration-2559-2026-11-12)):
 
@@ -897,7 +959,14 @@ unit's front end (6.6 s for the checker's unit), its split and its largest
 changed part.
 
 **What it costs.** Develop's executable runs the compile path 1% to 2% slower
-than Release's (above) and writes the same outputs; its debug
+than Release's (above) and writes the same outputs. The gap is the import
+limit (#2624, [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/develop-runtime-2624-2026-11-13)):
+with CI's toolchain on the 9700X, Develop ran 3.0% more instructions than
+Release on `-c sqlite3.c` and 3.2% on the checker's unit; the splitter's
+fixes from #2559's step 5 at `--import 300` closed it (cycles within 0.1
+points of Release's), but cost 13% on a clean build and 13% to 15% on an
+edit, and at `--import 100` they gained nothing. Develop keeps the edit loop's
+side of that trade, `--import 100`, until the owner says otherwise; its debug
 information has functions and lines, not variables, so `perf` and backtraces
 work and a debugger's `print` doesn't (Debug is for that). Release and Debug are
 untouched: their commands are the same, and so are their executables, byte for
