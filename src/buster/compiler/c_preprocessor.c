@@ -3843,6 +3843,12 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // The base pages that a lane's records arena and its bytes arena start with (file_cache_arenas): a unit fills a few
 // hundred kilobytes of each (sqlite3.c's 268 and 376 KB), where each one's first huge page took 2 MB (#672).
 #define BUSTER_FILE_CACHE_SMALL_BYTES (2ull << 20)
+// The base pages that a lane's token columns start with, but where FileCache.lane_small_bytes gives more: a unit of a
+// few headers fills a few pages past BUSTER_ARENA_SMALL_BYTES of the 4-byte ones, the starts' and the values', and each
+// such page took a huge page of its own, cleared whole: stdio.h's 18,000 tokens took 72 KB of each, two of a hello
+// world's six huge pages (#1444). 256 KB holds 64K tokens, about 64 pages of base pages, less than a huge page costs to
+// clear on the 9700X; sqlite3.c's 1.3 million take 48 more faults a column.
+#define BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES (256ull << 10)
 // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
 // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
 // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
@@ -3991,10 +3997,11 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
         bool reserved = true;
         for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
         {
-            // The token columns are the first three. The records' arena and the bytes arena, the last two, start with
+            // The token columns are the first three, with BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES of base pages, or the
+            // cache's lane_small_bytes past lane 0. The records' arena and the bytes arena, the last two, start with
             // BUSTER_FILE_CACHE_SMALL_BYTES of base pages.
             const bool small = lane != 0 && cache->lane_small_bytes != 0 && i < 3;
-            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_ARENA_SMALL_BYTES;
+            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES;
             *arenas[i] = arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, base_pages);
             reserved = arenas[i]->base != 0;
         }
