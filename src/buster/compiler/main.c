@@ -2419,7 +2419,8 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
 #endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
              (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
-              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
+              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0 ||
+              strcmp(argv[1], "start-order") == 0))
     {
         result = run_profile_command(argc - 1, argv + 1);
     }

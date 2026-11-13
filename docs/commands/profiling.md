@@ -107,6 +107,11 @@ must be exactly the expected one:
 - `branch-misses`: records mispredicted, predicted and neither, fields that
   aren't records, the load bias and the disassembly's instructions, and
   10,000 branches, which grow its table;
+- `start-order`: functions of main.c's units by their `FILE` symbols (one
+  unit in two parts), a global past its unit's locals, a parallel split's
+  alias, a benchmark's and the C library's functions, a name a unit's static
+  shares (left out), two sample files that repeat functions, and symbols
+  without functions (an error);
 - `ab`: the order of a Williams design (#1311) for 1 to 17 trees, each
   tree at every place and after every other equally often over the period,
   and runs that succeed, fail and can't start, with
@@ -131,8 +136,12 @@ copies with `--copies`, in a Williams design's order, with their wall time, rusa
 resident set, page faults and user cycles and instructions, and the builds
 compared over their placements and copies; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
 [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
-FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
-ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
+FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]`, `branch-misses BRSTACK [--bias
+ADDRESS] [--disassembly FILE] [--branches N]` and `start-order SYMBOLS
+SAMPLES...` (the functions that `perf script -F ip,brstack` samples ran, by
+their copies in `readelf -sW` of the executable, for
+`cmake/BusterStartOrder.txt`: the build guide's "The start's code order");
+`docs/profiling.md` has the
 perf and objdump commands that make their inputs. Run `ab` itself outside the
 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
 for each run. The 9700X job's test step runs the tests.

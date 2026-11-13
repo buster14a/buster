@@ -466,7 +466,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
 - `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
 - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).
-- `ab, time-runs, test-profile` — `profile.c` — [guide](docs/commands/profiling.md).
+- `ab, time-runs, start-order, test-profile` — `profile.c` — [guide](docs/commands/profiling.md).
 - `test-refinement, benchmark-refinement` — `c_intern.c` — [guide](docs/commands/refinement.md).
 - `test-snapshot, benchmark-snapshot` — `snapshot.c` — [guide](docs/commands/snapshot.md).
 - `test-ssa, test-ssa-ir, test-ssa-source` — `ssa.c` — [guide](docs/commands/ssa.md).
