@@ -1901,7 +1901,9 @@ the funnel shift of each lane of two vectors by a third's:
   the vector class's scratch register keeps them across that move.
 
 **Zen 5:** the 36 forms had no row: the 18 variable funnels, the 12 rotates
-and the 6 word funnels by an immediate. They are to be measured on the 9700X.
+and the 6 word funnels by an immediate. They were measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-funnel-1840-2026-11-13)):
+every one takes 2 cycles and runs 2 per cycle.
 
 Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
 families above: `main_unit_backend.c` 96 → 92. The 3 `vpshrdvd` rows and the
