@@ -1019,7 +1019,19 @@ of its reachable takes' nearest common dominator, P, and then:
   its switch). A path that takes it nowhere (`powerOfTen`'s `aBase`,
   `sqlite3VdbeMemSetText`'s destructor compared on two branches) leaves the
   takes their own, as before #2574; #2601's sharing in Tier 1's selection still
-  joins those of one block.
+  joins those of one block;
+- but where P is kept for a take in a loop and some path from P takes it
+  nowhere, the takes split into groups (#2618), by the child of P in the
+  dominator tree that dominates each, and each group is placed by these rules,
+  where no path takes two groups' (each group's child is entered from P alone,
+  or from inside itself by a back edge; P is in no loop) or where P is a join
+  of the typed stream's values. `jsonTranslateBlobToText` read
+  `sqlite3CtypeMap` in two rare cases' loops, defined at the switch every call
+  runs, where the value took a callee-saved register its prologue saved; each
+  group's one take is now its own. `sqlite3FindFunction`'s P, a truth value's
+  join, which #2554's threading copies into its predecessors, held
+  `sqlite3UpperToLower`'s definition at its start, which defeated it. Where a
+  group would be defined at P or above it, P keeps the definition for them all.
 
 P must also precede every take in source order, which the emission's numbering
 needs and a backward `goto` can break: P then rises to its dominators until it
@@ -1093,20 +1105,51 @@ against this one's:
 Without the "some take is in a loop" rule outside loops, `jsonTranslateBlobToText`
 gains 0.89 M and `sqlite3GetToken` loses 1.22 M: its identifier loops, which
 call nothing, read `sqlite3CtypeMap` on every character, and the two can't be
-told apart from their loops alone. What the hoist still costs is the
-allocator's, at most 0.89 M a function: `jsonTranslateBlobToText`'s
-`sqlite3CtypeMap`, defined at a switch every call runs and read in a few
-cases' loops, takes a callee-saved register its prologue saves; `speedtest1_run`'s
-hot `g` is recomputed after each call where its accesses would have folded
-rip-relative (+0.27 M); `sqlite3FindFunction` +0.12 M, `hexFunc` +0.07 M.
+told apart from their loops alone.
+
+The split by P's children tells them apart by where the paths go: in
+`sqlite3GetToken` a keyword's case reads `sqlite3CtypeMap` once and then joins
+the identifier loop after the switch, so the two groups' definitions would both
+run, where P's one does. By callgrind at main `b7a95eed`, with the allocator's
+change of #2618 for recomputed values' definitions ([the allocation
+guide](tier1-allocation.md)'s rematerialization), speedtest1 runs 2,991.47 M
+instructions instead of 2,993.98 M; the split alone is 1.02 M of it
+(`jsonTranslateBlobToText` −0.89 M, `sqlite3FindFunction` −0.12 M), and Lua's
+scripts run the same instructions. The variants measured on the way, as
+speedtest1's instructions against main's (Lua's the same in each):
+
+| Variant | speedtest1 |
+| --- | ---: |
+| the split, wherever P's paths don't all take the symbol | +0.17 M |
+| the same, a group's one take in a loop defined before its loop | +0.31 M |
+| the same, both, and a group defined at P keeping P's definition | −0.24 M |
+| the split where no path takes two groups' | −0.90 M |
+| this rule (or P a value join) | −1.02 M |
+| no hoist of a take a load reads or a store writes at a constant offset, alone | +0.33 M |
+
+Without the separation test, `sqlite3GetToken` loses 0.79 M to 1.20 M. A take
+whose access folds rip-relative needs no register, and leaving such takes out
+of the hoist gains `speedtest1_run` its 0.27 M (its hot `g`, read at constant
+offsets, was recomputed after each call), but `memsys5Unlink` and
+`memsys5MallocUnsafe` lose 0.30 M each: without the hoisted address in a
+register, the allocator's lowest free register for a two-address `imul`'s
+result is no longer its dying operand's, and a copy is added on every call. No
+hint ties such a result to its operand. What the hoist still costs is the
+allocator's, at most 0.21 M a function: `speedtest1_run` +0.21 M,
+`jsonLookupStep` +0.10 M (frame addresses giving way, then recomputed), and
+`hexFunc` +0.07 M, whose call-free loop needs ten values in nine caller-saved
+registers, so the address is evicted inside the loop and moved back on its
+backedge.
 `test-ir-lowering` checks both lowering paths, the verifiers, the interpreter's
 results and promotion for a symbol taken three times, one taken once and one
 through its GOT slot, and each of the rules above: a definition past an early
 return, two takes of three paths left their own, a definition every path from
 a branch takes, one before a loop and two takes on a loop's exits left their
 own; and (#2618) takes left their own in a loop whose every iteration calls and
-in one where a single iteration takes the symbol, and one definition before a
-nest whose call-free inner loop takes it on every iteration.
+in one where a single iteration takes the symbol, one definition before a nest
+whose call-free inner loop takes it on every iteration, a definition before
+each of two cases' loops entered from P alone, one at P for groups a path
+takes in turn, and a definition in each group of a value join's.
 Backedges to source entry zero skip that initialization. The typed stream's U64
 pointer representation becomes explicit `inttoptr` / `ptrtoint` at memory and
 address operations; ordinary U64 arithmetic remains integer arithmetic. Integer
