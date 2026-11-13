@@ -182,8 +182,9 @@ static bool test_process_finish_to(TestProcess* process, void* result, size_t si
     return received && exited && copied && errors_copied;
 }
 
-// test_process_finish_to this process's standard output and errors.
-static bool test_process_finish(TestProcess* process, void* result, size_t size)
+// test_process_finish_to this process's standard output and errors (the backend's parts collect theirs into memory, and
+// take test_process_finish_to alone).
+static __attribute__((unused)) bool test_process_finish(TestProcess* process, void* result, size_t size)
 {
     return test_process_finish_to(process, result, size, stdout, stderr);
 }
