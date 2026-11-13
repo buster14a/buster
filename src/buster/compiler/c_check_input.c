@@ -10208,6 +10208,23 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         reader->declarator_noderef = NULL;
         reader->declarator_identifier_list = false;
     }
+    // A sizeof type name's variable bound was retained while its declarator was incomplete (#2528). A pointer or a
+    // fixed array of pointers to that bound has a constant size; only the completed runtime-sized array is refused.
+    const Parser* parser = reader->parser;
+    if (result != 0 && reader->function_body == BUSTER_CHECK_NONE && *name == BUSTER_CHECK_NONE && end < parser->tokens.count &&
+        parser->tree.roles[end] == PARSE_ROLE_CLOSE_SIZEOF && check_input_vla_runtime_size(reader->types, result))
+    {
+        const uint32_t query = parser->tree.parents[end];
+        if (query < parser->tokens.count && parser->tokens.names[query] == C_NAME_SIZEOF)
+        {
+            const uint32_t at = check_input_vla_initializer_element(reader, query);
+            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
+            {
+                check_input_report(reader, at, CHECK_INPUT_CONSTANT_INITIALIZER);
+            }
+            result = 0;
+        }
+    }
     return result;
 }
 

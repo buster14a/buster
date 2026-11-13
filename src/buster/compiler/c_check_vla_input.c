@@ -384,16 +384,16 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         valid = parameter;
         *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
     }
-    // A cast's or an _Alignof's type name at file scope (#1852): clang takes its variable type, whose bound it never
-    // evaluates (a cast's value is its operand's, _Alignof's the element's alignment). Its bound is no expression of the
-    // unit's, and no VLA is captured for it.
+    // A cast's or a query's type name at file scope (#1852, #2528): retain its variable bound without evaluation.
+    // Only the completed sizeof type tells whether its size is runtime: a pointer to the variable array still has a
+    // constant size. check_input_declarator rejects the completed runtime-sized query, preserving its initializer's
+    // diagnostic. A cast's value and an _Alignof's result need no bound, and no VLA is captured for any of these.
     bool unevaluated = false;
     if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && !parameter && !star && reader->function_body == BUSTER_CHECK_NONE && name >= parser->tokens.count)
     {
         uint32_t context_token = BUSTER_CHECK_NONE;
         const uint8_t context = check_input_vla_context(reader, open, &context_token);
-        unevaluated = context == PARSE_ROLE_CLOSE_CAST ||
-                      (context == PARSE_ROLE_CLOSE_SIZEOF && context_token < parser->tokens.count && parser->tokens.names[parser->tree.parents[context_token]] != C_NAME_SIZEOF);
+        unevaluated = context == PARSE_ROLE_CLOSE_CAST || context == PARSE_ROLE_CLOSE_SIZEOF;
     }
     if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
     {
