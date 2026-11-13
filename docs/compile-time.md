@@ -1999,6 +1999,58 @@ probe.
 3.50.4's `-c -g -Wall -Wextra` objects and diagnostics are the same bytes as main's on the vector path and with
 `--scalar`.
 
+## The intrinsics' set-up from a memo of each name's answer (#893)
+
+**What cost.** After #914's filter, the search in `check_input_intrinsic_initialize` was mostly gone, but the pass
+was still 1.62% of the cycles of musl's 1,336 units as one command, and about 0.6% of `-c sqlite3.c`, on the 9700X
+at main `26f0bb0e`. Each unit:
+
+- cleared a 4-byte cache as long as the lane's intern table, which grows with a command's units;
+- tested every operand again by scalar loads;
+- looked every distinct operand name up again, though the answer is the spelling's alone;
+- walked the operands twice.
+
+**Now.** [The design](builtin-intrinsic-filter.md#the-set-ups-memo-of-each-names-answer):
+
+- **The memo.** The intern table keeps each id's code (`InternTable.intrinsic_rows`), so a command's units look
+  each spelling up once.
+- **The pass.** One pass gathers 16 operands' codes at once and takes out of line only the operands that aren't a
+  miss's (`check_input_intrinsic_take`): a name not looked up yet, an operand waiting for a pending one, and a row's.
+- **Storage.** Only a unit with a row's name allocates. Its name cache is made from the memo, and the tables'
+  capacities are unchanged.
+
+**Measured on the 9700X.** Main `26f0bb0e` against the branch's `2c52baea`, each build from fresh copies (`time-runs
+--copies`), every step its own hold of the lock. [The
+record](https://github.com/buster14a/buster-performance/tree/72e69cbe7259088e6faf1ca04d4044ed833b6d93/docs/measurements/intrinsic-memo-893-2026-11-13)
+keeps the scripts, the receipts and the profiles.
+
+| workload | wall time | user cycles |
+| --- | ---: | ---: |
+| musl's 1,336 units, one command | 816.9 → 797.5 ms, −2.37% (−2.58% to −2.29% over copies) | −2.79% |
+| c-testsuite's 220 units, one command | 66.17 → 64.70 ms, −2.22% (−2.94% to −1.79%) | −3.16% |
+| `-c sqlite3.c` | 124.11 → 124.11 ms, −0.00% (−0.22% to +0.22%) | +0.10% (−0.36% to +0.37%) |
+| three c-testsuite units, one process each | within the copies' spread | −0.66%, −0.31%, −0.50% |
+
+- **musl's command.** The set-up's functions fall from 883 to 308 samples (−65%), and `memcmp` from 702 to 575.
+- **Byte-for-byte.** The objects and diagnostics of all three workloads are the same bytes as main's on the vector
+  path and with `--scalar`.
+
+**Three steps on the way, in the record:**
+
+- **The first version spilled.** It took each operand in the pass's own loop, and clang kept the loop's mask and the
+  batch's counts in stack memory around the inlined batch search: on `sqlite3.c` the function took more cycles than
+  main's for fewer instructions.
+- **A scalar loop for the mask instead of the gathers** gained −1.33% and −0.87% on the two commands, against the
+  gathers' −2.10% and −1.94%.
+- **The memo's first reservation** was the table's whole id room, 82 KB. That is past the arena's 64 KB of base
+  pages, so every process took the huge-page advice and a split mapping, +0.6% for a single-file process. It now
+  starts at 8 KB and doubles.
+
+**What's left.** A unit whose names the table has never seen still pays for looking each of them up. `-c sqlite3.c`
+has 10.8 K: the filter's key loads from the spellings, and the false positives' binary searches. The set-up takes
+384 samples of 20 compiles against main's 399, which is about 3.8 M cycles a compile, the same as before. A sharper
+filter or an exact table is the next step there.
+
 ## What remains of check-input (#1671)
 
 After #1692 and #1694, `check-input` is 43.15 ms on `-c sqlite3.c` (main `829eb71a`, the 9700X). A study found no
