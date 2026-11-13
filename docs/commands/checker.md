@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only] [--in-process] [--clang-server PATH]
+  --asm-definitions-only | --call-counts-only | --fp-contract-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -130,7 +130,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447;
   `--call-counts-only` runs `c_check_call_count_driver_test.c` alone, calls'
   and builtins' argument count errors and calls without a prototype, worded
-  and placed as clang's, #1860, #1921, #1994). Its library-builtin comparisons are pinned to Clang
+  and placed as clang's, #1860, #1921, #1994; `--fp-contract-only` runs
+  `c_check_fp_contract_driver_test.c` against Clang 23.1.4 at `-O0`, using
+  `tests/driver/fp_contract.c` for float/double result bits, expression
+  boundaries, option ordering, scoped pragmas and dynamic rounding. It covers
+  both readers, object/direct output and strict Tier 1 without fallback,
+  with transition verification enabled). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
@@ -702,8 +707,13 @@ The `compatible` table is an exact-spelling list, not a family-prefix escape:
   `-fno-trapv`, `-fno-stack-check`,
   `-fno-instrument-functions`, `-fno-profile-arcs`, `-fno-test-coverage`,
   `-fno-profile-generate`, `-fno-profile-instr-generate`, `-fno-lto`,
-  `-fno-blocks`, `-fplt`, `-ffp-contract=off`, `-mfpmath=sse`, `-m64`,
+  `-fno-blocks`, `-fplt`, `-mfpmath=sse`, `-m64`,
   `-mred-zone`, `-mno-ms-bitfields`, `-mno-rtd` and `-mno-iamcu`.
+- Floating contraction: `-ffp-contract=off|on|fast|fast-honor-pragmas` is a
+  handled value option. The floating option parser validates its value and
+  order; the input reader preserves that policy and lexical pragma overrides
+  in the source graph. The default is `on`; STDC `FP_CONTRACT DEFAULT`
+  restores the command-line policy. See [floating-point pragmas](../c-checker.md).
 - Existing integer/aliasing behavior and permissions that do not require an
   optimization: `-fwrapv`, `-fno-wrapv`, `-fstrict-overflow`,
   `-fno-strict-overflow`, `-fstrict-aliasing`, `-fno-strict-aliasing` and

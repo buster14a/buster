@@ -1461,7 +1461,8 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         tests |= same ? UINT64_C(1) << NODE_CENSUS_SELF_ASSIGN : 0;
     }
     s->mixed_system |= node_census_system(s, token) && !node_census_system(s, graph->tokens[root]);
-    tests |= input->fp_environments != NULL && graph->fp_environments != NULL && graph->fp_environments[node] != 0 ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
+    tests |= input->fp_environments != NULL && graph->fp_environments != NULL &&
+             (graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)) != 0 ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
     return tests;
 }
 

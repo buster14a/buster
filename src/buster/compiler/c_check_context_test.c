@@ -136,6 +136,89 @@ static void check_test_context_histories(CheckTest* test, TypeTable* types)
     arena_release(&storage);
 }
 
+// A source default and an explicit lexical off are different contracts. Exercise newly appended nodes and both
+// validators on empty graphs, full vector blocks and partial blocks; malformed policies must never enable fusion.
+static void check_test_context_contract(CheckTest* test)
+{
+    enum { CAPACITY = 35 };
+    Arena storage = arena_reserve(UINT64_C(1) << 28);
+    CheckGraph graph = { 0 };
+    const bool ready = storage.base != NULL && check_graph_initialize(&graph, &storage, CAPACITY, 0);
+    check_test_expect(test, ready, "floating contraction context fixture storage");
+    if (ready)
+    {
+        const uint32_t counts[] = { 0, 1, 15, 16, 17, 32, CAPACITY };
+        const uint8_t policies[] = { 0, BUSTER_CHECK_FP_CONTRACT_ON, BUSTER_CHECK_FP_CONTRACT_FAST };
+        uint8_t environments[CAPACITY];
+        uint8_t pure[CAPACITY];
+        for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+        {
+            graph.fp_environments = NULL;
+            while (graph.count < counts[size])
+            {
+                check_test_leaf(&graph, graph.count, check_test_integer(BUSTER_TYPE_INT, graph.count));
+            }
+            for (uint32_t policy = 0; policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
+            {
+                graph.fp_contract_default = policies[policy];
+                bool inherited = true;
+                for (uint32_t node = 0; node < graph.count; node += 1)
+                {
+                    const CheckContext context = check_graph_context(&graph, node, false);
+                    inherited &= check_graph_fp_contract(&graph, node) == policies[policy] && context.fp_environment == policies[policy];
+                }
+                check_test_expect(test, inherited, "new nodes inherit off/on/fast without a lexical policy allocation");
+                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                {
+                    CheckGraphValidation validation;
+                    uint32_t failed;
+                    const bool valid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
+                                                check_graph_validate_vector(&graph, pure, &validation, &failed);
+                    check_test_expect(test, valid && failed == BUSTER_CHECK_NONE, "both graph validators accept every valid default at node-block boundaries");
+                }
+            }
+            graph.fp_contract_default = BUSTER_CHECK_FP_CONTRACT_FAST;
+            graph.fp_environments = environments;
+            for (uint32_t node = 0; node < graph.count; node += 1)
+            {
+                const uint8_t policy = policies[node % BUSTER_ARRAY_LENGTH(policies)];
+                environments[node] = policy | BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_DOUBLE;
+                const CheckContext context = check_graph_context(&graph, node, false);
+                check_test_expect(test, check_graph_fp_contract(&graph, node) == policy && context.fp_environment == environments[node],
+                                  "lexical off/on/fast replaces the default while preserving environment access and evaluation format");
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                CheckGraphValidation validation;
+                uint32_t failed;
+                const bool valid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
+                                            check_graph_validate_vector(&graph, pure, &validation, &failed);
+                check_test_expect(test, valid, "both graph validators accept independent lexical contraction and floating environment settings");
+                if (graph.count != 0)
+                {
+                    const uint32_t node = graph.count - 1;
+                    const uint8_t saved = environments[node];
+                    environments[node] |= BUSTER_CHECK_FP_CONTRACT_MASK;
+                    const bool invalid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
+                                                  check_graph_validate_vector(&graph, pure, &validation, &failed);
+                    check_test_expect(test, !invalid && failed == node, "contradictory lexical contraction permissions fail at the exact node");
+                    environments[node] = saved;
+                }
+                const uint8_t invalid_defaults[] = { BUSTER_CHECK_FP_CONTRACT_MASK, BUSTER_CHECK_FP_ENV_ACCESS };
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_defaults); i += 1)
+                {
+                    graph.fp_contract_default = invalid_defaults[i];
+                    const bool invalid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
+                                                  check_graph_validate_vector(&graph, pure, &validation, &failed);
+                    check_test_expect(test, !invalid, "an invalid graph default is rejected even for an empty graph or a lexical override");
+                }
+                graph.fp_contract_default = BUSTER_CHECK_FP_CONTRACT_FAST;
+            }
+        }
+    }
+    arena_release(&storage);
+}
+
 static void check_test_context_receipts(CheckTest* test, TypeTable* types)
 {
     Arena first_arena = arena_reserve(UINT64_C(1) << 20);
@@ -288,6 +371,7 @@ static __attribute__((noinline)) void check_test_semantic_context(CheckTest* tes
     {
         check_test_context_roots(test, &types.table);
         check_test_context_histories(test, &types.table);
+        check_test_context_contract(test);
         check_test_context_receipts(test, &types.table);
         check_test_context_provenance(test, &types.table);
         check_const_test_exhaustion(test, &types.table);

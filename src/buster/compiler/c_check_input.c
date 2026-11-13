@@ -14107,7 +14107,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_node(Check
         }
         if (__builtin_expect(reader->output->graph.fp_environments != 0, 0))
         {
-            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | BUSTER_CHECK_FP_CONTRACT_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
             reader->output->graph.fp_environments[node] = reader->output->fp_environments[token] & mask;
         }
     }
@@ -16821,6 +16821,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
     valid &= warning_suppressed != NULL;
     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
+    const uint8_t fp_contract = predefines_fp_contract(&pp->options.predefines);
+    input->graph.fp_contract_default = fp_contract == BUSTER_PREDEFINES_CONTRACT_ON ? BUSTER_CHECK_FP_CONTRACT_ON :
+                                       fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.const_values = &input->const_values;

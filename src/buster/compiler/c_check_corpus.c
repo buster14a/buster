@@ -2297,6 +2297,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     const CheckGraph* graph = &left->graph;
     const CheckGraph* other = &right->graph;
     equal = equal && graph->count == other->count && graph->argument_count == other->argument_count && graph->varargs_count == other->varargs_count &&
+            graph->fp_contract_default == other->fp_contract_default &&
             graph->extensions == other->extensions && graph->builtin_count == other->builtin_count && graph->vector_member_count == other->vector_member_count &&
             graph->x86_count == other->x86_count && graph->overload_count == other->overload_count &&
             graph->overload_candidate_count == other->overload_candidate_count &&

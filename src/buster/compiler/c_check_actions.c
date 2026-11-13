@@ -65,6 +65,8 @@ typedef enum CheckFault
 #define BUSTER_CHECK_VOLATILE_PART 0x100u
 #define BUSTER_CHECK_GNU_CONSTANT 0x200u
 #define BUSTER_CHECK_GNU_ICE_FORM 0x400u
+// A source constant whose emitted evaluation must remain: environment-sensitive arithmetic, runtime builtin-query
+// answers and materialized floating statement expressions. This flag inherits without erasing the source proof.
 #define BUSTER_CHECK_FP_ENVIRONMENT 0x800u
 #define BUSTER_CHECK_VECTOR_ELEMENT 0x1000u
 #define BUSTER_CHECK_VECTOR_DUPLICATE 0x2000u
@@ -114,7 +116,10 @@ typedef enum CheckFault
 #define BUSTER_CHECK_FP_EVAL_DOUBLE 0x02u
 #define BUSTER_CHECK_FP_EVAL_EXTENDED 0x04u
 #define BUSTER_CHECK_FP_EVAL_MASK (BUSTER_CHECK_FP_EVAL_DOUBLE | BUSTER_CHECK_FP_EVAL_EXTENDED)
-#define BUSTER_CHECK_FP_ENV_MASK (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)
+#define BUSTER_CHECK_FP_CONTRACT_ON 0x40u
+#define BUSTER_CHECK_FP_CONTRACT_FAST 0x80u
+#define BUSTER_CHECK_FP_CONTRACT_MASK (BUSTER_CHECK_FP_CONTRACT_ON | BUSTER_CHECK_FP_CONTRACT_FAST)
+#define BUSTER_CHECK_FP_ENV_MASK (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK | BUSTER_CHECK_FP_CONTRACT_MASK)
 // Token history only: an evaluation-method pragma occurred in this lexical scope, even if it selected source.
 #define BUSTER_CHECK_FP_EVAL_PRAGMA 0x08u
 // Typedef restrictions use the last pragma's method, which float_control(pop) does not restore with arithmetic.
@@ -3344,6 +3349,16 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
                 result->value.category = CHECK_RVALUE;
                 result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
                 result->value.flags |= action->member & BUSTER_CHECK_SIDE_EFFECT;
+                // Clang materializes a statement expression's floating value even when its source proof is constant.
+                // Keep that proof for source diagnostics, but inherit the existing source/runtime divergence flag so
+                // an enclosing expression cannot fold an unfused answer over a runtime contraction (#1239). This
+                // boundary is independent of the contraction option and the generated target's FMA capability.
+                const TypeId statement_type = type_unqualified(type_strip_aligned(table, result->value.type));
+                if (!action->context.constant_evaluated && result->value.constant_kind == CHECK_CONSTANT_FLOATING &&
+                    (statement_type == BUSTER_TYPE_FLOAT || statement_type == BUSTER_TYPE_DOUBLE))
+                {
+                    result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+                }
                 if ((action->member & ~BUSTER_CHECK_SIDE_EFFECT) != 0)
                 {
                     check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
