@@ -730,9 +730,42 @@ every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
 
 The `cc3387f` record had `--tier1` at 1.70× -O2's time on speedtest1 and 1.71×
 on Lua, before #1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1 and
-before the depth slots above. The 9700X job runs the measurement on its daily
-and dispatched runs, and on pull requests that change Tier 1's input or
-pipeline.
+before the depth slots above. The 9700X job runs the measurement on its nightly
+and dispatched qualifications under the current [CI policy](commands/ci.md).
+
+### Function-size qualification (#1116)
+
+PR #1159 removed the redundant call moves and repeated call saves described
+by #1116. Its remaining Lua size criterion is now an explicit corpus gate:
+`measure-tier1-programs --check-code-size=lua` requires the sum of all emitted
+Tier 1 function bytes across Lua's 34 sources, including `luac.c`, to be no
+greater than the matching Clang `-O0` sum. The command also reports SQLite's
+`sqlite3.c`; `test-c-testsuite --tier1 --code-size` reports the same quantities
+for c-testsuite. Their above-bound results stay visible as `gate=fail` with
+`enforced=0`. Strict optional gates remain available with the bare
+`--check-code-size` flag on either command, or `=sqlite` on the program
+command. `--sizes-only` needs no runtime scripts or hardware counters.
+
+An opt-in, versioned `--tier1-function-sizes` manifest identifies source bodies
+by exact emitted symbol names and their actual tier after publication. The
+reader checks those names and sizes against each relocatable ELF object and
+matches only within the same translation unit. It reports fallback and
+unmatched functions separately, along with remaining executable bytes and
+executable section bytes. An unmatched Tier 1 body remains in the Tier 1 byte
+total and contributes zero Clang bytes, so a missing counterpart makes the
+bound stricter. This covers legitimate omissions such as SQLite's local
+`always_inline` function `allocateSpace`, whose separate body Clang can remove
+after inlining ([the symbol comparison](c-lowering.md#against-clang--o0s-objects)).
+Function sizes exclude alignment padding; the executable
+section total is a separate quantity. Missing, malformed, duplicate or
+inconsistent evidence cannot pass, and an empty comparison cannot qualify.
+This is an aggregate size bound, not a bound on every function or a claim
+about execution time. The [command guide](commands/tier1.md) describes the
+flags and reporting. Hosted correctness validates all three reports and
+enforces the issue's Lua bound before merge, with the real Lua release
+acquired once in its verified offline input bundle and the existing frozen
+SQLite amalgamation. The nightly runtime measurement enforces the same Lua
+bound; both commands continue to reject missing or malformed evidence.
 
 #1216 keeps dispatch loops' loop-carried values in registers and their phi
 webs in one slot ([the allocation guide](tier1-allocation.md)). From its merge

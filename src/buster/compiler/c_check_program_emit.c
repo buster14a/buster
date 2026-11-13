@@ -126,6 +126,12 @@ struct CheckProgramCode
     uint64_t records;
     uint64_t deferred;
     uint64_t code_bytes;
+    // Optional source-body identities for --tier1-function-sizes. Kept until the driver has published the object,
+    // so the manifest reads its final symbol sizes after named sections and assembly .size directives are applied.
+    SymbolId* tier1_size_symbols;
+    uint8_t* tier1_size_kinds;
+    uint32_t tier1_size_count;
+    bool tier1_sizes_ready;
     // The first of the symbols cpu_dispatch's and cpu_specific's groups add (#1447, check_program_cpu_symbols).
     SymbolId cpu_first;
     // The first of the symbols the groups of multiversioning by target strings add (#1838, check_program_target_symbols).
@@ -829,6 +835,7 @@ struct CheckProgramLanes
     uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
+    FILE* tier1_function_sizes;
     // Every emission's plan of its helpers' operations, summed (#1059, --helper-report), where the command asks for it
     // (`helper_reporting`): its direct forms are a pass over every lowered entry, which on sqlite3.c cost every compile
     // about a millisecond of the lowering's stage (#1048).
@@ -4761,6 +4768,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
+    if (valid && lanes != NULL && lanes->tier1_function_sizes != NULL)
+    {
+        result->tier1_size_symbols = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, count) : NULL;
+        result->tier1_size_kinds = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : NULL;
+        valid = count == 0 || (result->tier1_size_symbols != NULL && result->tier1_size_kinds != NULL && run.tier1_outcomes != NULL);
+        for (uint32_t b = 0; valid && b < count; b += 1)
+        {
+            const CheckTier1Outcome outcome = run.tier1_outcomes[b];
+            result->tier1_size_symbols[b] = check_program_body_symbol(program, b);
+            result->tier1_size_kinds[b] = outcome.category == CHECK_TIER1_SUCCESS ? 1 : 0;
+            valid = outcome.category == CHECK_TIER1_SUCCESS || outcome.fallback == CHECK_TIER1_FALLBACK_TIER0;
+        }
+        result->tier1_size_count = valid ? count : 0;
+        result->tier1_sizes_ready = valid;
+    }
     // Report only source order's prefix through the winning Tier 1 failure, not the speculative work later parts
     // happened to finish. A failure of an earlier compiler phase publishes no Tier 1 success counters. This is
     // independent of lane completion order, and a rejected body's counts are always zero.
@@ -4855,6 +4877,36 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->merge_ns = check_program_lanes_now() - lanes_end;
     }
     return valid;
+}
+
+// The opt-in manifest describes source bodies only, never inferred helper or alias symbols. Names are hexadecimal
+// bytes, so assembler labels containing whitespace cannot split a record. A successful publication calls this once;
+// even a declaration-only unit has a header and footer. Consumers validate these sizes against the published ELF.
+static void check_program_print_tier1_sizes(FILE* stream, const CheckProgramCode* code)
+{
+    if (stream != NULL && code->tier1_sizes_ready)
+    {
+        const uint32_t count = code->tier1_size_count;
+        const Link* link = &code->link;
+        static const char digits[] = "0123456789abcdef";
+        fprintf(stream, "tier1-function-sizes\tversion=1\tfunctions=%" PRIu32 "\n", count);
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            const SymbolId symbol = code->tier1_size_symbols[b];
+            const NameId name = symbol < link->symbols.count ? link->symbols.name[symbol] : 0;
+            const uint64_t size = symbol < link->symbols.count ? link->symbols.size[symbol] : 0;
+            const uint32_t length = name != 0 ? link->names.length[name] : 0;
+            fprintf(stream, "tier1-function-size\ttier=%s\tbytes=%" PRIu64 "\tname=", code->tier1_size_kinds[b] != 0 ? "tier1" : "tier0", size);
+            for (uint32_t i = 0; i < length; i += 1)
+            {
+                const uint8_t byte = link->names.bytes[name][i];
+                fputc(digits[byte >> 4], stream);
+                fputc(digits[byte & 15], stream);
+            }
+            fputc('\n', stream);
+        }
+        fprintf(stream, "tier1-function-sizes-end\tfunctions=%" PRIu32 "\n", count);
+    }
 }
 
 // check_program_emit_timed without a clock: the benchmark's and the tests' emission on lanes.
