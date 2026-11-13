@@ -1041,15 +1041,19 @@ static __attribute__((unused)) void intern_release(InternTable* table)
     *table = (InternTable){ 0 };
 }
 
+// Codes past the ids' room in InternTable.intrinsic_rows, zero: a gather's 32-bit read of the last id's code reads into them.
+#define BUSTER_INTERN_INTRINSIC_PADDING 32u
+
 // The table's intrinsic codes (InternTable.intrinsic_rows), with room for every id it has: at the first call, and again
-// when the table has grown past them, a fresh reservation as long as the ids' room (`capacity`) and the codes it had.
+// when the table has grown past them, a fresh reservation as long as the ids' room (`capacity`) and the padding, and the
+// codes it had.
 // Null, the codes left as they were, if the memory can't be reserved.
 static __attribute__((unused)) uint16_t* intern_intrinsic_rows(InternTable* table)
 {
     if (table->intrinsic_rows == NULL || table->count > table->intrinsic_capacity)
     {
         const uint32_t capacity = table->capacity > table->count ? table->capacity : table->count;
-        const uint64_t bytes = (uint64_t)capacity * sizeof(uint16_t);
+        const uint64_t bytes = ((uint64_t)capacity + BUSTER_INTERN_INTRINSIC_PADDING) * sizeof(uint16_t);
         Arena arena = arena_reserve(bytes);
         uint16_t* rows = arena.base != NULL ? arena_push(&arena, bytes, 64) : NULL;
         if (rows != NULL)

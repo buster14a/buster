@@ -425,6 +425,11 @@ needs 24,000). Three of those were during refinement. Now:
   and one huge page, which the predefined names touch. A growth moves the
   buckets and spans to a mapping of their own; the records never move, so a
   pointer to one (`intern_bytes`) stays valid.
+- each id's answer from the intrinsic catalogue (`intrinsic_rows`, a 16-bit
+  code per id that the checker's intrinsic set-up gives its meaning, #893) is
+  in a reservation of its own, made at its first use and made again larger as
+  the table grows: a table no checker reads never maps it, and the units of a
+  command that share a table share the answers.
 
 The first version used a Swiss table, as #116 sketched: groups of 16 one-byte
 tags, a slot array of record offsets, and the records. A hit needed three

@@ -27,6 +27,52 @@ permits null. Null or empty names miss, inactive records are never read, and
 names need neither NUL termination nor readable padding. No new mutable state
 or lifetime crosses the handoff. The filter occupies 8 KiB of read-only data.
 
+## The set-up's memo of each name's answer
+
+After the filter, `check_input_intrinsic_initialize`'s cost was the walks
+around the search rather than the search. Each unit:
+
+- cleared a 4-byte cache as long as the lane's intern table, which grows with
+  a command's units;
+- tested every operand again by scalar loads, then read and wrote its name's
+  cache entry;
+- looked every distinct operand name up again, though the answer is the
+  spelling's alone;
+- walked the operands a second time to count the calls.
+
+The intern table now keeps each id's answer (`InternTable.intrinsic_rows`, a
+16-bit code: not looked up, no row, or the row plus 2). It lives in its own
+fresh reservation, made at its first use and made again larger when the table
+has outgrown it (`intern_intrinsic_rows`); `intern_reset` and
+`intern_release` drop it. The units of a command that share a table look each
+spelling up once.
+
+- **One pass.** The set-up reads each operand's code once. It counts the
+  distinct rows (a bit per row) and the call-shaped operands of rows together,
+  which size the tables as before.
+- **The vector path** takes the 64-token mask's operands without testing each
+  again. It queues a name not yet looked up for the eight-lane filter and
+  search, marking it pending, and the operands that meet a pending name wait
+  for it: at most 8 names and 64 operands, after which the batch is looked up
+  and its waiting operands are counted.
+- **The scalar path**, its twin, tests each token and looks each name up by
+  the unfiltered exact search. Both give every name its exact code and the
+  same counts, and no code is left pending.
+- **Storage.** Only a unit with a row's name allocates: the tables, and the
+  name cache, made from the memo, 32 codes at once on the vector path. A name
+  the memo hasn't looked up keeps `UINT32_MAX`, which its readers look up
+  themselves, as before. The other names' entries are the exact answers the
+  scan would have written.
+
+`test-checker`'s intrinsic memo test runs synthetic units on both paths
+against an oracle that looks every operand up by the exact search. The units
+mix operands, calls, other identifiers, deferred tokens, rows and their near
+misses. They run on fresh tables, and on shared tables that grow past their
+first room between units. One unit makes more than 64 operands wait for a
+batch of two names. Every run must give the oracle's counts, leave each code
+exact and none pending, and give each cache entry its exact answer or
+`UINT32_MAX`. A reset table must drop its codes.
+
 ## Reproduction and regression coverage
 
 Compile and regenerate from the repository root (replace the checked-in include
