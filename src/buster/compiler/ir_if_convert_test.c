@@ -257,6 +257,8 @@ static bool ir_if_convert_test_shared_extra(Arena* arena, IrFunction* f)
     return created;
 }
 
+// The inner triangle's join has a third predecessor: its two entries fold into a select in its head, which the second
+// round's diamond (the head, now ending in a branch to the join, and the third predecessor) takes in turn.
 static bool ir_if_convert_test_three_predecessors(Arena* arena, IrFunction* f)
 {
     const IrSizes sizes = {
@@ -292,8 +294,9 @@ static bool ir_if_convert_test_three_predecessors(Arena* arena, IrFunction* f)
     return created;
 }
 
-// The inner diamond's join is an arm of an outer decision. Only the inner region qualifies in this bounded pass;
-// selecting it must neither speculate the outer decision nor mistake the original outer phi for an inner phi.
+// The inner diamond's join is an arm of an outer decision. Only the inner region qualifies in the first round;
+// selecting it must neither speculate the outer decision nor mistake the original outer phi for an inner phi. The
+// second round takes the outer decision, whose false arm is then the chain of the inner head and its join.
 static bool ir_if_convert_test_nested(Arena* arena, IrFunction* f)
 {
     const IrSizes sizes = {
@@ -330,6 +333,128 @@ static bool ir_if_convert_test_nested(Arena* arena, IrFunction* f)
         ir_optimize_test_instruction(f, 14, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
         ir_optimize_test_instruction(f, 15, IR_RET, IR_VOID, 14, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t extra[] = { 3, 8, 4, 10, 1, 5, 5, 12 };
+        memcpy(f->extra, extra, sizeof(extra));
+    }
+    return created;
+}
+
+// The conditional sum's shape: the head loads an element, and the arm recomputes its address and reloads it. Variant 0
+// reuses the head's address, load and comparison; 1 and 5 (a store or a fence after the head's load) can't reuse the
+// load but speculate it, the head's load of that address proving it; 2 (a call), 3 (a volatile arm load) and 4 (the
+// head's load at another offset) leave the branch.
+static bool ir_if_convert_test_reload(Arena* arena, IrFunction* f, uint32_t variant)
+{
+    const IrSizes sizes = {
+        .instruction_count = 16,
+        .block_count = 3,
+        .extra_count = 4,
+        .constant_count = 1,
+        .address_count = 2,
+        .parameter_count = 2,
+        .call_count = 1,
+        .call_type_count = 1,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->parameter_types[0] = IR_PTR;
+        f->parameter_types[1] = IR_I64;
+        f->result_type = IR_I64;
+        f->symbol_count = 2;
+        f->constants[0].low = 3;
+        f->calls[0].result_type = IR_I64;
+        f->call_types[0] = IR_I64;
+        f->addresses[0] = (IrAddress){
+            .offset = variant == 4 ? 8 : 0,
+            .scale = 1,
+        };
+        f->addresses[1] = (IrAddress){
+            .offset = 0,
+            .scale = 1,
+        };
+        const uint32_t offsets[] = { 0, 9, 14, 16 };
+        memcpy(f->block_offsets, offsets, sizeof(offsets));
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 3, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 4, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+        ir_optimize_test_instruction(f, 5, IR_LOAD, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        if (variant == 1)
+        {
+            ir_optimize_test_instruction(f, 6, IR_STORE, IR_VOID, 4, 1, BUSTER_IR_NONE);
+        }
+        else if (variant == 2)
+        {
+            ir_optimize_test_instruction(f, 6, IR_CALL, IR_I64, 1, 0, BUSTER_IR_NONE);
+        }
+        else if (variant == 5)
+        {
+            ir_optimize_test_instruction(f, 6, IR_FENCE, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else
+        {
+            ir_optimize_test_instruction(f, 6, IR_COPY, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        ir_optimize_test_instruction(f, 7, IR_ICMP, IR_I1, 5, 2, IR_UGT);
+        ir_optimize_test_instruction(f, 8, IR_CBR, IR_VOID, 7, 1, 2);
+        ir_optimize_test_instruction(f, 9, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 1);
+        ir_optimize_test_instruction(f, 10, IR_LOAD, IR_I64, 9, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        f->flags[10] = variant == 3 ? BUSTER_IR_VOLATILE : 0;
+        ir_optimize_test_instruction(f, 11, IR_ADD, IR_I64, 10, 1, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 12, IR_ICMP, IR_I1, 10, 2, IR_UGT);
+        ir_optimize_test_instruction(f, 13, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 14, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 15, IR_RET, IR_VOID, 14, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t extra[] = { 0, 1, 1, 11 };
+        memcpy(f->extra, extra, sizeof(extra));
+    }
+    return created;
+}
+
+// The C lowering's `&&` (variant 0) and `||` (1) value: the arm holds a comparison twice with its zero extensions and
+// a dead shift, of which the phi needs two rows. The join tests the phi against zero, which becomes an i1 select of the
+// two comparisons. Variant 2's dead division by a parameter could fault, so its arm stays.
+static bool ir_if_convert_test_truth(Arena* arena, IrFunction* f, uint32_t variant)
+{
+    const IrSizes sizes = {
+        .instruction_count = 20,
+        .block_count = 3,
+        .extra_count = 4,
+        .constant_count = 3,
+        .parameter_count = 2,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->parameter_types[0] = IR_I64;
+        f->parameter_types[1] = IR_I64;
+        f->result_type = IR_I64;
+        f->constants[0].low = 7;
+        f->constants[1].low = variant == 1 ? 1 : 0;
+        const uint32_t offsets[] = { 0, 8, 15, 20 };
+        memcpy(f->block_offsets, offsets, sizeof(offsets));
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 3, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 4, IR_ICMP, IR_I1, 0, 2, IR_LT);
+        ir_optimize_test_instruction(f, 5, IR_ZEXT, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 6, IR_ICMP, IR_I1, 0, 2, IR_LT);
+        ir_optimize_test_instruction(f, 7, IR_CBR, IR_VOID, 4, variant == 1 ? 2 : 1, variant == 1 ? 1 : 2);
+        ir_optimize_test_instruction(f, 8, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 9, IR_ICMP, IR_I1, 1, 8, IR_LT);
+        ir_optimize_test_instruction(f, 10, IR_ZEXT, IR_I64, 9, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 11, IR_ICMP, IR_I1, 1, 8, IR_LT);
+        ir_optimize_test_instruction(f, 12, IR_ZEXT, IR_I64, 11, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 13, variant == 2 ? IR_SDIV : IR_SHL, IR_I64, 0, variant == 2 ? 1 : 8, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 14, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 15, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 16, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 17, IR_ICMP, IR_I1, 15, 16, IR_NE);
+        ir_optimize_test_instruction(f, 18, IR_ZEXT, IR_I64, 17, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 19, IR_RET, IR_VOID, 18, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t extra[] = { 1, 12, 0, 3 };
         memcpy(f->extra, extra, sizeof(extra));
     }
     return created;
@@ -474,8 +599,16 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "if-conversion CFG and side-table fixture allocation");
             if (created)
             {
-                const uint32_t expected = kind == 0 ? 2 : kind == 3 ? 0 : 1;
+                const uint32_t expected = kind == 0 || kind >= 3 ? 2 : 1;
                 ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                if (kind == 3 || kind == 4)
+                {
+                    IrIfConvertResult converted = { 0 };
+                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, false, &converted);
+                    ir_optimize_test_expect(test, check.error == IR_OK && converted.rounds == 2 && converted.folded == (kind == 3 ? 1u : 0u),
+                                            "if-conversion takes the outer region in a second round, folding a join with a third predecessor");
+                    arena_pop_to(&vector, 0);
+                }
                 if (kind == 2)
                 {
                     IrIfConvertResult converted = { 0 };
@@ -485,6 +618,53 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                                             "if-conversion separates shared switch indices and remapped call values without mutating input");
                     arena_pop_to(&vector, 0);
                 }
+            }
+            arena_pop_to(&input, 0);
+        }
+        for (uint32_t variant = 0; variant < 6; variant += 1)
+        {
+            IrFunction f = { 0 };
+            const bool created = ir_if_convert_test_reload(&input, &f, variant);
+            ir_optimize_test_expect(test, created, "if-conversion reload fixture allocation");
+            if (created)
+            {
+                const uint32_t expected = variant == 0 || variant == 1 || variant == 5 ? 1 : 0;
+                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                IrIfConvertResult v = { 0 };
+                IrIfConvertResult s = { 0 };
+                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
+                const IrCheck sc = ir_if_convert(&f, &scalar, &scratch, true, &s);
+                // Variant 0 reuses the address, the load and the dead comparison; 1 and 5 reuse the address alone.
+                const uint32_t reused = variant == 0 ? 3 : expected != 0 ? 1 : 0;
+                ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK && v.loads == expected && s.loads == expected && v.reused == reused && s.reused == reused,
+                                        "if-conversion reuses or speculates an arm's reload only behind the head's proof");
+                arena_pop_to(&vector, 0);
+                arena_pop_to(&scalar, 0);
+            }
+            arena_pop_to(&input, 0);
+        }
+        for (uint32_t variant = 0; variant < 3; variant += 1)
+        {
+            IrFunction f = { 0 };
+            const bool created = ir_if_convert_test_truth(&input, &f, variant);
+            ir_optimize_test_expect(test, created, "if-conversion truth fixture allocation");
+            if (created)
+            {
+                const uint32_t expected = variant == 2 ? 0 : 1;
+                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                IrIfConvertResult v = { 0 };
+                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
+                // The test of the phi is now an i1 select of the head's comparison and the arm's, in the head.
+                uint32_t truth = BUSTER_IR_NONE;
+                for (uint32_t i = 0; vc.error == IR_OK && i < v.function.instruction_count; i += 1)
+                {
+                    truth = v.function.op[i] == IR_SELECT && v.function.type[i] == IR_I1 ? i : truth;
+                }
+                const bool shaped = truth != BUSTER_IR_NONE && v.function.op[v.function.a[truth]] == IR_ICMP && v.function.op[v.function.b[truth]] == IR_ICMP &&
+                                    v.function.op[v.function.c[truth]] == IR_ICMP && (variant == 0 ? v.function.c[truth] == v.function.a[truth] : v.function.b[truth] == v.function.a[truth]);
+                ir_optimize_test_expect(test, vc.error == IR_OK && (variant == 2 ? truth == BUSTER_IR_NONE && v.reused == 0 : shaped && v.reused == 2),
+                                        "if-conversion leaves dead rows, reuses repeated ones and tests the truth value as an i1 select");
+                arena_pop_to(&vector, 0);
             }
             arena_pop_to(&input, 0);
         }
