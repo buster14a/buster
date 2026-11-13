@@ -223,8 +223,14 @@ correctness (about 110 s) and the runner hook (1 to 92 s, including lock waits)
 are the other costs. `tests/ci/caches.sh` tests each cache's hit, miss,
 corruption and changed input.
 
-The hosted `qualification` job retains the ruleset's existing required context,
-`Build and execute on Ryzen 7 9700X`. It requires the `evidence` job's success,
+The hosted `qualification` job is the ruleset's required context,
+`Integration qualification` (#1430). Until then it was named
+`Build and execute on Ryzen 7 9700X`, which no longer described a job that
+qualifies most runs on hosted runners alone. The `qualification-alias` job
+reports the old name until main's ruleset requires the new one: the
+replacement is installed and observed first, and the ruleset switches names in
+the same edit that turns on the merge queue, so no interval is unprotected. It
+requires the `evidence` job's success,
 successful hosted tests and fuzzing, and the hardware job: on a push to main
 before the nightly mode and on the daily and dispatched runs, native
 correctness and the measurements. A pull request, draft or ready, never runs
@@ -240,7 +246,7 @@ the nightly mode retired.
 A push no longer reuses its pull request's native qualification: that run has
 none, and the `host-identity` job is gone. Before the nightly mode, every push
 to main runs native correctness on the landed commit. In the nightly mode it
-runs none in the daytime, and has no `Build and execute on Ryzen 7 9700X`
+runs none in the daytime, and has no `Integration qualification`
 context: its state's nightly run qualifies it on the 9700X, recorded in the
 ledger.
 
@@ -722,7 +728,7 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   nothing, and neither does a merged run, which may still be uploading its
   record. A candidate dropped from the end of the queue has no rebuild behind
   it, so its run goes on to the end.
-- **Aggregate.** `Build and execute on Ryzen 7 9700X` runs for a candidate.
+- **Aggregate.** `Integration qualification` runs for a candidate.
   It passes only when the hosted rows, the fuzz campaigns, the policy job and
   the coverage step all succeeded and the 9700X was skipped. There is no
   documentation exemption.

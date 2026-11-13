@@ -3179,6 +3179,7 @@ static bool changes_main_policy(Text workflow)
         { 5, "              \"$RUNNER_TEMP/changes\" --event merge_group --files \"$RUNNER_TEMP/files\" --workflow \"$workflow\" --output \"$GITHUB_OUTPUT\"" },
         { 5, "      auxiliary: ${{ steps.files.outputs.auxiliary }}" },
         { 6, "    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}" },
+        { 6, "    name: Integration qualification" },
         { 6, "      actions: read" },
         { 6, "        if: github.event_name == 'merge_group'" },
         { 6, "        run: bash tools/ci/nightly.sh coverage \"$RUNNER_TEMP/coverage\"" },

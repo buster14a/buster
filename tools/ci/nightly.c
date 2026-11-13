@@ -76,7 +76,9 @@
 #define BUSTER_NIGHTLY_WORKFLOW ".github/workflows/9700x.yml"
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
 // The required aggregate (9700x.yml's `qualification`), which passes a merge-queue candidate after its coverage check.
-#define BUSTER_NIGHTLY_AGGREGATE_JOB "Build and execute on Ryzen 7 9700X"
+#define BUSTER_NIGHTLY_AGGREGATE_JOB "Integration qualification"
+// Its name until #1430 renamed it, which earlier runs' jobs carry, and the alias job that reports it during the move.
+#define BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE "Build and execute on Ryzen 7 9700X"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"
 // The window, in Europe/Madrid local time: hardware work starts at or after 02:00 and ends by 08:00 (the owner's choice
@@ -1774,7 +1776,8 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
     const NightlyJob* hardware = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_HARDWARE_JOB);
     const bool hardware_ran = hardware != NULL && hardware->completed && hardware->conclusion != NIGHTLY_CONCLUSION_SKIPPED;
     const bool hardware_success = hardware != NULL && hardware->completed && hardware->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
-    const NightlyJob* aggregate = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB);
+    const NightlyJob* renamed = nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB);
+    const NightlyJob* aggregate = renamed != NULL ? renamed : nightly_find_job(facts, run->id, BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE);
     const bool aggregate_success = aggregate != NULL && aggregate->completed && aggregate->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
     const bool queue = run->event == NIGHTLY_EVENT_MERGE_GROUP;
     row.hardware = hardware_ran ? NIGHTLY_HARDWARE_ADMIT : NIGHTLY_HARDWARE_SKIP;
@@ -4519,6 +4522,24 @@ static void nightly_test_queue(NightlyTest* test)
     nightly_expect(test, row.outcome != NIGHTLY_OUTCOME_DEFERRED, "without a record, a failed aggregate is no pass");
     row = nightly_harvest_row(&facts, &facts.runs[1], NULL);
     nightly_expect(test, row.outcome == NIGHTLY_OUTCOME_BLOCKED_HOSTED, "without a record, a failed shard blocks it");
+    // The aggregate's name before #1430 renamed it, in an earlier run's jobs, and the alias that reports it during
+    // the move: the renamed aggregate decides wherever it ran.
+    {
+        NightlyBuffer* named = nightly_allocate(1, sizeof(NightlyBuffer));
+        nightly_test_run(named, 63, "merge_group", "completed", "success", a, 1, 2, "x");
+        nightly_test_candidate(named, 63, "", NULL);
+        nightly_append(named, "job\t63\tcompleted\tsuccess\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE);
+        nightly_test_run(named, 64, "merge_group", "completed", "failure", a, 1, 2, "x");
+        nightly_test_candidate(named, 64, "", NULL);
+        nightly_append(named, "job\t64\tcompleted\tfailure\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB);
+        nightly_append(named, "job\t64\tcompleted\tsuccess\t%s\n", BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE);
+        NightlyFacts earlier = nightly_facts_new();
+        const bool parsed = nightly_facts_parse(&earlier, nightly_buffer_text(named));
+        nightly_expect(test, parsed && nightly_harvest_row(&earlier, &earlier.runs[0], NULL).outcome == NIGHTLY_OUTCOME_DEFERRED, "an earlier run's aggregate under its old name passes a candidate");
+        nightly_expect(test, parsed && nightly_harvest_row(&earlier, &earlier.runs[1], NULL).outcome != NIGHTLY_OUTCOME_DEFERRED, "the renamed aggregate decides over its alias");
+        nightly_facts_free(&earlier);
+        free(named);
+    }
     // Its ledger line reads back as written.
     row = nightly_harvest_row(&facts, &facts.runs[0], NULL);
     char* data = NULL;

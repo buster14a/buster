@@ -2046,8 +2046,11 @@ jobs:
     uses: ./.github/workflows/tier1-problem.yml
 
   qualification:
-    # Preserve the existing required context: both hosted variants and the gated
-    # 9700X job must pass on the same revision. A pull request, draft or ready,
+    # The required context, `Integration qualification` (#1430; it replaces the
+    # hardware-named `Build and execute on Ryzen 7 9700X`, which the
+    # qualification-alias job below reports until the ruleset requires this
+    # name): both hosted variants and the gated 9700X job must pass on the same
+    # revision. A pull request, draft or ready,
     # never runs that job (#2055): the context passes on its hosted rows alone,
     # and says that native correctness and measurements run on its merged
     # first-parent state in the nightly window. A merge-queue candidate
@@ -2062,7 +2065,7 @@ jobs:
     # scheduled run (the nightly mode's) runs nothing; and a push in the
     # nightly mode defers its 9700X work to the window. None of the three has
     # this context, so none can show a 9700X qualification that didn't run.
-    name: Build and execute on Ryzen 7 9700X
+    name: Integration qualification
     needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
     runs-on: ubuntu-26.04
@@ -2113,6 +2116,25 @@ jobs:
         run: |
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification"
+
+  # The required context's old name (#1430), reported until main's ruleset requires `Integration qualification` in
+  # its place: the replacement is installed and observed first, and the ruleset switches names in one edit, so no
+  # interval is unprotected. It passes exactly when the aggregate passes, and runs wherever the aggregate does. The
+  # change that removes main's push triggers removes this job.
+  qualification-alias:
+    name: Build and execute on Ryzen 7 9700X
+    needs: [qualification]
+    if: ${{ always() && needs.qualification.result != 'skipped' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Pass exactly when the aggregate passed
+        env:
+          QUALIFICATION_RESULT: ${{ needs.qualification.result }}
+        shell: bash
+        run: |
+          echo "Integration qualification: $QUALIFICATION_RESULT"
+          test "$QUALIFICATION_RESULT" = success
 
   record:
     # The run's coverage record (tools/ci/nightly.c's `record`, docs/ci.md): its commit, tree and first parent; the
