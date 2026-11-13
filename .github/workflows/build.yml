@@ -15,6 +15,7 @@ on:
       - 'tools/ci/codegen_fixture/**'
       - 'tools/codegen/**'
       - 'tools/ci/build_ownership*.h'
+      - tools/ci/session-toolchain.sh
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
       - tools/ci/hosted-offline.sh
@@ -34,6 +35,7 @@ on:
       - 'tools/ci/codegen_fixture/**'
       - 'tools/codegen/**'
       - 'tools/ci/build_ownership*.h'
+      - tools/ci/session-toolchain.sh
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
       - tools/ci/hosted-offline.sh

@@ -128,6 +128,45 @@ byte (the CI configuration, checked at `x86-64`); with `-g`, its allocated
 sections are, and only `.debug_str` and `.debug_line_str` (source paths) and
 the build ID, a hash over the whole file, differ.
 
+## The toolchain
+
+`build.sh` builds with CI's toolchain (#2628): the official LLVM release, CMake
+and Ninja that `tools/ci/hosted-tools.lock` pins (LLVM 23.1.4, CMake 4.4.3,
+Ninja 1.13.2), so that a session's executable is the product CI builds and
+measures, and its build is faster: a Release build without debug information
+took 54.9 s with the release's clang on the 9700X, and 69.5 s with the host's
+23.1.1 ([buster-performance#482](https://github.com/buster14a/buster-performance/pull/482)).
+
+- **Where `PATH`'s clang is the release's** (its `--version` names the
+  release's commit), `build.sh` builds with `PATH`'s tools as they are: CI's
+  setup steps (`setup-hosted.sh`, `setup-benchpress.sh`) put them first.
+- **Elsewhere `tools/ci/session-toolchain.sh stage`** finds or stages them under
+  `${XDG_CACHE_HOME:-~/.cache}/buster`, and `build.sh` puts its directories
+  first on `PATH` for its own commands. On the 9700X that is the job's own tree,
+  `benchpress-clang/DIGEST` with `build-tools/`, and the host's linkers, as the
+  9700X job builds. Elsewhere it is the hosted rows' layout, `toolchain/KEY`
+  (`install-hosted-tools.sh`: clang and LLVM's tools, CMake, Ninja, mold and
+  wild), staged once from the verified inputs (`hosted-release.sh prepare`:
+  the pinned GHCR mirror, then upstream, each file checked against the lock's
+  SHA-256): 1.27 GB to download, 1.9 GB staged, 91 s in a cloud container.
+  Staging needs `curl`, `zstd`, `tar`, `sha256sum` and `flock`, and the network
+  once; afterwards a staged tree is used by its marker, about 30 ms a command.
+- **`BUSTER_TOOLCHAIN=path`** builds with `PATH`'s tools as found, as
+  `build.sh` did before: for a stand-in clang (the PGO refusals' workflow), an
+  offline host with nothing staged, or another compiler on purpose.
+
+The configure step names the toolchain it configures with, CI's or `PATH`'s,
+and a tree configured with another clang starts afresh, as below: the first
+build after the switch rebuilds the tree. `BUSTER_PGO`'s `llvm-profdata` is
+the one beside clang or on `PATH`; the staged release leaves it out, so a
+profile-guided build merges with `PATH`'s. The tools a session runs itself
+(`clang` oracles, `llvm-*`) are still `PATH`'s; `PATH="$(bash
+tools/ci/session-toolchain.sh stage):$PATH"` gives a shell CI's, and so
+the presets ([Presets and CTest](#presets-and-ctest)), which configure with
+`PATH`'s clang: with another first, they and `build.sh` start each other's
+tree afresh. `build-regression` puts CI's first on its own `PATH` for that
+reason, and checks the selection with a stand-in release in a cache of its own.
+
 ## Trees, settings and publication
 
 `build.sh` keeps a tree per toolchain and variant, `build/cmake/VARIANT`: the
@@ -168,6 +207,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
+| `BUSTER_TOOLCHAIN` | `ci` | `build.sh`'s alone: `ci` builds with CI's clang, CMake and Ninja ([The toolchain](#the-toolchain)), staged once where `PATH` hasn't them; `path` with `PATH`'s as found |
 | `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code, and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
@@ -706,7 +746,10 @@ where `llvm-config` finds them, else static, as the official release's
 archives do in CI, hosted and on the 9700X. A system library `llvm-config`
 names by a path the host lacks links by its name instead: the release names
 Ubuntu's `/usr/lib/x86_64-linux-gnu/libzstd.a`, and the 9700X, an Arch host,
-links `-lzstd`. The Debug configuration compiles
+links `-lzstd`; a host with zstd's runtime library alone, no development file
+(`libzstd.so` or `.a`), as a session's container can be, links the runtime file
+by its path, `libzstd.so.1` (#2628: without it, CI's toolchain there turned
+the parts off). The Debug configuration compiles
 the units as before; the final link still uses any supported `BUSTER_LINKER`.
 
 An unrelated edit reuses both units' native objects. A change to a split unit

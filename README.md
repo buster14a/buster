@@ -15,7 +15,10 @@ for AMD Zen 5. The lexer, x86 encoder, lane base layer, ELF object writer and
 first static-executable path are implemented; a complete C compilation
 pipeline is still being built.
 
-Build with Clang, CMake 3.25 or later and Ninja on the intended host:
+Build on the intended host. `build.sh` builds with CI's toolchain, the official
+Clang, CMake and Ninja releases that `tools/ci/hosted-tools.lock` pins, which it
+stages once in `~/.cache/buster` (`zstd` and the network needed then;
+`BUSTER_TOOLCHAIN=path` uses the Clang 23, CMake 3.25+ and Ninja on `PATH`):
 
 ```sh
 ./build.sh

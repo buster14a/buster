@@ -299,7 +299,7 @@ computers:
 
 ## Build
 
-Use `./build.sh` (Clang, CMake 3.25+, Ninja): Develop (`-O3` in parts) by
+Use `./build.sh` (CI's Clang, CMake, Ninja): Develop (`-O3` in parts) by
 default, for edits and tests; `--config Release` (`-O3`) for **every timing
 and benchmark**; `--config Debug` (`-O0 -g`) for a debugger; incremental in
 `build/cmake/VARIANT`, published as `build/compiler`. Respect

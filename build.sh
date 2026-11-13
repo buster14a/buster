@@ -14,6 +14,10 @@
 #   ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
 #   ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 #
+# It builds with CI's toolchain, the official LLVM release, CMake and Ninja that tools/ci/hosted-tools.lock pins: PATH's
+# when its clang is the release's, or else tools/ci/session-toolchain.sh's, staged once in the user's cache (#2628);
+# BUSTER_TOOLCHAIN=path builds with PATH's as found.
+#
 # A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
 # runtime, sanitizer, fuzzing and debug information, only when the settings, PATH or the toolchain changed since it
 # last did (a changed clang starts the tree afresh), then has Ninja build what changed: an unchanged build compiles,
@@ -121,6 +125,29 @@ esac
 case "$command" in
     build) ;;
     *) [ "${#targets[@]}" -eq 0 ] && [ "$verbose" = 0 ] || die "--target and --verbose are build's options" ;;
+esac
+
+# The toolchain (#2628): CI's unless BUSTER_TOOLCHAIN=path, which takes PATH's as found. CI's is the official LLVM
+# release, CMake and Ninja that tools/ci/hosted-tools.lock pins: PATH's when its clang is the release's (CI's own setup
+# puts them first), or else tools/ci/session-toolchain.sh's, staged once in the user's cache and put first on PATH.
+toolchain_identity="$(bash "$root/tools/ci/session-toolchain.sh" identity)" || die "can't read CI's toolchain from tools/ci/hosted-tools.lock"
+# The first line of $1's --version, or nothing.
+first_line()
+{
+    local text
+    text="$("$1" --version 2> /dev/null)" || return 0
+    printf '%s\n' "${text%%$'\n'*}"
+}
+case "${BUSTER_TOOLCHAIN:-ci}" in
+    ci)
+        if [ "$(first_line clang)" != "$toolchain_identity" ]; then
+            directories="$(bash "$root/tools/ci/session-toolchain.sh" stage)" || die "can't stage CI's toolchain; BUSTER_TOOLCHAIN=path builds with PATH's"
+            PATH="$directories:$PATH"
+            [ "$(first_line clang)" = "$toolchain_identity" ] || die "the staged clang isn't CI's ($toolchain_identity)"
+        fi
+        ;;
+    path) ;;
+    *) die "BUSTER_TOOLCHAIN must be ci or path" ;;
 esac
 
 # The tools. CMake 3.25 has every feature CMakeLists.txt and CMakePresets.json use; Ninja Multi-Config needs Ninja 1.10.
@@ -418,6 +445,11 @@ if [ -d "$tree" ]; then
     fi
 fi
 if [ "$command" = configure ] || [ ! -f "$stamp" ] || [ ! -f "$tree/build.ninja" ] || [ "$recorded" != "$wanted" ]; then
+    if [ "${clang_version%%$'\n'*}" = "$toolchain_identity" ]; then
+        echo "build.sh: configuring ${tree#"$root/"} with CI's toolchain: $toolchain" >&2
+    else
+        echo "build.sh: configuring ${tree#"$root/"} with PATH's toolchain (BUSTER_TOOLCHAIN=path), not CI's: $toolchain" >&2
+    fi
     rm -f -- "$stamp"
     run "$cmake" "${configure_arguments[@]}" >&2
     printf '%s\n' "$wanted" > "$stamp"

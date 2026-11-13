@@ -21,6 +21,8 @@
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - driver helpers preserve version thresholds, description failures and publication without redundant copies;
+//   - BUSTER_TOOLCHAIN refuses unknown values, takes PATH's release clang as it is and otherwise a staged toolchain only
+//     once its marker is written, and never downloads in the check;
 //   - the parallel native generation's splitter links llvm-config's system libraries at paths the host lacks by name;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
 //     global/configuration flags, in generated compile/link commands and real unit compiles;
@@ -2565,6 +2567,219 @@ static void check_develop(void)
     }
 }
 
+// The last line `argv` prints, without its newline: a command's result after what it says on stderr.
+static void capture_last_line(char* const* argv, char* line, size_t size)
+{
+    Text text = capture(argv);
+    while (text.length > 0 && text.data[text.length - 1] == '\n')
+    {
+        text.length -= 1;
+        text.data[text.length] = 0;
+    }
+    const char* last = strrchr(text.data, '\n');
+    snprintf(line, size, "%s", last != 0 ? last + 1 : text.data);
+    free(text.data);
+}
+
+// CI's toolchain, which build.sh builds with unless BUSTER_TOOLCHAIN=path (docs/commands/build.md, "The toolchain"),
+// first on this program's PATH too, so that the trees it configures itself (the flags' fresh trees, the presets) use
+// the clang build.sh's do: a preset configured with another would start build.sh's tree afresh.
+static void align_toolchain(void)
+{
+    const char* setting = getenv("BUSTER_TOOLCHAIN");
+    if (setting == 0 || setting[0] == 0 || strcmp(setting, "ci") == 0)
+    {
+        char* identity_argv[] = { "bash", "tools/ci/session-toolchain.sh", "identity", 0 };
+        char* version_argv[] = { "sh", "-c", "clang --version 2> /dev/null | head -n 1", 0 };
+        char identity[512];
+        char version[512];
+        capture_line(identity_argv, identity, sizeof(identity));
+        capture_line(version_argv, version, sizeof(version));
+        if (strcmp(identity, version) != 0)
+        {
+            char* stage_argv[] = { "bash", "tools/ci/session-toolchain.sh", "stage", 0 };
+            char directories[4 * PATH_MAX];
+            capture_last_line(stage_argv, directories, sizeof(directories));
+            const char* path = getenv("PATH");
+            const size_t length = strlen(directories) + strlen(path != 0 ? path : "") + 2;
+            char* joined = malloc(length);
+            if (joined == 0)
+            {
+                fail("out of memory joining PATH");
+            }
+            snprintf(joined, length, "%s:%s", directories, path != 0 ? path : "");
+            if (setenv("PATH", joined, 1) != 0)
+            {
+                fail("can't put CI's toolchain first on PATH");
+            }
+            free(joined);
+            capture_line(version_argv, version, sizeof(version));
+            if (strcmp(identity, version) != 0)
+            {
+                fail("CI's staged toolchain's clang is %s, not %s", version, identity);
+            }
+        }
+    }
+}
+
+// The toolchain setting (#2628): an unknown value is refused; a PATH whose clang is the release's is used as it is,
+// staging nothing; and any other PATH's clang gives way to the hosted layout staged in the cache, its marker the
+// staging's last step. A stand-in plays the release there: a clang that reports the release's identity and runs the
+// real one, beside the real CMake and Ninja, in a cache of its own. Each run has a curl that fails, so that a wrong
+// decision to stage fails at once rather than downloading the release.
+static void check_toolchain(void)
+{
+    char log[PATH_MAX];
+    snprintf(log, sizeof(log), "%s/toolchain.log", work);
+    const char* const bogus[] = { "BUSTER_TOOLCHAIN=bogus", 0 };
+    char* output[] = { "./build.sh", "print-output", 0 };
+    if (run(log, bogus, output) != 1 || occurrences(log, "BUSTER_TOOLCHAIN must be ci or path") != 1)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("BUSTER_TOOLCHAIN=bogus wasn't refused");
+    }
+
+    char identity[512];
+    char* identity_argv[] = { "bash", "tools/ci/session-toolchain.sh", "identity", 0 };
+    capture_line(identity_argv, identity, sizeof(identity));
+    char real_clang[PATH_MAX];
+    char real_cmake[PATH_MAX];
+    char real_ninja[PATH_MAX];
+    char* which_clang[] = { "sh", "-c", "command -v clang", 0 };
+    char* which_cmake[] = { "sh", "-c", "command -v cmake", 0 };
+    char* which_ninja[] = { "sh", "-c", "command -v ninja", 0 };
+    capture_line(which_clang, real_clang, sizeof(real_clang));
+    capture_line(which_cmake, real_cmake, sizeof(real_cmake));
+    capture_line(which_ninja, real_ninja, sizeof(real_ninja));
+
+    // Two caches, each with nothing staged, and the stand-ins' directory: a clang that isn't the release's and a curl
+    // that fails.
+    char staged_cache[PATH_MAX];
+    char empty_cache[PATH_MAX];
+    char stand_ins[PATH_MAX];
+    char used[PATH_MAX];
+    snprintf(staged_cache, sizeof(staged_cache), "%s/toolchain-staged", work);
+    snprintf(empty_cache, sizeof(empty_cache), "%s/toolchain-empty", work);
+    snprintf(stand_ins, sizeof(stand_ins), "%s/toolchain-stand-ins", work);
+    snprintf(used, sizeof(used), "%s/toolchain-used", work);
+    if (mkdir(staged_cache, 0755) != 0 || mkdir(empty_cache, 0755) != 0 || mkdir(stand_ins, 0755) != 0)
+    {
+        fail("can't make the toolchain fixture's directories");
+    }
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/clang", stand_ins);
+    write_file(path, "#!/bin/sh\necho 'clang version 0 (not the release)'\nexit 1\n", 0755);
+    snprintf(path, sizeof(path), "%s/curl", stand_ins);
+    write_file(path, "#!/bin/sh\necho 'curl: the toolchain check downloads nothing' >&2\nexit 6\n", 0755);
+
+    // The staged cache's hosted layout: its root, its marker's line and its PATH directories (build tools, LLVM's, the
+    // linkers').
+    char staged_home[PATH_MAX + 32];
+    snprintf(staged_home, sizeof(staged_home), "XDG_CACHE_HOME=%s", staged_cache);
+    const char* const staged_environment[] = { staged_home, 0 };
+    char* layout_argv[] = { "bash", "tools/ci/session-toolchain.sh", "layout", 0 };
+    if (run(log, staged_environment, layout_argv) != 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("session-toolchain.sh layout failed");
+    }
+    Text layout = read_file(log);
+    char* root = layout.data;
+    char* key = strchr(root, '\n');
+    char* directories = key != 0 ? strchr(key + 1, '\n') : 0;
+    char* end = directories != 0 ? strchr(directories + 1, '\n') : 0;
+    if (end == 0)
+    {
+        fail("session-toolchain.sh layout didn't print a root, a key and directories: %s", layout.data);
+    }
+    *key++ = 0;
+    *directories++ = 0;
+    *end = 0;
+    char* tools = directories;
+    char* llvm = tools != 0 ? strchr(tools, ':') : 0;
+    char* linkers = llvm != 0 ? strchr(llvm + 1, ':') : 0;
+    if (linkers == 0)
+    {
+        fail("session-toolchain.sh layout's directories aren't three: %s", directories);
+    }
+    *llvm++ = 0;
+    *linkers++ = 0;
+    char* make[] = { "mkdir", "-p", tools, llvm, linkers, 0 };
+    if (run(0, 0, make) != 0)
+    {
+        fail("can't make the staged layout's directories");
+    }
+    const size_t script_size = 3 * PATH_MAX + 1024;
+    char* script = malloc(script_size);
+    if (script == 0)
+    {
+        fail("out of memory writing the stand-in clang");
+    }
+    snprintf(script, script_size,
+             "#!/bin/sh\nif [ \"$1\" = --version ]; then\n    echo '%s'\n    exit 0\nfi\necho used >> '%s'\nexec '%s' \"$@\"\n", identity,
+             used, real_clang);
+    snprintf(path, sizeof(path), "%s/clang", llvm);
+    write_file(path, script, 0755);
+    free(script);
+    char cmake_link[PATH_MAX + 32];
+    char ninja_link[PATH_MAX + 32];
+    snprintf(cmake_link, sizeof(cmake_link), "%s/cmake", tools);
+    snprintf(ninja_link, sizeof(ninja_link), "%s/ninja", tools);
+    if (symlink(real_cmake, cmake_link) != 0 || symlink(real_ninja, ninja_link) != 0)
+    {
+        fail("can't link the real CMake and Ninja into the staged layout");
+    }
+
+    char stand_in_path[2 * PATH_MAX + 4096];
+    snprintf(stand_in_path, sizeof(stand_in_path), "PATH=%s:%s", stand_ins, getenv("PATH"));
+    char* flags[] = { "./build.sh", "print-compile-flags", 0 };
+
+    // The release first on PATH is used as it is, with nothing staged in the cache.
+    char empty_home[PATH_MAX + 32];
+    char release_path[3 * PATH_MAX + 4096];
+    snprintf(empty_home, sizeof(empty_home), "XDG_CACHE_HOME=%s", empty_cache);
+    snprintf(release_path, sizeof(release_path), "PATH=%s:%s:%s", llvm, stand_ins, getenv("PATH"));
+    const char* const release_first[] = { empty_home, release_path, 0 };
+    if (run(log, release_first, flags) != 0 || access(used, F_OK) != 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("build.sh didn't take PATH's release clang as it was");
+    }
+    char* staged_anything[] = { "find", empty_cache, "-mindepth", "1", "-print", "-quit", 0 };
+    Text left = capture(staged_anything);
+    if (left.length != 0)
+    {
+        fail("build.sh staged %s with the release first on PATH", left.data);
+    }
+    free(left.data);
+    unlink(used);
+
+    // Marked, the staged layout goes first on PATH: the stand-in's clang answers the description's queries.
+    const char* const staged[] = { staged_home, stand_in_path, 0 };
+    char marker[PATH_MAX + 32];
+    char marker_line[64];
+    snprintf(marker, sizeof(marker), "%s/.complete", root);
+    snprintf(marker_line, sizeof(marker_line), "%s\n", key);
+    write_file(marker, marker_line, 0644);
+    if (run(log, staged, flags) != 0 || access(used, F_OK) != 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("build.sh didn't build with the marked staged toolchain");
+    }
+    unlink(used);
+
+    // Unmarked, the layout is a partial staging, which build.sh stages afresh (taking it away first), and the failing
+    // curl stops: it fails, naming BUSTER_TOOLCHAIN=path, and runs no clang.
+    unlink(marker);
+    if (run(log, staged, flags) == 0 || occurrences(log, "BUSTER_TOOLCHAIN=path builds with PATH's") != 1 || access(used, F_OK) == 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("build.sh used an unmarked staged toolchain, or didn't fail naming BUSTER_TOOLCHAIN=path");
+    }
+    free(layout.data);
+    pass("BUSTER_TOOLCHAIN refuses unknown values; CI's toolchain is PATH's release as it is, or else the staged one once marked");
+}
+
 static void check_failures(void)
 {
     // A post-link step that fails, by an nm that does.
@@ -3295,18 +3510,34 @@ static void check_codegen_system_libraries(void)
 {
     char present[PATH_MAX];
     char script[PATH_MAX];
-    char text[4 * PATH_MAX];
-    char expected[2 * PATH_MAX];
+    char text[6 * PATH_MAX];
+    char expected[3 * PATH_MAX];
     snprintf(present, sizeof(present), "%s/libpresent.a", work);
     snprintf(script, sizeof(script), "%s/system-libraries.cmake", work);
     write_file(present, "!<arch>\n", 0644);
+    // The host's library directories: one with a development link (libdevelopment.so) and its runtime file, one with
+    // a runtime file alone (libruntime.so.2), its longer name's too.
+    char directories[PATH_MAX];
+    char file[PATH_MAX + 64];
+    snprintf(directories, sizeof(directories), "%s/system-libraries", work);
+    mkdir(directories, 0755);
+    snprintf(file, sizeof(file), "%s/libdevelopment.so", directories);
+    write_file(file, "", 0644);
+    snprintf(file, sizeof(file), "%s/libdevelopment.so.1", directories);
+    write_file(file, "", 0644);
+    snprintf(file, sizeof(file), "%s/libruntime.so.2.5", directories);
+    write_file(file, "", 0644);
+    snprintf(file, sizeof(file), "%s/libruntime.so.2", directories);
+    write_file(file, "", 0644);
     snprintf(text, sizeof(text),
+        "set(BUSTER_CODEGEN_LIBRARY_DIRECTORIES \"%s/absent\" \"%s\")\n"
         "include(\"%s/cmake/BusterCodegen.cmake\")\n"
-        "buster_codegen_system_libraries(libraries -lrt /buster-absent/x86_64-linux-gnu/libzstd.a \"%s\" /buster-absent/libxml2.so.2 -lm)\n"
+        "buster_codegen_system_libraries(libraries -lrt /buster-absent/x86_64-linux-gnu/libzstd.a \"%s\" /buster-absent/libxml2.so.2 "
+        "/buster-absent/libdevelopment.a /buster-absent/libruntime.a -lm)\n"
         "message(\"libraries: ${libraries}\")\n",
-        root, present);
+        directories, directories, root, present);
     write_file(script, text, 0644);
-    snprintf(expected, sizeof(expected), "libraries: -lrt;-lzstd;%s;-lxml2;-lm\n", present);
+    snprintf(expected, sizeof(expected), "libraries: -lrt;-lzstd;%s;-lxml2;-ldevelopment;%s/libruntime.so.2;-lm\n", present, directories);
     char* argv[] = { "cmake", "-P", script, 0 };
     Text log = capture(argv);
     if (strcmp(log.data, expected) != 0)
@@ -3314,7 +3545,7 @@ static void check_codegen_system_libraries(void)
         fail("BusterCodegen.cmake's system libraries: expected \"%s\", got \"%s\"", expected, log.data);
     }
     free(log.data);
-    pass("llvm-config's system libraries at paths the host lacks link by name, the others as given");
+    pass("llvm-config's system libraries at paths the host lacks link by name, or by their runtime file's path where the host has no development file, the others as given");
 }
 
 // Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
@@ -3633,6 +3864,7 @@ int main(int argc, char** argv)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    align_toolchain();
     if (argc == 1 || ownership_only)
     {
         check_standalone_preprocessing();
@@ -3642,6 +3874,7 @@ int main(int argc, char** argv)
     if (argc == 1 || driver_only)
     {
         check_driver();
+        check_toolchain();
     }
     if (ownership_only)
     {
