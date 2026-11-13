@@ -6,9 +6,9 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && (inputs.purpose == 'ba
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
-  # Every main update gets full hosted correctness, including documentation-only merges (#1271).
-  push:
-    branches: [main]
+  # No push trigger: the merge queue tests every main revision before it lands, so a push to main runs nothing (the
+  # owner's decision of 10 November, #1430). The merge_group trigger below runs the full contract on each candidate;
+  # the nightly measures main's first-parent states on the 9700X.
   # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
   # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
   # against its first parent, or comprehensively, inside 02:00-08:00 Europe/Madrid unless `override` gives a reason.
@@ -46,10 +46,10 @@ on:
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   # A merge-queue candidate (#1430): GitHub's temporary merge of main, the queue's entries ahead of it and its pull
   # request, on a gh-readonly-queue/main/... branch. It runs the full hosted contract once (every row and sanitizer, the
-  # vector pool and the fuzz campaigns; docs/ci.md, "The merge queue") and reports both required contexts, so that a
-  # ruleset requiring the queue merges only what passed. Nothing triggers it until a ruleset turns the queue on. No
-  # path filter: every candidate runs, documentation alone included. `checks_requested` is the event's only type,
-  # named so that a type GitHub adds later doesn't start runs.
+  # vector pool and the fuzz campaigns; docs/ci.md, "The merge queue") and reports both required contexts, which main's
+  # ruleset requires through its merge queue, so that only what passed merges. No path filter: every candidate runs,
+  # documentation alone included. `checks_requested` is the event's only type, named so that a type GitHub adds later
+  # doesn't start runs.
   merge_group:
     types: [checks_requested]
     branches: [main]
@@ -58,14 +58,13 @@ permissions:
   contents: read
 
 # Keep each PR's replaceable queue separate: a newer push cancels only that PR's superseded qualification.
-# Every push to main gets its own run-id group. cancel-in-progress: false alone would still allow a later merge to
-# replace an earlier pending main run in GitHub's default single pending slot; all main revisions need the full
-# hosted matrix and fuzzing (#1271). So does every merge-queue candidate (#1430): the queue builds several at once,
-# and one candidate's run must neither cancel nor replace another's. The daily run and manual refs retain their own
-# groups. The runner's job hooks still serialize hardware jobs with the shared host lock (AGENTS.md), not the hosted
-# correctness runs.
+# Every merge-queue candidate (#1430) gets its own run-id group: the queue builds several at once, and one candidate's
+# run must neither cancel nor replace another's (cancel-in-progress: false alone would still let a later one replace
+# an earlier pending one in GitHub's default single pending slot); the stale job cancels the runs of candidates GitHub
+# dropped. The daily run and manual refs retain their own groups. The runner's job hooks still serialize hardware jobs
+# with the shared host lock (AGENTS.md), not the hosted correctness runs.
 concurrency:
-  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -2046,11 +2045,9 @@ jobs:
     uses: ./.github/workflows/tier1-problem.yml
 
   qualification:
-    # The required context, `Integration qualification` (#1430; it replaces the
-    # hardware-named `Build and execute on Ryzen 7 9700X`, which the
-    # qualification-alias job below reports until the ruleset requires this
-    # name): both hosted variants and the gated 9700X job must pass on the same
-    # revision. A pull request, draft or ready,
+    # The required context, `Integration qualification` (#1430; it replaced the
+    # hardware-named `Build and execute on Ryzen 7 9700X`): both hosted variants
+    # and the gated 9700X job must pass on the same revision. A pull request, draft or ready,
     # never runs that job (#2055): the context passes on its hosted rows alone,
     # and says that native correctness and measurements run on its merged
     # first-parent state in the nightly window. A merge-queue candidate
@@ -2119,25 +2116,6 @@ jobs:
         run: |
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification"
-
-  # The required context's old name (#1430), reported until main's ruleset requires `Integration qualification` in
-  # its place: the replacement is installed and observed first, and the ruleset switches names in one edit, so no
-  # interval is unprotected. It passes exactly when the aggregate passes, and runs wherever the aggregate does. The
-  # change that removes main's push triggers removes this job.
-  qualification-alias:
-    name: Build and execute on Ryzen 7 9700X
-    needs: [qualification]
-    if: ${{ always() && needs.qualification.result != 'skipped' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - name: Pass exactly when the aggregate passed
-        env:
-          QUALIFICATION_RESULT: ${{ needs.qualification.result }}
-        shell: bash
-        run: |
-          echo "Integration qualification: $QUALIFICATION_RESULT"
-          test "$QUALIFICATION_RESULT" = success
 
   record:
     # The run's coverage record (tools/ci/nightly.c's `record`, docs/ci.md): its commit, tree and first parent; the

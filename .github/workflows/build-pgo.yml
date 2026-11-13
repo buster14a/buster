@@ -7,12 +7,10 @@ name: build.sh PGO
 on:
   pull_request:
     paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
-  push:
-    branches: [main]
-    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
   workflow_dispatch:
   # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
-  # lists (9700x.yml's auxiliary-build-pgo job, which tools/ci/changes.c decides from that list; #1430).
+  # lists (9700x.yml's auxiliary-build-pgo job, which tools/ci/changes.c decides from that list; #1430). A push to main runs
+  # nothing: the queue tested it before it landed.
   workflow_call:
 
 permissions:
