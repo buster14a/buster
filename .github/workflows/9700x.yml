@@ -231,21 +231,6 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Test the nightly glue and the 9700X's caches against fixtures
-        # On pull requests and merge-queue candidates, before any hardware: the scripts this job, the record job and the
-        # 9700X job run, the hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on
-        # recorded runs (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's
-        # own self-test runs in `changes`). A candidate runs them on main and its pull request merged (#1430).
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-        shell: bash
-        run: |
-          bash tests/ci/nightly.sh
-          bash tests/ci/caches.sh
-          bash tests/ci/build-benchmarks.sh
-          bash tests/ci/vector-draw.sh
-          node tests/ci/vector-runtime.cjs
-          bash tests/ci/rerun.sh
-
       - name: Decide reuse and hardware admission
         id: decide
         shell: bash
@@ -257,6 +242,38 @@ jobs:
           EVIDENCE_OVERRIDE: ${{ inputs.override }}
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
+
+  # The CI glue's fixtures, on pull requests and merge-queue candidates: the scripts the evidence job, the record job
+  # and the 9700X job run, the hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on
+  # recorded runs (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's own
+  # self-test runs in `changes`). A candidate runs them on main and its pull request merged (#1430). They hold nothing
+  # back: the rows start once the evidence job decides, and the required aggregate requires these to have passed
+  # (tools/ci/qualification.c's `qualification_evidence`). In the evidence job, before the rows, they held every row
+  # back by their 4 minutes, when neither event uses the 9700X (#2658).
+  glue:
+    name: CI glue fixtures
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the run's commit and its first parent
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Test the nightly glue and the 9700X's caches against fixtures
+        shell: bash
+        run: |
+          bash tests/ci/nightly.sh
+          bash tests/ci/caches.sh
+          bash tests/ci/build-benchmarks.sh
+          bash tests/ci/vector-draw.sh
+          node tests/ci/vector-runtime.cjs
+          bash tests/ci/rerun.sh
 
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
@@ -2067,7 +2084,7 @@ jobs:
     # waiting for its own rows (hotfix.yml reports the context when the label is added); its candidate runs this job in
     # full, since a merge_group event has no pull request labels.
     name: Integration qualification
-    needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
+    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2104,6 +2121,7 @@ jobs:
           SIZE_RESULT: ${{ needs.policy.result }}
           DCO_RESULT: ${{ needs.policy.result }}
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
+          GLUE_RESULT: ${{ needs.glue.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
           TEST_RESULT: ${{ needs.test.result }}

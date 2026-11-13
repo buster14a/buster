@@ -112,7 +112,7 @@ reruns use bounded identity reads and refuse unknown state. The verdict
 reports request ledgers and shared-quota headers; see [Vector REST
 budget](../ci.md#vector-rest-budget-2309). After changes, run the shell
 fixture above and `node tests/ci/vector-runtime.cjs`; both run in the PR's
-hosted evidence job.
+`CI glue fixtures` job.
 Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
@@ -516,7 +516,7 @@ never ones that failed, so green keeps meaning the tests passed.
   job and test step keep their names, and `rerun.yml` watches exactly the
   workflows that call `hosted-correctness.yml` and re-runs only failed first
   attempts. A renamed setup step fails it until the list follows.
-  `bash tests/ci/rerun.sh`, in the `evidence` job's fixtures step, also runs
+  `bash tests/ci/rerun.sh`, in the `CI glue fixtures` job, also runs
   the cases recorded from the API in `tests/ci/rerun/cases.tsv` against their
   reports and Markdown: the 2026-11-11 outage's push and pull request, test,
   build, timeout, fail-fast, lost-runner and self-hosted failures. It checks
@@ -584,8 +584,10 @@ the policy. In short:
   snapshot's comprehensive run is the daily run.
 - Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
   and the glue against a fake `gh` and a merge history) and
-  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
-  the `evidence` job before any hardware; `changes` runs
+  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests and
+  merge-queue candidates run both in the `glue` job (`CI glue fixtures`),
+  beside the rows, which don't wait for them, and the required aggregate
+  requires them (#2658); `changes` runs
   `nightly --self-test`, which also fails if the build or the inventory ever
   calls `git`.
 

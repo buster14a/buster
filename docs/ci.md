@@ -262,6 +262,11 @@ event, draft state, selection, dispatch purpose, the `evidence` job's hardware
 decision, and seven job results.
 The hosted selector job runs that test before any hardware admission, and the
 selector's own policy mutants pin the draft guard and ready/draft triggers.
+The evidence result it reads is the `evidence` job's where the CI glue's
+fixtures (the `glue` job, `CI glue fixtures`) did what the event requires:
+passed on a pull request and a merge-queue candidate, which alone run them,
+and skipped elsewhere (`qualification_evidence`, which the self-test checks
+for every event and both results).
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
 fast, and its tests wait for the policy job (`Measurement storage policy`: the
@@ -273,6 +278,13 @@ to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
 Tier 1 machine-problem workflow's two architectures follow the same rule.
+The CI glue's fixtures are the exception (#2658): the scripts the evidence,
+record and 9700X jobs run, the vector row's draws and the setup re-run's
+decisions, against fixtures, in a job of their own beside the rows, which the
+required aggregate waits for. In the evidence job they held every row back by
+about 4 minutes (merge-queue run 43481767714: 236 s of its 246 s, the rows
+starting at 298 s), when neither a pull request nor a candidate uses the
+9700X; a candidate's pull request has passed the same fixtures.
 GitHub has no fail-fast across jobs. A job that cancels the run through the API
 was considered (#1195) and dropped: it needs a token with `actions: write`,
 which fork pull requests don't get; on a pull request, once the policy checks
