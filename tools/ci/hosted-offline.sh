@@ -167,7 +167,7 @@ check_apt()
 # attempts, each apt host that doesn't resolve here is pinned in /etc/hosts to an address a DNS-over-HTTPS resolver
 # gives it (Cloudflare's, else Google's), as setup-hosted.sh did before it stopped using the network. This brings in
 # nothing unverified: apt checks the archive's signed Release files and every package's hash, and the downloads here
-# keep their SHA-256 pins (setup-baseline-runtime.sh's come from archive.ubuntu.com too).
+# keep their SHA-256 pins (setup-baseline-runtime.sh's come from Launchpad's copies of the archive's files).
 apt_hosts()
 {
     local file
