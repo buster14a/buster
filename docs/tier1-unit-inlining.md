@@ -1,8 +1,11 @@
 # Tier 1: inlining the unit's small functions, whatever their control flow (#2541): design
 
-Status: design only. Nothing below is on main. Its measurements are current
-main's, and an experiment patch kept in the record (not for merging) prototypes
-its central transformation and was run on the three programs
+Status: step 0 (the splice, offered to `always_inline` callees) is
+implemented: [the inlining guide](ir-inlining.md)'s "Callees with control
+flow", measured [below](#step-0-measured). Steps 1 to 3 are design only. The
+measurements other than step 0's are main's at `c5f0efb2`, and an experiment
+patch kept in the record (not for merging) prototypes the central
+transformation and was run on the three programs
 ([below](#what-the-prototype-measured)). It is
 [#138](https://github.com/buster14a/buster/issues/138)'s code-quality design:
 the change that the measurements below rank first among those nothing owns.
@@ -840,6 +843,36 @@ two workloads, with `--tier1 -c sqlite3.c` for the compile.
 Steps 0 and 1 carry the risk. Step 0 is small and already separable: it is the
 prototype's splice with tests. Step 1 is where the design's claim about
 compile cost is tested, at a small limit, before anything depends on it.
+
+### Step 0, measured
+
+Step 0 landed as `IrInlineOptions.control_flow` (#2613): the splice with a
+vector rebase of the callee's operand columns and its scalar twin, lifetime
+brackets for the callee's unmarked slots and the aggregate arguments' copies,
+and the callee's calls with ABI records, offered by `--tier1` to its
+`always_inline` callees. Its gate, on the 9700X against main `df85213e`
+([the record](https://github.com/buster14a/buster-performance/tree/9f3680a0b6dbb3de7b1662b4f769b6a75d455213/docs/measurements/tier1-unit-inlining-step0-2541-2026-11-13)):
+
+| Gate | Result |
+| --- | --- |
+| the interpreter's generated callees with control flow agree before and after | 14,256 executions (6,432 before): nine callee shapes into six callers at two types, before and after inlining and after SROA and promotion, and a by-value callee with two returns |
+| the mutants fail | each of ten: a return's phi operand, a block base, a predecessor remap, a slice's rebase, a parameter's binding, the vector shift, a kind table's entry, the scalar `cbr` base, the lifetime ends' place, a caller branch's remap |
+| the twins write the same columns | on every unit of `test-ir-inline` |
+| the compiler built by `--tier1` reproduces itself | the self-host qualification passes with every unit by `--tier1`; on the 9700X the `--tier1` build's objects are clang -O2's build's |
+| at most 215 M returns on `-c sqlite3.c`, in no more cycles | **283.8 M** (345.0 M on main; 521.7 M without inlining), in 1.1% fewer cycles: not met |
+| speedtest1's and Lua's objects unchanged | Lua's and `speedtest1.c`'s are; `sqlite3.c` has one `always_inline` function with control flow, `allocateSpace`, whose two calls are now expanded, as clang expands them; speedtest1 over eight placements +0.15 (-0.33 to +0.63), no change measurable |
+
+The returns gate assumed that the expanded callees' own calls go away. In the
+scalar host's build, the hot ones are `host_aesenc`'s 16-byte `memcpy`s of its
+by-value `__m128i`s, which stay calls of libc (#1373): sampled call records put
+them at about 42% of the remaining calls. Expanding `host_aesenc` also moves its
+argument into its caller's memory by two 8-byte stores, at a target without
+AVX-512, which `memcpy`'s 16-byte load cannot forward from (#1344's pattern),
+so libc's share of the cycles grows from 3.8% to 14.7% and gives back most of
+the 26% that `host_aesenc` and `intern_lane_rounds` took as calls. Both are
+the next steps' preconditions on this program, as the design's expected case
+already said of #1344. The compiler's own `--tier1` build expands 4,097 calls
+where main's expands 795, for 6.6% more records and 3.0% more user time.
 
 ### Expected gains
 

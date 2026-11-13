@@ -446,11 +446,15 @@ team's code waits for every lowering, a board's share runs two epochs), so that
 a body's lane reads any callee's typed stream. Each lane prepares a callee once
 an emission, in a cache arena of its own: lowered at its own target, promoted
 and optimized, which leaves a wrapper a preheader and its body, one straight
-line. A callee whose target has a feature its caller's lacks stays a call.
+line, and a helper with control flow its blocks. A callee whose target has a
+feature its caller's lacks stays a call.
 
 The unit of the caller and the callees its calls reach (up to 64) goes through
-`ir_optimize_inline` with no cost threshold, as clang inlines an always_inline
-function whatever its size, copies of 64-, 32- and 16-byte vectors taking the
+`ir_optimize_inline` with no cost threshold and with `control_flow` (#2541), as
+clang inlines an always_inline function whatever its size and its control flow:
+a helper's blocks are spliced at the call, its returns joined in a phi
+([the inlining guide](ir-inlining.md)'s "Callees with control flow"), and
+copies of 64-, 32- and 16-byte vectors take the
 target's widths ([the inlining guide](ir-inlining.md)'s "SIMD callees and
 by-value vectors"). SROA, with its `simd` and `flagged` options ([the field
 splitting guide](ir-scalar-replacement.md)'s "#1282's options"), then makes the
@@ -468,9 +472,11 @@ is an optimization, never a refusal. `--tier1-report`'s `inlined` sums the
 calls expanded into the bodies Tier 1 compiled; `--tier1-no-inline` keeps every
 call, for comparison. `test-ir-inline` runs the inliner's SIMD and by-value
 fixtures, the latter on the IR's interpreter before and after inlining, SROA and
-promotion; `test-checker-driver`'s inlining fixture builds a program of
-intrinsics, a struct helper and a noinline function by each path, with and
-without inlining, against clang -O0's.
+promotion, and #2541's generated units of callees with control flow;
+`test-checker-driver`'s inlining fixture builds a program of intrinsics, a
+struct helper, helpers with control flow (two returns, a loop, a switch, a
+vector by value chosen by a branch, a local array, nested calls) and a noinline
+function by each path, with and without inlining, against clang -O0's.
 
 ### The vectors wider than the target's registers
 

@@ -1964,6 +1964,8 @@ static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* out
 
 // #1282's SIMD and by-value fixtures (ir_optimize_inline_simd_test.c, after SROA and the interpreter).
 static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch);
+// #2541's general splice fixtures (ir_optimize_inline_cfg_test.c, after the SIMD ones, whose helpers they use).
+static void ir_inline_test_general(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch);
 
 static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char** argv)
 {
@@ -1987,6 +1989,7 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_general(&test, &input, &output, &twin, &scratch);
     }
     arena_release(&scratch);
     arena_release(&twin);

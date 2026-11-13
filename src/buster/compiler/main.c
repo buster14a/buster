@@ -913,6 +913,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
 #include "buster/compiler/ir_optimize_inline_simd_test.c"
+#include "buster/compiler/ir_optimize_inline_cfg_test.c"
 #endif
 // #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)

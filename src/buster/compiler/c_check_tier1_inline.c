@@ -9,8 +9,9 @@
 // lowers every part before any part's code (CheckEmitRun.tier1_inline), so that a body's lane reads any callee's typed
 // stream. Each lane prepares a callee once an emission, in its own cache arena (CheckTier1Lane.inline_cache): its typed
 // stream lowered at its own target, promoted to SSA and optimized (SCCP, dead code and CFG cleanup), which leaves a
-// wrapper one block that ends in its return (ir_optimize_inline.c's candidates). A callee that doesn't prepare, or whose
-// target has a feature its caller's lacks, stays a call. The unit of the caller and the callees its calls reach
+// wrapper one block that ends in its return, and a helper with control flow its blocks, which the general splice places
+// at the call (#2541, IrInlineOptions.control_flow). A callee that doesn't prepare, or whose target has a feature its
+// caller's lacks, stays a call. The unit of the caller and the callees its calls reach
 // (transitively, up to BUSTER_CHECK_TIER1_INLINE_CALLEES of them) goes through ir_optimize_inline with no cost threshold,
 // as clang inlines an always_inline function whatever its size; a call it keeps, of a callee whose body it doesn't take,
 // stays a call to that function's own code. SROA, with the options #1282 gave it, then splits the aggregates' slots
@@ -274,6 +275,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
         options.maximum_cost = UINT32_MAX - 1;
         options.maximum_function_growth = BUSTER_IR_INLINE_MAX_ITEMS / 4;
         options.scalar = scalar;
+        // Whatever its control flow (#2541): its blocks spliced at the call, as clang expands an always_inline function.
+        options.control_flow = true;
         const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
         const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
         options.vector_copies = (target->features & evex) != evex ? 0 : (target->features & narrow) == narrow ? 7 : 4;
