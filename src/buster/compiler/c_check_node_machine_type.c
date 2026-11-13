@@ -2138,6 +2138,14 @@ static inline __attribute__((always_inline)) uint32_t node_machine_leaf(NodeMach
     return overload;
 }
 
+// Graph node `operand` (BUSTER_CHECK_NONE for none) as a record of the expression whose first node is `first`, an operand of
+// record `r`: node_machine_operand's answer, from the node itself, which T's loop has found already.
+static inline __attribute__((always_inline)) uint32_t node_machine_record_of(uint32_t operand, uint32_t first, uint32_t r)
+{
+    const uint32_t record = operand - first;
+    return operand == BUSTER_CHECK_NONE ? UINT32_MAX : operand >= first && record < r ? record : BUSTER_NODE_MACHINE_MOST;
+}
+
 // T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
 // nodes `first` to first + count - 2 and `root`. A refusal stops it, at machine->stopped.
 static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count)
@@ -2177,9 +2185,9 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
         }
         else
         {
-            const uint32_t a = node_machine_operand(machine, r, 0);
-            const uint32_t b = node_machine_operand(machine, r, 1);
-            const uint32_t c = node_machine_operand(machine, r, 2);
+            const uint32_t a = node_machine_record_of(graph->operand0[node], machine->first, r);
+            const uint32_t b = node_machine_record_of(graph->operand1[node], machine->first, r);
+            const uint32_t c = node_machine_record_of(graph->operand2[node], machine->first, r);
             columns->left[r] = a;
             columns->right[r] = b;
             // Its subtree's least record (a call's arguments' too, node_machine_arguments).
