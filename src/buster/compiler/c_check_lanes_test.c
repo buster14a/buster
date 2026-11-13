@@ -2885,13 +2885,16 @@ static void check_lanes_test_exit_helper(CheckLanesTestTally* tally, const char*
         }
     }
     // Held after its helper's start, the driver's streams end while it still runs: neither it nor its helper holds them.
+    // Without a helper (a sanitizer build) the order is the kernel's, not the driver's: a threaded process's files can
+    // close while another of its threads still tears its address space down, long before its exit can be waited for, and
+    // the merge-queue drill (#1430) saw TSan drivers end both ways. So the order is checked only where a helper sets it.
     char* held[] = { (char*)executable, (char*)"-c", (char*)"-o", (char*)"/dev/null", small, NULL };
     check_lanes_test_exit_run(&runs[0], held, "1", "2000", threads_path);
     const bool helped = !BUSTER_SANITIZER_RESOURCES;
     char detail[256];
     snprintf(detail, sizeof(detail), "status %d, streams ended first: %d, %u helpers, %u ended%s", runs[0].status, runs[0].streams_ended_first, runs[0].helpers,
              runs[0].helpers_ended, runs[0].helpers_timed_out ? ", timed out" : "");
-    check_lanes_test_expect(tally, runs[0].status == 0 && runs[0].streams_ended_first == helped && runs[0].helpers == (helped ? 1u : 0u) &&
+    check_lanes_test_expect(tally, runs[0].status == 0 && (!helped || runs[0].streams_ended_first) && runs[0].helpers == (helped ? 1u : 0u) &&
                                        runs[0].helpers_ended == runs[0].helpers && !runs[0].helpers_timed_out,
                             "a reader of the driver's streams sees them end without waiting for its exit helper", detail);
     printf("  exit helper: %u commands by BUSTER_EXIT_HELPER=0, =1 and by default (orphans %s here), and a driver held after the helper's start\n",
