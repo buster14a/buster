@@ -753,7 +753,9 @@ static bool node_machine_pointer_assignable(const NodeMachine* machine, TypeId t
 // T's member access, `.` or `->` at record `r` (node `node`) of record `a`, by check_action_member's steps where the record is
 // a complete struct or union at the node's position without an address space and the member is no bit-field, and its base
 // is no constant or (for `.`) an address constant, a static object's: whether it typed the node.
-static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a)
+// Always inlined into node_machine_rule, its one caller, as main's T had it before the rules for the action's nodes
+// grew T's loop past clang's threshold (#2619).
+static inline __attribute__((always_inline)) bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a)
 {
     TypeTable* types = machine->types;
     const CheckGraph* graph = machine->graph;
@@ -808,7 +810,9 @@ static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node,
 // T's truth test, `!` or a condition at record `r` of record `a`, by check_action_logic's steps for an operand the common
 // conversions take and the action takes as a scalar: whether it typed the node. An integer constant of a type of at most
 // 64 bits is true by its low bits; another constant is made whole for check_action_truth.
-static bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a)
+// Always inlined into node_machine_rule, its one caller, as main's T had it before the rules for the action's nodes
+// grew T's loop past clang's threshold (#2619).
+static inline __attribute__((always_inline)) bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a)
 {
     NodeMachineOperand operand;
     CheckConversion conversion;
@@ -871,7 +875,9 @@ static bool node_machine_operand_truth(const NodeMachine* machine, const NodeMac
 // T's logical operator, `&&` or `||` at record `r` of records `a` and `b`, by check_action_logic's steps for operands the
 // common conversions take, both scalars without a fault (the machine refuses a node of a floating-point environment
 // before, whose promotion the action would make): whether it typed the node. The action is its twin, as for the rules.
-static bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+// Always inlined into node_machine_rule, its one caller, as main's T had it before the rules for the action's nodes
+// grew T's loop past clang's threshold (#2619).
+static inline __attribute__((always_inline)) bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
 {
     TypeTable* types = machine->types;
     NodeMachineOperand left;
