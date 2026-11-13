@@ -291,6 +291,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
+  Member lookup on an atomic struct or union still finds the underlying record's member and keeps its declared type
+  (#2444), including arrays and bit-fields; qualifiers on the atomic wrapper do not qualify the member.
+  `-Watomic-access` defaults to an error at `.` or `->`, can be demoted or suppressed independently, and joins the
+  existing runtime-warning walk: none in unevaluated operands or array bounds, reachable accesses at the function's
+  end, and file-scope accesses after the initializer's own diagnostics. Structural errors retain the usual queued
+  warnings during recovery, and an atomic error at one body's end flushes subsequent bodies' queues. Under `-w`, a
+  valid body skips that queue; erroneous bodies and file-scope initializers retain default-error accesses.
+  A monotonic type-table flag adds member candidates to that walk only in units with atomic
+  records; ordinary units gain no new graph scan or formatting work. The default-warning driver fixtures compare
+  complete Clang output and source/command-line policies through scalar/vector and one/three-lane readers.
   `-Wunsequenced` (#1953, clang's SequenceChecker, `c_check_unsequenced.c`) is on by default, under
   `-Wsequence-point`: two modifications of a variable, or a modification and a read of it, that no sequence point
   orders warn once per variable and full expression, "multiple unsequenced modifications to 'x'" or "unsequenced

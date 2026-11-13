@@ -335,8 +335,13 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
     }
     else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
     {
-        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : node_machine_record_type(machine, a);
-        const uint8_t record_kind = check_action_kind(types, record);
+        TypeId record = type_strip_aligned(types, op == CHECK_OP_ARROW ? type_element(types, type_a) : node_machine_record_type(machine, a));
+        uint8_t record_kind = type_kind(types, record);
+        if (__builtin_expect(record_kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+        {
+            record = type_strip_aligned(types, type_element(types, record));
+            record_kind = type_kind(types, record);
+        }
         const bool bit_field = (node_machine_record_flags(machine, r) & BUSTER_CHECK_BIT_FIELD) != 0;
         const bool loads = !address && !address_value;
         if ((record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) && !bit_field && node_machine_record_member_offset(machine, r) % 8 == 0 &&

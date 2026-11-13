@@ -1016,6 +1016,62 @@ static void check_test_string_literal_blocks(CheckTest* test)
     }
 }
 
+static void check_test_atomic_members(CheckTest* test, TypeTable* table)
+{
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        const uint8_t kind = variant == 0 ? BUSTER_TYPE_KIND_STRUCT : BUSTER_TYPE_KIND_UNION;
+        const TypeId record = type_tag(table, kind, 891001 + variant);
+        const TypeMember members[] = {
+            { .name = 891011, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+            { .name = 891012, .type = type_array(table, BUSTER_TYPE_CHAR, 3), .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+            { .name = 891013, .type = BUSTER_TYPE_UINT, .bit_width = 3 },
+            { .name = 891014, .type = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST), .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+            { .name = 891015, .type = type_atomic(table, BUSTER_TYPE_INT), .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        };
+        const bool complete = type_complete_record(table, record, members, BUSTER_ARRAY_LENGTH(members), (TypeRecordAttributes){ 0 });
+        const TypeId atomic = complete ? type_atomic(table, record) : 0;
+        check_test_expect(test, atomic != 0 && table->atomic_records, "atomic struct and union types enable their rare member-warning candidates");
+        for (uint32_t scalar = 0; atomic != 0 && scalar < 2; scalar += 1)
+        {
+            for (uint32_t arrow = 0; arrow < 3; arrow += 1)
+            {
+                for (uint32_t qualified = 0; qualified < 2; qualified += 1)
+                {
+                    const TypeId object = type_qualify(table, atomic, qualified != 0 ? BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE : 0);
+                    const CheckValue base = {
+                        .type = arrow == 1 ? type_pointer(table, object) : arrow == 2 ? type_array(table, object, 1) : object,
+                        .category = arrow == 1 ? CHECK_RVALUE : CHECK_LVALUE,
+                        .constant_kind = CHECK_CONSTANT_ADDRESS,
+                        .object = 891021,
+                    };
+                    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(members); m += 1)
+                    {
+                        const CheckAction action = {
+                            .op = arrow != 0 ? CHECK_OP_ARROW : CHECK_OP_MEMBER,
+                            .operands = { base },
+                            .member = members[m].name,
+                            .scalar = scalar != 0,
+                        };
+                        const CheckActionResult field = check_test_action(test, table, action);
+                        check_test_expect(test, field.diagnostic == CHECK_DIAG_NONE && field.value.type == members[m].type && field.value.category == CHECK_LVALUE,
+                                          "atomic record member lookup retains the member's type without inheriting the atomic wrapper's qualifiers");
+                        check_test_expect(test, ((field.value.flags & BUSTER_CHECK_BIT_FIELD) != 0) == (members[m].bit_width != BUSTER_TYPE_NOT_BIT_FIELD),
+                                          "atomic record member lookup retains bit-field metadata");
+                        if (m == 1)
+                        {
+                            const CheckAction size = { .op = CHECK_OP_SIZEOF, .operands = { field.value } };
+                            const CheckActionResult result = check_test_action(test, table, size);
+                            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.integer == 3,
+                                              "sizeof an atomic record's array member uses its full declared array type");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static __attribute__((noinline)) void check_test_actions_extra(CheckTest* test, TypeTable* table, const char* clang)
 {
     check_test_void_return_conversion(test, table);
@@ -1025,6 +1081,7 @@ static __attribute__((noinline)) void check_test_actions_extra(CheckTest* test, 
     check_test_record_casts(test, table);
     check_test_mixed_void_conditional(test, table);
     check_test_action_histories(test, table);
+    check_test_atomic_members(test, table);
     check_test_gnu_constant_contexts(test, table);
     check_test_gnu_actions(test, table);
     check_test_pointer_integer_casts(test, table, clang);

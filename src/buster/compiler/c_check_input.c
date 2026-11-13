@@ -397,6 +397,15 @@ typedef enum CheckInputMessage
     // variables must have global storage" at the keyword, '__thread' for GNU's (`detail` 1); recovered, the declaration
     // read on.
     CHECK_INPUT_THREAD_NON_GLOBAL,
+    // A prototype parameter's storage class other than register (#2498), at its keyword; the recovered parameter
+    // keeps its declared type without that storage class.
+    CHECK_INPUT_PARAMETER_STORAGE,
+    // A declaration's K&R identifier list outside a function definition (#2498), at its first parameter name.
+    CHECK_INPUT_IDENTIFIER_LIST_DECLARATION,
+    // An enum's formed fixed base that isn't an ordinary integer (#2492): its type and typedef spelling retained,
+    // clang's "non-integral type 'T' is an invalid underlying type"; a bit-precise type has its own unsupported wording.
+    // The recovered enum keeps its fixed state with int as its base.
+    CHECK_INPUT_ENUM_INVALID_BASE,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -567,6 +576,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION] = "expected identifier or '('",
     [CHECK_INPUT_ASM_LABEL_CONFLICT] = "conflicting asm label",
     [CHECK_INPUT_THREAD_NON_GLOBAL] = "'_Thread_local' variables must have global storage",
+    [CHECK_INPUT_ENUM_INVALID_BASE] = "non-integral type is an invalid underlying type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -4566,8 +4576,9 @@ static bool check_input_specifier_combination(const TypeTable* types, TypeId bas
 
 // An enum's fixed underlying type (C23's `enum E : T`, which clang takes in every language mode): from `colon` + 1 to
 // `end`, the parser's specifiers there, which are type keywords, qualifiers, typedef names and _Atomic. It is an
-// integer type of any width (bool too, but not a _BitInt or an enum), its qualifiers dropped. Returns 0 for none,
-// reported at its first token as clang reports it. (check_input_specifiers, which reads a tag, isn't called here.)
+// integer type of any width (bool too, but not a _BitInt or an enum), its qualifiers dropped. A formed non-integral
+// base reports clang's error and recovers as int (#2492); an unformed type returns 0. (check_input_specifiers, which
+// reads a tag, isn't called here.)
 static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t colon, uint32_t end)
 {
     const Parser* parser = reader->parser;
@@ -4585,6 +4596,8 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     bool skipping = false;
     bool attributed = false;
     bool complex_seen = false;
+    bool complex_type = false;
+    bool atomic = false;
     uint32_t sign_seen = 0;
     bool attempt = true;
     while (attempt)
@@ -4597,6 +4610,8 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         base = 0;
         valid = colon + 1 < end;
         complex_seen = false;
+        complex_type = false;
+        atomic = false;
         sign_seen = 0;
         for (uint32_t i = colon + 1; valid && i < end; i += 1)
         {
@@ -4612,6 +4627,23 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
             {
                 // const and volatile dropped, as clang drops them (with a warning); restrict, which needs a pointer, refused.
                 valid = (qualifiers & BUSTER_TYPE_RESTRICT) == 0;
+            }
+            else if (kind == PARSE_KIND_ATOMIC && (i + 1 >= end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
+            {
+                if (atomic)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_ATOMIC);
+                }
+                atomic = true;
+            }
+            else if (check_declspec_complex_name(name))
+            {
+                if (complex_seen)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_COMPLEX_C99);
+                }
+                complex_seen = true;
+                complex_type = true;
             }
             else if (kind == PARSE_KIND_ATTRIBUTE)
             {
@@ -4658,7 +4690,9 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
             else if (kind == PARSE_KIND_TYPE && base == 0)
             {
                 base = name == C_NAME_CHAR ? BUSTER_TYPE_CHAR : name == C_NAME_BOOL || name == C_NAME_BOOL_C99 ? BUSTER_TYPE_BOOL :
-                       name == C_NAME_INT128 ? BUSTER_TYPE_INT128 : name == C_NAME_FLOAT ? BUSTER_TYPE_FLOAT : name == C_NAME_DOUBLE ? BUSTER_TYPE_DOUBLE : 0;
+                       name == C_NAME_INT128 ? BUSTER_TYPE_INT128 : name == C_NAME_FLOAT ? BUSTER_TYPE_FLOAT : name == C_NAME_DOUBLE ? BUSTER_TYPE_DOUBLE :
+                       name == C_NAME_VOID ? BUSTER_TYPE_VOID : name == C_NAME_FP16 ? BUSTER_TYPE_HALF : name == C_NAME_FLOAT16 ? BUSTER_TYPE_FLOAT16 :
+                       name == C_NAME_FLOAT128 ? BUSTER_TYPE_FLOAT128 : name == C_NAME_BF16 ? BUSTER_TYPE_BF16 : 0;
                 valid = base != 0;
             }
             else if (kind == PARSE_KIND_IDENTIFIER && base == 0)
@@ -4682,7 +4716,8 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         }
         if (valid && base == 0)
         {
-            base = shorts ? (signedness == 2 ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
+            base = complex_type && !integer_seen && !longs && !shorts && !signedness ? BUSTER_TYPE_DOUBLE :
+                   shorts ? (signedness == 2 ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
                    longs == 2 ? (signedness == 2 ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) :
                    longs == 1 ? (signedness == 2 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
                                 (signedness == 2 ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT);
@@ -4697,9 +4732,21 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
             valid = !longs && !shorts && !integer_seen;
             base = signedness == 2 ? BUSTER_TYPE_UINT128 : base;
         }
+        else if (valid && base == BUSTER_TYPE_DOUBLE)
+        {
+            valid = longs <= 1 && !shorts && !signedness && !integer_seen;
+            base = longs != 0 ? BUSTER_TYPE_LONG_DOUBLE : base;
+        }
         else if (valid)
         {
             valid = !longs && !shorts && !signedness && !integer_seen;
+        }
+        if (valid && complex_type)
+        {
+            const uint8_t code = type_arithmetic_code(reader->types, base);
+            valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
+            base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
+            valid &= base != 0;
         }
         attempt = !valid && !skipping && !attributed && colon + 1 < end && check_input_specifiers_dropped(parser, colon + 1, end, false, &drops);
         skipping |= attempt;
@@ -4711,37 +4758,88 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         check_input_report_specifiers(reader, colon + 1, end, colon + 1, true);
         valid = valid && reader->output->report_count != count && check_input_recover_reports(reader, count);
     }
-    const TypeId integer = valid ? type_unqualified(type_strip_aligned(reader->types, base)) : 0;
-    valid = valid && type_kind(reader->types, integer) == BUSTER_TYPE_KIND_INTEGER;
+    if (valid && atomic)
+    {
+        base = check_input_type_result(reader, type_atomic(reader->types, base));
+        valid = base != 0;
+    }
+    // Clang's TypeLoc begins at the written type, sign or width, past qualifiers and attributes.
+    // DeclSpec's sign error still leaves that written beginning as the base's location (`unsigned float`).
+    uint32_t at = colon + 1;
+    uint32_t complex_at = BUSTER_CHECK_NONE;
+    uint32_t ignored_qualifiers = 0;
+    while (at < end && (check_input_qualifier(parser, at, &ignored_qualifiers) || parser->tokens.kinds[at] == PARSE_KIND_ATOMIC ||
+                        check_declspec_complex_name(parser->tokens.names[at]) || check_input_attribute_starts(parser, at, end)))
+    {
+        complex_at = complex_at == BUSTER_CHECK_NONE && check_declspec_complex_name(parser->tokens.names[at]) ? at : complex_at;
+        at = check_input_attribute_starts(parser, at, end) ? check_input_skip_attributes(parser, at, end) : at + 1;
+    }
+    at = at == end && complex_at != BUSTER_CHECK_NONE ? complex_at : at;
+    TypeId integer = valid ? type_unqualified(type_strip_aligned(reader->types, base)) : 0;
+    const bool atomic_type = valid && type_kind(reader->types, integer) == BUSTER_TYPE_KIND_ATOMIC;
+    const uint32_t dropped = (qualifiers | type_qualifiers(base)) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+    if (atomic_type)
+    {
+        integer = type_unqualified(type_strip_aligned(reader->types, type_element(reader->types, integer)));
+    }
+    if (valid && at < end && (atomic || atomic_type))
+    {
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_UNDERLYING_ATOMIC_QUALIFIER,
+            .kind = CHECK_WARNING_EVENT_UNDERLYING_ATOMIC_QUALIFIER,
+            .token = at,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_DEFAULT_ERROR,
+            .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+            .completion = end,
+            .suborder = 16,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+    if (valid && dropped != 0 && at < end)
+    {
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER,
+            .kind = CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+            .token = at,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+            .completion = end,
+            .suborder = 17,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = dropped },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+    if (valid && type_kind(reader->types, integer) != BUSTER_TYPE_KIND_INTEGER)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report_typed(reader, at, CHECK_INPUT_ENUM_INVALID_BASE, integer, BUSTER_CHECK_NONE, 0);
+        if (reader->output->report_count > before)
+        {
+            CheckInputReport* report = &reader->output->reports[before];
+            // The base's typedef itself is its sugar, rather than a declaration whose preceding specifiers name it.
+            for (uint32_t t = colon + 1; report->type_spelling == 0 && t < end; t += 1)
+            {
+                const uint32_t declaration = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[t] : BUSTER_CHECK_NONE;
+                if (declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_TYPEDEF)
+                {
+                    report->type_spelling = declaration;
+                }
+            }
+            report->note_kind = CHECK_INPUT_NOTE_NONE;
+            report->detail = type_kind(reader->types, integer) == BUSTER_TYPE_KIND_BIT_INT;
+            report->completion = end + 1;
+            report->suborder = 18;
+            // DeclSpec can have reported another error at the same written type (`unsigned float`). Both are primary.
+            report->repeated = true;
+        }
+        valid = reader->output->report_count > before && check_input_recover_reports(reader, before);
+        integer = valid ? BUSTER_TYPE_INT : 0;
+    }
     if (!valid)
     {
         check_input_report(reader, colon + 1 < end ? colon + 1 : colon, CHECK_INPUT_DECLARATION);
-    }
-    else
-    {
-        // Its const and volatile, written or a typedef's, which clang drops with -Wunderlying-cv-qualifier-ignored (#1952),
-        // once, at the base's first token that isn't a qualifier (its type's location).
-        const uint32_t dropped = (qualifiers | type_qualifiers(base)) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
-        uint32_t at = colon + 1;
-        uint32_t ignored_qualifiers = 0;
-        while (at + 1 < end && (check_input_qualifier(parser, at, &ignored_qualifiers) || check_input_attribute_starts(parser, at, end)))
-        {
-            at = check_input_attribute_starts(parser, at, end) ? check_input_skip_attributes(parser, at, end) : at + 1;
-        }
-        if (dropped != 0 && at < end)
-        {
-            const CheckWarningEvent event =
-            {
-                .id = CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER,
-                .kind = CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
-                .token = at,
-                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
-                .completion = end,
-                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = dropped },
-            };
-            check_input_warning_event(reader, &event, NULL, 0);
-        }
     }
     for (uint32_t i = colon; valid && i < end; i += 1)
     {
@@ -8397,7 +8495,22 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     uint32_t storage;
                     const uint32_t start = i;
                     const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline, true);
-                    valid = parameter != 0 && !is_typedef && !is_inline && (storage == 0 || storage == C_NAME_REGISTER);
+                    valid = parameter != 0 && !is_typedef && !is_inline;
+                    if (valid && storage != 0 && storage != C_NAME_REGISTER)
+                    {
+                        // Clang drops the invalid parameter storage class and keeps reading its type and the rest of
+                        // the declaration, so later parameters and later declarations retain their own diagnostics.
+                        uint32_t token = start;
+                        while (token < i && parser->tokens.names[token] != storage)
+                        {
+                            token += 1;
+                        }
+                        const uint32_t before = reader->output->report_count;
+                        check_input_report(reader, token < i ? token : start, CHECK_INPUT_PARAMETER_STORAGE);
+                        check_input_lane_refuse(reader, run->recover && reader->lane, "invalid parameter storage classes recover in source order");
+                        valid = run->recover && !reader->lane && check_input_recover_reports(reader, before);
+                        storage = 0;
+                    }
                     if (valid)
                     {
                         frames[depth++] = check_input_declarator_frame(parameter, i, close, false, true, storage, reader->specifier_abi_origin, reader->specifier_noderef);
@@ -11590,8 +11703,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             if (next == PARSE_KIND_SEMI || next == PARSE_KIND_COMMA || next == PARSE_KIND_EQUAL || is_typedef)
             {
                 // An identifier list outside a definition (C17 6.7.6.3p3).
-                check_input_report(reader, parameters != BUSTER_CHECK_NONE ? parameters : name, CHECK_INPUT_DECLARATION);
-                valid = false;
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, parameters != BUSTER_CHECK_NONE ? parameters : name, CHECK_INPUT_IDENTIFIER_LIST_DECLARATION);
+                check_input_lane_refuse(reader, reader->lane, "an invalid identifier-list declaration recovers in source order");
+                valid = !reader->lane && check_input_recover_reports(reader, before);
+                invalid |= valid;
             }
             else
             {

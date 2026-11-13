@@ -2574,6 +2574,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                      payload->data == BUSTER_TYPE_VOLATILE ? "'volatile' qualifier in enumeration underlying type ignored" :
                                                              "'const' qualifier in enumeration underlying type ignored";
             break;
+        case CHECK_WARNING_EVENT_UNDERLYING_ATOMIC_QUALIFIER:
+            result = "'_Atomic' qualifier ignored; operations involving the enumeration type will be non-atomic";
+            break;
         case CHECK_WARNING_EVENT_STANDALONE_SPECIFIER:
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;

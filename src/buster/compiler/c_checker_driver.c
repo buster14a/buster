@@ -123,6 +123,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
     {
         case CHECK_INPUT_UNSUPPORTED: result = "construct is not yet supported by the type checker"; break;
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
+        case CHECK_INPUT_PARAMETER_STORAGE: result = "invalid storage class specifier in function declarator"; break;
+        case CHECK_INPUT_IDENTIFIER_LIST_DECLARATION: result = "a parameter list without types is only allowed in a function definition"; break;
         case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
         case CHECK_INPUT_ARRAY_LITERAL_MISMATCH: result = "cannot initialize array with array of another type"; break;
         case CHECK_INPUT_FUNCTION_RETURN: result = "function cannot return array or function type"; break;
@@ -238,6 +240,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
         case CHECK_INPUT_ATTRIBUTES_MISPLACED: result = "misplaced attributes; expected attributes here"; break;
         case CHECK_INPUT_ENUM_NOT_REPRESENTABLE: result = "enumerator value is not representable in the underlying type"; break;
+        case CHECK_INPUT_ENUM_INVALID_BASE: result = "non-integral type is an invalid underlying type"; break;
         case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
         case CHECK_INPUT_CONVENTION_CHANGE: result = "function declared here was previously declared with another calling convention"; break;
         case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
@@ -944,6 +947,11 @@ struct CheckDriverDiagnostic
     // source's node plus one (0 for none) and its target.
     uint32_t default_source;
     TypeId default_target;
+    // A duplicate case/default makes clang discard that switch before its jump-scope check (#2498).
+    bool switch_conflict;
+    // A parameter's unknown type name corrected to a specifier (#2498) precedes that specifier's own errors at the
+    // same token, and is retained alongside them rather than deduplicated as another account of the same error.
+    bool parameter_correction;
 };
 
 // A conversion clang warns of with an error by default and makes (#1969, check_driver_report_default_error), whose source a
@@ -3108,7 +3116,10 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                 }
                 if (warning != 0)
                 {
-                    const uint32_t located = check_warning_graph_first(graph, parser, argument);
+                    // A call converts the whole argument, including its enclosing parentheses (#2521), whose
+                    // opening token has no graph node. The operand-only builtin path keeps its existing anchor.
+                    const uint32_t located = listed ? check_semantic_argument_begin(parser, graph, node, i) :
+                                             check_warning_graph_first(graph, parser, argument);
                     const CheckWarningSeverity severity = check_driver_legacy_severity(pp, input, located, warning, (enabled & warning) == 0);
                     if (severity != CHECK_WARNING_IGNORE)
                     {
@@ -3757,6 +3768,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t index = argument_index - 1;
         source = graph->argument_nodes[graph->argument_offsets[node] + index];
         *argument = source;
+        at = check_semantic_argument_begin(parser, graph, node, index);
         const uint32_t callee = graph->operand0[node];
         // An overloadable call's selected candidate (#2480): C overloading takes an incompatible pointer argument as a
         // conversion, whose error then names that candidate's parameter, not the latest declaration's.
@@ -3901,7 +3913,7 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                     {
                         const CheckReport report = { .node = node, .token = at, .message = CHECK_MESSAGE_ACTION, .diagnostic = CHECK_DIAG_INCOMPATIBLE };
                         // A call's argument's takes its place among the call's conversion warnings, as its error does (#2481).
-                        const uint32_t first = listed ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+                        const uint32_t first = listed ? check_semantic_argument_begin(parser, graph, node, i) : BUSTER_CHECK_NONE;
                         const uint64_t suborder = first < count ? (uint64_t)parser->tokens.sources[first] + 1u : 0;
                         check_driver_default_error_report(parser, pp, input, stream, types, &spell, &report, id, parser->tokens.sources[token < count ? token : at],
                                                           suborder, scratch);
@@ -4404,6 +4416,57 @@ static const char* check_driver_call_count(const Parser* parser, Preprocessor* p
     return result;
 }
 
+// The switch owning the case whose keyword, value or colon is `token`. This cold walk is used only for jump reports
+// and duplicate-case constraints; independent and enclosing switches retain their own jump-scope diagnostics.
+static uint32_t check_driver_case_owner(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t steps = 0; token < count && parser->tree.roles[token] != PARSE_ROLE_CLOSE_CASE && steps < count; steps += 1)
+    {
+        token = parser->tree.parents[token];
+    }
+    return token < count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CASE ? check_sparse_get(input->control_owners, token) : BUSTER_CHECK_NONE;
+}
+
+// ActOnFinishSwitchStmt drops a switch whose cases conflict. Jumps originating in its subtree, including nested
+// switches' case jumps, and direct gotos to its labels never reach clang's function JumpScopeChecker (#2498).
+// Keep the reader's actual reports intact and filter only publication for that discarded subtree.
+static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input, const CheckInputReport* report,
+                                   const CheckDriverDiagnostic* extra, uint32_t extra_count)
+{
+    bool kept = true;
+    if (report->message >= CHECK_INPUT_JUMP_GOTO && report->message <= CHECK_INPUT_JUMP_ASM)
+    {
+        const uint32_t count = parser->tokens.count;
+        const uint32_t source = report->message == CHECK_INPUT_JUMP_SWITCH ? check_driver_case_owner(parser, input, report->token) : report->token;
+        // A direct goto has exactly one retained target. An indirect/asm report's subject is only one representative
+        // of its possible targets, so discarding that label alone cannot discard the whole report.
+        const uint32_t target = report->message == CHECK_INPUT_JUMP_GOTO ? check_sparse_get(input->label_targets, report->token) : BUSTER_CHECK_NONE;
+        const uint32_t endpoints[] =
+        {
+            source,
+            target,
+        };
+        for (uint32_t i = 0; kept && source < count && i < extra_count; i += 1)
+        {
+            if (extra[i].switch_conflict)
+            {
+                const uint32_t discarded = check_driver_case_owner(parser, input, extra[i].token);
+                for (uint32_t side = 0; kept && discarded < count && side < BUSTER_ARRAY_LENGTH(endpoints); side += 1)
+                {
+                    uint32_t ancestor = endpoints[side];
+                    for (uint32_t steps = 0; ancestor < count && ancestor != discarded && steps < count; steps += 1)
+                    {
+                        ancestor = parser->tree.parents[ancestor];
+                    }
+                    kept = ancestor != discarded;
+                }
+            }
+        }
+    }
+    return kept;
+}
+
 // `from`: the first token whose reports, warnings, pragmas' diagnostics and packed members' warnings it publishes, 0 for
 // all of them (check_driver_rejected_common's second reading publishes those past where the first one stopped).
 static bool check_driver_reports_from(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
@@ -4460,7 +4523,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             const uint32_t located = input->reports[i].sort != 0 ? input->reports[i].sort : input->reports[i].token;
             const uint32_t token = located < count ? located : count;
             // An invalid declaration's use publishes nothing (#1447, CHECK_INPUT_INVALID_USE).
-            if (input->reports[i].message != CHECK_INPUT_INVALID_USE &&
+            if (input->reports[i].message != CHECK_INPUT_INVALID_USE && check_driver_jump_kept(parser, input, input->reports + i, extra, extra_count) &&
                 (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | i;
@@ -4558,13 +4621,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             const bool input_repeated = sequence < input->report_count && input->reports[sequence].repeated;
             const bool repeated = input_repeated ||
                                   (sequence >= input->report_count + stream_reports && extra_index < extra_count && extra[extra_index].repeated);
+            const bool parameter_correction = sequence >= input->report_count + stream_reports && extra_index < extra_count &&
+                                              extra[extra_index].parameter_correction;
             // A typo's correction (#1447) is not its token's error but a name's: the expression it recovers to keeps its own
             // error at that token, as clang's does (`static int s = countr;`'s non-constant one), once.
             const uint32_t last = first_count != 0 ? (uint32_t)firsts[first_count - 1] : BUSTER_CHECK_NONE;
             const bool corrected = last < input->report_count && input->reports[last].message == CHECK_INPUT_UNDECLARED_CORRECTED;
             if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated || corrected)
             {
-                firsts[first_count++] = firsts[i];
+                const uint64_t key = firsts[i];
+                uint32_t at = first_count;
+                while (parameter_correction && at != 0 && (firsts[at - 1] >> 32) == (key >> 32))
+                {
+                    firsts[at] = firsts[at - 1];
+                    at -= 1;
+                }
+                firsts[at] = key;
+                first_count += 1;
             }
             else
             {
@@ -4992,8 +5065,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
                                                                     &conversion_note_token, &conversion_note, &conversion_argument, scratch);
                     }
-                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ?
-                                                    check_warning_graph_first(stream->graph, parser, conversion_argument) : BUSTER_CHECK_NONE;
+                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ? x86_location : BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
@@ -5434,7 +5506,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "definition of builtin function '%.*s'", (int)intern_length(pp->table, name),
                                                   (const char*)intern_bytes(pp->table, name));
                         }
-                        else if (phase == 0 && kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE)
+                        else if (phase == 0 && (kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE || kind == CHECK_INPUT_ENUM_INVALID_BASE))
                         {
                             // The underlying type as clang prints it, its typedef's name first (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
@@ -5450,13 +5522,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                            (String8){ 0 };
-                            char value[32] = "";
-                            if (report->detail == 1)
+                            if (kind == CHECK_INPUT_ENUM_INVALID_BASE)
                             {
-                                snprintf(value, sizeof(value), " %" PRIu64, report->value);
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      report->detail != 0 ? "%.*s is an invalid underlying type" :
+                                                                            "non-integral type %.*s is an invalid underlying type",
+                                                      (int)type.length, type.pointer);
                             }
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "enumerator value%s is not representable in the underlying type %.*s", value,
-                                                  (int)type.length, type.pointer);
+                            else
+                            {
+                                char value[32] = "";
+                                if (report->detail == 1)
+                                {
+                                    snprintf(value, sizeof(value), " %" PRIu64, report->value);
+                                }
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "enumerator value%s is not representable in the underlying type %.*s", value,
+                                                      (int)type.length, type.pointer);
+                            }
                             arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && (kind == CHECK_INPUT_VECTOR_ELEMENT || kind == CHECK_INPUT_FUNCTION_RETURN || kind == CHECK_INPUT_ARRAY_FUNCTIONS ||
@@ -6296,6 +6378,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     else
                     {
                         check_driver_diagnose(parser, pp, located, message);
+                    }
+                    if (types->atomic_records && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_ACTION &&
+                        stream->reports[index].diagnostic == CHECK_DIAG_MEMBER && node < input->graph.count &&
+                        check_common_atomic_member(&input->graph, stream, types, node))
+                    {
+                        // The erroneous lookup is removed by the common-warning recovery reading. Its atomic
+                        // diagnostic still belongs to the original expression's queue, flushed by this error.
+                        check_common_atomic_report(parser, pp, input, node, true, scratch);
                     }
                 }
                 report += 1;
@@ -7779,6 +7869,8 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                         .repeated = true,
                         .note_token = constraint->previous,
                         .note = constraint->previous != BUSTER_CHECK_NONE ? "previous case defined here" : NULL,
+                        .switch_conflict = constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE ||
+                                           constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
                     };
                 }
             }
@@ -10603,7 +10695,8 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
             static const char expected[] = "expected identifier or '('";
             if (viewed)
             {
-                additional[result] = (CheckDriverDiagnostic){ .token = token, .message = message, .position = token, .note_token = declared, .note = note };
+                additional[result] = (CheckDriverDiagnostic){ .token = token, .message = message, .position = token, .repeated = edits->parameters[e],
+                                                            .note_token = declared, .note = note, .parameter_correction = edits->parameters[e] };
                 result += 1;
                 additional[result] = (CheckDriverDiagnostic){ .token = token, .message = expected, .position = token, .repeated = true };
                 result += value ? 1u : 0u;
@@ -11331,6 +11424,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 .repeated = true,
                                 .note_token = constraint->previous,
                                 .note = constraint->previous != BUSTER_CHECK_NONE ? "previous case defined here" : NULL,
+                                .switch_conflict = constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE ||
+                                                   constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
                             };
                         }
                         if (!listed && ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE))
@@ -11417,6 +11512,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 .repeated = true,
                                 .note_token = constraint->previous,
                                 .note = constraint->previous != BUSTER_CHECK_NONE ? "previous case defined here" : NULL,
+                                .switch_conflict = constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE ||
+                                                   constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
                             };
                         }
                         if (!listed)
@@ -11478,7 +11575,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
-                        if (!quiet)
+                        if (!quiet || types.atomic_records)
                         {
                             // (The scratch's flushed marks go with the common warnings' own, which give it back past them.)
                             const uint64_t flushed_mark = scratch->length;
