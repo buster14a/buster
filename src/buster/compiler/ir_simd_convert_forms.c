@@ -314,6 +314,39 @@ static const uint16_t ir_simd_quadword_op_forms[2][3] = {
     { X86_FORM_VPSADBW_X_X_XM128_EVEX, X86_FORM_VPSADBW_Y_Y_YM256_EVEX, X86_FORM_VPSADBW_Z_Z_ZM512 },
 };
 
+// The funnel shifts (#1840, BUSTER_IR_INTRINSIC_FUNNEL), by the direction (left, right), the lanes (words to quadwords)
+// and the width: VBMI2's by a vector of counts, vpshldvw to vpshldvq into the high half's register (reg), the low half
+// in vvvv, and vpshrdvw to vpshrdvq into the low half's (reg), the high half in vvvv, the counts in rm; and by an
+// immediate, vpshldw to vpshldq and vpshrdw to vpshrdq (VBMI2's, the high half in vvvv for a left shift and in rm for a
+// right one); and the rotates by an immediate of doublewords and quadwords, AVX512F's vprold to vprorq of rm into vvvv.
+static const uint16_t ir_simd_funnel_forms[2][3][3] = {
+    {
+        { X86_FORM_VPSHLDVW_X_X_XM128, X86_FORM_VPSHLDVW_Y_Y_YM256, X86_FORM_VPSHLDVW_Z_Z_ZM512 },
+        { X86_FORM_VPSHLDVD_X_X_XM128, X86_FORM_VPSHLDVD_Y_Y_YM256, X86_FORM_VPSHLDVD_Z_Z_ZM512 },
+        { X86_FORM_VPSHLDVQ_X_X_XM128, X86_FORM_VPSHLDVQ_Y_Y_YM256, X86_FORM_VPSHLDVQ_Z_Z_ZM512 },
+    },
+    {
+        { X86_FORM_VPSHRDVW_X_X_XM128, X86_FORM_VPSHRDVW_Y_Y_YM256, X86_FORM_VPSHRDVW_Z_Z_ZM512 },
+        { X86_FORM_VPSHRDVD_X_X_XM128, X86_FORM_VPSHRDVD_Y_Y_YM256, X86_FORM_VPSHRDVD_Z_Z_ZM512 },
+        { X86_FORM_VPSHRDVQ_X_X_XM128, X86_FORM_VPSHRDVQ_Y_Y_YM256, X86_FORM_VPSHRDVQ_Z_Z_ZM512 },
+    },
+};
+static const uint16_t ir_simd_rotate_forms[2][2][3] = {
+    {
+        { X86_FORM_VPROLD_X_XM128_IMM8, X86_FORM_VPROLD_Y_YM256_IMM8, X86_FORM_VPROLD_Z_ZM512_IMM8 },
+        { X86_FORM_VPROLQ_X_XM128_IMM8, X86_FORM_VPROLQ_Y_YM256_IMM8, X86_FORM_VPROLQ_Z_ZM512_IMM8 },
+    },
+    {
+        { X86_FORM_VPRORD_X_XM128_IMM8, X86_FORM_VPRORD_Y_YM256_IMM8, X86_FORM_VPRORD_Z_ZM512_IMM8 },
+        { X86_FORM_VPRORQ_X_XM128_IMM8, X86_FORM_VPRORQ_Y_YM256_IMM8, X86_FORM_VPRORQ_Z_ZM512_IMM8 },
+    },
+};
+// A rotate of words by an immediate: VBMI2's vpshldw and vpshrdw of one vector twice.
+static const uint16_t ir_simd_word_rotate_forms[2][3] = {
+    { X86_FORM_VPSHLDW_X_X_XM128_IMM8, X86_FORM_VPSHLDW_Y_Y_YM256_IMM8, X86_FORM_VPSHLDW_Z_Z_ZM512_IMM8 },
+    { X86_FORM_VPSHRDW_X_X_XM128_IMM8, X86_FORM_VPSHRDW_Y_Y_YM256_IMM8, X86_FORM_VPSHRDW_Z_Z_ZM512_IMM8 },
+};
+
 // The byte shuffles by an immediate (#1840): vpshufd's doublewords, vpshuflw's low and vpshufhw's high words and vpslldq's
 // and vpsrldq's byte shifts move the same bytes within every 16-byte lane, so each is the IR's shuffle (vpshufb) of its
 // vector by a constant, their indices (ir_simd_shuffle_immediate_indices). Their EVEX forms by the kind and the width,

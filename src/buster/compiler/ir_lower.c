@@ -956,6 +956,32 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->funnel)
+    {
+        // A funnel shift (#1840), its flags its lanes and direction, its counts the third operand, in the extra array; a
+        // rotate's of its vector twice by its count, a constant in each lane.
+        uint32_t counts = operation->rotate ? BUSTER_IR_NONE : operands[2];
+        if (operation->rotate)
+        {
+            const uint32_t lane_bytes = 1u << (operation->immediate & 3);
+            uint8_t lanes[64] = {0};
+            for (uint32_t at = 0; at < ir_type_bits[type] / 8; at += lane_bytes)
+            {
+                lanes[at] = operation->part;
+            }
+            uint64_t words[8] = {0};
+            memcpy(words, lanes, sizeof(lanes));
+            counts = ir_typed_vector_constant(sink, type, words);
+        }
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = counts;
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operation->rotate ? operands[0] : operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_FUNNEL, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
     else if (operation->quadword_op)
     {
         // A quadword operation (#1840), its operation in its flags.

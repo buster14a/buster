@@ -443,6 +443,10 @@ where a mask's AND takes it.
 The multishifts and sums of absolute differences are its `quadword_op` (#1840,
 its "Quadword operations"), `BUSTER_TIER1_VECTOR_QUADWORD_OP`:
 `vpmultishiftqb` or `vpsadbw`.
+The funnel shifts and rotates are its `funnel` (#1840, its "Funnel shifts and
+rotates"), `BUSTER_TIER1_VECTOR_FUNNEL`: a rotate by an immediate where its
+halves are one value and its counts a constant, else `vpshldv` or `vpshrdv`
+into the tied half's register.
 
 ### Inlining (#1282)
 

@@ -1027,6 +1027,102 @@ static void ir_test_permute2s(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 3 * 2 * 4, "permute2 is admitted at every width and lanes, its slot first or not");
 }
 
+// The funnel shifts (#1840): both verifiers admit funnel of three vectors of the result's type exactly at lanes of 2, 4 or
+// 8 bytes and either direction (flags 1 to 3 and 5 to 7), refusing other flags and counts of another width; and the
+// model gives C's funnel shift of each lane, a:b's high half shifted left or its low half shifted right by the count
+// modulo the lanes' bits, on random vectors whose counts are often past the lanes' bits or zero.
+static void ir_test_funnels(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x510e527f9b05688c);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType type = (IrType)(IR_V4I32 + width);
+                const bool admitted = other == 0 && (flags & 3) != 0 && flags <= 7;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .extra_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "funnel verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 5;
+                ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_UNDEF, other == 0 ? type : (IrType)(IR_V4I32 + (width + 1) % 3), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 3, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_FUNNEL, 0));
+                ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.extra[0] = 2;
+                function.flags[3] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a funnel shift is admitted exactly at its lanes and direction, its three operands of its type");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * 6, "funnel shifts are admitted at every width, lanes and direction");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 6 * 4; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t size = 1 + (trial / 3) % 3;
+        const uint32_t right = (trial / 9) % 2;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const uint32_t bits = 8 * element;
+        IrSimdValue values[3] = { 0 };
+        for (uint32_t v = 0; v < 3; v += 1)
+        {
+            for (uint32_t w = 0; w < bytes / 8; w += 1)
+            {
+                values[v].words[w] = ir_test_random(&state);
+            }
+        }
+        // Counts of 0, of the lanes' bits and past them, and small ones.
+        uint8_t* counts = (uint8_t*)values[2].words;
+        for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+        {
+            const uint64_t random = ir_test_random(&state);
+            const uint64_t count = (random & 3) == 0 ? 0 : (random & 3) == 1 ? bits : (random & 3) == 2 ? bits + (random >> 8) % bits : (random >> 8) % bits;
+            memcpy(counts + lane * element, &count, element);
+        }
+        IrSimdValue wanted = { 0 };
+        for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+        {
+            uint64_t high = 0;
+            uint64_t low = 0;
+            uint64_t count = 0;
+            memcpy(&high, (const uint8_t*)values[0].words + lane * element, element);
+            memcpy(&low, (const uint8_t*)values[1].words + lane * element, element);
+            memcpy(&count, counts + lane * element, element);
+            count %= bits;
+            // C's fshl and fshr: the lanes' 2 * bits of high:low, shifted, a bit at a time.
+            uint64_t value = 0;
+            for (uint32_t bit = 0; bit < bits; bit += 1)
+            {
+                const uint32_t from = right != 0 ? bit + (uint32_t)count : bit + bits - (uint32_t)count;
+                const uint32_t at = from % (2 * bits);
+                const uint64_t source = at >= bits ? high >> (at - bits) : low >> at;
+                value |= (source & 1) << bit;
+            }
+            memcpy((uint8_t*)wanted.words + lane * element, &value, element);
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &values[0], &values[1], &values[2] };
+        const IrSimdAction action = { .operation = IR_SIMD_FUNNEL, .result = shape, .operands = { shape, shape, shape }, .index = (uint8_t)(size | right << 2) };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && memcmp(value.words, wanted.words, bytes) == 0;
+    }
+    ir_test_expect(test, exact, "the model's funnel shift gives C's fshl and fshr of each lane");
+}
+
 // The bitwise functions of three vectors (#1840): both verifiers admit ternlog of three vectors of the result's type with
 // any truth table, and refuse a third operand of another width; the model is checked against each bit's table entry.
 static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
@@ -2044,6 +2140,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_lane_unaries(test, output, scratch);
     ir_test_bitshuffles(test, output, scratch);
     ir_test_quadword_ops(test, output, scratch);
+    ir_test_funnels(test, output, scratch);
     ir_test_frounds(test, output, scratch);
     ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);

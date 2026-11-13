@@ -150,6 +150,10 @@ struct IrSimdTypedOperation
     uint8_t shuffle_immediate;
     // A quadword operation (#1840, ir_simd_typed_quadword_op): whether the row is one, its flags in `immediate`.
     bool quadword_op;
+    // A funnel shift (#1840, ir_simd_typed_funnel): whether the row is one, its flags in `immediate`; and whether it is a
+    // rotate by an immediate (`rotate`, its count in `part`), the funnel of its vector twice by that constant count.
+    bool funnel;
+    bool rotate;
     // A bit shuffle into a mask (#1840, ir_simd_typed_bitshuffle): whether the row is one, its bytes' mask ANDed with its
     // third operand, the writemask, as a comparison's (`lane` the bytes'), left out where the typed stream's writemask
     // has every lane.
@@ -2201,6 +2205,89 @@ static IrSimdTypedStatus ir_simd_typed_cvtt(const Tier0Operation* source, uint64
     return status;
 }
 
+// The funnel shifts (#1840): clang's __builtin_elementwise_fshl and fshr of vectors of words, doublewords or quadwords,
+// three vectors of the result's width (16, 32 or 64 bytes), as c_check_program_vector_builtins.c writes them: fshl's one
+// record of ir_simd_funnel_forms' left form, VECTOR(0) (reg, a, the high half and the destination), VECTOR(1) (vvvv, b,
+// the low half) and VECTOR(2) (rm, the counts); fshr's the right form of VECTOR(1) (reg, b, the low half), VECTOR(0)
+// (vvvv, a) and VECTOR(2), then VECTOR(1) moved whole into VECTOR(0). And the rotates by an immediate, the builtins'
+// __builtin_ia32_prold, prolq, prord and prorq at each width: one vector of the result's width, one record of
+// ir_simd_rotate_forms' form of VECTOR(0) (rm) into VECTOR(0) (vvvv, its reg the opcode's extension) by the immediate,
+// whose low 8 bits are the instruction's. Each register-direct and undecorated. The IR's funnel of a, b and the counts
+// (a rotate's of its vector twice and its count modulo the lanes' bits in each lane, a constant); its features its
+// form's (VBMI2 for the funnels, BW for words), AVX512F's, VL's below 64 bytes and the vectors' moves.
+static IrSimdTypedStatus ir_simd_typed_funnel(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    bool shaped = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && (source->operand_count == 1 || source->operand_count == 3);
+    for (uint32_t j = 0; shaped && j < source->operand_count; j += 1)
+    {
+        shaped = source->operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[j] == bytes;
+    }
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    uint16_t form = X86_FORM_NONE;
+    for (uint32_t right = 0; shaped && source->operand_count == 3 && right < 2; right += 1)
+    {
+        for (uint32_t size = 0; size < 3; size += 1)
+        {
+            const X86Instruction expected = {
+                .form = ir_simd_funnel_forms[right][size][width],
+                .reg = right != 0 ? v1 : v0,
+                .vvvv = right != 0 ? v0 : v1,
+                .rm = v2,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            const X86Instruction moved = { .form = bytes == 16 ? X86_FORM_VMOVDQU64_X_XM128 : bytes == 32 ? X86_FORM_VMOVDQU64_Y_YM256 : X86_FORM_VMOVDQU64_Z_ZM512, .reg = v0, .rm = v1,
+                                           .mode = BUSTER_X86_REGISTER_DIRECT };
+            const bool matched = memcmp(record, &expected, sizeof(expected)) == 0 &&
+                                 (right != 0 ? source->record_count == 2 && memcmp(&source->records[1], &moved, sizeof(moved)) == 0 : source->record_count == 1);
+            if (matched)
+            {
+                candidate.funnel = true;
+                candidate.immediate = (uint8_t)((size + 1) | right << 2);
+                form = expected.form;
+            }
+        }
+    }
+    for (uint32_t right = 0; shaped && source->operand_count == 1 && source->record_count == 1 && right < 2; right += 1)
+    {
+        for (uint32_t size = 0; size < 2; size += 1)
+        {
+            const X86Instruction expected = {
+                .form = ir_simd_rotate_forms[right][size][width],
+                .vvvv = v0,
+                .rm = v0,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = record->immediate,
+            };
+            if (memcmp(record, &expected, sizeof(expected)) == 0 && record->immediate >= -128 && record->immediate <= 255)
+            {
+                candidate.funnel = true;
+                candidate.rotate = true;
+                candidate.immediate = (uint8_t)((size + 2) | right << 2);
+                candidate.part = (uint8_t)((uint32_t)record->immediate & ((32u << size) - 1));
+                form = expected.form;
+            }
+        }
+    }
+    candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                  (x86_target_requirement(form) & ~BUSTER_X86_TARGET_KNOWN);
+    const IrSimdTypedStatus status = candidate.funnel && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // The quadword operations (#1840): a row of two vectors of the result's width (16, 32 or 64 bytes) and one record of an
 // ir_simd_quadword_op_forms form at that width, register-direct and undecorated, of VECTOR(0) (vvvv) and VECTOR(1) (rm)
 // into VECTOR(0) (reg): the builtins' __builtin_ia32_vpmultishiftqb128 to 512 (a's bytes the bits' positions, b the
@@ -2285,8 +2372,8 @@ static IrSimdTypedStatus ir_simd_typed_bitshuffle(const Tier0Operation* source, 
 // comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, byte shuffles by an
 // immediate, conversions and shifts by a scalar count, lane operations, masks to vectors and back, masked loads and
 // stores, one lane's moves, reductions, the lanes' unary operations, floating operations at their own rounding and
-// truncating conversions of lane 0, bit shuffles into a mask, quadword operations (#1840), then exact scalar splats;
-// other admitted forms stay machine rows. A semantic
+// truncating conversions of lane 0, bit shuffles into a mask, quadword operations, funnel shifts (#1840), then exact
+// scalar splats; other admitted forms stay machine rows. A semantic
 // match whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
 // vector, a width change, a permute, a byte shuffle by an immediate, a conversion or a shift, whose machine row a target
 // may still run, stays one.
@@ -2393,6 +2480,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_quadword_op(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_funnel(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && tier0_class_integer(source->result_class))
     {

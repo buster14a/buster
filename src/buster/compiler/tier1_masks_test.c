@@ -188,6 +188,9 @@ struct Tier1MasksTest
     // IR's quadword_op.
     uint32_t quadword_attempts;
     uint32_t quadword_rows;
+    // The funnel shifts (#1840, tier1_masks_test_funnels): those tried, and those through every stage as the IR's funnel.
+    uint32_t funnel_attempts;
+    uint32_t funnel_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -7258,6 +7261,233 @@ static void tier1_masks_test_conversions(Tier1MasksTest* test)
     free(program);
 }
 
+// A funnel shift's row (#1840), `index` 0 to 17: clang's __builtin_elementwise_fshl (0 to 8) and fshr (9 to 17) of
+// words, doublewords and quadwords at 16, 32 and 64 bytes, as c_check_program_vector_builtins.c writes them (its forms
+// check_vector_elementwise_forms'): fshl's vpshldv into VECTOR(0), a, from VECTOR(1), b, by VECTOR(2), and fshr's
+// vpshrdv into VECTOR(1) from VECTOR(0) by VECTOR(2), then VECTOR(1) moved into VECTOR(0); its flags into `flags`.
+// ir_simd_typed_test.c's decoder test reads the same rows.
+static Tier0Operation tier1_masks_test_funnel_row(uint32_t index, uint32_t* flags)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint32_t right = index / 9;
+    const uint32_t size = 1 + index / 3 % 3;
+    const uint32_t width = index % 3;
+    const uint32_t bytes = 16u << width;
+    const CheckVectorShape shape = { .lanes = bytes >> size, .bytes = bytes, .element = (uint8_t)(1u << size), .integer = true };
+    uint64_t needed = 0;
+    const uint16_t form = (uint16_t)check_vector_elementwise_forms(right != 0 ? CBUILTIN_ELEMENTWISE_FSHR : CBUILTIN_ELEMENTWISE_FSHL, shape, &needed).forms[width];
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    if (right != 0)
+    {
+        row.records[0] = check_vector_lower_record(form, v1, v0, v2);
+        row.records[1] = check_x86_lower_move_result(bytes, v1);
+        row.record_count = 2;
+    }
+    else
+    {
+        row.records[0] = check_vector_lower_record(form, v0, v1, v2);
+        row.record_count = 1;
+    }
+    row.operand_count = 3;
+    for (uint32_t j = 0; j < 3; j += 1)
+    {
+        row.operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_bytes[j] = (uint8_t)bytes;
+    }
+    row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+    row.result_bytes = (uint8_t)bytes;
+    *flags = size | right << 2;
+    return row;
+}
+
+// A rotate rule's direction and lanes (#1840): __builtin_ia32_prold, prolq, prord and prorq at each width; 0 for any
+// other rule, else 1 + right * 2 + (quadwords).
+static uint32_t tier1_masks_test_rotate_kind(const CheckX86LowerRule* rule)
+{
+    static const char* const names[4] = { "__builtin_ia32_prold", "__builtin_ia32_prolq", "__builtin_ia32_prord", "__builtin_ia32_prorq" };
+    uint32_t kind = 0;
+    for (uint32_t k = 0; rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE && k < 4; k += 1)
+    {
+        kind = strncmp(rule->name, names[k], strlen(names[k])) == 0 ? k + 1 : kind;
+    }
+    return kind;
+}
+
+// C's funnel shift of one lane of `bits` bits: high:low's high half shifted left, or its low half shifted right, by
+// `count` modulo the bits, a bit at a time.
+static uint64_t tier1_masks_test_funnel_lane(uint64_t high, uint64_t low, uint64_t count, uint32_t bits, bool right)
+{
+    const uint32_t shift = (uint32_t)(count % bits);
+    uint64_t value = 0;
+    for (uint32_t bit = 0; bit < bits; bit += 1)
+    {
+        const uint32_t at = (right ? bit + shift : bit + bits - shift) % (2 * bits);
+        const uint64_t source = at >= bits ? high >> (at - bits) : low >> at;
+        value |= (source & 1) << bit;
+    }
+    return value;
+}
+
+// The funnel shifts through the IR to Tier 1 (#1840): each of tier1_masks_test_funnel_row's 18 rows, in 4 statements of
+// the input buffer's vectors k, k + 1 and k + 2 (the counts, often past the lanes' bits or zero) into the output's vector
+// k; and each rotate rule's row at 6 immediates (0, 1, the lanes' bits less 1, their bits, their bits plus 3 and 255),
+// in 4 statements of vector k. tier1_masks_test_typed_pipeline takes each through the IR as its funnel, which the
+// interpreter runs at every stage, and Tier 1 natively, against tier1_masks_test_funnel_lane; a rotate's code by both
+// paths has its vprold to vprorq form's 4 records, its constant counts folded into the immediate. The funnels are
+// VBMI2's, past x86-64-v4: their output target has it too, and a host that runs Tier 1's code natively must have it,
+// or they are left to test-ir-simd's decoding.
+static void tier1_masks_test_funnels(Tier1MasksTest* test)
+{
+    const uint64_t v4 = test->v4_features;
+    uint8_t* const v4_forms = test->v4;
+    const uint64_t vbmi2 = BUSTER_X86_FEATURE(AVX512VBMI2);
+    const X86Target target = { .features = v4 };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    uint8_t* funnel_forms = malloc(X86_FORM_COUNT);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && funnel_forms != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the funnel shifts' memory");
+    if (ready)
+    {
+        const X86Target shifting = { .features = v4 | vbmi2 };
+        x86_target_forms(&shifting, funnel_forms);
+    }
+    const bool funnels = !test->native || (x86_target_native().features & vbmi2) != 0;
+    uint64_t state = test->random ^ UINT64_C(0x5be0cd191f83d9ab);
+    // The cases: the 18 funnels' rows, then each rotate rule at 6 immediates.
+    const uint32_t rules = BUSTER_ARRAY_LENGTH(check_x86_lower_rules);
+    for (uint32_t c = funnels ? 0 : 18; ready && c < 18 + 6 * rules; c += 1)
+    {
+        const bool rotate = c >= 18;
+        const CheckX86LowerRule* rule = rotate ? check_x86_lower_rules + (c - 18) / 6 : 0;
+        const uint32_t kind = rotate ? tier1_masks_test_rotate_kind(rule) : 0;
+        if (rotate && kind == 0)
+        {
+            continue;
+        }
+        uint32_t flags = 0;
+        Tier0Operation row;
+        bool made = true;
+        uint32_t immediate = 0;
+        char name[128];
+        if (rotate)
+        {
+            const uint32_t bits = kind == 2 || kind == 4 ? 64 : 32;
+            const uint32_t immediates[6] = { 0, 1, bits - 1, bits, bits + 3, 255 };
+            immediate = immediates[(c - 18) % 6];
+            made = check_x86_lower_row_of(&target, rule, immediate, 4, 0, false, &row) == NULL;
+            flags = (bits == 64 ? 3u : 2u) | (kind >= 3 ? 4u : 0u);
+            snprintf(name, sizeof(name), "%s (immediate %u)", rule->name, immediate);
+        }
+        else
+        {
+            row = tier1_masks_test_funnel_row(c, &flags);
+            snprintf(name, sizeof(name), "%s of %u-byte lanes at %u bytes", (flags & 4) != 0 ? "fshr" : "fshl", 1u << (flags & 3), (uint32_t)row.result_bytes);
+        }
+        const uint64_t output_mark = test->output.length;
+        test->funnel_attempts += 1;
+        test->v4_features = v4 | vbmi2;
+        test->v4 = funnel_forms;
+        const uint32_t bytes = row.result_bytes;
+        const uint32_t element = 1u << (flags & 3);
+        const uint32_t bits = 8 * element;
+        const bool right = (flags & 4) != 0;
+        bool ok = tier1_masks_test_expect(test, made && row.result_class == BUSTER_TYPED_CLASS_VECTOR && row.operand_count == (rotate ? 1u : 3u), "the front end's funnel shift's row");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+            for (uint32_t j = 0; j < row.operand_count; j += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + j) * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the funnel shift's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            // Counts of 0, of the lanes' bits and past them, and small ones, in every lane of the input.
+            uint8_t* raw = (uint8_t*)in;
+            for (uint32_t lane = 0; !rotate && lane < BUSTER_TIER1_MASKS_TEST_IN / element; lane += 1)
+            {
+                const uint64_t random = tier0_test_mask_random(&state);
+                if ((random & 3) != 3)
+                {
+                    const uint64_t count = (random & 3) == 0 ? 0 : (random & 3) == 1 ? bits : (random >> 8) % (2 * bits);
+                    memcpy(raw + lane * element, &count, element);
+                }
+            }
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const uint8_t* a = raw + k * bytes % 256;
+                const uint8_t* b = rotate ? a : raw + (k + 1) * bytes % 256;
+                const uint8_t* counts = raw + (k + 2) * bytes % 256;
+                for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+                {
+                    uint64_t high = 0;
+                    uint64_t low = 0;
+                    uint64_t count = immediate;
+                    memcpy(&high, a + lane * element, element);
+                    memcpy(&low, b + lane * element, element);
+                    if (!rotate)
+                    {
+                        memcpy(&count, counts + lane * element, element);
+                    }
+                    const uint64_t value = tier1_masks_test_funnel_lane(high, low, count, bits, right);
+                    memcpy(wanted + k * bytes + lane * element, &value, element);
+                }
+            }
+        }
+        // A rotate's immediate form: its 4 records by both paths.
+        test->watched_forms[0] = rotate && ok ? row.records[0].form : X86_FORM_NONE;
+        test->watched_records[0] = 0;
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine && (!rotate || test->watched_records[0] == 2 * 4),
+                                           "a funnel shift is the IR's funnel, a rotate its immediate form by both paths");
+        if (!ok)
+        {
+            printf("test-tier1-masks: %s: %u immediate records\n", name, test->watched_records[0]);
+        }
+        test->watched_forms[0] = X86_FORM_NONE;
+        test->funnel_rows += ok;
+        test->v4_features = v4;
+        test->v4 = v4_forms;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the funnel shifts return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(funnel_forms);
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The quadword operations through the IR to Tier 1 (#1840): each vpmultishiftqb and psadbw builtin's row at each width as
 // the program's only row in 4 statements of the input buffer's vectors k and k + 1 into the output's vector k.
 // tier1_masks_test_typed_pipeline takes each through the IR as its quadword_op, which the interpreter runs at every stage,
@@ -7892,6 +8122,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_carriers(&test);
             tier1_masks_test_bitshuffles(&test);
             tier1_masks_test_quadword_ops(&test);
+            tier1_masks_test_funnels(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
             tier1_masks_test_lane_ops(&test);
@@ -7919,7 +8150,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
-                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows),
+                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows +
+                                                                               test.funnel_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -7937,6 +8169,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // 3 widths and the two shuffles of lanes at 2, at 8 immediates.
             tier1_masks_test_expect(&test, test.permute_attempts == 6 + 3 + 6 * 8 + 4 * 8 && test.permute_rows == test.permute_attempts,
                                     "every front-end permute goes through the IR and Tier 1 as the IR's permute");
+            // The funnel shifts (#1840): the 4 rotates at 3 widths at 6 immediates, and the 18 funnels on a host that runs them.
+            tier1_masks_test_expect(&test, test.funnel_attempts == 4u * 3 * 6 + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI2)) != 0 ? 18u : 0u) &&
+                                               test.funnel_rows == test.funnel_attempts,
+                                    "every funnel shift and rotate goes through the IR and Tier 1 as the IR's funnel");
             // The quadword operations (#1840): vpsadbw at 3 widths, and vpmultishiftqb at 3 on a host that runs it.
             tier1_masks_test_expect(&test, test.quadword_attempts == 3u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI)) != 0 ? 3u : 0u) &&
                                                test.quadword_rows == test.quadword_attempts,
@@ -8017,6 +8253,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
                "shuffle_lanes\n",
                test.permute_rows);
+        printf("test-tier1-masks: the funnel shifts and rotates: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its funnel\n",
+               test.funnel_rows);
         printf("test-tier1-masks: the quadword operations: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its quadword_op\n",
                test.quadword_rows);
         printf("test-tier1-masks: the bit shuffles into a mask: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its bitshuffle\n",

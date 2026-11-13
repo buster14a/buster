@@ -93,6 +93,10 @@ typedef enum IrSimdOperation
     // past them; and a's lanes from lane 0 at the set bits' lanes, c's at the others.
     IR_SIMD_COMPRESS,
     IR_SIMD_EXPAND,
+    // A funnel shift of each lane (#1840, ir.c's BUSTER_IR_INTRINSIC_FUNNEL): a's lane the high half and b's the low, by the
+    // third operand's lane modulo the lanes' bits, the action's `index` the IR's flags (the lanes' bytes' log2, then
+    // the direction: 4 right).
+    IR_SIMD_FUNNEL,
     // An AES round of each 16-byte lane (#1840, ir.c's BUSTER_IR_INTRINSIC_AES): ShiftRows, SubBytes and MixColumns of a
     // (the last round, the action's `index` 1, without MixColumns), then b xor'ed: vaesenc and vaesenclast.
     IR_SIMD_AES,
@@ -272,7 +276,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
                           action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
                           action->operation == IR_SIMD_REDUCE || action->operation == IR_SIMD_LANE_UNARY || action->operation == IR_SIMD_FROUND ||
-                          action->operation == IR_SIMD_CVTT || action->operation == IR_SIMD_BITSHUFFLE || action->operation == IR_SIMD_QUADWORD_OP);
+                          action->operation == IR_SIMD_CVTT || action->operation == IR_SIMD_BITSHUFFLE || action->operation == IR_SIMD_QUADWORD_OP ||
+                          action->operation == IR_SIMD_FUNNEL);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -311,6 +316,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_PERMUTE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
             case IR_SIMD_PERMUTE2: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && action->index <= 3; break;
             case IR_SIMD_TERNLOG: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type; break;
+            case IR_SIMD_FUNNEL: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && (action->index & 3) != 0 && action->index <= 7; break;
             case IR_SIMD_AES: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 1; break;
             case IR_SIMD_LANE_EXTRACT:
                 valid = valid && type == IR_SIMD_NONE && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
@@ -873,6 +879,22 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                 }
             }
             ir_simd_lane_write(&staged, lane_bits, lane, value);
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_FUNNEL)
+    {
+        // a:b's high half shifted left, or its low half shifted right, by the count modulo the lanes' bits.
+        const uint32_t lane_bits = 8u << (action->index & 3);
+        const bool right = (action->index & 4) != 0;
+        const uint32_t lanes = ir_simd_bits(action->result) / lane_bits;
+        const uint64_t all = lane_bits == 64 ? UINT64_MAX : (UINT64_C(1) << lane_bits) - 1;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const uint64_t high = ir_simd_lane_read(values[0], lane_bits, lane);
+            const uint64_t low = ir_simd_lane_read(values[1], lane_bits, lane);
+            const uint32_t count = (uint32_t)(ir_simd_lane_read(values[2], lane_bits, lane) & (lane_bits - 1));
+            const uint64_t shifted = count == 0 ? (right ? low : high) : right ? (low >> count) | (high << (lane_bits - count)) : (high << count) | (low >> (lane_bits - count));
+            ir_simd_lane_write(&staged, lane_bits, lane, shifted & all);
         }
     }
     else if (valid && action->operation == IR_SIMD_QUADWORD_OP)

@@ -360,6 +360,10 @@ typedef enum Tier1SelectRule
 // A quadword operation (#1840): `immediate` the IR's flags, its operation; ir_simd_quadword_op_forms' form of values[0]
 // (vvvv) and values[1] (rm) into the destination.
 #define BUSTER_TIER1_VECTOR_QUADWORD_OP 30
+// A funnel shift (#1840, tier1_select_funnel): `operation` the IR's flags (its lanes and direction), values[0] the high
+// half, values[1] the low half and values[2] the counts; or, where the halves are one value and the counts a constant
+// in every lane (`condition` 1), a rotate by that count, `immediate`, of values[0] alone.
+#define BUSTER_TIER1_VECTOR_FUNNEL 31
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1569,6 +1573,69 @@ static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+// A funnel shift (#1840, BUSTER_TIER1_VECTOR_FUNNEL). A rotate by an immediate (`condition` 1): vprold to vprorq of the
+// vector (rm) into the destination (vvvv; reg the opcode's extension), and for words VBMI2's vpshldw or vpshrdw of it
+// twice into the destination (reg). Otherwise vpshldvw to vpshrdvq (ir_simd_funnel_forms), whose destination is their
+// first source: the high half for a left shift, the low half for a right one, the other half in vvvv and the counts in
+// rm. The destination takes that half first by a move where it isn't already its register, and where it holds the other
+// half or the counts instead, the vector class's scratch register keeps them across that move.
+static void tier1_select_funnel(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t flags = (uint32_t)holes->operation;
+    const uint32_t size = (flags & 3) != 0 ? flags & 3 : 2;
+    const uint32_t right = (flags >> 2) & 1;
+    const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+    const uint8_t x = destination & 15;
+    const uint8_t high = holes->left & 15;
+    if (holes->condition != 0 && size == 1)
+    {
+        const X86Instruction record = { .form = ir_simd_word_rotate_forms[right][width], .reg = x, .vvvv = high, .rm = high, .mode = BUSTER_X86_REGISTER_DIRECT,
+                                        .immediate = (int32_t)(holes->immediate & 15) };
+        tier1_select_append(result, record);
+    }
+    else if (holes->condition != 0)
+    {
+        const X86Instruction record = { .form = ir_simd_rotate_forms[right][size - 2][width], .vvvv = x, .rm = high, .mode = BUSTER_X86_REGISTER_DIRECT,
+                                        .immediate = (int32_t)(holes->immediate & 63) };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        const uint8_t tied = right != 0 ? holes->right & 15 : high;
+        uint8_t other = right != 0 ? high : holes->right & 15;
+        uint8_t counts = holes->third & 15;
+        if (x != tied)
+        {
+            if (other == x || counts == x)
+            {
+                tier1_select_append(result, tier1_select_class_move(scratch, x, holes->width, false));
+            }
+            other = other == x ? scratch : other;
+            counts = counts == x ? scratch : counts;
+            tier1_select_append(result, tier1_select_class_move(x, tied, holes->width, false));
+        }
+        const X86Instruction record = { .form = ir_simd_funnel_forms[right][size - 1][width], .reg = x, .vvvv = other, .rm = counts, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, record);
+    }
+}
+
+// Whether `value` is a vector constant of `width` bytes whose lanes of `lane_bits` are all one value, that value modulo
+// the lanes' bits into `count` (#1840: a funnel shift's counts, which it reads so).
+static bool tier1_select_lane_splat(const IrFunction* function, uint32_t value, uint32_t width, uint32_t lane_bits, uint64_t* count)
+{
+    bool result = value < function->instruction_count && function->op[value] == IR_VCONST && function->a[value] < function->vector_constant_count && lane_bits >= 16;
+    const IrSimdValue* payload = result ? &function->vector_constants[function->a[value]] : 0;
+    const uint32_t lanes = width * 8 / (lane_bits != 0 ? lane_bits : 64);
+    const uint64_t first = result ? ir_simd_lane_read(payload, lane_bits, 0) & (lane_bits - 1) : 0;
+    for (uint32_t lane = 1; result && lane < lanes; lane += 1)
+    {
+        result = (ir_simd_lane_read(payload, lane_bits, lane) & (lane_bits - 1)) == first;
+    }
+    *count = first;
+    return result;
+}
+
 // A compress or an expand (#1840): vpcompressb to vpcompressq (the destination in rm) and vpexpandb to vpexpandq (in reg)
 // merge into their destination under the mask, so it takes the passthrough first by a move where it isn't already its
 // register; where it holds the source instead, the vector class's scratch register keeps the source across that move.
@@ -2532,6 +2599,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .immediate = complement ? 0x55 : 0,
             };
             tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_FUNNEL)
+        {
+            tier1_select_funnel(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP)
         {
@@ -5289,6 +5360,30 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_FUNNEL && ir_intrinsic_ternary(c))
+        {
+            // A funnel shift (#1840): a rotate by an immediate where its halves are one value and its counts a constant in
+            // every lane, first, as the bottom-up path takes its kind's first candidate; and by its counts' register.
+            const uint32_t third = ir_intrinsic_third(function, node);
+            const uint32_t flags = function->flags[node];
+            uint64_t count = 0;
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_FUNNEL;
+            base.operation = (uint8_t)flags;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            if (a == b && tier1_select_lane_splat(function, third, vector_width, 8u << (flags & 3), &count))
+            {
+                Tier1SelectPattern rotate = base;
+                rotate.condition = 1;
+                rotate.immediate = count;
+                tier1_select_add_candidate(forest, node, &candidates, rotate);
+            }
+            base.values[1] = b;
+            base.values[2] = third;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_QUADWORD_OP)

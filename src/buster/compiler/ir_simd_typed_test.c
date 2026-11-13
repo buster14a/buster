@@ -1425,6 +1425,101 @@ static void ir_simd_typed_test_shifts(IrTestTally* tally)
     printf("  IR SIMD rows: the front end's %u shifts by an int decode to the IR's shift\n", decoded_rows);
 }
 
+// The funnel shifts (#1840): tier1_masks_test_funnel_row's 18 rows (clang's fshl and fshr of words to quadwords at each
+// width) decode as the IR's funnel of their lanes and direction at exactly VBMI2's and BW's (its target rows'), AVX512F's
+// and VL's below 64 bytes; and each rotate rule's row (__builtin_ia32_prold, prolq, prord and prorq at each width, by the real producer) at
+// 4 immediates as the funnel of its vector twice by the immediate modulo the lanes' bits, at AVX512F's and VL's. Each is
+// refused without each feature it needs and under 6 changes.
+static void ir_simd_typed_test_funnels(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512VBMI2) };
+    uint32_t funnels = 0;
+    uint32_t rotates = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    const uint32_t rules = BUSTER_ARRAY_LENGTH(check_x86_lower_rules);
+    for (uint32_t c = 0; tables && c < 18 + 4 * rules; c += 1)
+    {
+        const bool rotate = c >= 18;
+        const CheckX86LowerRule* rule = rotate ? check_x86_lower_rules + (c - 18) / 4 : 0;
+        const uint32_t kind = rotate ? tier1_masks_test_rotate_kind(rule) : 0;
+        if (rotate && kind == 0)
+        {
+            continue;
+        }
+        Tier0Operation row;
+        uint32_t flags = 0;
+        uint32_t part = 0;
+        uint64_t expected = 0;
+        char description[192];
+        if (rotate)
+        {
+            const uint32_t bits = kind == 2 || kind == 4 ? 64 : 32;
+            const uint32_t immediates[4] = { 0, 5, bits + 1, 255 };
+            const uint32_t immediate = immediates[(c - 18) % 4];
+            const bool made = check_x86_lower_row_of(&every, rule, immediate, 4, 0, false, &row) == NULL;
+            snprintf(description, sizeof(description), "%s (immediate %u): its row is the front end's", rule->name, immediate);
+            ir_test_expect(tally, made, description);
+            if (!made)
+            {
+                continue;
+            }
+            flags = (bits == 64 ? 3u : 2u) | (kind >= 3 ? 4u : 0u);
+            part = immediate % bits;
+            expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
+            snprintf(description, sizeof(description), "%s (immediate %u): the IR's funnel of its vector twice at exactly its features", rule->name, immediate);
+        }
+        else
+        {
+            row = tier1_masks_test_funnel_row(c, &flags);
+            // The VBMI2 forms' target rows have BW with it, at every lane size.
+            expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512BW) | (row.result_bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
+            snprintf(description, sizeof(description), "a funnel shift's row %u: the IR's funnel 0x%x at exactly its features", c, flags);
+        }
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.funnel && decoded.rotate == rotate && decoded.immediate == flags && (!rotate || decoded.part == part) &&
+                        (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected;
+        ir_test_expect(tally, ok, description);
+        funnels += ok && !rotate;
+        rotates += ok && rotate;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            ir_test_expect(tally, (expected & features[f]) != 0 ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.funnel,
+                           "a funnel shift without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 6; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* first = &changed.records[0];
+            switch (m)
+            {
+            case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: first->rm = BUSTER_TIER0_ROLE_VECTOR(3); break;
+            case 3: changed.result_bytes = (uint8_t)(changed.result_bytes == 64 ? 32 : 64); break;
+            case 4: first->vvvv = BUSTER_TIER0_ROLE_VECTOR(3); break;
+            case 5:
+                changed.records[changed.record_count] = changed.records[0];
+                changed.record_count += 1;
+                break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && !decoded.funnel && !decoded.machine),
+                           "a changed funnel shift's row is not the IR's funnel");
+        }
+    }
+    ir_test_expect(tally, funnels == 18 && rotates == 4 * 3 * 4, "every funnel shift and rotate decodes");
+    printf("  IR SIMD rows: %u funnel shifts and %u rotates by an immediate decode to the IR's funnel\n", funnels, rotates);
+}
+
 // The quadword operations (#1840): the vpmultishiftqb and psadbw builtins' rows at each width, by the real producer,
 // decode as the IR's quadword_op of their operation at exactly BW's (and VBMI's for the multishifts), AVX512F's and VL's
 // below 64 bytes; refused
@@ -2923,6 +3018,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_carrier_casts(tally);
     ir_simd_typed_test_bitshuffles(tally);
     ir_simd_typed_test_quadword_ops(tally);
+    ir_simd_typed_test_funnels(tally);
     ir_simd_typed_test_shuffle_matches(tally);
     ir_simd_typed_test_shifts(tally);
     ir_simd_typed_test_mask_vectors(tally);

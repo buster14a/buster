@@ -1852,6 +1852,82 @@ The tests:
   multishifts' target adds VBMI to x86-64-v4's. A host that runs Tier 1's code
   natively without it leaves them to `test-ir-simd`.
 
+## Funnel shifts and rotates (#1840)
+
+One more ternary `intrinsic` kind, `funnel` (`BUSTER_IR_INTRINSIC_FUNNEL`), is
+the funnel shift of each lane of two vectors by a third's:
+
+```text
+%6 = intrinsic.v16i32 %3, %4, %5 funnel 6
+```
+
+- **Operands:** a (the high halves), b (the low halves) and the third operand
+  (the counts) are of the result's type. The third is in the extra array, as
+  the other ternary kinds' are.
+- **Flags:** the lanes' bytes' log2 in bits 0 and 1 (1 to 3, words to
+  quadwords) and the direction in bit 2 (`BUSTER_IR_FUNNEL_RIGHT`):
+  - **left:** the high half of a:b shifted left (C's `fshl`, `vpshldvw` to
+    `vpshldvq`);
+  - **right:** its low half shifted right (`fshr`, `vpshrdvw` to `vpshrdvq`).
+  The count is taken modulo the lanes' bits. A rotate is the funnel of one
+  vector twice.
+- **Numbering:** the ternary kinds are a range of kind numbers, so `funnel`
+  takes 30, the old `aes`. `aes` to `quadword_op` each move up by one (31 to 40).
+- **Model and passes:** `IR_SIMD_FUNNEL`. SCCP folds three constants, and GVN
+  and LICM take it as pure and total, as the other ternary kinds.
+
+**Decoder** (`ir_simd_typed_funnel`):
+- **clang's `__builtin_elementwise_fshl` and `fshr`** of words to quadwords,
+  three vectors, as `c_check_program_vector_builtins.c` writes them:
+  - fshl's one `vpshldv` into `VECTOR(0)` (a) from `VECTOR(1)` by `VECTOR(2)`;
+  - fshr's `vpshrdv` into `VECTOR(1)` (b) from `VECTOR(0)` by `VECTOR(2)`,
+    then `VECTOR(1)` moved into `VECTOR(0)`;
+  - the target needs VBMI2 and BW (their target rows'), AVX512F and VL below 64
+    bytes.
+- **The rotates by an immediate:** `__builtin_ia32_prold`, `prolq`, `prord`
+  and `prorq` at each width. One `vprold` to `vprorq` of `VECTOR(0)` is the
+  funnel of the vector twice by a constant, the immediate modulo the lanes'
+  bits in every lane. The target needs AVX512F and VL below 64 bytes.
+
+**Tier 1** (`BUSTER_TIER1_VECTOR_FUNNEL`, `tier1_select_funnel`):
+- **A rotate by an immediate:** where a and b are one value and the counts a
+  constant of one value in every lane (`tier1_select_lane_splat`), the first
+  candidate, the counts left unused. It is `vprold` to `vprorq`, or VBMI2's
+  `vpshldw` or `vpshrdw` of the vector twice for words.
+- **Otherwise** `vpshldv` or `vpshrdv` by the counts' register. Their
+  destination is their first source: the high half for a left shift, the low
+  half for a right one. The destination takes that half first by a move where
+  it isn't already its register. Where it holds the other half or the counts,
+  the vector class's scratch register keeps them across that move.
+
+**Zen 5:** the 36 forms had no row: the 18 variable funnels, the 12 rotates
+and the 6 word funnels by an immediate. They are to be measured on the 9700X.
+
+Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
+families above: `main_unit_backend.c` 96 → 92. The 3 `vpshrdvd` rows and the
+`vprold` row are gone.
+
+The tests:
+
+- **`test-ir`:**
+  - both verifiers admit `funnel` exactly of three vectors of the result's
+    type, at flags 1 to 3 and 5 to 7;
+  - the model is checked against C's `fshl` and `fshr`, written out a bit at a
+    time, on random vectors whose counts are often zero or past the lanes'
+    bits.
+- **`test-ir-parse`:** `tests/ir/funnel.ir` round-trips.
+- **`test-ir-simd`:** the 18 funnels' rows and the 4 rotate rules at 3 widths
+  and 4 immediates decode at exactly their features. Each is refused without
+  each and under 6 changes.
+- **`test-tier1-masks`:** the 18 funnels and the 72 rotates (6 immediates each)
+  run through both lowering paths, the interpreter at every stage and Tier 1
+  natively, against C.
+  - A rotate's code by both paths has its immediate form's 4 records.
+  - The funnels' target adds VBMI2 to x86-64-v4's. A host without it, running
+    Tier 1's code natively, leaves them to `test-ir-simd`.
+  - With the scratch register's save left out, 144 of their runs fail; with a
+    wrong rotate count, 576.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:
