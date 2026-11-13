@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Tier 1's register allocation over a CFG (#140). Include after lane.c, dataflow.c and tier1_allocate.c.
+// Tier 1's register allocation over a CFG (#140). Include after lane.c, dataflow.c, dominators.c and tier1_allocate.c.
 //
 // tier1_cfg_allocate takes a machine CFG in layout order. Block b occupies positions [block_starts[b],
 // block_starts[b + 1]); block 0 is the entry, without predecessors or phis. Every value is defined once: a phi at its
@@ -22,7 +22,11 @@
 //    the whole range couldn't have one for a use that needs it. Intervals are numbered by value, then position, so
 //    that each one's uses are a slice of the value's: the allocator borrows the input's use columns. Each value's
 //    blocks come from the liveness rows block by block, counted and then filled, so the cost is the live pairs', not
-//    values times blocks.
+//    values times blocks. Each range a value enters a block with is hinted to the register the value has at the exit of
+//    the block's anchor (#2553, tier1_cfg_anchors): its immediate dominator, or a latch laid out before it, of which
+//    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
+//    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. Each value
+//    then stays where control from its definition brings it, and an edge moves what its own source block changed.
 // 3. tier1_allocate, or its scalar twin, assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
 //    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
@@ -894,6 +898,138 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
     pieces->splits += split;
 }
 
+// Each block's anchor and chosen predecessor (#2553), from dominators.c's tree, which `scratch` holds until they are read,
+// with its temporaries on `output`; both arenas end as they began, but for the caller's two columns. False where the
+// analysis fails.
+// - The chosen predecessor, by its index among the block's, is the one whose exit its phis take their operands' places
+//   from: one laid out before the block that the block dominates (a loop's latch, whose back edge runs every
+//   iteration: the nearest in layout of them), else the immediate dominator where it is a predecessor laid out before
+//   the block (its edge then moves no value the block takes from before it), else the nearest predecessor before the
+//   block in layout, which the allocator has most likely placed last; none where every predecessor follows the block.
+// - The anchor is the block whose exit the block takes its other values' places from: such a latch, as for the phis,
+//   since the loop's body, laid out before its header, has placed them; else the immediate dominator where that is laid
+//   out before the block; else none: the entry, an unreachable block, or one whose dominator follows it, as a dispatch
+//   loop's handlers' join does, whose own conventions (`siblings`, `firsts`) take them. A value live into a block is live
+//   out of each of its predecessors, and out of its immediate dominator, unless the block is its definition's: the values
+//   a block takes from its anchor's exit are there at once, each in its own place.
+static bool tier1_cfg_anchors(const Tier1CfgInput* input, Arena* output, Arena* scratch, uint32_t* anchors, uint32_t* chosen)
+{
+    const uint64_t mark = scratch->length;
+    const DominatorCfg graph = {
+        .block_count = input->block_count,
+        .edge_count = input->edge_count,
+        .entry = 0,
+        .successor_offsets = input->successor_offsets,
+        .successors = input->successors,
+        .predecessor_offsets = input->predecessor_offsets,
+        .predecessors = input->predecessors,
+    };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators tree = { 0 };
+    const bool analyzed = dominators_analyze(scratch, output, &graph, options, &tree) == DOMINATOR_OK;
+    for (uint32_t b = 0; analyzed && b < input->block_count; b += 1)
+    {
+        const uint32_t dominator = b != 0 ? tree.idom[b] : BUSTER_TIER1_CFG_NONE;
+        anchors[b] = dominator < b ? dominator : BUSTER_TIER1_CFG_NONE;
+        uint32_t latch = BUSTER_TIER1_CFG_NONE;
+        uint32_t anchored = BUSTER_TIER1_CFG_NONE;
+        uint32_t nearest = BUSTER_TIER1_CFG_NONE;
+        for (uint32_t j = 0; j < input->predecessor_offsets[b + 1] - input->predecessor_offsets[b]; j += 1)
+        {
+            const uint32_t p = input->predecessors[input->predecessor_offsets[b] + j];
+            const bool earlier = p < b;
+            const bool closer = nearest == BUSTER_TIER1_CFG_NONE || p > input->predecessors[input->predecessor_offsets[b] + nearest];
+            const bool back = earlier && dominators_dominates(&tree, b, p);
+            latch = back && (latch == BUSTER_TIER1_CFG_NONE || p > input->predecessors[input->predecessor_offsets[b] + latch]) ? j : latch;
+            anchored = earlier && p == anchors[b] ? j : anchored;
+            nearest = earlier && closer ? j : nearest;
+        }
+        chosen[b] = latch != BUSTER_TIER1_CFG_NONE ? latch : anchored != BUSTER_TIER1_CFG_NONE ? anchored : nearest;
+        anchors[b] = latch != BUSTER_TIER1_CFG_NONE ? input->predecessors[input->predecessor_offsets[b] + latch] : anchors[b];
+    }
+    arena_pop_to(scratch, mark);
+    return analyzed;
+}
+
+// The interval of value v's run [first, end) that holds `position`, or BUSTER_TIER1_CFG_NONE: the runs are in position
+// order and don't overlap.
+static uint32_t tier1_cfg_piece_at(const Tier1CfgPieces* pieces, uint32_t first, uint32_t end, uint32_t position)
+{
+    uint32_t low = first;
+    uint32_t high = end;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (pieces->starts[middle] <= position)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low > first && pieces->ends[low - 1] > position ? low - 1 : BUSTER_TIER1_CFG_NONE;
+}
+
+// A phi's interval that no sibling convention models (#1216) takes its operand's register at the exit of its block's
+// chosen predecessor (#2553, tier1_cfg_anchors). Every value's intervals must be filled: an operand's may follow its
+// phi's.
+static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chosen, const uint32_t* offsets, Tier1CfgPieces* pieces)
+{
+    for (uint32_t b = 0; b < input->block_count; b += 1)
+    {
+        const uint32_t j = chosen[b];
+        const uint32_t predecessor = j != BUSTER_TIER1_CFG_NONE ? input->predecessors[input->predecessor_offsets[b] + j] : BUSTER_TIER1_CFG_NONE;
+        const uint32_t exit = predecessor != BUSTER_TIER1_CFG_NONE ? input->block_starts[predecessor + 1] - 1 : 0;
+        for (uint32_t k = input->phi_offsets[b]; predecessor != BUSTER_TIER1_CFG_NONE && k < input->phi_offsets[b + 1]; k += 1)
+        {
+            const uint32_t v = input->phi_values[k];
+            const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+            const uint32_t own = tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], input->block_starts[b]);
+            const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
+            if (own != BUSTER_TIER1_CFG_NONE && taken != BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->classes[taken] == pieces->classes[own] &&
+                pieces->ends[taken] <= pieces->starts[own])
+            {
+                pieces->hint_intervals[own] = taken | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+            }
+        }
+    }
+}
+
+// The furthest a phi operand's definition looks along its phis for a register (tier1_cfg_operand_targets).
+#define BUSTER_TIER1_CFG_TARGET_STEPS 8u
+
+// A value that a phi takes along an edge, and that nothing else hints, is hinted to that phi (`targets`, from the phi
+// hints). Where the phi has no interval before the value's definition, no register of it is known there: the hint goes on
+// along the phis that take the phi in turn (`ups`, each value's first such phi), to the first with an interval before
+// the definition (#2553), whose first interval the definition's interval takes its opening register from: a phi's own,
+// or a dispatch loop's join's phi's in its first handler, the register every handler takes it in. A handler passes a
+// value on through phis of its own joins to the loop's join: the value is defined in that register, so that none of
+// those edges move it, though the phi may have left it in the handler since.
+static void tier1_cfg_operand_targets(const Tier1CfgInput* input, const uint32_t* targets, const uint32_t* ups, const uint8_t* phis, const uint32_t* offsets, Tier1CfgPieces* pieces)
+{
+    for (uint32_t v = 0; v < input->value_count; v += 1)
+    {
+        uint32_t target = phis[v] == 0 ? targets[v] : BUSTER_TIER1_CFG_NONE;
+        const uint32_t definition = input->definitions[v];
+        bool unknown = target != BUSTER_TIER1_CFG_NONE && (offsets[target] == offsets[target + 1] || pieces->starts[offsets[target]] > definition);
+        for (uint32_t step = 0; unknown && step < BUSTER_TIER1_CFG_TARGET_STEPS && ups[target] != BUSTER_TIER1_CFG_NONE && ups[target] != v && input->classes[ups[target]] == input->classes[v]; step += 1)
+        {
+            target = ups[target];
+            unknown = offsets[target] == offsets[target + 1] || pieces->starts[offsets[target]] > definition;
+        }
+        const uint32_t own = target != BUSTER_TIER1_CFG_NONE && !unknown ? tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], definition) : BUSTER_TIER1_CFG_NONE;
+        if (own != BUSTER_TIER1_CFG_NONE)
+        {
+            const uint32_t first = offsets[target];
+            pieces->hints[own] = target;
+            pieces->hint_intervals[own] = pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->starts[first] < pieces->starts[own] ? first : pieces->hint_intervals[own];
+        }
+    }
+}
+
 // Wider values first, so a partial block column keeps the ones whose binary search is deepest (#1399). Descending:
 // narrow values' zero keys sort last, where the install loop's `keys[i] != 0` stops.
 static int tier1_cfg_lookup_order(const void* left, const void* right)
@@ -1004,7 +1140,9 @@ static uint32_t tier1_cfg_slot_root(uint32_t* roots, uint32_t slot)
 // definition, so those pairs are a shared slot's whole interference. A phi's slot is written by its edges' moves, which
 // read its operands in the same parallel move; a value live out of the predecessor and not into the phi's block is dead
 // along that edge, whose moves then run on it alone. A dispatch loop's values that rest in memory then keep one slot
-// around the loop, where each edge copied them from one value's slot to the next's. Slots are renumbered in order, each
+// around the loop, where each edge copied them from one value's slot to the next's. Operands that are phis themselves join
+// first (#2553), then the others: a web of phis that pass a value on around a loop keeps one slot, which an entering
+// operand, joined first, could have split by being live at one of their definitions. Slots are renumbered in order, each
 // keeping its first value in spill_values. False where scratch is short.
 static bool tier1_cfg_share_slots(const Tier1CfgInput* input, Tier1CfgAllocation* result, Arena* scratch)
 {
@@ -1016,9 +1154,18 @@ static bool tier1_cfg_share_slots(const Tier1CfgInput* input, Tier1CfgAllocation
     uint32_t* sizes = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* heads = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* tails = arena_push_array(scratch, (uint64_t)spills + 1, sizeof(uint32_t), _Alignof(uint32_t));
-    // Each value's next in its slot's list.
+    // Each value's next in its slot's list, and whether it is a phi.
     uint32_t* nexts = arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
-    const bool ready = roots != 0 && sizes != 0 && heads != 0 && tails != 0 && nexts != 0;
+    uint8_t* phis = arena_push(scratch, (uint64_t)input->value_count + 1, 1);
+    const bool ready = roots != 0 && sizes != 0 && heads != 0 && tails != 0 && nexts != 0 && phis != 0;
+    if (ready)
+    {
+        memset(phis, 0, (uint64_t)input->value_count + 1);
+        for (uint32_t k = 0; k < input->phi_count; k += 1)
+        {
+            phis[input->phi_values[k]] = 1;
+        }
+    }
     for (uint32_t s = 0; ready && s < spills; s += 1)
     {
         const uint32_t v = allocation->spill_values[s];
@@ -1028,29 +1175,33 @@ static bool tier1_cfg_share_slots(const Tier1CfgInput* input, Tier1CfgAllocation
         tails[s] = v;
         nexts[v] = BUSTER_TIER1_CFG_NONE;
     }
-    for (uint32_t k = 0; ready && k < input->phi_count; k += 1)
+    for (uint32_t pass = 0; pass < 2; pass += 1)
     {
-        const uint32_t phi = input->phi_values[k];
-        for (uint32_t o = input->phi_operand_offsets[k]; ids[phi] != UINT32_MAX && o < input->phi_operand_offsets[k + 1]; o += 1)
+        for (uint32_t k = 0; ready && k < input->phi_count; k += 1)
         {
-            const uint32_t operand = input->phi_operands[o];
-            const bool paired = operand != BUSTER_TIER1_CFG_NONE && ids[operand] != UINT32_MAX && input->classes[operand] == input->classes[phi] && input->slot_widths[operand] == input->slot_widths[phi];
-            const uint32_t into = paired ? tier1_cfg_slot_root(roots, ids[phi]) : 0;
-            const uint32_t from = paired ? tier1_cfg_slot_root(roots, ids[operand]) : 0;
-            bool apart = paired && into != from && sizes[into] + sizes[from] <= BUSTER_TIER1_CFG_SLOT_WEB;
-            for (uint32_t m = apart ? heads[into] : BUSTER_TIER1_CFG_NONE; apart && m != BUSTER_TIER1_CFG_NONE; m = nexts[m])
+            const uint32_t phi = input->phi_values[k];
+            for (uint32_t o = input->phi_operand_offsets[k]; ids[phi] != UINT32_MAX && o < input->phi_operand_offsets[k + 1]; o += 1)
             {
-                for (uint32_t n = heads[from]; apart && n != BUSTER_TIER1_CFG_NONE; n = nexts[n])
+                const uint32_t operand = input->phi_operands[o];
+                const bool paired = operand != BUSTER_TIER1_CFG_NONE && ids[operand] != UINT32_MAX && input->classes[operand] == input->classes[phi] && input->slot_widths[operand] == input->slot_widths[phi] &&
+                                    (phis[operand] != 0) == (pass == 0);
+                const uint32_t into = paired ? tier1_cfg_slot_root(roots, ids[phi]) : 0;
+                const uint32_t from = paired ? tier1_cfg_slot_root(roots, ids[operand]) : 0;
+                bool apart = paired && into != from && sizes[into] + sizes[from] <= BUSTER_TIER1_CFG_SLOT_WEB;
+                for (uint32_t m = apart ? heads[into] : BUSTER_TIER1_CFG_NONE; apart && m != BUSTER_TIER1_CFG_NONE; m = nexts[m])
                 {
-                    apart = tier1_cfg_interval_at(result, m, input->definitions[n]) == BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_at(result, n, input->definitions[m]) == BUSTER_TIER1_CFG_NONE;
+                    for (uint32_t n = heads[from]; apart && n != BUSTER_TIER1_CFG_NONE; n = nexts[n])
+                    {
+                        apart = tier1_cfg_interval_at(result, m, input->definitions[n]) == BUSTER_TIER1_CFG_NONE && tier1_cfg_interval_at(result, n, input->definitions[m]) == BUSTER_TIER1_CFG_NONE;
+                    }
                 }
-            }
-            if (apart)
-            {
-                roots[from] = into;
-                sizes[into] += sizes[from];
-                nexts[tails[into]] = heads[from];
-                tails[into] = tails[from];
+                if (apart)
+                {
+                    roots[from] = into;
+                    sizes[into] += sizes[from];
+                    nexts[tails[into]] = heads[from];
+                    tails[into] = tails[from];
+                }
             }
         }
     }
@@ -1329,8 +1480,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 dense_count += 1;
             }
         }
-        // Each phi's hint: its operand from the predecessor nearest before it in layout, which the allocator has most
-        // likely placed last, or else from its first predecessor.
+        // Each block's anchor and chosen predecessor (#2553, tier1_cfg_anchors).
+        uint32_t* anchors = ready ? arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        uint32_t* chosen = ready ? arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        ready = ready && anchors != 0 && chosen != 0 && tier1_cfg_anchors(input, output, scratch, anchors, chosen);
+        // Each phi's hint: its operand from its block's chosen predecessor, or else from its first predecessor.
         uint32_t* phi_hints = ready ? arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         ready = ready && phi_hints != 0;
         if (ready)
@@ -1339,14 +1493,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         }
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
-            uint32_t nearest = 0;
+            const uint32_t nearest = chosen[b] != BUSTER_TIER1_CFG_NONE ? chosen[b] : 0;
             const uint32_t predecessors = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
-            for (uint32_t j = 0; j < predecessors; j += 1)
-            {
-                const uint32_t p = input->predecessors[input->predecessor_offsets[b] + j];
-                const uint32_t best = input->predecessors[input->predecessor_offsets[b] + nearest];
-                nearest = p < b && (best >= b || p > best) ? j : nearest;
-            }
             for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
             {
                 // An undefined operand hints nothing: then the first defined one, if any.
@@ -1361,18 +1509,30 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // And a value a phi takes along an edge, hinted to the phi where nothing else hints it: along a back edge, the
         // phi has its register by then, from its definition, or (a loop's header laid out after its body, as a
         // dispatch loop's join is) from its ranges in the body's blocks before. Where the operand takes it, the edge
-        // moves nothing for it; where the phi has no register yet, the hint is none.
+        // moves nothing for it; where the phi has no register yet, the hint goes on along the phis
+        // (tier1_cfg_operand_targets, #2553), for which this pass notes each value's first phi that takes it (`ups`)
+        // and whether it is a phi.
+        uint32_t* ups = ready ? arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        uint8_t* phis = ready ? arena_push(scratch, (uint64_t)values + 1, 1) : 0;
+        ready = ready && ups != 0 && phis != 0;
+        if (ready)
+        {
+            memset(ups, 0xff, ((uint64_t)values + 1) * sizeof(uint32_t));
+            memset(phis, 0, (uint64_t)values + 1);
+        }
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
             {
                 const uint32_t phi = input->phi_values[k];
+                phis[phi] = 1;
                 for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
                 {
                     const uint32_t operand = input->phi_operands[o];
                     if (operand != BUSTER_TIER1_CFG_NONE)
                     {
                         phi_hints[operand] = phi_hints[operand] == BUSTER_TIER1_CFG_NONE ? phi : phi_hints[operand];
+                        ups[operand] = ups[operand] == BUSTER_TIER1_CFG_NONE && operand != phi ? phi : ups[operand];
                     }
                 }
             }
@@ -1470,10 +1630,13 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // The join, in turn, takes for its phis their places at its first successor's entry, which comes before it.
         uint32_t* firsts = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         uint32_t* siblings = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        // Per block, the interval the value being built has at its entry, where entry_stamps says it is that value's.
+        // Per block, the interval the value being built has at its entry, where entry_stamps says it is that value's; and the
+        // one it has at its exit, where it is live out of the block (#2553).
         uint32_t* entry_pieces = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         uint32_t* entry_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && firsts != 0 && siblings != 0 && entry_pieces != 0 && entry_stamps != 0;
+        uint32_t* exit_pieces = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        uint32_t* exit_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        ready = ready && firsts != 0 && siblings != 0 && entry_pieces != 0 && entry_stamps != 0 && exit_pieces != 0 && exit_stamps != 0;
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             uint32_t first = BUSTER_TIER1_CFG_NONE;
@@ -1639,6 +1802,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
             if (ready)
             {
                 memset(entry_stamps, 0, (uint64_t)blocks * sizeof(uint32_t));
+                memset(exit_stamps, 0, (uint64_t)blocks * sizeof(uint32_t));
             }
             for (uint32_t v = 0; ready && v < values; v += 1)
             {
@@ -1705,9 +1869,16 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                                 }
                                 else
                                 {
-                                    const uint32_t model = !entry ? BUSTER_TIER1_CFG_NONE : !defined_here ? siblings[b] : firsts[b] < b ? firsts[b] : BUSTER_TIER1_CFG_NONE;
+                                    // A block laid out after its first successor (a dispatch loop's join) takes that
+                                    // successor's convention for the values the two share, as its phis do (#2553).
+                                    const uint32_t joined = firsts[b] < b ? firsts[b] : BUSTER_TIER1_CFG_NONE;
+                                    const uint32_t model = !entry ? BUSTER_TIER1_CFG_NONE : !defined_here && siblings[b] != BUSTER_TIER1_CFG_NONE ? siblings[b] : joined;
                                     const bool modeled = model != BUSTER_TIER1_CFG_NONE && entry_stamps[model] == v + 1 && (!pieces.fill || pieces.starts[entry_pieces[model]] < from);
-                                    const uint32_t earlier = modeled ? entry_pieces[model] : BUSTER_TIER1_CFG_NONE;
+                                    // Else a value the block takes from before it, its place at the anchor's exit (#2553): a
+                                    // phi's, its operand's at a predecessor's, comes once every value has its intervals.
+                                    const uint32_t anchor = entry && !defined_here ? anchors[b] : BUSTER_TIER1_CFG_NONE;
+                                    const bool anchored = !modeled && anchor != BUSTER_TIER1_CFG_NONE && exit_stamps[anchor] == v + 1;
+                                    const uint32_t earlier = modeled ? entry_pieces[model] : anchored ? exit_pieces[anchor] | BUSTER_TIER1_ALLOCATE_HINT_EXIT : BUSTER_TIER1_CFG_NONE;
                                     tier1_cfg_piece(&pieces, input, v, from, to, piece == 0 && defined_here ? phi_hints[v] : v, earlier, piece != 0);
                                 }
                                 if (entry)
@@ -1719,6 +1890,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                             }
                         }
                         cursor = blocked_start < end ? blocked_end : end;
+                    }
+                    if (live_out && pieces.count > first)
+                    {
+                        exit_stamps[b] = v + 1;
+                        exit_pieces[b] = (uint32_t)pieces.count - 1;
                     }
                 }
                 ready = !stray && use == use_end;
@@ -1746,6 +1922,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     }
                 }
                 use_offsets[count] = input->use_count;
+                tier1_cfg_phi_exits(input, chosen, candidate.value_interval_offsets, &pieces);
+                tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 candidate.block_starts = input->block_starts;
                 candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){

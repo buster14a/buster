@@ -193,6 +193,20 @@ independent reference over positions, with and without interval hints, a trace
 whose two values the rule alone swaps, and one whose range takes an earlier
 range's opening register over its own value's last.
 
+With `BUSTER_TIER1_ALLOCATE_HINT_EXIT` in its entry, `hint_intervals` names
+instead an interval that ends by the interval's start, whose register at its
+end, its closing register, the interval takes first (#2553); validation also
+refuses one that ends after the interval starts. The closings follow the
+openings in the same scratch array, written as each interval ends on every path:
+the register it still holds, or the memory hint where an eviction left it in its
+slot. `tier1_cfg.c` names so a value's range at the exit of a block that
+dominates the one the interval enters, and a phi's operand's at a predecessor's
+exit ("Places along dominators" below). The hint test's reference takes the
+closings too, its random inputs name a third of their hinted ranges' earlier
+ranges by their exits where those end first, and a literal trace, whose interval
+the scan moves from r0 through its slot to r1, gives the range named by its exit
+r1 and by its opening r0 on every path.
+
 That matching stays scalar, for a measured reason. It used to resolve the
 partners' registers afterwards: pointer-jumping rounds over every interval,
 after an AVX-512 prefix sum that recounted the pressure the class loop already
@@ -455,6 +469,72 @@ slot, since each join checks every pair of the two slots' values.
 `tier1_cfg_verify` refuses a store over another value its slot still holds;
 `tier1_allocation_verify`, which takes a slot to hold one value, checks the CFG
 tests' allocations with a slot per spilled value.
+
+### Places along dominators (#2553)
+
+A block's ranges used to take, by `hint_values`, the register their value had
+most recently in layout, and a phi its operand's at the predecessor nearest
+before it. A block laid out after a sibling whose code moved a value took the
+moved register wherever control came from, and a phi often took the cold path's:
+each of Lua's handlers tests `trap` and calls `luaG_traceexec` where it is set,
+and the join after that call took the call's result's register, so that the hot
+path moved `trap` on a split edge and the handler's tail rotated three values
+through r11 into the dispatch join's places. #138's measurement put edge moves,
+spills and reloads at 7.4% and 10.0% of speedtest1's and Lua's executed
+instructions.
+
+`tier1_cfg_anchors` takes the CFG's dominator tree (`dominators.c`'s SEMI-NCA,
+one analysis per function) and gives each block:
+
+- a chosen predecessor: one laid out before it that it dominates (a latch of a
+  loop whose header is laid out after its body, whose back edge runs every
+  iteration: the nearest of them in layout), else its immediate dominator where
+  that is a predecessor laid out before it, else its nearest predecessor before
+  it in layout;
+- an anchor: such a latch, else its immediate dominator where that is laid out
+  before it, else none: the entry, an unreachable block, and a dispatch loop's
+  handlers, whose dominator is the join laid out after them, which keep #1216's
+  conventions.
+
+A value live into a block is live out of each of its predecessors, and of its
+immediate dominator unless the block defines it, so the values a block takes
+from one block's exit are there at once, each in its own place. The ranges then
+take, by exit hints:
+
+- a range a value enters a block with, the value's place at the anchor's exit: a
+  value keeps its register from its definition through the blocks it dominates,
+  and an edge moves what the blocks on its way changed;
+- in a block laid out after its first successor (a dispatch loop's join), that
+  successor's entry convention, for its values as #1216 gave it for its phis;
+- a phi, its operand's place at its chosen predecessor's exit, so that the edge
+  from a dominating predecessor, a critical one where the other path rejoins,
+  moves nothing;
+- a value that a phi takes and nothing else hints, where that phi has no range
+  before the value's definition: along the phis that take the phi in turn
+  (`tier1_cfg_operand_targets`, up to eight), the first with a range before it,
+  whose first range's opening register the definition takes. A dispatch loop's
+  join's phi has its first handler's, the register every handler takes it in.
+
+Slot sharing joins phi-to-phi pairs before the others (`tier1_cfg_share_slots`):
+in `sqlite3VdbeExec`, whose latch's join is laid out before its header, an
+operand spilled where it entered the loop joined its phi's slot first and kept
+the loop's two phis apart, so that every handler's edge to the latch copied
+slot to slot.
+
+From its merge base `afcb185e`, the tagged edge moves, stores and reloads fell
+from 225.1 M to 210.6 M on speedtest1 and from 542.7 M to 355.5 M on Lua, where
+the moves through r11 halved (191 M to 96 M). On the 9700X, user cycles fell by
+0.73 on speedtest1 over 8 shifts and by 1.02 on Lua over 33 link orders
+(100 ln(head / base); [the record](https://github.com/buster14a/buster-performance/tree/ddb5213da1fce7ac9325afbf6364a797bbc63b5b/docs/measurements/tier1-dominator-places-2553-2026-11-12)).
+Not everywhere: `sqlite3VdbeExec`'s edge traffic rose by 2.1 M though it runs
+fewer instructions, and `yy_reduce` keeps its parameter `yypParser` in `rdi`,
+its incoming register, into its switch's join, which calls
+`yy_find_reduce_action`: every reduction saves and restores it (4.9 M more).
+The preferred problem lets a parameter keep its incoming register on every one
+of its intervals; keeping one that crosses a call in callee-saved registers past
+its definition's interval cost far more (28.5 M instructions on speedtest1,
+269 M on Lua). The dominator analysis costs about 0.6% of sqlite3.c's
+`--tier1 -c` cycles, the whole change 1.0%.
 
 ### The opmask class (#179)
 

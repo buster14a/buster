@@ -2,17 +2,19 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Value hints (Tier1AllocationInput.hint_values, #140, and hint_intervals, #1216): literal traces of two values that
-// end and restart at one position, which the level rule alone gives each other's registers, and of a range that takes
-// an earlier one's opening register over its own value's last; and random inputs on both paths against the interval
+// end and restart at one position, which the level rule alone gives each other's registers, of a range that takes an
+// earlier one's opening register over its own value's last, and of one that takes an earlier one's closing register
+// (BUSTER_TIER1_ALLOCATE_HINT_EXIT, #2553) after the scan moved it; and random inputs on both paths against the interval
 // verifier, the position occupancy oracle and an independent reference of the common path's hint rule.
 // Included by tier1_allocate_test.c.
 
 // The common path's rule with hints, written over positions as tier1_allocation_test_levels writes it, with the free
 // registers as a set per level: a start whose hinted register is free takes it, from the level above that holds it
 // (which then holds what the level rule would have taken) or as a fresh one (which makes a register taken from this
-// level fresh again). The hinted register is the hinted interval's opening one (`openings`, per interval), then the
+// level fresh again). The hinted register is the hinted interval's opening one (`openings`, per interval) or, named by
+// its exit, its closing one (`closings`, which the common path's never moving intervals make their registers), then the
 // own value's last, then the hinted value's. False when the class doesn't fit.
-static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* input, uint32_t class, uint8_t* regs, uint8_t* last, uint8_t* openings)
+static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* input, uint32_t class, uint8_t* regs, uint8_t* last, uint8_t* openings, uint8_t* closings)
 {
     uint8_t levels[33];
     memset(levels, UINT8_MAX, sizeof(levels));
@@ -28,6 +30,7 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
             {
                 height -= 1;
                 levels[height] = regs[i];
+                closings[i] = regs[i];
             }
         }
         for (uint32_t i = 0; fits && i < input->count; i += 1)
@@ -47,7 +50,8 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
                     // A hinted interval's own value's register from an earlier interval first, then the hinted value's.
                     const uint8_t own = hinted != UINT32_MAX ? last[input->values[i]] : UINT8_MAX;
                     const uint32_t earlier = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
-                    const uint8_t opening = earlier != UINT32_MAX ? openings[earlier] : UINT8_MAX;
+                    const bool exit = earlier != UINT32_MAX && (earlier & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0;
+                    const uint8_t opening = earlier == UINT32_MAX ? UINT8_MAX : exit ? closings[earlier & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] : openings[earlier];
                     const uint8_t follow = opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : hinted != UINT32_MAX ? last[hinted] : UINT8_MAX;
                     uint32_t holder = UINT32_MAX;
                     for (uint32_t k = height + 1; follow != UINT8_MAX && k < 33; k += 1)
@@ -432,6 +436,145 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         const uint64_t saved = arena->length;
         tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "an interval hint across classes is refused");
     }
+    // A range named by its exit (#2553): with two registers, a [0, 10) takes r0, c [3, 6) evicts it, d [8, 10) takes r0
+    // again, and a's required use at 9 reloads it into r1. e [10, 20), another value's, takes the register a ends in,
+    // r1, where a hint to a's opening gives it r0 and none the lowest free one, r0. The exit must end by e's start.
+    {
+        const uint32_t starts[] = {
+            0,
+            2,
+            3,
+            8,
+            10,
+        };
+        const uint32_t ends[] = {
+            10,
+            6,
+            6,
+            10,
+            20,
+        };
+        const uint32_t values[] = {
+            0,
+            1,
+            2,
+            3,
+            4,
+        };
+        const uint32_t allowed[] = {
+            3,
+            3,
+            3,
+            3,
+            3,
+        };
+        const uint8_t classes[5] = { 0 };
+        const uint32_t hint_values[] = {
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+        };
+        const uint32_t use_offsets[] = {
+            0,
+            2,
+            4,
+            6,
+            7,
+            8,
+        };
+        const uint32_t use_positions[] = {
+            0,
+            9,
+            2,
+            5,
+            3,
+            5,
+            8,
+            10,
+        };
+        const uint8_t required[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+        const uint32_t named[][5] = {
+            {
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                BUSTER_TIER1_ALLOCATE_HINT_EXIT,
+            },
+            {
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                0,
+            },
+            {
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+                UINT32_MAX,
+            },
+        };
+        const uint8_t expected[] = {
+            1,
+            0,
+            0,
+        };
+        const char* expected_names[] = {
+            "a range named by its exit takes the register its interval ends in",
+            "a range named by its opening takes the register its interval starts in",
+            "a range without an interval hint takes the lowest free register",
+        };
+        Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = hint_values,
+            .use_offsets = use_offsets,
+            .use_positions = use_positions,
+            .use_required = required,
+            .use_count = 8,
+            .count = 5,
+            .value_count = 5,
+            .position_count = 20,
+            .registers = { 3 },
+        };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(expected); k += 1)
+        {
+            input.hint_intervals = named[k];
+            for (uint32_t path = 0; path < 3; path += 1)
+            {
+                const uint64_t saved = arena->length;
+                Tier1Allocation output = { 0 };
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                const bool produced = error == TIER1_ALLOCATION_OK && tier1_allocation_verify(&input, &output) && tier1_allocation_test_occupancy(&input, &output);
+                // a's fragments: r0, then its slot from 3, then r1 from 9.
+                const uint32_t a = output.fragment_offsets[0];
+                const bool moved = produced && output.fragment_offsets[1] == a + 3 && output.registers[a] == 0 && output.kinds[a + 1] == BUSTER_TIER1_ALLOCATE_SPILL && output.registers[a + 2] == 1;
+                const uint32_t e = produced ? output.fragment_offsets[4] : 0;
+                tier1_allocation_test_expect(tally, moved && output.fragment_offsets[5] == e + 1 && output.kinds[e] == BUSTER_TIER1_ALLOCATE_REGISTER && output.registers[e] == expected[k], expected_names[k]);
+                arena_pop_to(arena, saved);
+            }
+        }
+        // d, which starts before a ends, can't take a's exit.
+        const uint32_t early[] = {
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            BUSTER_TIER1_ALLOCATE_HINT_EXIT,
+            UINT32_MAX,
+        };
+        input.hint_intervals = early;
+        Tier1Allocation refused = { 0 };
+        const uint64_t saved = arena->length;
+        tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "an exit hint to an interval that ends after the range starts is refused");
+        tier1_allocation_test_expect(tally, tier1_allocate_scalar(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "the scalar path refuses that exit hint too");
+    }
     // Random ranges of a few values each, adjacent and apart, every one hinted to a random value of its class or to
     // none, at pressures to the class's registers and past them, with required uses and fixed ranges in some.
     uint32_t starts[128];
@@ -513,10 +656,12 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
                 hinted = value_classes[other] == classes[i] ? other : UINT32_MAX;
             }
             hint_values[i] = hinted;
-            // Every other iteration, a third of the ranges also hinted to a random earlier range of their class.
+            // Every other iteration, a third of the ranges also hinted to a random earlier range of their class, half of
+            // those that end before it starts by its exit (#2553).
             const uint32_t earlier = tier1_allocation_test_random(&seed) % count;
             const bool model = iteration % 2 == 1 && tier1_allocation_test_random(&seed) % 3 == 0 && classes[earlier] == classes[i] && starts[earlier] < starts[i];
-            hint_intervals[i] = model ? earlier : UINT32_MAX;
+            const bool exit = model && ends[earlier] <= starts[i] && (tier1_allocation_test_random(&seed) & 1) != 0;
+            hint_intervals[i] = model ? earlier | (exit ? BUSTER_TIER1_ALLOCATE_HINT_EXIT : 0) : UINT32_MAX;
             use_offsets[i] = i;
             use_positions[i] = ends[i] - 1;
             required[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
@@ -567,11 +712,13 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             uint8_t reference[128];
             uint8_t last[25];
             uint8_t openings[128];
+            uint8_t closings[128];
             memset(last, UINT8_MAX, sizeof(last));
             memset(openings, UINT8_MAX, sizeof(openings));
+            memset(closings, UINT8_MAX, sizeof(closings));
             for (uint32_t class = 0; !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
             {
-                if (tier1_allocation_test_hinted_levels(&input, class, reference, last, openings))
+                if (tier1_allocation_test_hinted_levels(&input, class, reference, last, openings, closings))
                 {
                     bool same = true;
                     for (uint32_t i = 0; i < count; i += 1)

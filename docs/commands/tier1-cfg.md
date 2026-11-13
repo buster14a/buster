@@ -10,7 +10,9 @@ requirements. [Command index](README.md).
   liveness with phi operands on their edges, hinted (`hint_values`, and
   `hint_intervals` for a dispatch loop's handlers' entries, #1216) to keep one
   register, then each edge's parallel move, placed at a block's end or start or
-  on the split edge, with a temporary slot for slot cycles. With `slot_widths`,
+  on the split edge, with a temporary slot for slot cycles. Ranges and phis take
+  their values' places at the exit of a dominating block or chosen predecessor
+  (`tier1_cfg_anchors`, exit hints, #2553). With `slot_widths`,
   a phi web's spilled values share one slot where none overlaps another, so an
   edge moves nothing for an operand already in its phi's slot (#1216).
   `tier1_cfg_verify` is its independent checker, which simulates each block and edge, and checks
@@ -22,7 +24,8 @@ requirements. [Command index](README.md).
   from the first interval overlapping its block when that column fits. The verifier and the certificate keep the
   binary search and check both results against it. `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
-  slot fragments overlap one slot); `test-tier1-cfg-source` adapts every function `-c`
+  slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
+  around a loop that keeps one slot; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
   allocates #732's SIMD functions as lowered, their masks in the opmask class.
