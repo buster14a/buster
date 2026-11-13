@@ -222,6 +222,258 @@ static bool check_attested_test_command(CheckAttested* census, const char* direc
     return valid && result == status && clean;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The compile's own (#2531's steps 1 and 2, --attested): a command's objects and diagnostics by --attested=on and verify
+// are --attested=off's bytes, which reads every declaration.
+
+// The compile fixture's header: the main one's kinds of declaration, with the runtime functions a struct's copy and its
+// zeroing call by name (memcpy, memset) and a prototype whose name a unit's undeclared call is a typo of.
+static const char check_attested_test_compile_header[] =
+    "typedef unsigned long size_t;\n"
+    "typedef struct _IO_FILE FILE;\n"
+    "struct _IO_FILE { int fd; size_t count; };\n"
+    "int puts(const char *);\n"
+    "int fclose(FILE *);\n"
+    "int abs(int);\n"
+    "void *memcpy(void *, const void *, size_t);\n"
+    "void *memset(void *, int, size_t);\n"
+    "enum color { RED, GREEN = RED + 2, BLUE };\n"
+    "struct later;\n"
+    "struct later { int a; };\n"
+    "struct later *make_later(void);\n"
+    "struct made *make(void);\n"
+    "static int hidden(void);\n"
+    "int tentative;\n"
+    "int labelled(void) __asm__(\"labelled_symbol\");\n"
+    "inline int twice(int x) { return 2 * x; }\n"
+    "int twice(int);\n"
+    "void die(void);\n"
+    "int prototyped(void);\n"
+    "int visible(struct invisible *);\n"
+    "extern int shared_counter;\n";
+
+// Its units: the first learns; the others call by name, by a builtin, by an asm label, copy and zero a struct, name an
+// enumerator; the last two call an undeclared function whose name is a typo of a skipped prototype's (clang's note
+// suggests it, which only a reading with nothing skipped finds) and name an undeclared identifier.
+static const char* const check_attested_test_compile_units[] =
+{
+    "int one(void) { return puts(\"one\") + shared_counter; }\n",
+    "int two(FILE *f) { return fclose(f) + __builtin_abs(-2) + labelled(); }\n",
+    "struct big { char b[300]; };\nvoid copy(struct big *x, const struct big *y) { *x = *y; }\nstruct big zero(void) { struct big z = { 0 }; return z; }\n",
+    "int four(int x) { if (x == BLUE) die(); return make_later() != 0; }\n",
+    "int five(void) { return prototypex(); }\n",
+    "int six(void) { return undeclared_name; }\n",
+};
+
+// Whether files `first` and `second` hold the same bytes.
+static bool check_attested_test_same(const char* first, const char* second)
+{
+    FILE* a = fopen(first, "rb");
+    FILE* b = fopen(second, "rb");
+    bool equal = a != NULL && b != NULL;
+    bool complete = false;
+    while (equal && !complete)
+    {
+        unsigned char left[4096];
+        unsigned char right[4096];
+        const size_t count_a = fread(left, 1, sizeof(left), a);
+        const size_t count_b = fread(right, 1, sizeof(right), b);
+        equal = count_a == count_b && memcmp(left, right, count_a) == 0 && !ferror(a) && !ferror(b);
+        complete = count_a < sizeof(left);
+    }
+    if (a != NULL)
+    {
+        fclose(a);
+    }
+    if (b != NULL)
+    {
+        fclose(b);
+    }
+    return equal;
+}
+
+// The compile fixture's first `count` units (written in `directory`, padded so that the first is the costliest) compiled
+// as one command with `options` and --attested=`mode`, in `directory`'s subdirectory `name`, its diagnostics into
+// `name`.err there: whether it ran with status `status`. The command's counts stay in check_units_attested_last.
+static bool check_attested_test_compile(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count, uint32_t count,
+                                        int status)
+{
+    char paths[8][24];
+    char* arguments[24];
+    char attested[32];
+    uint32_t argument_count = 0;
+    bool valid = count <= 8 && option_count + count + 1 < 24;
+    snprintf(attested, sizeof(attested), "--attested=%s", mode);
+    arguments[argument_count] = attested;
+    argument_count += 1;
+    for (uint32_t o = 0; valid && o < option_count; o += 1)
+    {
+        arguments[argument_count] = (char*)options[o];
+        argument_count += 1;
+    }
+    for (uint32_t u = 0; valid && u < count; u += 1)
+    {
+        char text[4096];
+        const int padding = (int)(count - u) * 256;
+        const int length = snprintf(text, sizeof(text), "/*%*s*/\n#include \"p.h\"\n%s", padding, "", check_attested_test_compile_units[u]);
+        char path[640];
+        snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
+        valid = length > 0 && (size_t)length < sizeof(text) && parse_test_write(path, text, (size_t)length);
+        snprintf(paths[u], sizeof(paths[u]), "../unit%u.c", u + 1);
+        arguments[argument_count] = paths[u];
+        argument_count += 1;
+    }
+    char subdirectory[640];
+    snprintf(subdirectory, sizeof(subdirectory), "%s/%s", directory, name);
+    valid = valid && (mkdir(subdirectory, 0700) == 0 || errno == EEXIST);
+    const int saved = valid ? open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    valid = valid && saved >= 0 && chdir(subdirectory) == 0;
+    fflush(stderr);
+    const int errors = valid ? dup(STDERR_FILENO) : -1;
+    const int captured = valid ? open("diagnostics.err", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+    const bool redirected = errors >= 0 && captured >= 0 && dup2(captured, STDERR_FILENO) >= 0;
+    const int result = valid && redirected ? run_check_command_mode((int)argument_count, arguments, true, true) : -1;
+    fflush(stderr);
+    if (errors >= 0)
+    {
+        dup2(errors, STDERR_FILENO);
+        close(errors);
+    }
+    if (captured >= 0)
+    {
+        close(captured);
+    }
+    if (saved >= 0)
+    {
+        valid = fchdir(saved) == 0 && valid;
+        close(saved);
+    }
+    if (valid && result != status)
+    {
+        fprintf(stderr, "test-checker: attested: --attested=%s's command %s ended with status %d (expected %d)\n", mode, name, result, status);
+    }
+    return valid && result == status;
+}
+
+// Whether directory `first`'s `count` objects and diagnostics are directory `second`'s bytes (both in `directory`).
+static bool check_attested_test_compiled_same(const char* directory, const char* first, const char* second, uint32_t count, bool objects)
+{
+    bool same = true;
+    char a[700];
+    char b[700];
+    for (uint32_t u = 0; objects && u < count; u += 1)
+    {
+        snprintf(a, sizeof(a), "%s/%s/unit%u.o", directory, first, u + 1);
+        snprintf(b, sizeof(b), "%s/%s/unit%u.o", directory, second, u + 1);
+        const bool equal = check_attested_test_same(a, b);
+        if (!equal)
+        {
+            fprintf(stderr, "test-checker: attested: unit%u.o of %s isn't %s's\n", u + 1, first, second);
+        }
+        same = same && equal;
+    }
+    snprintf(a, sizeof(a), "%s/%s/diagnostics.err", directory, first);
+    snprintf(b, sizeof(b), "%s/%s/diagnostics.err", directory, second);
+    const bool diagnostics = check_attested_test_same(a, b);
+    if (!diagnostics)
+    {
+        fprintf(stderr, "test-checker: attested: %s's diagnostics aren't %s's\n", first, second);
+    }
+    return same && diagnostics;
+}
+
+// Removes the compile fixture's subdirectory `name` of `directory` and what its command wrote there.
+static void check_attested_test_compiled_remove(const char* directory, const char* name, uint32_t count)
+{
+    char path[700];
+    for (uint32_t u = 0; u < count; u += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s/unit%u.o", directory, name, u + 1);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/%s/diagnostics.err", directory, name);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    rmdir(path);
+}
+
+static __attribute__((noinline)) void check_test_attested_compile(CheckTest* test, const char* directory)
+{
+    char header[640];
+    snprintf(header, sizeof(header), "%s/p.h", directory);
+    const bool written = parse_test_write(header, check_attested_test_compile_header, strlen(check_attested_test_compile_header));
+    const uint32_t units = BUSTER_ARRAY_LENGTH(check_attested_test_compile_units);
+    // Every unit by -c, on one lane: the last two fail the command.
+    {
+        const char* options[] = { "-nostdinc", "-std=gnu17", "--lanes", "1", "-c" };
+        const bool off = written && check_attested_test_compile(directory, "off", "off", options, BUSTER_ARRAY_LENGTH(options), units, 1);
+        const bool on = written && check_attested_test_compile(directory, "on", "on", options, BUSTER_ARRAY_LENGTH(options), units, 1);
+        uint64_t counts[CHECK_ATTESTED_SUMMARY];
+        memcpy(counts, check_units_attested_last, sizeof(counts));
+        const bool verify = written && check_attested_test_compile(directory, "verify", "verify", options, BUSTER_ARRAY_LENGTH(options), units, 1);
+        check_test_expect(test, off && on && verify && check_attested_test_compiled_same(directory, "on", "off", units - 2, true) &&
+                                    check_attested_test_compiled_same(directory, "verify", "off", units - 2, true),
+                          "--attested=on's and verify's objects and diagnostics are --attested=off's, two units' errors among them");
+        check_test_expect(test, on && counts[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0 && counts[CHECK_ATTESTED_SUMMARY_SKIPPING] >= units - 1 &&
+                                    counts[CHECK_ATTESTED_SUMMARY_AGAIN] == 2 && counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] == 0 &&
+                                    counts[CHECK_ATTESTED_SUMMARY_UNLISTED] == 0,
+                          "--attested=on skips in every unit after the first, and reads each unit with an error again with nothing skipped");
+        check_test_expect(test, verify && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPING] == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0 &&
+                                    check_units_attested_last[CHECK_ATTESTED_SUMMARY_AGAIN] == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] == 0,
+                          "--attested=verify reads what it would skip, and no hit's reading contradicts its memo");
+        check_attested_test_compiled_remove(directory, "off", units);
+        check_attested_test_compiled_remove(directory, "on", units);
+        check_attested_test_compiled_remove(directory, "verify", units);
+    }
+    // The units without an error on two lanes, by -c and by -fsyntax-only -Wall -Wextra.
+    {
+        const char* options[] = { "-nostdinc", "-std=gnu17", "--lanes", "2", "-c" };
+        const bool off = written && check_attested_test_compile(directory, "off", "off", options, BUSTER_ARRAY_LENGTH(options), units - 2, 0);
+        const bool on = written && check_attested_test_compile(directory, "on", "on", options, BUSTER_ARRAY_LENGTH(options), units - 2, 0);
+        check_test_expect(test, off && on && check_attested_test_compiled_same(directory, "on", "off", units - 2, true) &&
+                                    check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0,
+                          "--attested=on on two lanes: each lane's memo, and the objects --attested=off's");
+        check_attested_test_compiled_remove(directory, "off", units);
+        check_attested_test_compiled_remove(directory, "on", units);
+        const char* warnings[] = { "-nostdinc", "-std=gnu17", "-Wall", "-Wextra", "--lanes", "1", "-fsyntax-only" };
+        const bool warned_off = written && check_attested_test_compile(directory, "off", "off", warnings, BUSTER_ARRAY_LENGTH(warnings), units - 2, 0);
+        const bool warned_on = written && check_attested_test_compile(directory, "on", "on", warnings, BUSTER_ARRAY_LENGTH(warnings), units - 2, 0);
+        check_test_expect(test, warned_off && warned_on && check_attested_test_compiled_same(directory, "on", "off", units - 2, false) &&
+                                    check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0,
+                          "--attested=on's diagnostics by -fsyntax-only -Wall -Wextra are --attested=off's");
+        check_attested_test_compiled_remove(directory, "off", units);
+        check_attested_test_compiled_remove(directory, "on", units);
+    }
+    // -g: the DWARF describes every type the unit's table holds, so nothing is skipped; and --scalar skips nothing.
+    {
+        // (Each command in the directory `debug`, which its DWARF names, moved aside after it.)
+        const char* debug[] = { "-nostdinc", "-std=gnu17", "-g", "--lanes", "1", "-c" };
+        char from[700];
+        char to[700];
+        snprintf(from, sizeof(from), "%s/debug", directory);
+        snprintf(to, sizeof(to), "%s/off", directory);
+        const bool off = written && check_attested_test_compile(directory, "debug", "off", debug, BUSTER_ARRAY_LENGTH(debug), units - 2, 0) && rename(from, to) == 0;
+        snprintf(to, sizeof(to), "%s/on", directory);
+        const bool on = written && check_attested_test_compile(directory, "debug", "on", debug, BUSTER_ARRAY_LENGTH(debug), units - 2, 0) && rename(from, to) == 0;
+        check_test_expect(test, off && on && check_attested_test_compiled_same(directory, "on", "off", units - 2, true) &&
+                                    check_units_attested_last[CHECK_ATTESTED_SUMMARY_UNITS] == 0,
+                          "-g runs no attested declarations' passes, and its objects are --attested=off's");
+        check_attested_test_compiled_remove(directory, "on", units);
+        const char* scalar[] = { "-nostdinc", "-std=gnu17", "--scalar", "--lanes", "1", "-c" };
+        const bool scalar_on = written && check_attested_test_compile(directory, "on", "on", scalar, BUSTER_ARRAY_LENGTH(scalar), units - 2, 0);
+        check_test_expect(test, scalar_on && check_units_attested_last[CHECK_ATTESTED_SUMMARY_UNITS] == 0, "--scalar runs no attested declarations' passes");
+        check_attested_test_compiled_remove(directory, "off", units);
+        check_attested_test_compiled_remove(directory, "on", units);
+    }
+    for (uint32_t u = 0; u < units; u += 1)
+    {
+        char path[640];
+        snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
+        unlink(path);
+    }
+    unlink(header);
+}
+
 static __attribute__((noinline)) void check_test_attested(CheckTest* test)
 {
     char directory[] = "/tmp/buster-attested-XXXXXX";
@@ -319,6 +571,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     }
     if (ready)
     {
+        check_test_attested_compile(test, directory);
         rmdir(directory);
     }
 }

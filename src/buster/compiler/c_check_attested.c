@@ -1,18 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #2531's step 0, the census (docs/attested-declarations.md, "The steps and their gates"): what attested declarations
-// would skip, counted on the pipeline as it is. measure-attested runs a command of several units as `--lanes 1` runs
-// it, and beside it, at two places of each unit that check_driver_unit gives it (one test of check_driver_attested a
-// place, which only this command sets):
+// #2531's attested declarations (docs/attested-declarations.md): the passes, a lane's memo, step 0's census and steps 1
+// and 2's compile.
+//
+// The compile (--attested, c_checker_driver.c's CheckAttestedMode): each units lane of a command of several source files
+// has a CheckAttested of its own (check_attested_lane_open, CheckUnitsLane.attested), whose memo and names' states its
+// units share. Before each unit's reader the passes run untimed (check_attested_decide); with --attested=on the reader's
+// walk passes the declarations attested and not reached (check_attested_skips, check_input_skip), and with verify a hit
+// whose reading contradicts its memo fails the unit (check_attested_contradiction). The reader tests each reading's
+// binding events against its list as it ends (check_attested_events); the unit's end records each reading and teaches the
+// memo (check_attested_after), and says whether a unit that skipped is read again with nothing skipped
+// (check_attested_again, check_units_compile). The compile's reach takes no runtime functions' names (check_attested_decide
+// says why).
+//
+// The census, step 0: what attested declarations would skip, counted on the pipeline as it is. measure-attested runs a
+// command of several units as `--lanes 1` runs it, and beside it, at two places of each unit that check_driver_unit gives
+// it (one test of check_driver_attested a place, which only this command sets):
 //
 //   - check_attested_input, the reader's call: before the reader, the design's passes over the parser's tree, timed by
 //     this thread's user-mode cycles: the lists (each file-scope declaration's range, and each identifier's class by its
 //     role and the brackets around it), the declarations' own hashes, the chain (each one's semantic hash from its own
 //     and its names' current hashes, the memo's probe, its declared names' new hashes), the reach (from the roots, by
-//     two cursors a name) and the marks (the skipped ranges' bits). Then the reader, check_input_run as -c calls it but
-//     with its environment published, which copies the binding events past the reader and changes nothing it reads or
-//     writes.
+//     two cursors a name) and the marks (the skipped ranges' bits). Then the reader, check_input_run as -c calls it, which
+//     tests each reading's binding events against its declaration's list as it ends (check_attested_events).
 //   - check_attested_after, the unit's end: what each declaration's reading did, from what the reader and the later
 //     stages left. Silent: no diagnostic of the driver's collected ones (PPOptions.collect_diagnostics, every stage's)
 //     is placed at one of its tokens by its output position. Pure: no token of it has a definition, a tentative
@@ -39,8 +50,7 @@
 // check_attested_input, the record (check_attested_after), check_attested_report and run_attested_census. Include after
 // c_checker_units.c: c_checker_driver.c declares the two calls and check_driver_attested.
 //
-// This is a measurement beside the compile: the passes are the design's in scalar code, one declaration's chain at a
-// time, and their figures are what a vector path must beat.
+// The census is a measurement beside the compile; the passes are the compile's.
 #ifndef BUSTER_C_CHECK_ATTESTED_INCLUDED
 #define BUSTER_C_CHECK_ATTESTED_INCLUDED
 
@@ -216,6 +226,23 @@ _Static_assert(2 * (uint64_t)BUSTER_ATTESTED_MAX_IDS <= (UINT64_C(1) << BUSTER_A
 typedef struct CheckAttested CheckAttested;
 struct CheckAttested
 {
+    // A lane's of a compile (steps 1 and 2, check_attested_lane_open), not measure-attested's: its mode (CheckAttestedMode),
+    // whether the unit's reader was given marks to skip (the unit then has `skipped` declarations, `skipped_tokens` tokens),
+    // whether the unit must be read again with nothing skipped (check_attested_after: an error, an unlisted name or the typo
+    // corrector), and whether the reading under way is that one, which runs no passes and teaches nothing. The unit's
+    // contradictions (hits whose reading here isn't what the memo attests), and the first one's declaration.
+    bool production;
+    uint8_t mode;
+    bool skipped;
+    bool again;
+    bool reading_again;
+    uint32_t skipped_declarations;
+    uint64_t skipped_tokens;
+    uint32_t unit_contradictions;
+    uint32_t contradicted;
+    // The lane's units that skipped, and those read again.
+    uint64_t units_skipping;
+    uint64_t units_again;
     // --list N: the first N declarations of each outcome but skipped, and every contradiction, by file and line.
     uint32_t list;
     // --passes N: the passes run N times a unit (1 by default), the least cycles of each kept; the first run's results.
@@ -229,9 +256,11 @@ struct CheckAttested
     CheckAttestedHash* memo;
     uint64_t memo_mask;
     uint64_t memo_count;
-    // By key: the names' states.
+    // By key: the names' states, and the events' test's marks (check_attested_events): the classes a declaration's list
+    // gives the key, with the declaration and the unit's stamp.
     Arena key_arena;
     CheckAttestedKey* keys;
+    uint64_t* list_marks;
     // By IdentId: the name's facts (BUSTER_ATTESTED_ID_*), a `__builtin_X` name's X (0 until it is interned), and how
     // many of the table's names have them.
     uint8_t* id_facts;
@@ -269,6 +298,11 @@ struct CheckAttested
     uint64_t* sums_high;
     CheckAttestedHash* semantics;
     uint8_t* hits;
+    // Each declaration whose reading declared, completed or looked up a name its list doesn't hold, the unit's events of
+    // that kind, and whether the reader got to test them (check_attested_events): it doesn't where it failed.
+    uint8_t* unlisted;
+    uint64_t unit_unlisted_events;
+    bool events_checked;
     uint8_t* reached;
     uint8_t* reached_without_runtime;
     uint32_t* worklist;
@@ -474,7 +508,8 @@ static uint32_t check_attested_runtime_count(void)
 static void check_attested_ids(CheckAttested* census, const InternTable* table)
 {
     const uint32_t count = table->count < BUSTER_ATTESTED_MAX_IDS ? table->count : BUSTER_ATTESTED_MAX_IDS;
-    const uint32_t runtimes = check_attested_runtime_count();
+    // (The compile's reach takes no runtime functions' names: only the census looks them up.)
+    const uint32_t runtimes = census->production ? 0 : check_attested_runtime_count();
     for (uint32_t id = census->ids_known > 1 ? census->ids_known : 1; id < count; id += 1)
     {
         const uint8_t* bytes = intern_bytes(table, id);
@@ -1527,10 +1562,14 @@ static __attribute__((noinline)) void check_attested_marks(CheckAttested* census
 {
     const uint32_t words = census->token_count / 64 + 1;
     memset(census->marks, 0, (uint64_t)words * sizeof(uint64_t));
+    uint32_t skipped = 0;
+    uint64_t skipped_tokens = 0;
     for (uint32_t d = 0; d < census->declaration_count; d += 1)
     {
         if (census->hits[d] != 0 && census->reached[d] == 0)
         {
+            skipped += 1;
+            skipped_tokens += census->lasts[d] - census->firsts[d] + 1;
             const uint32_t first = census->firsts[d];
             const uint32_t end = census->lasts[d] + 1;
             uint32_t t = first;
@@ -1544,10 +1583,12 @@ static __attribute__((noinline)) void check_attested_marks(CheckAttested* census
             }
         }
     }
+    census->skipped_declarations = skipped;
+    census->skipped_tokens = skipped_tokens;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The unit before its reader: its arrays, the passes timed, then the reader with its environment published.
+// The unit before its reader: its arrays, the passes timed, then the reader.
 
 // The counter's value: with rdpmc from its page under the page's sequence lock, as linux/perf_event.h describes (the
 // parser benchmark's reader), or with read() where the kernel doesn't allow rdpmc.
@@ -1668,6 +1709,7 @@ static bool check_attested_unit_arrays(CheckAttested* census, uint32_t count, ui
     census->sums_low = arena_push_array(arena, slots + 8, sizeof(uint64_t), 64);
     census->sums_high = arena_push_array(arena, slots + 8, sizeof(uint64_t), 64);
     census->hits = arena_push_array(arena, slots, sizeof(uint8_t), 64);
+    census->unlisted = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->reached = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->reached_without_runtime = arena_push_array(arena, slots, sizeof(uint8_t), 64);
     census->worklist = arena_push_array(arena, slots, sizeof(uint32_t), 64);
@@ -1843,8 +1885,8 @@ static void check_attested_twins(CheckAttested* census, const Parser* parser, Pr
     arena_pop_to(&census->unit_arena, mark);
 }
 
-// check_driver_unit's reader for a census's unit: the passes, then check_input_run as check_input_compile calls it, with
-// the reader's environment published (its binding events kept past it). A view of a failed parse runs no passes.
+// check_driver_unit's reader for a census's unit: the passes, then check_input_run as check_input_compile calls it, which
+// tests each reading's binding events as it ends (check_attested_events). A view of a failed parse runs no passes.
 static bool check_attested_input(CheckAttested* census, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, const char* path)
 {
@@ -1913,8 +1955,262 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
         }
         census->unit_ready = listed;
     }
-    return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true,
-                           true);
+    census->events_checked = false;
+    return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, false, true,
+                           true, census);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The compile's own (#2531's steps 1 and 2): a lane's state, the passes untimed before its unit's reader, and the reader
+// given the marks of the declarations it passes.
+
+static bool check_attested_open(CheckAttested* census);
+static void check_attested_close(CheckAttested* census);
+
+// A lane's state for a command of several source files with --attested=on or verify (`mode`), or null where it can't be
+// reserved (its units are then read as without it). The memo starts empty, and its names' states are the lane's intern
+// table's, which its units share.
+static CheckAttested* check_attested_lane_open(uint8_t mode)
+{
+    CheckAttested* attested = calloc(1, sizeof(CheckAttested));
+    const bool opened = attested != NULL && check_attested_open(attested);
+    if (attested != NULL && !opened)
+    {
+        check_attested_close(attested);
+        free(attested);
+        attested = NULL;
+    }
+    if (attested != NULL)
+    {
+        attested->production = true;
+        attested->mode = mode;
+        attested->passes = 1;
+    }
+    return attested;
+}
+
+static void check_attested_lane_close(CheckAttested* attested)
+{
+    if (attested != NULL)
+    {
+        check_attested_close(attested);
+        free(attested);
+    }
+}
+
+// A unit's start on the lane (null where it has no state): nothing skipped yet, and whether it is a reading again, which
+// skips nothing.
+static void check_attested_begin(CheckAttested* attested, bool again)
+{
+    if (attested != NULL)
+    {
+        attested->units_again += again ? 1 : 0;
+        attested->reading_again = again;
+        attested->skipped = false;
+        attested->again = false;
+    }
+}
+
+// Whether the unit just compiled is read again with nothing skipped: it skipped, and its record says so or it `failed`.
+static bool check_attested_again(const CheckAttested* attested, bool failed)
+{
+    return attested != NULL && attested->skipped && (attested->again || failed);
+}
+
+// The lane's counts, which --time-stages reports for the command (check_driver_units), into `counts`
+// (CHECK_ATTESTED_SUMMARY): added to what is there.
+static void check_attested_summary(const CheckAttested* attested, uint64_t* counts)
+{
+    if (attested != NULL)
+    {
+        counts[CHECK_ATTESTED_SUMMARY_UNITS] += attested->units_observed - attested->units_again;
+        counts[CHECK_ATTESTED_SUMMARY_SKIPPING] += attested->units_skipping;
+        counts[CHECK_ATTESTED_SUMMARY_AGAIN] += attested->units_again;
+        counts[CHECK_ATTESTED_SUMMARY_DECLARATIONS] += attested->declarations;
+        counts[CHECK_ATTESTED_SUMMARY_SKIPPED] += attested->outcome_declarations[CHECK_ATTESTED_SKIPPED];
+        counts[CHECK_ATTESTED_SUMMARY_OUTSIDE_TOKENS] += attested->declaration_tokens - attested->outcome_tokens[CHECK_ATTESTED_DEFINITION_ROOT];
+        counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] += attested->outcome_tokens[CHECK_ATTESTED_SKIPPED];
+        counts[CHECK_ATTESTED_SUMMARY_HASHES] += attested->memo_count;
+        counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] += attested->contradictions;
+        counts[CHECK_ATTESTED_SUMMARY_UNLISTED] += attested->unlisted_declares + attested->unlisted_uses + attested->unlisted_completions;
+    }
+}
+
+// The passes, untimed: whether the lists could be made (room, and every pragma's end). The marks then hold the
+// declarations attested and not reached (skipped_declarations of them, skipped_tokens tokens).
+static bool check_attested_decide(CheckAttested* attested, const Parser* parser, Preprocessor* pp)
+{
+    attested->stamp += 1;
+    const bool scalar = parser->options.scalar;
+    const bool listed = check_attested_lists(attested, parser, scalar) && check_attested_pragmas(attested, parser, pp);
+    if (listed)
+    {
+        check_attested_hashes(attested, parser, scalar);
+        check_attested_literals(attested, parser, pp, scalar);
+        check_attested_chain(attested);
+        // Without the runtime functions' names: a runtime call takes a declaration's symbol only where the selection
+        // numbered the declaration's object (check_lower_declared_runtime), which only a reference of the code it selects
+        // makes, a reading's that spells the name or its builtin's, which reach the declaration. The census counts what that
+        // rule would reach (reached-by-runtime-names).
+        check_attested_reach(attested, parser, pp, attested->reached, false);
+        check_attested_marks(attested);
+        // (The record's outcomes take the reach as its own: the census's reach without the runtime names.)
+        memcpy(attested->reached_without_runtime, attested->reached, attested->declaration_count);
+    }
+    return listed;
+}
+
+// check_driver_unit's reader for a unit of a lane with attested declarations: the passes (none for a unit read again,
+// whose first reading skipped and must not, nor for a view of a failed parse), then check_input_run as check_input_compile
+// calls it, which tests each reading's binding events against its list as it ends (check_attested_events), and, with
+// --attested=on, the marks of the declarations attested and not reached, which its walk passes.
+static bool check_attested_read(CheckAttested* attested, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                                bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
+{
+    const uint32_t count = parser->tokens.count;
+    attested->unit_ready = false;
+    attested->skipped = false;
+    attested->again = false;
+    attested->path = NULL;
+    attested->token_count = count;
+    attested->skipped_declarations = 0;
+    attested->skipped_tokens = 0;
+    const bool whole = !attested->reading_again && complete_translation_unit && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE &&
+                       parser->tree.roles != NULL && parser->tree.parents != NULL && pp->table->count < BUSTER_ATTESTED_MAX_IDS;
+    if (whole && check_attested_unit_arrays(attested, count, parser->tokens.pragma_count, pp->output.count))
+    {
+        check_attested_ids(attested, pp->table);
+        check_attested_levels(attested, parser, pp);
+        attested->unit_ready = check_attested_decide(attested, parser, pp);
+        attested->skipped = attested->unit_ready && attested->mode == CHECK_ATTESTED_MODE_ON && attested->skipped_declarations != 0;
+    }
+    attested->events_checked = false;
+    return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, false, true,
+                           true, attested);
+}
+
+// Whether --attested=verify fails the unit: a contradiction in it.
+static bool check_attested_verifying(const CheckAttested* attested)
+{
+    return attested->mode == CHECK_ATTESTED_MODE_VERIFY && attested->unit_contradictions != 0;
+}
+
+// --attested=verify's failure: the unit's first contradiction, a hit whose reading here wasn't silent, pure and listed,
+// by its file and line, on the unit's stream.
+static void check_attested_contradiction(const CheckAttested* attested, Preprocessor* pp, FILE* errors)
+{
+    const char* name = NULL;
+    uint32_t length = 0;
+    const uint32_t line = attested->contradicted != 0 ? pp_presumed(pp, attested->contradicted, &name, &length) : 0;
+    fprintf(errors, "fatal error: %.*s:%u: an attested declaration's reading here is not what the memo attests (%u in the unit; #2531)\n",
+            name != NULL ? (int)length : 1, name != NULL ? name : "-", line, attested->unit_contradictions);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The readings' binding events against the lists: check_input_run's call as it ends, with its bindings stream, its tags'
+// completions and its table, before its scratch goes.
+
+static uint32_t check_attested_declaration_of(const CheckAttested* census, uint32_t token);
+static bool check_attested_lists_hold(const CheckAttested* census, uint32_t d, uint32_t key, uint8_t classes);
+static void check_attested_list_declaration(CheckAttested* census, Preprocessor* pp, const char* what, uint32_t d);
+
+// The marks of the declarations that the unit's walk passes (check_input_skip), or null where it passes none.
+static const uint64_t* check_attested_skips(const CheckAttested* attested)
+{
+    return attested->skipped ? attested->marks : NULL;
+}
+
+// Declaration `d`'s list marked by key (CheckAttested.list_marks): each key's mark the unit's stamp, `d` and the classes
+// its entries give the key. A mark of another unit or declaration is replaced, and so is the one an earlier marking left.
+static void check_attested_mark_list(CheckAttested* census, uint32_t d)
+{
+    const uint64_t owner = ((uint64_t)(census->stamp & 0xffffffu) << 40) | ((uint64_t)d << 8);
+    uint64_t* const marks = census->list_marks;
+    for (uint32_t n = census->name_starts[d]; n < census->name_starts[d + 1]; n += 1)
+    {
+        const uint32_t entry = census->name_entries[n];
+        const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
+        const uint64_t mark = marks[key];
+        const uint64_t kept = (mark & ~UINT64_C(0xff)) == owner ? mark : owner;
+        marks[key] = kept | (entry >> BUSTER_ATTESTED_CLASS_SHIFT);
+    }
+}
+
+// Each file-scope DECLARE event, and each USE event, of a declaration's reading against its list, and each tag it
+// completes: a declaration whose reading declared, completed or looked up a name its list doesn't hold is unlisted
+// (never learned, and a unit that skipped is read again). The events come in nearly source order, so each one's
+// declaration is the last one's or a search's; a declaration's list is marked by key as its events start (a function
+// body's has every name it spells, so that a scan of the list for each event would take the body's square).
+static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count)
+{
+    const bool ready = census->unit_ready && count == census->token_count;
+    const uint32_t declarations = ready ? census->declaration_count : 0;
+    census->events_checked = true;
+    census->unit_unlisted_events = 0;
+    if (ready)
+    {
+        memset(census->unlisted, 0, declarations);
+    }
+    const uint32_t name_capacity = bindings->name_capacity;
+    const uint32_t* const firsts = census->firsts;
+    const uint32_t* const lasts = census->lasts;
+    const uint64_t stamp = (uint64_t)(census->stamp & 0xffffffu) << 40;
+    uint32_t d = declarations;
+    for (uint32_t e = 0; ready && name_capacity != 0 && e < bindings->count; e += 1)
+    {
+        const uint8_t operation = bindings->operation[e];
+        const uint32_t space = bindings->key[e] / name_capacity;
+        const uint32_t id = bindings->key[e] % name_capacity;
+        const bool file_declare = operation == C_BINDING_DECLARE && bindings->depth[e] == 0 && space <= C_BINDING_TAG;
+        const bool use = operation == C_BINDING_USE && space <= C_BINDING_TAG;
+        const uint32_t point = bindings->point[e];
+        const bool here = d < declarations && firsts[d] <= point && point <= lasts[d];
+        const uint32_t at = (file_declare || use) && !here ? check_attested_declaration_of(census, point) : d;
+        if (at != d && at < declarations)
+        {
+            check_attested_mark_list(census, at);
+        }
+        d = at;
+        if ((file_declare || use) && d < declarations)
+        {
+            const uint32_t key = id * 2 + (space == C_BINDING_TAG ? 1u : 0u);
+            const uint64_t mark = key < 2 * BUSTER_ATTESTED_MAX_IDS ? census->list_marks[key] : 0;
+            const uint8_t classes = file_declare ? BUSTER_ATTESTED_DECLARES : BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP;
+            const bool held = (mark & ~UINT64_C(0xff)) == (stamp | (uint64_t)d << 8) && (mark & classes) != 0;
+            census->declare_events += file_declare ? 1 : 0;
+            census->use_events += use ? 1 : 0;
+            census->unlisted_declares += file_declare && !held ? 1 : 0;
+            census->unlisted_uses += use && !held ? 1 : 0;
+            census->unit_unlisted_events += !held ? 1 : 0;
+            census->unlisted[d] |= !held ? 1 : 0;
+            if (!held && census->list != 0)
+            {
+                printf("attested: unlisted %s name=%.*s\n", file_declare ? "declare" : "use", (int)intern_length(pp->table, id), (const char*)intern_bytes(pp->table, id));
+                check_attested_list_declaration(census, pp, "unlisted", d);
+            }
+        }
+    }
+    // The tags' completions against the lists. A completion is the token after a body's `}`, or a fixed enum's `{` or `;`
+    // (the token before either is the declaration's), and 0 for a predefined type's tag (`__va_list_tag`), no
+    // declaration's.
+    const uint32_t tags = ready && completions != NULL ? types->tags.count : 0;
+    for (uint32_t tag = 0; tag < tags; tag += 1)
+    {
+        const uint32_t completion = completions[tag];
+        const uint32_t name = types->tags.name[tag];
+        const uint32_t at = completion != 0 && completion <= count && name != 0 ? check_attested_declaration_of(census, completion - 1) : declarations;
+        if (at < declarations && (census->flags[at] & BUSTER_ATTESTED_DEFINITION) == 0 && !check_attested_lists_hold(census, at, name * 2 + 1, BUSTER_ATTESTED_DECLARES))
+        {
+            census->unlisted_completions += 1;
+            census->unit_unlisted_events += 1;
+            census->unlisted[at] = 1;
+            if (census->list != 0)
+            {
+                printf("attested: unlisted completion name=%.*s\n", (int)intern_length(pp->table, name), (const char*)intern_bytes(pp->table, name));
+                check_attested_list_declaration(census, pp, "unlisted", at);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1951,6 +2247,21 @@ static uint32_t check_attested_token_at(const Parser* parser, uint32_t position)
     return low == 0 || past ? count : low - 1;
 }
 
+// The declaration that holds the first token whose location is `location`, or the count where none does: a token at a time,
+// for a diagnostic that its position doesn't place (few, and only in a unit that has one).
+static uint32_t check_attested_located(const CheckAttested* census, const Parser* parser, const Preprocessor* pp, uint32_t location)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t* const sources = parser->tokens.sources;
+    const uint32_t* const locations = pp->output.locations;
+    uint32_t token = count;
+    for (uint32_t t = 0; locations != NULL && token == count && t < count; t += 1)
+    {
+        token = sources[t] < pp->output.count && locations[sources[t]] == location ? t : count;
+    }
+    return token < count ? check_attested_declaration_of(census, token) : census->declaration_count;
+}
+
 // Whether declaration `d`'s list holds `key` with a class among `classes`.
 static bool check_attested_lists_hold(const CheckAttested* census, uint32_t d, uint32_t key, uint8_t classes)
 {
@@ -1982,6 +2293,9 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
     const uint32_t count = parser->tokens.count;
     census->units_observed += 1;
     census->tokens += count;
+    census->unit_contradictions = 0;
+    census->contradicted = 0;
+    uint64_t unlisted_events = 0;
     const bool ready = census->unit_ready && complete && count == census->token_count;
     census->unit_ready = false;
     const uint32_t declarations = ready ? census->declaration_count : 0;
@@ -1996,14 +2310,17 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         memset(diagnostics, 0, ((uint64_t)declarations + 1) * sizeof(uint32_t));
         memset(unlisted, 0, (uint64_t)declarations + 1);
     }
-    bool error = !valid || input->report_count != 0 || !input->environment.valid || pp->diagnostic_collection_failed;
+    bool error = !valid || input->report_count != 0 || !census->events_checked || pp->diagnostic_collection_failed;
     uint32_t unplaced = 0;
     for (const PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL; record = record->next)
     {
         error |= record->severity == PP_SEVERITY_ERROR || record->severity == PP_SEVERITY_FATAL;
         const uint64_t position = record->position / PP_DIAGNOSTIC_PHASE_COUNT;
         const uint32_t token = position < UINT32_MAX ? check_attested_token_at(parser, (uint32_t)position) : count;
-        const uint32_t d = arrays && token < count ? check_attested_declaration_of(census, token) : declarations;
+        uint32_t d = arrays && token < count ? check_attested_declaration_of(census, token) : declarations;
+        // A diagnostic of the unit's end (-Wunused-function's, an unused internal declaration's) is published past its
+        // last token: placed by its location instead, at the token that has it, where one does.
+        d = arrays && d == declarations && record->location != 0 ? check_attested_located(census, parser, pp, record->location) : d;
         if (d < declarations)
         {
             diagnostics[d] += 1;
@@ -2016,52 +2333,11 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
     }
     census->unplaced_diagnostics += unplaced;
     census->units_unplaced += unplaced != 0 ? 1 : 0;
-    // The binding events of file scope against the lists.
-    const CBindings* bindings = arrays && input->environment.valid ? input->environment.bindings : NULL;
-    const uint32_t name_capacity = bindings != NULL ? bindings->name_capacity : 0;
-    for (uint32_t e = 0; bindings != NULL && e < bindings->count; e += 1)
+    // The binding events against the lists, which the reader tested as it ended (check_attested_events).
+    unlisted_events += ready ? census->unit_unlisted_events : 0;
+    for (uint32_t d = 0; ready && arrays && d < declarations; d += 1)
     {
-        const uint8_t operation = bindings->operation[e];
-        const uint32_t space = bindings->key[e] / name_capacity;
-        const uint32_t id = bindings->key[e] % name_capacity;
-        const bool file_declare = operation == C_BINDING_DECLARE && bindings->depth[e] == 0 && space <= C_BINDING_TAG;
-        const bool use = operation == C_BINDING_USE && space <= C_BINDING_TAG;
-        const uint32_t d = file_declare || use ? check_attested_declaration_of(census, bindings->point[e]) : declarations;
-        if (d < declarations)
-        {
-            const uint32_t key = id * 2 + (space == C_BINDING_TAG ? 1u : 0u);
-            const bool held = check_attested_lists_hold(census, d, key, file_declare ? BUSTER_ATTESTED_DECLARES : BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP);
-            census->declare_events += file_declare ? 1 : 0;
-            census->use_events += use ? 1 : 0;
-            census->unlisted_declares += file_declare && !held ? 1 : 0;
-            census->unlisted_uses += use && !held ? 1 : 0;
-            unlisted[d] |= !held ? 1 : 0;
-            if (!held && census->list != 0)
-            {
-                printf("attested: unlisted %s name=%.*s\n", file_declare ? "declare" : "use", (int)intern_length(pp->table, id), (const char*)intern_bytes(pp->table, id));
-                check_attested_list_declaration(census, pp, "unlisted", d);
-            }
-        }
-    }
-    // The tags' completions against the lists. A completion is the token after a body's `}`, or a fixed enum's `{` or `;`
-    // (the token before either is the declaration's), and 0 for a predefined type's tag (`__va_list_tag`), no
-    // declaration's.
-    const uint32_t tags = bindings != NULL && input->environment.tag_completions != NULL ? input->environment.tag_count : 0;
-    for (uint32_t tag = 0; tag < tags && tag < types->tags.count; tag += 1)
-    {
-        const uint32_t completion = input->environment.tag_completions[tag];
-        const uint32_t name = types->tags.name[tag];
-        const uint32_t d = completion != 0 && completion <= count && name != 0 ? check_attested_declaration_of(census, completion - 1) : declarations;
-        if (d < declarations && (census->flags[d] & BUSTER_ATTESTED_DEFINITION) == 0 && !check_attested_lists_hold(census, d, name * 2 + 1, BUSTER_ATTESTED_DECLARES))
-        {
-            census->unlisted_completions += 1;
-            unlisted[d] = 1;
-            if (census->list != 0)
-            {
-                printf("attested: unlisted completion name=%.*s\n", (int)intern_length(pp->table, name), (const char*)intern_bytes(pp->table, name));
-                check_attested_list_declaration(census, pp, "unlisted", d);
-            }
-        }
+        unlisted[d] = census->unlisted[d];
     }
     error |= ready && !arrays;
     const bool learning = !error && unplaced == 0;
@@ -2074,9 +2350,10 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         const uint32_t last = census->lasts[d];
         const uint32_t tokens = last - first + 1;
         const uint8_t flags = census->flags[d];
-        // Its reading's consequences, by the reader's facts at its tokens.
+        // Its reading's consequences, by the reader's facts at its tokens (none where the walk passed it: no reading).
+        const bool passed = census->skipped && census->hits[d] != 0 && census->reached[d] == 0;
         CheckAttestedOutcome impure = CHECK_ATTESTED_OUTCOMES;
-        for (uint32_t t = first; bits != NULL && t <= last && impure == CHECK_ATTESTED_OUTCOMES; t += 1)
+        for (uint32_t t = first; bits != NULL && !passed && t <= last && impure == CHECK_ATTESTED_OUTCOMES; t += 1)
         {
             const uint8_t b = bits[t];
             const CheckInputAttributes* attributes = (b & (BUSTER_CHECK_BITS_STATIC | BUSTER_CHECK_BITS_DEFINED)) != 0 || check_input_linkage(bits, t) != 0 ?
@@ -2109,6 +2386,10 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         // A hit whose reading here wasn't what the memo attests: an input of the reading the hash doesn't cover.
         if (hit && !error && !eligible)
         {
+            const uint32_t source = parser->tokens.sources[first];
+            census->contradicted = census->unit_contradictions == 0 && source < pp->output.count && pp->output.locations != NULL ? pp->output.locations[source] :
+                                   census->contradicted;
+            census->unit_contradictions += 1;
             census->contradictions += 1;
             census->contradiction_tokens += tokens;
             if (census->contradictions_listed < census->list)
@@ -2154,6 +2435,12 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
             census->record_count += 1;
         }
     }
+    // A unit that skipped is read again with nothing skipped where its reading may have depended on what it skipped: an
+    // error (clang's typo correction and recovery look at every declared name), the typo corrector for a warning, a name
+    // declared or looked up outside its declaration's list (the chain's hashes didn't cover it), or a contradiction (an
+    // input of a reading that the hash doesn't cover, which a skipped declaration may have too).
+    census->again = census->skipped && (error || !ready || !arrays || unlisted_events != 0 || input->typo_searched || census->unit_contradictions != 0);
+    census->units_skipping += census->skipped ? 1 : 0;
     arena_pop_to(&census->unit_arena, mark);
 }
 
@@ -2237,10 +2524,11 @@ static bool check_attested_open(CheckAttested* census)
     census->memo_arena = arena_reserve(2 * (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
     census->memo = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_MEMO_FIRST_SLOTS, sizeof(CheckAttestedHash), 64);
     census->memo_mask = BUSTER_ATTESTED_MEMO_FIRST_SLOTS - 1;
-    census->key_arena = arena_reserve(keys * sizeof(CheckAttestedKey) + (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t)) +
+    census->key_arena = arena_reserve(keys * (sizeof(CheckAttestedKey) + sizeof(uint64_t)) + (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t)) +
                                       2 * ((uint64_t)runtimes + 1) * sizeof(uint32_t) + 16 * 4096);
     Arena* arena = &census->key_arena;
     census->keys = arena_push_array(arena, keys, sizeof(CheckAttestedKey), 4096);
+    census->list_marks = arena_push_array(arena, keys, sizeof(uint64_t), 4096);
     census->id_facts = arena_push_array(arena, BUSTER_ATTESTED_MAX_IDS, sizeof(uint8_t), 4096);
     census->builtin_targets = arena_push_array(arena, BUSTER_ATTESTED_MAX_IDS, sizeof(uint32_t), 4096);
     census->runtime_keys = arena_push_array(arena, runtimes + 1, sizeof(uint32_t), 4096);
@@ -2251,7 +2539,7 @@ static bool check_attested_open(CheckAttested* census)
     }
     census->unit_arena = arena_reserve(UINT64_C(1) << 36);
     check_attested_actions(census->kind_actions, census->role_actions);
-    return census->memo != NULL && census->keys != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL;
+    return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL;
 }
 
 static void check_attested_close(CheckAttested* census)

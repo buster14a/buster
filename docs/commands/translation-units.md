@@ -169,6 +169,61 @@ space's lock, raise the system time where a busy machine's wall time may hide
 it. The 9700X job runs it by 1, 2, 4 and 8 lanes with the frozen corpus's
 headers and predefines, where `tools/ci/changes.c`'s `check-units` says.
 
+## Attested declarations (`--attested`, #2531)
+
+A command of several source files skips, in each unit, the file-scope
+declarations that its lane's earlier units read silently and purely and that
+the unit's own code doesn't reach: steps 1 and 2 of [attested
+declarations](../attested-declarations.md) (`c_check_attested.c`, the passes
+the census below measures, run in the compile). `--attested=MODE` picks:
+
+- **`on`, the default:** each units lane opens a state of its own with its
+  first unit (`check_attested_lane_open`: a memo of 128-bit semantic hashes,
+  and each name's state by the lane's intern table's ids, which its units
+  share), and `check_driver_unit`'s reader (`check_attested_read`) runs the
+  passes before `check_input_run`, which gives the skipped declarations' tokens
+  no visit and ignores them (`check_input_skip`, as a lazily deferred body's),
+  so that the walk passes them. The tokens stay, lexed and parsed, and keep
+  their indices.
+- **`verify`:** the same passes, and nothing skipped: a hit whose reading here
+  isn't silent, pure and listed (a contradiction: an input of a reading that
+  the semantic hash doesn't cover) fails the unit with a fatal error naming
+  its file and line. Step 1's shadow.
+- **`off`:** no passes and no state. `--scalar` is `off` (its reader is the
+  skip's oracle), and so is `on` with `-g`, whose DWARF describes every type
+  the unit's table holds (`c_check_debug_values.c`), a skipped declaration's
+  too; `verify` runs with `-g`. A command of one source file has no memo and
+  runs none.
+
+As the reader ends, while it has its binding events, it tests each reading's
+file-scope `DECLARE` and `USE` events and its tags' completions against the
+declaration's list (`check_attested_events`, a declaration's list marked by key
+as its events start). At the unit's end (`check_attested_after`) the memo
+learns the misses read silently (no diagnostic placed at their tokens by output
+position, or by location for one published past the last token, as
+`-Wunused-function`'s), purely and listed, in a unit without an error. A unit
+that skipped is read again from its start with nothing skipped, into its stream
+from its start and its arenas emptied (`check_units_compile`), where its first
+reading may have depended on what it skipped: an error or the failure of any
+stage, the typo corrector, an unlisted event or a contradiction. Nothing reaches
+the lowering's runtime functions' names in the compile: a runtime call takes a
+declaration's symbol only for an object the selection numbered
+(`check_lower_declared_runtime`, `check_program_needed_number`), which only a
+reference of the selected code makes, and a reading that spells the name or its
+builtin reaches the declaration.
+
+`--time-stages` reports the lanes' counts (`attested declarations: ...`): the
+units that skipped, the file-scope declarations and the tokens outside function
+definitions skipped, the units read again, the memos' hashes, the
+contradictions and the unlisted events. `test-checker --attested` (in
+`c_check_attested_test.c`) compiles a fixture's units by each mode: by `-c`
+with two units' errors (one an undeclared call whose typo correction suggests a
+skipped prototype), on two lanes, by `-fsyntax-only -Wall -Wextra`, with `-g`
+and with `--scalar`, each object and the diagnostics `--attested=off`'s bytes;
+and `test-check-units`' every object of a command against the unit's alone is
+the skip's test on its programs. The design's "Steps 1 and 2" has the 9700X's
+results.
+
 ## Attested declarations' census (#2531)
 
 `./build/compiler measure-attested [--list N] [--passes N] [--twins] [compile options] file...`
@@ -199,9 +254,9 @@ sets, at two places: its reader's call and its unit's end.
   misses and L1D read misses (`rdpmc`) and TSC ticks: the first run's, the
   one inside the compile, and with `--passes N` the least of N runs. The
   report gives them a token of the units' tokens.
-- **The reader** is `check_input_run` as `-c` calls it but with its
-  environment published, which keeps its binding events past it and changes
-  nothing it reads or writes.
+- **The reader** is `check_input_run` as `-c` calls it, which tests each
+  reading's binding events against its declaration's list as it ends
+  (`check_attested_events`, the compile's own).
 - **The record, at the unit's end:** silent (no diagnostic of the driver's
   collected ones, every stage's, placed at one of the declaration's tokens by
   its output position), pure (no token with a definition, a tentative
