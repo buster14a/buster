@@ -752,7 +752,7 @@ static bool node_machine_pointer_assignable(const NodeMachine* machine, TypeId t
 
 // T's member access, `.` or `->` at record `r` (node `node`) of record `a`, by check_action_member's steps where the record is
 // a complete struct or union at the node's position without an address space and the member is no bit-field, and its base
-// is no constant: whether it typed the node.
+// is no constant or (for `.`) an address constant, a static object's: whether it typed the node.
 static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a)
 {
     TypeTable* types = machine->types;
@@ -1068,8 +1068,8 @@ static bool node_machine_dereference(NodeMachine* machine, uint32_t r, uint32_t 
 
 // T's pointer arithmetic, a subscript or a pointer plus or minus an integer at record `r` (node `node`) of records `a` and
 // `b`, by check_action_pointer_arithmetic's steps where the common conversions take both operands, one is a pointer to a
-// complete object type and the other an integer (no bit-field's), the pointer is no constant and neither has a fault:
-// whether it typed the node.
+// complete object type and the other an integer (no bit-field's), the pointer is no constant or an address constant, and
+// neither has a fault: whether it typed the node.
 static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
 {
     TypeTable* types = machine->types;
@@ -1083,8 +1083,6 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
     const NodeMachineOperand* pointer = reverse ? &right : &left;
     const NodeMachineOperand* index = reverse ? &left : &right;
     const uint32_t slot = reverse ? 0 : 1;
-    // Either operand's fault, which check_action_inherit would carry, and an index's bit-field width leave the node to the
-    // action.
     // A pointer that is an address constant (a static array's decay, say) held whole by the columns gives one with an index
     // that is an integer constant of node_machine_operand_width's types (check_action_address_index's), and none with an
     // index that has no constant.
@@ -1092,6 +1090,8 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
                          (index->constant_kind == CHECK_CONSTANT_NONE ||
                           (index->constant_kind == CHECK_CONSTANT_INTEGER && node_machine_operand_width(index) != 0 &&
                            (machine->columns->standings[index->record] & BUSTER_NODE_MACHINE_WIDE) == 0));
+    // Either operand's fault, which check_action_inherit would carry, and an index's bit-field width leave the node to the
+    // action.
     taken = taken && lp != rp && (lp || reverse) && check_action_is_integer(types, index->type) && (index->flags & BUSTER_CHECK_BIT_FIELD) == 0 &&
             (pointer->constant_kind == CHECK_CONSTANT_NONE || address) && node_machine_record_fault(machine, a) == CHECK_FAULT_NONE &&
             node_machine_record_fault(machine, b) == CHECK_FAULT_NONE;
@@ -1620,8 +1620,6 @@ static __attribute__((noinline)) bool node_machine_update_pointer_rule(NodeMachi
     return taken;
 }
 
-// T's direct rules for the operators whose type a lookup gives, each by its action's own steps for the common case, the
-// action taking the rest: whether one typed record `r` (node `node`, operator `op`, operands' records `a` and `b`).
 // T's integer constant fold: unary +, - or ~, or a binary arithmetic, shift, bitwise or comparison operator `op` at
 // record `r` of records `a` and `b` (UINT32_MAX for a unary one), each an rvalue integer constant its columns hold whole,
 // of an unqualified builtin integer type of at most 64 bits but bool, by check_action_arithmetic's steps: the operator's
@@ -1946,6 +1944,8 @@ static __attribute__((noinline)) bool node_machine_conditional(NodeMachine* mach
     return taken;
 }
 
+// T's direct rules for the operators whose type a lookup gives, each by its action's own steps for the common case, the
+// action taking the rest: whether one typed record `r` (node `node`, operator `op`, operands' records `a` and `b`).
 static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
 {
     bool typed = false;
