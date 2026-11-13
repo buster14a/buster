@@ -14,6 +14,8 @@ struct CheckExpressionWarnings
     TypeTable* types;
     const CheckCommonFacts* facts;
     Arena* scratch;
+    uint32_t* modifications;
+    bool modifications_read;
 };
 
 // A named expression's source-visible declaration. Its canonical object is used only for identity, never to read
@@ -169,8 +171,14 @@ static bool check_expression_same(CheckExpressionWarnings* warnings, uint32_t le
             }
             else if (same)
             {
-                same = check_semantic_member_of(parser, warnings->input, warnings->stream, warnings->types, left) ==
-                       check_semantic_member_of(parser, warnings->input, warnings->stream, warnings->types, right);
+                const uint32_t lm = check_semantic_member_of(parser, warnings->input, warnings->stream, warnings->types, left);
+                const uint32_t rm = check_semantic_member_of(parser, warnings->input, warnings->stream, warnings->types, right);
+                const uint32_t lb = check_common_bool_expression(graph, graph->operand0[left]);
+                const uint32_t rb = check_common_bool_expression(graph, graph->operand0[right]);
+                const CheckOp lop = lb < graph->count ? graph->ops[lb] : CHECK_OP_COUNT;
+                const CheckOp rop = rb < graph->count ? graph->ops[rb] : CHECK_OP_COUNT;
+                same = lm != 0 && lm == rm && (lop == CHECK_OP_VALUE || lop == CHECK_OP_MEMBER || lop == CHECK_OP_ARROW) &&
+                       (rop == CHECK_OP_VALUE || rop == CHECK_OP_MEMBER || rop == CHECK_OP_ARROW);
             }
             if (same)
             {
@@ -212,6 +220,147 @@ static bool check_expression_array(const CheckExpressionWarnings* warnings, uint
            type_kind_is_array(check_action_kind(warnings->types, type)) && !check_expression_weak(warnings, declaration);
 }
 
+static const CheckInputAttribute* check_expression_attribute(const CheckInput* input, uint32_t declaration, CheckInputAttributeKind kind,
+                                                            uint32_t parameter)
+{
+    const CheckInputAttributes* attributes = declaration < input->token_count ? check_input_attributes_at(input, declaration) : NULL;
+    const CheckInputAttribute* result = NULL;
+    for (uint32_t i = 0; result == NULL && attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        bool matches = !attribute->ignored && !attribute->subject_ignored && attribute->kind == kind;
+        if (matches && parameter != BUSTER_CHECK_NONE && attribute->argument_count != 0)
+        {
+            matches = false;
+            for (uint32_t a = 0; a < attribute->argument_count; a += 1)
+            {
+                matches |= attribute->argument_values != NULL && attribute->argument_values[a] == (int64_t)parameter + 1;
+            }
+        }
+        result = matches ? attribute : NULL;
+    }
+    return result;
+}
+
+// Clang records a nonnull parameter as modifiable when a bare name is assigned or its address is taken. This is
+// source order, including dead/unevaluated code, and not a reachability proof. A truth conversion checks at the full
+// expression's completion, so even a later assignment in that expression invalidates its earlier parameter use.
+// Only a unit with a nonnull parameter candidate pays for this sparse candidate scan and first-modification column.
+static bool check_expression_unmodified(CheckExpressionWarnings* warnings, uint32_t declaration, uint32_t completion)
+{
+    const CheckGraph* graph = &warnings->input->graph;
+    if (!warnings->modifications_read)
+    {
+        warnings->modifications_read = true;
+        warnings->modifications = CHECK_COMMON_PUSH_ARRAY(warnings->scratch, uint32_t, warnings->input->token_count);
+        if (warnings->modifications == NULL)
+        {
+            check_common_exhausted(warnings->pp);
+        }
+        else
+        {
+            memset(warnings->modifications, 0xff, warnings->input->token_count * sizeof(*warnings->modifications));
+            static const CheckOp operators[] = { CHECK_OP_ASSIGN, CHECK_OP_ADDRESS };
+            const CheckCommonOps set = check_common_ops(operators, BUSTER_ARRAY_LENGTH(operators));
+            CheckCommonScan scan = { 0 };
+            const bool vector = !BUSTER_SCALAR_PATH(warnings->parser->options.scalar);
+            for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < graph->count;
+                 node = check_common_next_op(graph, &set, &scan, vector))
+            {
+                const CheckOp op = graph->ops[node];
+                const uint32_t source = op == CHECK_OP_ASSIGN || op == CHECK_OP_ADDRESS ? graph->operand0[node] : BUSTER_CHECK_NONE;
+                const uint32_t parameter = source < graph->count && graph->ops[source] == CHECK_OP_VALUE &&
+                                           !check_expression_grouped(warnings->parser, graph, source) ?
+                                           check_expression_declaration(warnings, source) : BUSTER_CHECK_NONE;
+                if (parameter < warnings->input->token_count && check_common_sparse_get(warnings->input->parameters, parameter) != BUSTER_CHECK_NONE)
+                {
+                    const uint32_t end = graph->source_positions != NULL ? graph->source_positions[node] : graph->tokens[node] + 1;
+                    warnings->modifications[parameter] = end < warnings->modifications[parameter] ? end : warnings->modifications[parameter];
+                }
+            }
+        }
+    }
+    return warnings->modifications != NULL && warnings->modifications[declaration] > completion;
+}
+
+static const CheckInputAttribute* check_expression_nonnull(CheckExpressionWarnings* warnings, uint32_t node, uint32_t declaration,
+                                                          uint32_t completion, bool* parameter)
+{
+    const CheckInput* input = warnings->input;
+    const CheckGraph* graph = &input->graph;
+    const CheckInputAttribute* result = NULL;
+    *parameter = node < graph->count && graph->ops[node] == CHECK_OP_VALUE && declaration < input->token_count &&
+                 check_common_sparse_get(input->parameters, declaration) != BUSTER_CHECK_NONE;
+    if (*parameter)
+    {
+        result = check_expression_attribute(input, declaration, CHECK_ATTRIBUTE_NONNULL, BUSTER_CHECK_NONE);
+        if (result == NULL)
+        {
+            const uint32_t opening = check_common_sparse_get(input->declaration_bodies, declaration);
+            const uint32_t function = opening < input->token_count ? check_common_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
+            result = check_expression_attribute(input, function, CHECK_ATTRIBUTE_NONNULL, check_common_sparse_get(input->parameters, declaration));
+        }
+        if (result != NULL && !check_expression_unmodified(warnings, declaration, completion))
+        {
+            result = NULL;
+        }
+    }
+    else if (node < graph->count && graph->ops[node] == CHECK_OP_CALL)
+    {
+        uint32_t callee = graph->operand0[node];
+        for (uint32_t steps = 0; callee < graph->count && steps < graph->count; steps += 1)
+        {
+            const CheckOp op = graph->ops[callee];
+            if (op != CHECK_OP_CONVERT && op != CHECK_OP_ADDRESS && op != CHECK_OP_DEREFERENCE)
+            {
+                break;
+            }
+            callee = graph->operand0[callee];
+        }
+        uint32_t function = check_expression_declaration(warnings, callee);
+        const uint32_t overload = check_program_builtin_index(warnings->stream->overloads, warnings->stream->overload_count, sizeof(CheckOverloadEffect), node);
+        function = overload != BUSTER_CHECK_NONE ? warnings->stream->overloads[overload].selected.declaration : function;
+        result = check_expression_attribute(input, function, CHECK_ATTRIBUTE_RETURNS_NONNULL, BUSTER_CHECK_NONE);
+    }
+    return result;
+}
+
+// An unsigned offset cannot wrap a pointer under the default C overflow contract. These four syntactic bounds
+// checks therefore have one result. An explicit group around the addition, a signed offset, and pointer-wrap
+// semantics all suppress the check. Equality and an arbitrary arithmetically equivalent expression are not proofs.
+static int check_expression_bounds(CheckExpressionWarnings* warnings, uint32_t node)
+{
+    const CheckGraph* graph = &warnings->input->graph;
+    const CheckOp op = graph->ops[node];
+    const bool reversed = op == CHECK_OP_GREATER || op == CHECK_OP_LESS_EQUAL;
+    const uint32_t sum = reversed ? graph->operand1[node] : graph->operand0[node];
+    const uint32_t base = reversed ? graph->operand0[node] : graph->operand1[node];
+    const PredefinesOptions* options = &warnings->pp->options.predefines;
+    const bool wraps = options->wrapv_pointer != 0 ? options->wrapv_pointer == BUSTER_PREDEFINES_ON : options->strict_overflow == BUSTER_PREDEFINES_OFF;
+    int result = -1;
+    if (!wraps && op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && sum < graph->count && base < graph->count &&
+        graph->ops[sum] == CHECK_OP_ADD && check_action_kind(warnings->types, check_stream_type(warnings->stream, sum)) == BUSTER_TYPE_KIND_POINTER &&
+        !check_expression_grouped(warnings->parser, graph, sum))
+    {
+        uint32_t offset = BUSTER_CHECK_NONE;
+        if (check_expression_same(warnings, graph->operand0[sum], base))
+        {
+            offset = graph->operand1[sum];
+        }
+        else if (check_expression_same(warnings, graph->operand1[sum], base))
+        {
+            offset = graph->operand0[sum];
+        }
+        uint32_t width = 0;
+        bool signed_offset = false;
+        if (offset < graph->count && check_common_integer(warnings->types, check_stream_type(warnings->stream, offset), &width, &signed_offset) && !signed_offset)
+        {
+            result = op == CHECK_OP_GREATER_EQUAL || op == CHECK_OP_LESS_EQUAL ? 1 : 0;
+        }
+    }
+    return result;
+}
+
 // The two runtime diagnostic families are built while the comparison is parsed, before the full expression's
 // implicit conversions. They survive unreachable code and static selection's other arm; a required constant,
 // sizeof/typeof operand or array bound suppresses them.
@@ -241,6 +390,11 @@ static void check_expression_comparison(CheckExpressionWarnings* warnings, uint3
         {
             message = op == CHECK_OP_EQUAL ? "array comparison always evaluates to false" : op == CHECK_OP_NOT_EQUAL ?
                       "array comparison always evaluates to true" : "array comparison always evaluates to a constant";
+        }
+        else
+        {
+            const int bounds = check_expression_bounds(warnings, node);
+            message = bounds < 0 ? NULL : bounds != 0 ? "pointer comparison always evaluates to true" : "pointer comparison always evaluates to false";
         }
         if (message != NULL)
         {
@@ -282,19 +436,41 @@ static void check_expression_pointer(CheckExpressionWarnings* warnings, uint32_t
     const bool array = type_kind_is_array(kind);
     const uint32_t token = node < graph->count ? graph->tokens[node] : BUSTER_CHECK_NONE;
     const bool member = node < graph->count && (graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW);
-    const uint32_t location = member ? token + 1 : token;
+    const bool call = node < graph->count && graph->ops[node] == CHECK_OP_CALL;
+    uint32_t root = token;
+    for (uint32_t steps = 0; compare && call && root < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[root];
+        if (parent >= parser->tokens.count || parser->tree.roles[parent] != PARSE_ROLE_CLOSE_GROUP)
+        {
+            break;
+        }
+        root = parent;
+    }
+    const uint32_t location = member ? token + 1 : call ? check_common_subtree_start(parser, root) : token;
+    const uint32_t completion = compare ? (graph->source_positions != NULL ? graph->source_positions[owner] : graph->tokens[owner]) :
+                                check_common_full_expression_end(parser, graph, warnings->facts->parents, owner);
     const bool macro = check_common_from_macro(parser, warnings->pp, original) &&
                        (check_expression_macro_body(parser, warnings->pp, original) ||
                         check_expression_macro_body(parser, warnings->pp, graph->tokens[owner]));
     const uint32_t id = compare ? CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE : CHECK_WARNING_ID_POINTER_BOOL_CONVERSION;
-    const bool candidate = location < parser->tokens.count && declaration < warnings->input->token_count && !macro &&
-                           !check_expression_weak(warnings, declaration) && (address || function || array) && !(address && function) &&
-                           !(compare && grouped && !address) && !(address && check_expression_grouped(parser, graph, node));
+    const bool form = location < parser->tokens.count && !macro && !(compare && grouped && !address && !call) &&
+                      !(address && check_expression_grouped(parser, graph, node));
+    bool parameter = false;
+    const CheckInputAttribute* nonnull = form && kind == BUSTER_TYPE_KIND_POINTER ?
+                                         check_expression_nonnull(warnings, node, declaration, completion, &parameter) : NULL;
+    const bool candidate = nonnull != NULL || (form && declaration < warnings->input->token_count && !check_expression_weak(warnings, declaration) &&
+                                              (address || function || array) && !(address && function));
     if (candidate && check_common_severity(warnings->pp, parser, warnings->input, location, id, false) != CHECK_WARNING_IGNORE)
     {
-        const uint32_t first = member ? check_common_subtree_start(parser, token) : token;
-        const char* name = check_semantic_requirement(parser, warnings->pp, first, location + 1, NULL, warnings->scratch);
-        const char* message = name == NULL ? NULL : compare ?
+        const uint32_t first = member ? check_common_subtree_start(parser, token) : location;
+        const uint32_t end = call ? root + 1 : location + 1;
+        const char* name = check_semantic_requirement(parser, warnings->pp, first, end, NULL, warnings->scratch);
+        const char* message = name == NULL ? NULL : nonnull != NULL && compare ?
+                              check_warning_text(warnings->scratch, "comparison of nonnull %s '%s' %sequal to a null pointer is '%s' on first encounter",
+                                                 parameter ? "parameter" : "function call", name, equal ? "" : "not ", equal ? "false" : "true") :
+                              nonnull != NULL ? check_warning_text(warnings->scratch, "nonnull %s '%s' will evaluate to 'true' on first encounter",
+                                                                   parameter ? "parameter" : "function call", name) : compare ?
                               check_warning_text(warnings->scratch, "comparison of %s'%s' %sequal to a null pointer is always %s",
                                                  address ? "address of " : function ? "function " : "array ", name,
                                                  equal ? "" : "not ", equal ? "false" : "true") :
@@ -302,7 +478,11 @@ static void check_expression_pointer(CheckExpressionWarnings* warnings, uint32_t
                                                  address ? "" : function ? "function " : "array ", name);
         CheckCommonNote notes[2];
         uint32_t note_count = 0;
-        if (function)
+        if (nonnull != NULL)
+        {
+            notes[note_count++] = (CheckCommonNote){ nonnull->name_token, parameter ? "declared 'nonnull' here" : "declared 'returns_nonnull' here" };
+        }
+        else if (function)
         {
             notes[note_count++] = (CheckCommonNote){ location, "prefix with the address-of operator to silence this warning" };
             uint32_t parameters = 0;
@@ -332,8 +512,7 @@ static void check_expression_pointer(CheckExpressionWarnings* warnings, uint32_t
         }
         else
         {
-            const uint32_t publication = check_common_full_expression_end(parser, graph, warnings->facts->parents, owner);
-            check_common_report_evaluated(parser, warnings->pp, warnings->input, location, publication, PP_DIAGNOSTIC_SEMANTIC, id, false,
+            check_common_report_evaluated(parser, warnings->pp, warnings->input, location, completion, PP_DIAGNOSTIC_SEMANTIC, id, false,
                                           message, notes, note_count, warnings->scratch);
         }
     }
@@ -345,7 +524,7 @@ static void check_common_expression_warnings(const Parser* parser, Preprocessor*
                                              TypeTable* types, const CheckProgram* program, const CheckCommonFacts* facts, Arena* scratch)
 {
     (void)program;
-    CheckExpressionWarnings warnings = { parser, pp, input, stream, types, facts, scratch };
+    CheckExpressionWarnings warnings = { .parser = parser, .pp = pp, .input = input, .stream = stream, .types = types, .facts = facts, .scratch = scratch };
     const CheckGraph* graph = &input->graph;
     const bool self = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE, false);
     const bool string = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_COMPARE, false);

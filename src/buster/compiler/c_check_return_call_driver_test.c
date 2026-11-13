@@ -21,6 +21,7 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         const char* source;
         uint32_t warnings;
         uint32_t clang_warnings;
+        const char* option;
     } cases[] =
     {
         { "ordinary void call", "void g(void); int f(void){g();}\n", 1, 1 },
@@ -103,6 +104,22 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         { "library exit contract", "void exit(int);int f(void){exit(1);}\n", 0, 0 },
         { "library stop leaves the other branch", "void abort(void);int f(int n){if(n)abort();}\n", 1, 1 },
         { "quick_exit needs its explicit contract", "void quick_exit(int);int f(void){quick_exit(1);}\n", 1, 1 },
+        { "library contract disabled globally", "void abort(void);int f(void){abort();}\n", 1, 1, "-fno-builtin" },
+        { "library contract disabled for this name", "void exit(int);int f(void){exit(1);}\n", 1, 1, "-fno-builtin-exit" },
+        { "library contract disabled freestanding", "void abort(void);int f(void){abort();}\n", 1, 1, "-ffreestanding" },
+        { "another disabled name keeps the library contract", "void abort(void);int f(void){abort();}\n", 0, 0, "-fno-builtin-exit" },
+        { "explicit library annotation survives builtin disabling", "_Noreturn void abort(void);int f(void){abort();}\n", 0, 0, "-fno-builtin" },
+        { "longjmp needs its named type", "void longjmp(void*,int);int f(void*p){longjmp(p,1);}\n", 1, 1 },
+        { "longjmp with its named type", "typedef int jmp_buf[8];void longjmp(jmp_buf,int);int f(jmp_buf p){longjmp(p,1);}\n", 0, 0 },
+        { "longjmp branch with its named type", "typedef int jmp_buf[8];void longjmp(jmp_buf,int);int f(jmp_buf p,int n){if(n)longjmp(p,1);}\n", 1, 1 },
+        { "longjmp contract disabled globally", "typedef int jmp_buf[8];void longjmp(jmp_buf,int);int f(jmp_buf p){longjmp(p,1);}\n", 1, 1, "-fno-builtin" },
+        { "analyzer annotation does not reach an earlier call", "void g(void);int f(void){g();}void g(void)__attribute__((analyzer_noreturn));\n", 1, 1 },
+        { "added analyzer annotation does not leak to a sibling", "void g(void);int f(void){void g(void)__attribute__((analyzer_noreturn));g();}int h(void){void g(void);g();}\n", 1, 1 },
+        { "added analyzer annotation does not change an outer declaration", "void g(void);int f(void){void g(void)__attribute__((analyzer_noreturn));g();}int h(void){g();}\n", 1, 1 },
+        { "first block analyzer declaration is inherited", "int f(void){extern void g(void)__attribute__((analyzer_noreturn));g();}int h(void){extern void g(void);g();}\n", 0, 0 },
+        { "invalid noreturn remains independent of return-type", "_Noreturn void f(void(*p)(void)){p();}\n", 0, 0 },
+        { "indirect noreturn satisfies a noreturn body", "void(*p)(void)__attribute__((noreturn));_Noreturn void f(void){p();}\n", 0, 0 },
+        { "indirect noreturn on one branch leaves invalid noreturn", "void(*p)(void)__attribute__((noreturn));_Noreturn void f(int n){if(n)p();}\n", 0, 0 },
     };
     static const char* const flags[] = { NULL, "-Werror=return-type", "-Wno-return-type", "-w" };
     char path[PATH_MAX];
@@ -119,14 +136,19 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
             check_test_expect(test, made, "return-call fixture is written");
             const uint32_t expected = policy >= 2 ? 0 : cases[c].warnings;
             const uint32_t reference = policy >= 2 ? 0 : cases[c].clang_warnings;
+            char* oracle = NULL;
             for (uint32_t route = 0; made && route < 4; route += 1)
             {
-                char* arguments[14] = { (char*)(route == 0 ? clang : executable != NULL ? executable : "/proc/self/exe"),
+                char* arguments[15] = { (char*)(route == 0 ? clang : executable != NULL ? executable : "/proc/self/exe"),
                                         "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", path };
                 uint32_t used = 5;
                 if (flags[policy] != NULL)
                 {
                     arguments[used++] = (char*)flags[policy];
+                }
+                if (cases[c].option != NULL)
+                {
+                    arguments[used++] = (char*)cases[c].option;
                 }
                 if (route == 2)
                 {
@@ -146,15 +168,24 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
                 const int expected_status = policy == 1 && warnings != 0 ? 1 : 0;
                 char description[256];
                 snprintf(description, sizeof(description), "return-call %s policy=%u route=%u", cases[c].name, policy, route);
-                const bool good = status == expected_status && text != NULL && check_test_return_call_count(text) == warnings;
+                const bool good = status == expected_status && text != NULL && check_test_return_call_count(text) == warnings &&
+                                  (route == 0 || (oracle != NULL && strcmp(text, oracle) == 0));
                 check_test_expect(test, good, description);
                 if (!good)
                 {
                     fprintf(stderr, "  status %d expected %d; return warnings %u expected %u\n%s\n", status, expected_status,
                             check_test_return_call_count(text), warnings, text != NULL ? text : "(missing)");
                 }
-                free(text);
+                if (route == 0)
+                {
+                    oracle = text;
+                }
+                else
+                {
+                    free(text);
+                }
             }
+            free(oracle);
         }
     }
     unlink(path);

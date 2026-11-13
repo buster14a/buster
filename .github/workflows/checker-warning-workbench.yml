@@ -29,7 +29,7 @@ jobs:
           for source in tests/checker-warning-probes/*.c; do
               echo "SOURCE $source"
               cat "$source"
-              for mode in default wall nobuiltin freestanding gnu23 before noreturnoff; do
+              for mode in default wall nobuiltin freestanding gnu23 before noreturnoff unsignedchar signedchar wrapvpointer; do
                   options=(-std=gnu17 -fsyntax-only -fno-caret-diagnostics -fno-color-diagnostics)
                   case "$mode" in
                       wall) options+=(-Wall);;
@@ -38,6 +38,9 @@ jobs:
                       gnu23) options+=(-std=gnu23);;
                       before) options+=(-DBEFORE=1);;
                       noreturnoff) options+=(-Wno-return-type);;
+                      unsignedchar) options+=(-Wall -funsigned-char);;
+                      signedchar) options+=(-Wall -fsigned-char);;
+                      wrapvpointer) options+=(-fwrapv-pointer);;
                   esac
                   echo "PROBE $source $mode"
                   timeout -k 5 30 clang "${options[@]}" "$source" 2>&1

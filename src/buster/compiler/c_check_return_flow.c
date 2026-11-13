@@ -165,8 +165,9 @@ static uint8_t* check_program_return_library_names(const InternTable* identifier
     return names;
 }
 
-// The rare annotations the call's declaration inherits. A new file declaration also inherits a formerly block-scope
-// extern's annotation; a sibling block declaration does not. A later annotation never changes an earlier declaration.
+// The rare annotations the call's declaration inherits. The first declaration of an entity carries its annotations
+// into later declarations even if it was a block extern. An added annotation in a block does not leak to a sibling.
+// A later annotation never changes an earlier declaration.
 static uint8_t check_program_return_annotation(const CheckProgram* program, const CheckProgramReturnContracts* contracts, uint32_t object, uint32_t declaration)
 {
     uint8_t result = 0;
@@ -175,7 +176,8 @@ static uint8_t check_program_return_annotation(const CheckProgram* program, cons
     for (uint32_t a = first; a < contracts->annotation_count; a = contracts->annotations[a].next)
     {
         const CheckProgramReturnAnnotation* annotation = contracts->annotations + a;
-        const bool visible = annotation->declaration <= declaration && (annotation->end >= declaration || file);
+        const bool visible = annotation->declaration <= declaration &&
+                             (annotation->declaration + 1 == object || annotation->end >= declaration || file);
         result |= visible ? annotation->fact : 0;
     }
     return result;
@@ -315,7 +317,7 @@ static uint8_t check_program_return_call(const CheckProgram* program, uint32_t n
     const uint32_t object = check_target_feature_noreturn_object(program, node, &use);
     const uint32_t declaration = overload != BUSTER_CHECK_NONE ? stream->overloads[overload].selected.declaration :
                                  input->declarations != NULL && use < input->token_count ? input->declarations[use] : BUSTER_CHECK_NONE;
-    const bool direct = object != 0 && input->objects != NULL && declaration < input->token_count && input->objects[declaration] == object &&
+    const bool direct = object != 0 && input->objects != NULL && input->declaration_kinds != NULL && declaration < input->token_count && input->objects[declaration] == object &&
                         input->declaration_kinds[declaration] == C_BINDING_FUNCTION && input->function_flags != NULL;
     const uint8_t annotation = direct && contracts != NULL ? check_program_return_annotation(program, contracts, object, declaration) : 0;
     const bool known = direct && (annotation & BUSTER_CHECK_RETURN_UNKNOWN) == 0;

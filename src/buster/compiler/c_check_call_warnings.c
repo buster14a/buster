@@ -21,6 +21,7 @@ struct CheckCommonCall
     bool function;
     bool builtin;
     bool explicit_builtin;
+    bool direct_contract;
 };
 
 static bool check_common_call_name(String8 name, const char* expected)
@@ -44,12 +45,13 @@ static CheckCommonCall check_common_call_source(const Parser* parser, Preprocess
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t limit = input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
-    CheckCommonCall result = { .node = node, .token = BUSTER_CHECK_NONE, .declaration = BUSTER_CHECK_NONE,
+    CheckCommonCall result = { .node = node, .token = BUSTER_CHECK_NONE, .declaration = BUSTER_CHECK_NONE, .direct_contract = true,
                                .closing = graph->tokens[node], .offset = graph->argument_offsets[node], .count = graph->argument_counts[node] };
     uint32_t callee = graph->ops[node] == CHECK_OP_CALL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     for (uint32_t steps = 0; callee < graph->count && steps < graph->count; steps += 1)
     {
         const CheckOp op = graph->ops[callee];
+        result.direct_contract &= op != CHECK_OP_DEREFERENCE;
         const bool wrapped = op == CHECK_OP_CONVERT || op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE;
         if (!wrapped || graph->operand0[callee] >= callee)
         {
@@ -101,7 +103,7 @@ static bool check_common_call_integer(const CheckStream* stream, const TypeTable
     const bool known = value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE &&
                        (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION)) == 0 &&
                        check_action_integer_type(types, value.type, &width, &signed_type) && width <= 128;
-    *integer = known ? check_common_integer_value(value, width, signed_type) : 0;
+    *integer = known ? check_common_integer_value(&value, width, signed_type) : 0;
     return known;
 }
 
@@ -122,7 +124,8 @@ static void check_common_call_nonnull(const Parser* parser, Preprocessor* pp, co
         for (uint32_t a = 0; a < attributes->count; a += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + a;
-            if (attribute->kind == CHECK_ATTRIBUTE_NONNULL && !attribute->ignored && !attribute->subject_ignored)
+            if (attribute->kind == CHECK_ATTRIBUTE_NONNULL && !attribute->ignored && !attribute->subject_ignored &&
+                (call->direct_contract || attribute->keyword))
             {
                 all |= attribute->argument_count == 0;
                 for (uint32_t index = 0; attribute->argument_values != NULL && index < attribute->argument_count; index += 1)

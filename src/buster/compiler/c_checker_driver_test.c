@@ -8240,6 +8240,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_warning_driver_test.c"
 #include "c_check_expression_warnings_driver_test.c"
 #include "c_check_call_warnings_driver_test.c"
+#include "c_check_syntax_warning_driver_test.c"
 #include "c_check_redefinition_driver_test.c"
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
@@ -9010,6 +9011,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_return_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_expression_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_call_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_syntax_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && sign_compare_only)
     {
@@ -9201,6 +9203,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_default_warnings(&test, clang, executable, directory);
             check_test_driver_expression_warnings(&test, clang, executable, directory);
             check_test_driver_call_warnings(&test, clang, executable, directory);
+            check_test_driver_syntax_warnings(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

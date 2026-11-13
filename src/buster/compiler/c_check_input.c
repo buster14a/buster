@@ -2112,6 +2112,8 @@ struct CheckInputReader
     uint32_t* parameter_seen;
     uint32_t* parameter_previous;
     uint8_t* parameter_shapes;
+    // Original array types before parameter adjustment, retained only during reading for sizeof's source warning.
+    TypeId* parameter_array_types;
     // The tags and enumeration constants a definition's parameter list declared besides its parameters, which its body
     // declares again: the first at the body's opening (written with output->body_declarations there, which says whether
     // it was), and each one's next at its declaration token.
@@ -7424,6 +7426,9 @@ struct CheckDeclaratorPart
     // A function's first parameter's lifetimebound attribute (#147), its first token plus one, or 0.
     uint32_t lifetimebound;
     bool object_size;
+    // Parameter nonnull contracts are also retained on the declared function for source-visible call checks.
+    bool nonnull_parameters;
+    const CheckInputAttribute* nonnull_type;
     // A function's: whether a parameter has a Swift ABI (#1447, CheckDeclaratorParameter.abi).
     bool parameter_abis;
     // An array's bound whose negative constant a recovering run reported (#1447, CheckDeclaratorRun.recover): the part
@@ -7456,6 +7461,8 @@ struct CheckDeclaratorParameter
     uint32_t abi_token;
     uint32_t place;
     const CheckNoderefType* noderef;
+    const CheckInputAttribute* nonnull;
+    const CheckInputAttribute* nonnull_type;
 };
 
 typedef struct CheckDeclaratorFrame CheckDeclaratorFrame;
@@ -8240,6 +8247,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
                 const uint32_t space_end = frame->attributes != NULL && frame->attributes->count > attribute_first ?
                                            check_input_spaces_claim(frame->attributes, attribute_first) : attribute_first;
+                const CheckInputAttribute* nonnull_type = NULL;
+                for (uint32_t a = attribute_first; frame->attributes != NULL && a < frame->attributes->count; a += 1)
+                {
+                    const CheckInputAttribute* attribute = frame->attributes->records + a;
+                    nonnull_type = attribute->kind == CHECK_ATTRIBUTE_NULLABILITY && attribute->name == C_NAME_NONNULL ? attribute : nonnull_type;
+                }
                 parts[part_count] = (CheckDeclaratorPart)
                 {
                     .next = frame->pointers,
@@ -8251,6 +8264,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     .spaces = space_end > attribute_first ? frame->attributes : NULL,
                     .space_first = attribute_first,
                     .space_end = space_end,
+                    .nonnull_type = nonnull_type,
                 };
                 frame->pointers = part_count++;
             }
@@ -8346,6 +8360,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 reader->declared_types[token] = 0;
                 check_input_rare_claim(reader, &reader->parameter_shapes[token]);
                 reader->parameter_shapes[token] = 0;
+                reader->parameter_array_types[token] = 0;
                 reader->declaration_kinds[token] = C_BINDING_OBJECT;
                 check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, false);
                 reader->objects[token] = token + 1;
@@ -8896,12 +8911,18 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             const CheckInputAttributes* lists[] = { frame->common_attributes, frame->attributes };
                             uint8_t object_size = 0;
                             uint32_t object_size_token = BUSTER_CHECK_NONE;
+                            const CheckInputAttribute* nonnull = NULL;
                             for (uint32_t list = 0; list < BUSTER_ARRAY_LENGTH(lists); list += 1)
                             {
                                 const CheckInputAttributes* attributes = lists[list];
                                 for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
                                 {
                                     const CheckInputAttribute* attribute = attributes->records + a;
+                                    if (attribute->kind == CHECK_ATTRIBUTE_NONNULL && attribute->argument_count == 0 &&
+                                        !attribute->ignored && !attribute->subject_ignored)
+                                    {
+                                        nonnull = attribute;
+                                    }
                                     const bool size = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_PASS_OBJECT_SIZE ||
                                                                             attribute->kind == CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE);
                                     if (size)
@@ -8933,6 +8954,9 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 valid &= check_input_swift_parameter(reader, abi_lists, BUSTER_ARRAY_LENGTH(abi_lists), adjusted, declared, spelling, &abi, &abi_token);
                             }
                             function->parameter_abis |= abi != TYPE_PARAMETER_ABI_ORDINARY;
+                            const CheckInputAttribute* nonnull_type = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_POINTER ?
+                                                                      parts[first].nonnull_type : NULL;
+                            function->nonnull_parameters |= nonnull != NULL || nonnull_type != NULL;
                             parameters[parameter_count] = (CheckDeclaratorParameter)
                             {
                                 .abi = abi,
@@ -8945,6 +8969,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 .object_size = object_size,
                                 .const_pointer = ((type_kind_is_array(kind) ? frame->array_qualifiers : qualifiers) & BUSTER_TYPE_CONST) != 0,
                                 .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
+                                .nonnull = nonnull,
+                                .nonnull_type = nonnull_type,
                             };
                             if (function->parameter_last != BUSTER_CHECK_NONE)
                             {
@@ -8981,6 +9007,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 check_input_rare_claim(reader, &reader->parameter_shapes[token]);
                                 reader->parameter_shapes[token] = (type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0) |
                                                                   (frame->star_array ? 2 : 0);
+                                reader->parameter_array_types[token] = type_kind_is_array(kind) ? type : 0;
                                 reader->declaration_kinds[token] = C_BINDING_OBJECT;
                                 check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, frame->storage == C_NAME_REGISTER);
                                 reader->objects[token] = token + 1;
@@ -9241,6 +9268,51 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
             reader->declarator_attributes = attributes;
         }
     }
+    // Parameter declarations do not all have names, and their prototype scopes have ended before call checking. Publish
+    // indexed contracts with the function's immutable attributes, rather than reconstructing those scopes at calls.
+    // A keyword record preserves a pointer's _Nonnull origin, which also applies through a dereferenced designator.
+    bool nonnulls = true;
+    if (own != NULL && own->nonnull_parameters)
+    {
+        CheckInputAttributes* attributes = reader->declarator_attributes;
+        if (attributes == NULL)
+        {
+            attributes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
+            if (attributes != NULL)
+            {
+                *attributes = (CheckInputAttributes){ 0 };
+            }
+        }
+        int64_t* indices = attributes != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, int64_t, (uint64_t)own->parameter_count * 2) : NULL;
+        nonnulls = indices != NULL;
+        uint32_t index = 0;
+        uint32_t count = 0;
+        for (uint32_t p = own->parameter_first; nonnulls && p != BUSTER_CHECK_NONE; p = run->parameters[p].next)
+        {
+            const CheckInputAttribute* contracts[] = { run->parameters[p].nonnull, run->parameters[p].nonnull_type };
+            for (uint32_t c = 0; nonnulls && c < BUSTER_ARRAY_LENGTH(contracts); c += 1)
+            {
+                const CheckInputAttribute* parameter = contracts[c];
+                if (parameter != NULL)
+                {
+                    indices[count] = (int64_t)index + 1;
+                    CheckInputAttribute contract = *parameter;
+                    contract.kind = CHECK_ATTRIBUTE_NONNULL;
+                    contract.argument_values = indices + count++;
+                    contract.argument_count = 1;
+                    contract.argument_ends = NULL;
+                    contract.schema = CHECK_ATTRIBUTE_INTEGER_LIST;
+                    nonnulls = check_input_attribute_append(reader, attributes, contract);
+                }
+            }
+            index += 1;
+        }
+        if (nonnulls)
+        {
+            reader->declarator_attributes = attributes;
+        }
+        reader->output->resource |= !nonnulls;
+    }
     // What check_input_declarator_conventions checks once the declaration's convention is final (#1447): the declared
     // function's own parameters' Swift ABIs, their places and attributes kept in the reader's arena, and a declaration's
     // name where its function has no prototype.
@@ -9267,7 +9339,7 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     }
     const bool definition_next = run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE;
     reader->declarator_no_prototype = complete && own != NULL && run->name != BUSTER_CHECK_NONE && !definition_next && !own->identifier_list ? run->name : BUSTER_CHECK_NONE;
-    const TypeId result = complete && captured && object_sizes ? run->result : 0;
+    const TypeId result = complete && captured && object_sizes && nonnulls ? run->result : 0;
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
     {
@@ -10323,6 +10395,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 reader->declared_types[listed] = valid ? type_qualify(reader->types, adjusted, type_kind_is_array(kind) ? 0 : type_qualifiers(type)) : 0;
                 check_input_rare_claim(reader, &reader->parameter_shapes[listed]);
                 reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
+                reader->parameter_array_types[listed] = type_kind_is_array(kind) ? type : 0;
                 check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 // Its bounds are the listed parameter's, as a prototype's are its parameter's.
                 for (uint32_t v = declarator_vlas; v < reader->output->vla_count; v += 1)
@@ -15418,6 +15491,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     if (op == CHECK_OP_SIZEOF && supported)
     {
+        check_input_sizeof_array_parameter(reader, token);
         TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
         if (requested == 0)
         {
@@ -16929,6 +17003,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(sizeof_types, TypeId) \
     X(vla_bounds, uint32_t) \
     X(parameter_shapes, uint8_t) \
+    X(parameter_array_types, TypeId) \
     X(parameter_declaration_next, uint32_t) \
     X(tag_types, TypeId) \
     X(tag_ends, uint32_t)

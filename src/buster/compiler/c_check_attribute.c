@@ -1472,7 +1472,8 @@ static uint32_t check_input_inherited_contract(const CheckInputAttribute* attrib
                          attribute->kind == CHECK_ATTRIBUTE_CONST ? 2u :
                          attribute->kind == CHECK_ATTRIBUTE_PURE ? 4u :
                          attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u :
-                         attribute->kind == CHECK_ATTRIBUTE_NONNULL ? 16u : 0u;
+                         attribute->kind == CHECK_ATTRIBUTE_NONNULL ? 16u :
+                         attribute->kind == CHECK_ATTRIBUTE_RETURNS_NONNULL ? 32u : 0u;
     const uint32_t result = !attribute->ignored && !attribute->subject_ignored ? bit : 0u;
     return result;
 }

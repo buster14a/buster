@@ -2,8 +2,8 @@
 #define BEFORE 0
 #endif
 #if BEFORE
-void longjmp(void *, int);
-int old(void *p) { longjmp(p, 1); }
+void longjmp(int *, int);
+int old(int *p) { longjmp(p, 1); }
 #endif
 typedef int jmp_buf[8];
 void longjmp(jmp_buf, int);

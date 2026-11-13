@@ -912,7 +912,7 @@ static bool check_common_runtime_id(uint32_t id)
                         id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || id == CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE ||
                         id == CHECK_WARNING_ID_NULL_DEREFERENCE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
                         id == CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE || id == CHECK_WARNING_ID_STRING_COMPARE ||
-                        id == CHECK_WARNING_ID_NONNULL || id == CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS;
+           id == CHECK_WARNING_ID_NONNULL || id == CHECK_WARNING_ID_FORTIFY_SOURCE || id == CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS;
     return result;
 }
 
@@ -4838,6 +4838,104 @@ static void check_common_chained_comparisons(const Parser* parser, Preprocessor*
     }
 }
 
+// A source expression known to produce a boolean value, before the implicit integer promotions. Literal 0/1 and an
+// explicit cast to int do not establish this property. Only warning candidates ask; there is no unit-sized boolean
+// column or extra graph pass. Both arms of a composite expression must have the property.
+static bool check_common_boolean_value(const CheckStream* stream, const TypeTable* types, uint32_t root)
+{
+    const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
+    const uint32_t count = graph != NULL ? graph->count : 0;
+    uint32_t pending[64];
+    uint32_t depth = 0;
+    uint32_t node = root;
+    bool result = types != NULL && root < count;
+    bool walking = result;
+    for (uint32_t steps = 0; walking && result && steps < count; steps += 1)
+    {
+        const CheckOp op = node < count ? graph->ops[node] : CHECK_OP_COUNT;
+        const TypeId type = node < count ? check_stream_type(stream, node) : 0;
+        const uint8_t kind = type != 0 ? check_action_kind(types, type) : BUSTER_TYPE_KIND_VOID;
+        const bool integral = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_BIT_INT;
+        const bool boolean = type != 0 && type_unqualified(type_strip_aligned(types, type)) == BUSTER_TYPE_BOOL;
+        const bool logical = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
+                             (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL);
+        if (!integral)
+        {
+            result = false;
+        }
+        else if (boolean || logical)
+        {
+            walking = depth != 0;
+            node = depth != 0 ? pending[--depth] : BUSTER_CHECK_NONE;
+        }
+        else if (op == CHECK_OP_POSITIVE || (op == CHECK_OP_CONVERT &&
+                 (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_CAST) == 0))
+        {
+            node = graph->operand0[node];
+        }
+        else if (op == CHECK_OP_COMMA || op == CHECK_OP_ASSIGN)
+        {
+            node = graph->operand1[node];
+        }
+        else if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR)
+        {
+            result = depth < BUSTER_ARRAY_LENGTH(pending);
+            if (result)
+            {
+                pending[depth++] = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : graph->operand1[node];
+                node = op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : graph->operand0[node];
+            }
+        }
+        else
+        {
+            result = false;
+        }
+    }
+    return result && !walking;
+}
+
+// -Wparentheses-equality: a grouped equality used as a truth condition can have been intended as an assignment. The
+// comparison's left side must be assignable, and a macro's grouping is intentional. Nested groups are one condition.
+static void check_common_parentheses_equality(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, uint32_t token, uint32_t group, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t outer = group;
+    uint32_t parent = check_common_parent(parser, outer);
+    for (uint32_t steps = 0; parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP && steps < count; steps += 1)
+    {
+        outer = parent;
+        parent = check_common_parent(parser, parent);
+    }
+    const bool condition = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CONDITION;
+    const uint32_t open = condition ? check_common_opener(parser, parent) : BUSTER_CHECK_NONE;
+    const bool truth = condition ? open != 0 && open < count && parser->tokens.kinds[open - 1] != PARSE_KIND_SWITCH :
+                       parent < count && check_common_for_condition(parser, outer, parent);
+    uint32_t grouped = BUSTER_CHECK_NONE;
+    for (uint32_t at = outer; truth && at != 0 && grouped == BUSTER_CHECK_NONE;)
+    {
+        at -= 1;
+        grouped = parser->tree.roles[at] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[at] == outer ? at : BUSTER_CHECK_NONE;
+    }
+    const uint32_t source = grouped < count ? parser->tokens.sources[grouped] : pp->output.count;
+    const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
+    const uint32_t node = truth && !macro && input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t left = node < graph->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const CheckValue value = stream != NULL && left < stream->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
+    const bool modifiable = value.category == CHECK_LVALUE && value.type != 0 && (type_qualifiers(value.type) & BUSTER_TYPE_CONST) == 0 &&
+                            (value.flags & BUSTER_CHECK_VECTOR_DUPLICATE) == 0 && !type_kind_is_array(check_action_kind(types, value.type));
+    if (truth && !macro && modifiable)
+    {
+        const CheckCommonNote notes[] = {
+            { token, "remove extraneous parentheses around the comparison to silence this warning" },
+            { token, "use '=' to turn this equality comparison into an assignment" },
+        };
+        check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES_EQUALITY, false,
+                               "equality comparison with extraneous parentheses", notes, BUSTER_ARRAY_LENGTH(notes), scratch);
+    }
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -4869,6 +4967,32 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
                                    "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
         }
+        else if (role == PARSE_ROLE_EQUALITY && parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL && parent_role == PARSE_ROLE_CLOSE_GROUP)
+        {
+            check_common_parentheses_equality(parser, pp, input, stream, types, token, parent, scratch);
+        }
+        else if (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_EXCLAIM &&
+                 (check_common_comparison_role(parent_role) || parent_role == PARSE_ROLE_BITWISE_AND) && token < parent)
+        {
+            const CheckGraph* graph = &input->graph;
+            const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+            const uint32_t binary = input->token_nodes != NULL && parent < input->token_count ? input->token_nodes[parent] : BUSTER_CHECK_NONE;
+            const uint32_t operand = node < graph->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+            const uint32_t right = binary < graph->count ? graph->operand1[binary] : BUSTER_CHECK_NONE;
+            if (!check_common_boolean_value(stream, types, operand) && !check_common_boolean_value(stream, types, right))
+            {
+                const bool bitwise = parent_role == PARSE_ROLE_BITWISE_AND;
+                const CheckCommonNote notes[2] = {
+                    { token, bitwise ? "add parentheses after the '!' to evaluate the bitwise operator first" :
+                                       "add parentheses after the '!' to evaluate the comparison first" },
+                    { token, "add parentheses around left hand side expression to silence this warning" },
+                };
+                // Both forms warn as the outer operator is built, including in an unevaluated expression.
+                check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, parent), CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
+                                       bitwise ? "logical not is only applied to the left hand side of this bitwise operator" :
+                                                 "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
+            }
+        }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
             if (check_common_comparison_role(role) && check_common_bitwise_precedence(parser, token, parent))
@@ -4884,16 +5008,6 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 check_common_report_at(parser, pp, input, parent, check_common_operand_end(parser, parent), CHECK_WARNING_ID_PARENTHESES, false, message,
                                        notes, 2, scratch);
             }
-        }
-        else if (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_EXCLAIM && check_common_comparison_role(parent_role) && token < parent)
-        {
-            const CheckCommonNote notes[2] = {
-                { token, "add parentheses after the '!' to evaluate the comparison first" },
-                { token, "add parentheses around left hand side expression to silence this warning" },
-            };
-            // Clang warns as it builds the comparison, after its right operand's own diagnostics (#1941).
-            check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, parent), CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
-                                   "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
         }
         else if ((role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL) &&
                  parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
@@ -8807,6 +8921,13 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         }
         const uint32_t closer = check_common_parent(parser, token);
         const uint32_t opener = check_common_opener(parser, closer);
+        const uint32_t condition = input->token_nodes != NULL && closer < input->token_count ? input->token_nodes[closer] : BUSTER_CHECK_NONE;
+        const uint32_t value = condition < input->graph.count ? input->graph.operand0[condition] : BUSTER_CHECK_NONE;
+        if (check_common_boolean_value(stream, types, value))
+        {
+            check_common_report_at(parser, pp, input, token, closer, CHECK_WARNING_ID_SWITCH_BOOL, false,
+                                   "switch condition has boolean value", NULL, 0, scratch);
+        }
         const uint32_t selector = opener != BUSTER_CHECK_NONE && opener + 1 < count ? opener + 1 : BUSTER_CHECK_NONE;
         uint32_t selector_node = input->token_nodes != NULL && selector < input->token_count ? input->token_nodes[selector] : BUSTER_CHECK_NONE;
         // Unary +, - and ~ apply the integer promotions, so their selector operand is never the

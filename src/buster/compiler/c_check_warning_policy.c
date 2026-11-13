@@ -61,7 +61,8 @@ static bool check_warning_option(uint32_t id, String8 option)
                       id == CHECK_WARNING_ID_UNUSED_FUNCTION ||
                       id == CHECK_WARNING_ID_UNINITIALIZED || id == CHECK_WARNING_ID_SWITCH || id == CHECK_WARNING_ID_DANGLING_ELSE ||
                       id == CHECK_WARNING_ID_SELF_ASSIGN || id == CHECK_WARNING_ID_EMPTY_BODY || id == CHECK_WARNING_ID_FORMAT_SECURITY ||
-                      id == CHECK_WARNING_ID_SHIFT_OP_PARENTHESES;
+                      id == CHECK_WARNING_ID_SHIFT_OP_PARENTHESES || id == CHECK_WARNING_ID_PARENTHESES_EQUALITY ||
+                      id == CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES || id == CHECK_WARNING_ID_SWITCH_BOOL;
     const bool wextra = id == CHECK_WARNING_ID_UNUSED_PARAMETER || id == CHECK_WARNING_ID_SIGN_COMPARE ||
                         id == CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER;
     matches |= wall && check_diagnostic_option(option, "-Wall");
@@ -80,8 +81,17 @@ static bool check_warning_option(uint32_t id, String8 option)
     matches |= id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE && check_diagnostic_option(option, "-Wtautological-compare");
     const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE ||
                       id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
+                      id == CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE || id == CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE ||
+                      id == CHECK_WARNING_ID_CHAR_SUBSCRIPTS || id == CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT || id == CHECK_WARNING_ID_NONNULL ||
                       id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS || id == CHECK_WARNING_ID_USER_DEFINED_WARNINGS || id == CHECK_WARNING_ID_MULTICHAR;
     matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
+    const bool address = id == CHECK_WARNING_ID_POINTER_BOOL_CONVERSION || id == CHECK_WARNING_ID_STRING_COMPARE ||
+                         id == CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE;
+    matches |= address && check_diagnostic_option(option, "-Waddress");
+    matches |= id == CHECK_WARNING_ID_POINTER_BOOL_CONVERSION &&
+               (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
+    matches |= id == CHECK_WARNING_ID_NONNULL && check_diagnostic_option(option, "-Wformat");
+    matches |= id == CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS && check_diagnostic_option(option, "-Wsuspicious-memaccess");
     // -Wint-conversion is -Wconversion's, so -Wnon-gcc's; -Wreturn-mismatch -Wreturn-type's, so -Wmost's and -Wall's (#1963).
     matches |= id == CHECK_WARNING_ID_INT_CONVERSION && check_diagnostic_option(option, "-Wnon-gcc");
     matches |= id == CHECK_WARNING_ID_RETURN_MISMATCH && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));

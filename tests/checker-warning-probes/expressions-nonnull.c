@@ -82,3 +82,13 @@ _Bool boolresult(void) {
     bargs(fn, fn);
     return fn;
 }
+int bounds(int *p, unsigned u, int i) {
+    int r = p + u >= p;
+    r += p + u < p;
+    r += p > p + u;
+    r += p <= p + u;
+    r += u + p >= p;
+    r += (p + u) >= p;
+    r += p + i >= p;
+    return r;
+}

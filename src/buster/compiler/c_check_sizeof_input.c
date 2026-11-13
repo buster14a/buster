@@ -6,6 +6,59 @@
 // The graph still retains and checks expression operands (including bit-fields). No result survives this reader.
 // Only this pass enables capture: earlier declaration/deferred-lane folds can hold private, not-yet-remapped TypeIds.
 
+// sizeof names an array parameter's adjusted pointer even though its declaration spells an array. Recognize the
+// written identifier through parentheses before folding discards it; the rare original-type column lives only for
+// this reader. Its event carries both types across a deferred body's remapping, with its declaration's source note.
+static void check_input_sizeof_array_parameter(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t first = token + 1;
+    uint32_t end = reader->ends[token] + 1;
+    const uint32_t location = first;
+    while (first < end && end <= count && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN &&
+           parser->tree.parents[first] == end - 1)
+    {
+        first += 1;
+        end -= 1;
+    }
+    const uint32_t declaration = end == first + 1 && first < count && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER ?
+                                 reader->output->declarations[first] : BUSTER_CHECK_NONE;
+    const TypeId original = declaration < count && reader->parameter_array_types != NULL ? reader->parameter_array_types[declaration] : 0;
+    const TypeId adjusted = original != 0 ? reader->declared_types[declaration] : 0;
+    if (original != 0 && adjusted != 0 && type_kind(reader->types, type_strip_aligned(reader->types, adjusted)) == BUSTER_TYPE_KIND_POINTER)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT,
+            .kind = CHECK_WARNING_EVENT_SIZEOF_ARRAY_ARGUMENT,
+            .token = location,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = reader->ends[token] + 1,
+            .payload = { .first_type = adjusted, .second_type = original, .token = declaration,
+                         .data = check_input_specifier_spelling(reader->output, parser, declaration) },
+        };
+        const uint64_t key = (uint64_t)event.kind << 32 | ((uint64_t)event.token + 1);
+        if (!check_warning_set_contains(&reader->source_warning_keys, key))
+        {
+            const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+            reader->output->resource |= !retained;
+            if (retained)
+            {
+                const CheckWarningNote note =
+                {
+                    .kind = CHECK_WARNING_NOTE_PARAMETER_DECLARED_HERE,
+                    .token = declaration,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, &note, 1);
+            }
+        }
+    }
+}
+
 static TypeId check_input_sizeof_operand(CheckInputReader* reader, uint32_t token)
 {
     const uint32_t first = token + 1;
@@ -33,6 +86,12 @@ static void check_input_sizeof_prepare(CheckInputReader* reader)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(active);
             active &= active - 1;
+            if (parser->tokens.kinds[token] == PARSE_KIND_SIZEOF && parser->tokens.names[token] == C_NAME_SIZEOF &&
+                parser->tree.roles[token] == PARSE_ROLE_PREFIX &&
+                (reader->output->deferred_tokens == NULL || reader->output->deferred_tokens[token] == 0))
+            {
+                check_input_sizeof_array_parameter(reader, token);
+            }
             if (token < covered_end || parser->tokens.kinds[token] != PARSE_KIND_SIZEOF || parser->tokens.names[token] != C_NAME_SIZEOF ||
                 parser->tree.roles[token] != PARSE_ROLE_PREFIX || reader->ignored[token] ||
                 check_input_expression_end(reader, token) > check_input_expression_limit(reader, token) ||
