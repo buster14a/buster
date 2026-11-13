@@ -320,6 +320,12 @@ static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t ke
 // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
 // as on the 9700X, the first write in two of them took a huge page each: 4 MB cleared for 44 KB of statics.
 static __attribute__((unused)) void arena_static_base_pages(void);
+// Makes the pages that [begin, begin + bytes) touches writable and present now, zero, in one system call
+// (MADV_POPULATE_WRITE, Linux 5.14), for memory a caller knows it is about to write all over, and that is writable
+// already (an arena's pushed bytes, the stack's next pages). On the 9700X a page so costs 172 ns, its first write
+// fault 290 ns, and a read of a fresh page before its first write 544 ns, two faults: the zero page's, then its copy's
+// (#1444). Where the call fails (an older kernel, a refused allocation), the pages are left to fault as before.
+static __attribute__((unused)) void arena_populate(void* begin, uint64_t bytes);
 // Reads the process's RLIMIT_AS once, for every later reservation and pool of the process (ArenaLimits, #652): for a
 // compile's commands to call first, before they start any thread. A setrlimit after it, or another process's prlimit,
 // changes no reservation's share.
@@ -1141,6 +1147,16 @@ static void arena_static_base_pages(void)
     if (end > begin)
     {
         madvise((void*)begin, end - begin, MADV_NOHUGEPAGE);
+    }
+}
+
+static void arena_populate(void* begin, uint64_t bytes)
+{
+    const uintptr_t first = (uintptr_t)begin & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uintptr_t end = ((uintptr_t)begin + bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    if (bytes != 0)
+    {
+        madvise((void*)first, end - first, MADV_POPULATE_WRITE);
     }
 }
 

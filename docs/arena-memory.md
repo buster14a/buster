@@ -93,6 +93,17 @@ The pages are the same either way; on an older kernel, or in a process that
 doesn't set the page policy, the reservations advise as before. `test-lanes`
 reads both back.
 
+A page's first touch is a fault, and a read before its first write is two: the
+first maps the zero page and the write then copies it. On the 9700X a write
+fault costs 290 ns a page, a read and then a write 544 ns, and populating the
+page beforehand (`MADV_POPULATE_WRITE`, `arena_populate`) 172 ns (#1444).
+Memory a caller knows it is about to write all over is populated in one call:
+the intern table's buckets (`intern_lay_out`), which a lookup reads before an
+insertion writes them and an empty file's predefined names touch nearly all
+of, and the stack below a compile's `main_driver`, 120 KB, which an empty
+file's `-fsyntax-only` writes 108 KB of. Where the call fails (a kernel before
+5.14, or a refused allocation), the pages fault as before.
+
 An arena that stays in its base pages, as most of a small unit's do, takes one
 `mmap` and one `mprotect` and no advice. An empty file's `-fsyntax-only` made
 146 `madvise` calls before, 48 since, and 12 once the preprocessor's tables
