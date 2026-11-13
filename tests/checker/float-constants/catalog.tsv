@@ -1,0 +1,10 @@
+buster-fixtures v1 checker-sources
+# check_test_float_constant_sources's source fixtures (c_check_program_constants_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	float constants: folds in constant expressions
+0002	0002.c	-	float constants: result types
+0003	0003.c	-	float constants: static initializers
+0004	0004.c	-	float constants: exact __float128 initializers
+0005	0005.c	rejected	float constants: an integer's payload
+0006	0006.c	rejected	float constants: nansf16 without its payload
+0007	0007.c	rejected	float constants: inff128 of an argument
+0008	0008.c	rejected	float constants: nanf128 of two payloads

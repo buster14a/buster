@@ -336,8 +336,9 @@ time (clang 18, locally).
 expected outputs and case list live under `tests/`, which the tests read when
 they run, so that editing a case or adding one compiles, links and bakes
 nothing. A new ordinary regression program goes there, not into a C string.
-The first suite is the checker's shared source fixtures,
-`tests/checker/sources/` ([the checker guide](checker.md#runtime-fixtures)).
+The checker's suites are its shared source fixtures, `tests/checker/sources/`,
+and ten test files' own tables beside them ([the checker
+guide](checker.md#runtime-fixtures)).
 C keeps what isn't data: independent oracles, generated inputs, guarded
 memory and the checks themselves. Nothing under `tests/` is a build input:
 no generated C array, `#include` or `#embed` brings it back.

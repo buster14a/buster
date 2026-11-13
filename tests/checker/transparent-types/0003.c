@@ -1,0 +1,1 @@
+typedef union __attribute__((transparent_union)){int*i;double*d;}U;typedef void F(U);typedef void I(int*);typedef void D(double*);_Static_assert(__builtin_types_compatible_p(F,I),"first");_Static_assert(__builtin_types_compatible_p(F*,D*),"second");_Static_assert(!__builtin_types_compatible_p(U,int*),"nominal");
