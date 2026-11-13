@@ -127,14 +127,19 @@ requirements. [Command index](README.md).
   identifies actual source bodies and their tier; its sizes are checked
   against ELF function symbols before use. Helpers, fallback bodies,
   unmatched functions and executable-section totals have separate counters.
-  `--check-code-size` requires a nonempty, complete comparison with the
-  aggregate Tier 1 function bytes no greater than Clang's **for each corpus
-  and each requested Tier 1 variant**. One larger function can be offset by
-  smaller functions in the same corpus. A missing report, failed compile or
+  `--check-code-size` requires complete Tier 1 accounting and nonempty matched
+  evidence, with all emitted Tier 1 function bytes no greater than Clang's
+  matched bytes **for each corpus and each requested Tier 1 variant**. An
+  unmatched Tier 1 body still costs its full bytes and contributes no Clang
+  bytes. This conservatively handles functions Clang inlines everywhere and
+  omits; a missing counterpart can only make the bound harder to satisfy.
+  One larger function can be offset by smaller functions in the same corpus.
+  A missing report, failed compile or
   malformed object fails the command; failure files are retained.
   `--sizes-only` runs only this deterministic comparison and requires only
   `--clang`, `--sqlite` and `--lua`, with no scripts, speedtest source,
-  hardware counters or timed program runs:
+  hardware counters or timed program runs. Its object compiles run sequentially
+  and the Tier 1 compiler uses one lane:
 
   ```sh
   ./build/compiler measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src

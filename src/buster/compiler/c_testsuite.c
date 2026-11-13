@@ -35,8 +35,9 @@
 //
 // --check-code-size requires --tier1 and implies --cross-check. The object compile also emits the explicit per-body
 // size report, kept apart from readelf's and the linker's logs. Each successful cross-check reads that report against
-// the same objects whose symbols were compared. The corpus's sum of matched Tier 1 function bytes must not exceed
-// clang -O0's; fallback bodies and unpaired names are reported separately, and an empty comparison fails.
+// the same objects whose symbols were compared. The corpus's sum of all emitted Tier 1 function bytes must not exceed
+// the matching clang -O0 functions' sum. An unpaired Tier 1 body stays in our sum and adds no reference bytes; its bytes
+// are reported as a subset of our total. Fallback bodies are separate, and missing evidence or an empty comparison fails.
 //
 // --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
@@ -1002,8 +1003,10 @@ static pid_t c_testsuite_wait_scenario(pid_t child, int* status)
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Corpus size is an aggregate gate: a larger function may be offset by another's smaller body. A one-byte aggregate
-// regression and empty evidence must fail the report that decides the command's exit status. Invalid flag combinations
-// go through the actual command's parser and must refuse before running a corpus or recursively entering its self-test.
+// regression and empty evidence must fail the report that decides the command's exit status. An unpaired body's bytes
+// stay in the total with no reference credit, and every compiled body must be counted as matched or unmatched. Invalid
+// flag combinations go through the actual command's parser and must refuse before running a corpus or recursively
+// entering its self-test.
 static bool c_testsuite_code_size_self_test(const char* directory)
 {
     char names[2][BUSTER_C_TESTSUITE_NAME_BYTES] = { "larger", "smaller" };
@@ -1039,6 +1042,26 @@ static bool c_testsuite_code_size_self_test(const char* directory)
     {
         failures += !c_testsuite_report(&suite, true);
         results[1].code_size.tier1_bytes += 1;
+        failures += c_testsuite_report(&suite, true);
+        // One matched byte and four unpaired bytes keep the corpus at equality; the latter get no oracle credit.
+        results[1].tier1_functions = 2;
+        results[1].tier1_compiled = 2;
+        results[1].code_size = (Tier1CodeSize){
+            .units = 1,
+            .compiled = 2,
+            .matched = 1,
+            .tier1_bytes = 5,
+            .clang_bytes = 10,
+            .unmatched = 1,
+            .unmatched_bytes = 4,
+        };
+        failures += !c_testsuite_report(&suite, true);
+        results[1].code_size.tier1_bytes += 1;
+        results[1].code_size.unmatched_bytes += 1;
+        failures += c_testsuite_report(&suite, true);
+        results[1].code_size.tier1_bytes -= 1;
+        results[1].code_size.unmatched_bytes -= 1;
+        results[1].code_size.compiled -= 1;
         failures += c_testsuite_report(&suite, true);
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(results); i += 1)
         {
@@ -1076,7 +1099,7 @@ static bool c_testsuite_code_size_self_test(const char* directory)
         free(text);
     }
     unlink(log);
-    printf("test-c-testsuite: code-size aggregation and options: 6 checks, %u failed\n", failures);
+    printf("test-c-testsuite: code-size aggregation and options: 9 checks, %u failed\n", failures);
     return failures == 0;
 }
 

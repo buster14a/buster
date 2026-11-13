@@ -738,8 +738,8 @@ and dispatched qualifications under the current [CI policy](commands/ci.md).
 PR #1159 removed the redundant call moves and repeated call saves described
 by #1116. Its remaining size criterion is now an explicit corpus gate:
 `test-c-testsuite --tier1 --check-code-size` and
-`measure-tier1-programs --check-code-size` require the sum of Tier 1 function
-bytes to be no greater than the matching Clang `-O0` sum. The gate applies
+`measure-tier1-programs --check-code-size` require the sum of all emitted Tier 1
+function bytes to be no greater than the matching Clang `-O0` sum. The gate applies
 separately to c-testsuite, SQLite's `sqlite3.c` and Lua's 34 sources, with
 `luac.c` included. The program command also offers `--sizes-only`, which
 requires no runtime scripts or hardware counters.
@@ -748,8 +748,13 @@ An opt-in, versioned `--tier1-function-sizes` manifest identifies source bodies
 by exact emitted symbol names and their actual tier after publication. The
 reader checks those names and sizes against each relocatable ELF object and
 matches only within the same translation unit. It reports fallback and
-unmatched functions separately, along with remaining executable bytes and executable
-section bytes. Function sizes exclude alignment padding; the executable
+unmatched functions separately, along with remaining executable bytes and
+executable section bytes. An unmatched Tier 1 body remains in the Tier 1 byte
+total and contributes zero Clang bytes, so a missing counterpart makes the
+bound stricter. This covers legitimate omissions such as SQLite's local
+`always_inline` function `allocateSpace`, whose separate body Clang can remove
+after inlining ([the symbol comparison](c-lowering.md#against-clang--o0s-objects)).
+Function sizes exclude alignment padding; the executable
 section total is a separate quantity. Missing, malformed, duplicate or
 inconsistent evidence cannot pass, and an empty comparison cannot qualify.
 This is an aggregate size bound, not a bound on every function or a claim

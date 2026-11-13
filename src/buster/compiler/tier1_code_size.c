@@ -2,9 +2,11 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #1116: deterministic per-source ELF function-size accounting, shared by the c-testsuite and program measurements.
-// Only bodies explicitly named by --tier1-function-sizes enter the Tier 1 comparison. Helpers, aliases and padding
-// remain in other_bytes; fallback bodies and missing Clang counterparts have separate counts. Text bytes are the
-// executable sections' sizes, whereas matched bytes are ELF st_size sums, without inter-function padding.
+// Every Tier 1 body explicitly named by --tier1-function-sizes contributes its ELF st_size to tier1_bytes; only
+// exact-name Clang counterparts contribute to clang_bytes. A missing counterpart contributes no reference bytes,
+// so it makes the corpus bound stricter; its Tier 1 bytes also remain visible in unmatched_bytes. Helpers, aliases
+// and padding remain in other_bytes, and fallback bodies have separate counts. Text bytes are executable section
+// sizes; function sizes exclude inter-function padding.
 // This is opt-in measurement tooling, outside the compile path, with no separate vector implementation.
 
 #include <inttypes.h>
@@ -379,6 +381,10 @@ static bool tier1_code_size_compare(Tier1CodeSize* result, String8 object, Strin
             valid = tier1_code_size_sum(&body_bytes, own->size);
             reason = "code size: function-byte total overflow";
         }
+        if (valid && body->tier1)
+        {
+            valid = tier1_code_size_sum(&unit.tier1_bytes, own->size);
+        }
         if (valid && !body->tier1)
         {
             valid = tier1_code_size_sum(&unit.fallback_bytes, own->size);
@@ -396,7 +402,7 @@ static bool tier1_code_size_compare(Tier1CodeSize* result, String8 object, Strin
             {
                 references[unit.matched] = (Tier1SizeBody){ .atom = reference->atom, .value = reference->value, .size = reference->size };
                 unit.matched += 1;
-                valid = tier1_code_size_sum(&unit.tier1_bytes, own->size) && tier1_code_size_sum(&unit.clang_bytes, reference->size);
+                valid = tier1_code_size_sum(&unit.clang_bytes, reference->size);
                 reason = "code size: matched-function total overflow";
             }
         }
@@ -451,12 +457,15 @@ static void tier1_code_size_add(Tier1CodeSize* total, const Tier1CodeSize* unit)
     total->invalid = !valid;
 }
 
+// The corpus charges every Tier 1 byte against only the exact-name reference bytes it has. Missing functions may
+// fit in that bound, but an empty reference cannot qualify. Subtraction keeps the classification check overflow-safe.
 static bool tier1_code_size_qualified(const Tier1CodeSize* total)
 {
-    return !total->invalid && total->units != 0 && total->matched != 0 && total->clang_bytes != 0 && total->compiled == total->matched &&
-           total->unmatched == 0 && total->tier1_bytes <= total->clang_bytes;
+    return !total->invalid && total->units != 0 && total->matched != 0 && total->clang_bytes != 0 && total->matched <= total->compiled &&
+           total->unmatched == total->compiled - total->matched && total->tier1_bytes <= total->clang_bytes;
 }
 
+// Report the same byte bound in optional and enforcing modes, including every unmatched body's cost and count.
 static bool tier1_code_size_report(const Tier1CodeSize* total, const char* label, bool enforce)
 {
     const bool qualified = tier1_code_size_qualified(total);

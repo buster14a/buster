@@ -61,21 +61,32 @@ be combined with `--self-test`. The object compile additionally requests
 `--tier1-function-sizes`; its `object-compile.txt` remains separate from the
 cross-check's `readelf` and linker logs. The size reader validates that report
 against the emitted object and the cross-check's existing Clang `-O0` object,
-so both comparisons use the same compilation and symbol set.
+so both comparisons inspect the same objects.
 
 The final `tier1-code-size` row for `corpus=c-testsuite` reports each count and
-byte sum. The gate compares the **sum of the sizes of matching Tier 1
-functions** with the sum of those same functions' Clang sizes: equality
+byte sum. The gate compares the **sum of the sizes of all emitted Tier 1
+functions** with the sum of their matching Clang functions' sizes: equality
 passes. It does not require every individual function or test to be smaller.
-Tier 0 fallback functions are counted and reported separately. Every Tier 1
-function must have an unambiguous match; unpaired function counts and bytes
-are visible and fail the gate. The objects' whole executable-section byte
-totals remain separate, because they also contain padding and other code. At least one
-function and nonzero reference bytes must be compared; absent or invalid
-evidence and an empty comparison fail, even if the programs ran correctly.
+A Tier 1 body without a Clang counterpart stays in `tier1_bytes` and
+contributes no `clang_bytes`, so a missing counterpart can only make the bound
+harder to meet. `unmatched` and `unmatched_bytes` expose that portion of the
+Tier 1 total. Every compiled body must be counted exactly once as matched or
+unmatched. The independent symbol cross-check still applies.
+
+Tier 0 fallback functions are counted and reported separately. The objects'
+whole executable-section byte totals also remain separate, because they
+contain padding and other code. At least one validated match and nonzero
+reference bytes must be compared; absent or invalid evidence and an empty
+comparison fail, even if the programs ran correctly.
 All parsed unit results are reduced after the workers finish, so worker
 ordering cannot change the aggregate. A failed gate makes the command exit
 1 and retain its files as any other failure does.
+
+Failed hosted shards upload the retained Buster and Clang objects, body-size
+reports and oracle logs in
+`tier1-code-size-ARCH-SANITIZER-OOPT-shardK-ATTEMPT`, kept for 14 days. The
+same artifact includes the SQLite and Lua size campaign's objects and reports
+when that campaign failed on the shard.
 
 A test passes when everything it was put through gave the expected status and
 output. A refusal that names a feature (`error: unsupported: FEATURE`) makes it
@@ -115,7 +126,9 @@ timeout, and so must its compiles where they sleep.
 
 The self-test also exercises the shared size reader and corpus reduction:
 one larger function offset by a smaller one passes at exact equality, one
-extra byte fails, and empty evidence fails. Its command-level controls reject
+extra byte fails, and unpaired bodies stay charged against the matching
+reference total. Inconsistent matched/unmatched counts and empty evidence
+fail. Its command-level controls reject
 `--check-code-size` without `--tier1` and with `--self-test` before attempting
 to run the corpus.
 
@@ -164,6 +177,6 @@ symbols' stage (on a Zen 4 laptop, clang 23.1.3), every object of the 219
 defines `clang -O0 -c`'s functions and objects.
 
 These historical results establish correct programs. The explicit
-`--check-code-size` gate now qualifies the matched Tier 1 functions' aggregate
+`--check-code-size` gate now qualifies all emitted Tier 1 functions' aggregate
 size; it makes no execution-time claim. Tier 0's code against `clang -O0`'s
 and the whole compile against tcc's remain #136's and #138's measurements.

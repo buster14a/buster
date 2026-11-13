@@ -1767,7 +1767,7 @@ jobs:
         # output clang -O0's); then every build runs every program in each of 11 rounds, each round in a Williams design's order,
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
-        # dispatched runs. #1116 also gates matched Tier 1 function bytes against clang -O0 separately on sqlite3.c
+        # dispatched runs. #1116 also gates all Tier 1 function bytes against matching clang -O0 bytes on sqlite3.c
         # and all 34 Lua sources (luac.c included), using paired objects rather than the linked executables' sizes.
         if: needs.changes.outputs.tier1_programs != 'false'
         timeout-minutes: 5

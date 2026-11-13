@@ -162,7 +162,7 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
 # others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
 # both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
-# The declared subset must pass. #1116 also requires its complete, matched Tier 1 function-size total <= clang -O0's;
+# The declared subset must pass. #1116 also requires all Tier 1 function bytes <= clang -O0's matching bytes;
 # --check-code-size implies the object/Clang cross-check and reports fallbacks and unmatched bodies separately.
 "$BUSTER_COMPILER" test-c-testsuite --tier1 --check-code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]

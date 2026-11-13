@@ -281,6 +281,9 @@ static bool tier1_programs_size_object(const Tier1Programs* p, uint32_t build, b
     if (tier1)
     {
         tier1_programs_add(&c, "--tier1-function-sizes");
+        // Object sizes need no parallel compilation; respect the hosted command group's single-CPU budget.
+        tier1_programs_add(&c, "--lanes");
+        tier1_programs_add(&c, "1");
     }
     if (lua)
     {

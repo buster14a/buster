@@ -3,6 +3,7 @@
 //
 // Small hand-written ELF objects keep the size oracle independent of the compiler's object writer. Nothing runs:
 // exact sizes, aliases, section padding, malformed reports and the corpus gate are checked by c-testsuite's self-test.
+// Missing Clang counterparts keep their full Tier 1 cost and may qualify only within the matched reference budget.
 
 #include <elf.h>
 
@@ -120,7 +121,46 @@ static bool tier1_code_size_self_test(void)
     tier1_code_size_test_object(&theirs, "missing", 10, 64, true, false);
     valid = arena.base != NULL && tier1_code_size_test_compare(&sizes, &ours, &theirs, report, &arena);
     tier1_code_size_test_expect(&checks, &failures, valid && sizes.compiled == 1 && sizes.matched == 0 && sizes.unmatched == 1 && sizes.unmatched_bytes == 8 &&
-                               sizes.fallback_bytes == 12 && !tier1_code_size_qualified(&sizes), "missing counterparts stay visible and cannot pass");
+                               sizes.tier1_bytes == 8 && sizes.clang_bytes == 0 && sizes.fallback_bytes == 12 && !tier1_code_size_qualified(&sizes),
+                               "entirely unmatched Tier 1 bodies keep their byte cost and cannot qualify alone");
+    const Tier1CodeSize unmatched = sizes;
+    Tier1CodeSize matched = { 0 };
+    tier1_code_size_test_object(&theirs, "good", 17, 64, true, false);
+    valid = arena.base != NULL && tier1_code_size_test_compare(&matched, &ours, &theirs, report, &arena);
+    Tier1CodeSize combined = matched;
+    tier1_code_size_add(&combined, &unmatched);
+    tier1_code_size_test_expect(&checks, &failures, valid && combined.compiled == 2 && combined.matched == 1 && combined.unmatched == 1 &&
+                               combined.tier1_bytes == 16 && combined.clang_bytes == 17 && combined.unmatched_bytes == 8 && tier1_code_size_qualified(&combined),
+                               "unmatched bytes can fit within the remaining matched reference budget");
+    tier1_code_size_test_object(&theirs, "good", 16, 64, true, false);
+    valid = arena.base != NULL && tier1_code_size_test_compare(&matched, &ours, &theirs, report, &arena);
+    combined = matched;
+    tier1_code_size_add(&combined, &unmatched);
+    tier1_code_size_test_expect(&checks, &failures, valid && combined.tier1_bytes == 16 && combined.clang_bytes == 16 && combined.unmatched_bytes == 8 &&
+                               tier1_code_size_qualified(&combined), "equality passes with every unmatched byte charged");
+    Tier1CodeSize inconsistent = combined;
+    inconsistent.compiled += 1;
+    tier1_code_size_test_expect(&checks, &failures, !tier1_code_size_qualified(&inconsistent), "inconsistent classification counts cannot qualify");
+    inconsistent.compiled = 1;
+    inconsistent.matched = 2;
+    inconsistent.unmatched = UINT64_MAX;
+    tier1_code_size_test_expect(&checks, &failures, !tier1_code_size_qualified(&inconsistent), "wrapped classification counts cannot qualify");
+    tier1_code_size_test_object(&ours, "good", 9, 64, true, false);
+    tier1_code_size_test_object(&theirs, "missing", 16, 64, true, false);
+    static const char larger_unmatched[] = BUSTER_TIER1_SIZE_TEST_HEADER "tier1-function-size\ttier=tier1\tbytes=9\tname=676f6f64\n"
+                                          BUSTER_TIER1_SIZE_TEST_FALLBACK BUSTER_TIER1_SIZE_TEST_END BUSTER_TIER1_SIZE_TEST_SUMMARY;
+    valid = arena.base != NULL && tier1_code_size_test_compare(&sizes, &ours, &theirs, larger_unmatched, &arena);
+    combined = matched;
+    tier1_code_size_add(&combined, &sizes);
+    tier1_code_size_test_expect(&checks, &failures, valid && combined.tier1_bytes == 17 && combined.clang_bytes == 16 && combined.unmatched_bytes == 9 &&
+                               !tier1_code_size_qualified(&combined), "one extra unmatched byte fails the corpus bound");
+    tier1_code_size_test_object(&ours, "good", 8, 64, true, false);
+    tier1_code_size_test_object(&theirs, "good", 0, 64, true, false);
+    valid = arena.base != NULL && tier1_code_size_test_compare(&sizes, &ours, &theirs, report, &arena);
+    tier1_code_size_test_expect(&checks, &failures, !valid && sizes.invalid, "a present zero-sized Clang counterpart is not an unmatched function");
+    tier1_code_size_test_object(&theirs, "good", 10, 64, false, false);
+    valid = arena.base != NULL && tier1_code_size_test_compare(&sizes, &ours, &theirs, report, &arena);
+    tier1_code_size_test_expect(&checks, &failures, !valid && sizes.invalid, "a present non-executable Clang counterpart is not an unmatched function");
     tier1_code_size_test_object(&theirs, "good", 10, 64, true, false);
     Elf64_Sym aliased;
     memcpy(&aliased, theirs.bytes + 512 + 2 * sizeof(Elf64_Sym), sizeof(aliased));
