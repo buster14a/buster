@@ -69,6 +69,7 @@ struct CheckCorpusPath
     uint32_t first_warning_token;
     uint32_t first_warning_line;
     uint32_t token;
+    uint32_t character;
     uint32_t position;
     uint32_t pragma;
     uint32_t pp_eval_use;
@@ -83,6 +84,7 @@ struct CheckCorpusPath
 
 static void check_corpus_input_diagnostic(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp, const CheckInputReport* report)
 {
+    path->character = 0;
     CheckWarningSpelling spell = { 0 };
     const char* message = check_semantic_input(parser, pp, &path->input, &path->types, report, &spell, &path->scratch);
     snprintf(path->message, sizeof(path->message), "%s", message);
@@ -97,6 +99,7 @@ static void check_corpus_input_diagnostic(CheckCorpusPath* path, const Parser* p
 
 static void check_corpus_expression_diagnostic(CheckCorpusPath* path, const Parser* parser, Preprocessor* pp, const CheckReport* report)
 {
+    path->character = 0;
     char text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
     CheckWarningSpelling spell = { 0 };
     const char* message = check_diagnostic_x86_hard(&path->input, &path->stream, report, text, sizeof(text), &path->token);
@@ -111,7 +114,7 @@ static void check_corpus_expression_diagnostic(CheckCorpusPath* path, const Pars
     if (message == NULL)
     {
         PPOutputDiagnosticNote notes[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
-        message = check_semantic_expression(parser, pp, &path->input, &path->stream, &path->types, report, &spell, &path->token, notes, &path->scratch);
+        message = check_semantic_expression(parser, pp, &path->input, &path->stream, &path->types, report, &spell, &path->token, &path->character, notes, &path->scratch);
     }
     snprintf(path->message, sizeof(path->message), "%s", message);
     path->resource |= pp->diagnostic_collection_failed;
@@ -426,7 +429,9 @@ static void check_corpus_location(CheckCorpusPath* path, const Parser* parser, P
     {
         const uint32_t spelling_location = pp->output.locations[source];
         located = true;
-        path->resource |= !check_corpus_primary_location(pp, spelling_location, pp_history_at(pp, source), &location);
+        const uint32_t character_location = strcmp(path->phase, "expression") == 0 && path->character != 0 ?
+                                            spelling_location + path->character : spelling_location;
+        path->resource |= !check_corpus_primary_location(pp, character_location, pp_history_at(pp, source), &location);
         const uint8_t* spelling = 0;
         const uint8_t kind = pp->output.kinds[source];
         const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
@@ -719,6 +724,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
         if (result->position < path->position)
         {
             path->token = result->token;
+            path->character = result->character;
             path->position = result->position;
             path->pragma = result->pragma;
             path->pp_eval_use = result->pp_eval_use;

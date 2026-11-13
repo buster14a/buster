@@ -3830,6 +3830,7 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
     if (severity != CHECK_WARNING_IGNORE)
     {
         uint32_t located = token;
+        uint32_t offset = 0;
         uint32_t note_token = BUSTER_CHECK_NONE;
         const char* note = NULL;
         uint32_t argument = BUSTER_CHECK_NONE;
@@ -3839,7 +3840,7 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
         if (message == NULL)
         {
             located = token;
-            message = check_semantic_expression(parser, pp, input, stream, types, report, spell, &located, notes, scratch);
+            message = check_semantic_expression(parser, pp, input, stream, types, report, spell, &located, &offset, notes, scratch);
             note_count = check_semantic_note_count(notes);
         }
         else if (note != NULL && note_token < count)
@@ -3852,7 +3853,15 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
         if (message != NULL && located < count)
         {
             const PPDiagnosticRecord* previous = pp->diagnostic_last;
-            pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[located], publication, notes, note_count, "%s", message);
+            if (offset != 0)
+            {
+                const uint32_t source = parser->tokens.sources[located];
+                pp_diagnose_output_location_at(pp, pp_severity, source, pp->output.locations[source] + offset, publication, PP_DIAGNOSTIC_SEMANTIC, "%s", message);
+            }
+            else
+            {
+                pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[located], publication, notes, note_count, "%s", message);
+            }
             if (suborder != 0)
             {
                 pp_diagnostic_suborder(pp, previous, suborder);
@@ -4956,6 +4965,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // published where the report's own token puts it (#1066).
                     char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
                     uint32_t x86_location = BUSTER_CHECK_NONE;
+                    uint32_t semantic_offset = 0;
                     PPOutputDiagnosticNote x86_note[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
                     const char* x86_message = phase == 1 ? check_diagnostic_x86_hard(input, stream, stream->reports + index, x86_text, sizeof(x86_text), &x86_location) :
                                                            NULL;
@@ -5007,7 +5017,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     if (x86_message == NULL && phase == 1)
                     {
-                        x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, x86_note, scratch);
+                        x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, &semantic_offset, x86_note, scratch);
                     }
                     if (phase == 0 && input->reports[index].message == CHECK_INPUT_FP_EVAL_USE)
                     {
@@ -6268,8 +6278,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (x86_message != NULL && x86_location < count)
                         {
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
-                                                        check_semantic_note_count(x86_note), "%s", x86_message);
+                            if (semantic_offset != 0)
+                            {
+                                const uint32_t at = parser->tokens.sources[x86_location];
+                                pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, at, pp->output.locations[at] + semantic_offset, publication, PP_DIAGNOSTIC_SEMANTIC, "%s", x86_message);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
+                                                            check_semantic_note_count(x86_note), "%s", x86_message);
+                            }
                             // CFString's argument that doesn't convert is no ordinary literal either: clang's CheckObjCString
                             // adds its own error after the conversion's (#2460).
                             if (builtin_converted && stream->graph->members[stream->reports[index].node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING)

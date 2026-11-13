@@ -2832,10 +2832,13 @@ What the lowering covers past scalars (#145's programs):
   name as a swizzle only in a unit whose type table has an extended vector
   (`TypeTable.ext_vectors`), growing its list past the `.` members it counted;
   a struct's `->` member is unaffected. Swizzles aren't lowered: `-c` refuses
-  both spellings as a member access. The checker's swizzle diagnostics are its
-  own words, not clang's ("illegal vector component name", "vector is not
-  assignable (contains duplicate components)", "address of vector element
-  requested", a `vector_size` vector's "is not a structure or union"): #2096.
+  both spellings as a member access. The cold diagnostic renderer gives clang's
+  vector member errors (#2096): the first illegal component character at its
+  operator-relative byte, an out-of-range component at the operator, duplicate
+  components on assignment, and an element's forbidden address. GNU vectors
+  keep the non-record-base error and their typedef spelling. A duplicate or
+  temporary swizzle's address gets the rvalue error, while ordinary records and
+  valid swizzles keep their existing semantics.
   Extended vectors' `!`, `&&` and `||` compare each lane with zero and return
   all-one or all-zero signed lanes. Both operands are evaluated; these vector
   operators do not short-circuit. Half-precision truth uses scalar conversions

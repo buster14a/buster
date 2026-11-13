@@ -1334,6 +1334,32 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
 {
     const CheckGraph* graph = &input->graph;
     uint32_t result = 0;
+    if (node < graph->count && node < stream->count && (graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW) &&
+        (check_stream_value(stream, node).flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+    {
+        const TypeId type = type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)));
+        const bool aliases = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_EXT_VECTOR && input->declarations != NULL &&
+                             input->declaration_kinds != NULL && input->declared_types != NULL && input->objects != NULL &&
+                             check_sparse_wide_present(input->attributes);
+        // Clang names a swizzle's vector result with the first matching extended-vector typedef declared so far.
+        // This is diagnostic sugar only; the value keeps its interned vector type and component flags.
+        const uint32_t before = graph->tokens[node] < input->token_count ? graph->tokens[node] : input->token_count;
+        for (uint32_t t = 0; aliases && result == 0 && t < before; t += 1)
+        {
+            if (parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && input->declarations[t] == t && input->objects[t] != 0 &&
+                input->declaration_kinds[t] == C_BINDING_TYPEDEF &&
+                type_unqualified(type_strip_aligned(types, input->declared_types[t])) == type)
+            {
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, t);
+                const uint32_t attribute_count = attributes != NULL ? attributes->count : 0;
+                for (uint32_t a = 0; result == 0 && a < attribute_count; a += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + a;
+                    result = attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && attribute->neon == 0 ? t : 0;
+                }
+            }
+        }
+    }
     uint32_t at = node;
     for (uint32_t steps = 0; result == 0 && at < graph->count && steps < graph->count; steps += 1)
     {
@@ -1347,6 +1373,37 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
         result = declaration != 0 && declaration < input->token_count ? check_input_typedef_sugar(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
         at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// A swizzle adopts the matching extended-vector typedef's name even when that declaration carries alignment.
+// Supply its underlying type as the alias key without changing the result's type or generic typedef printing.
+static String8 check_semantic_vector_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          const TypeTable* types, CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling, uint32_t node)
+{
+    const TypeId vector = type_unqualified(type_strip_aligned(types, type));
+    const bool named = vector != 0 && type_kind(types, vector) == BUSTER_TYPE_KIND_EXT_VECTOR && node < stream->count &&
+                       (check_stream_value(stream, node).flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && spelling != 0 &&
+                       spelling < input->token_count && input->declared_types != NULL;
+    String8 result = { 0 };
+    if (named)
+    {
+        const TypeId alias = type_strip_alignment(types, input->declared_types[spelling]);
+        const String8 name = check_semantic_name(parser, pp, spelling);
+        const TypeNames names = { .alias_types = &alias, .alias_names = &name, .alias_count = 1 };
+        const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+        const String8 sugared = type_print(types, scratch, type, (String8){ 0 }, &names, options);
+        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_vector_element(types, vector), 0);
+        const uint64_t count = types->types.extent[type_index(vector)];
+        const char* text = sugared.length != 0 && element.length != 0 ?
+                           check_warning_text(scratch, "'%.*s' (vector of %llu %.*s %s)", (int)sugared.length, sugared.pointer,
+                                              (unsigned long long)count, (int)element.length, element.pointer, count > 1 ? "values" : "value") : NULL;
+        result = text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
+    }
+    else
+    {
+        result = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
     }
     return result;
 }
@@ -2297,7 +2354,7 @@ static const char* check_semantic_clear_padding(const Parser* parser, Preprocess
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
 
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                            const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
+                                            const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, uint32_t* character_offset,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
@@ -2309,6 +2366,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     const TypeId operand_type = operand < stream->count ? check_stream_type(stream, operand) : 0;
     const char* result = check_driver_report_message(report);
     *location = token;
+    *character_offset = 0;
     memset(note, 0, sizeof(*note) * BUSTER_CHECK_SEMANTIC_NOTES);
     uint32_t note_count = 0;
     // A call of an overload set none or several of whose candidates are viable (#1447), whose text is clang's where its
@@ -2365,7 +2423,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     {
         if (report->diagnostic == CHECK_DIAG_MEMBER && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && token + 1 < parser->tokens.count)
         {
-            const TypeId record = op == CHECK_OP_ARROW ? type_element(types, operand_type) : operand_type;
+            const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_strip_aligned(types, operand_type)) : operand_type;
             const String8 name = check_semantic_name(parser, pp, token + 1);
             // A base of no structure or union is clang's err_typecheck_member_reference_struct_union at the operator
             // (LookupMemberExpr, #2288), the operand's type as written for `.`; `.` of a pointer to one is its
@@ -2374,13 +2432,41 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
             const uint8_t pointee = op == CHECK_OP_MEMBER && kind == BUSTER_TYPE_KIND_POINTER ? type_kind(types, type_strip_aligned(types, type_element(types, record))) : 0;
             const bool suggestion = pointee == BUSTER_TYPE_KIND_STRUCT || pointee == BUSTER_TYPE_KIND_UNION;
-            const uint32_t spelling = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling);
+            const uint32_t direct = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
+            const uint32_t spelling = direct != 0 ? direct : !aggregate ? check_semantic_operand_spelling(parser, input, stream, types, operand) : 0;
+            const String8 type = check_semantic_vector_type(parser, pp, input, stream, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling, operand);
             *location = aggregate ? token + 1 : token;
             result = type.length == 0 ? NULL :
                      aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
                      suggestion ? check_warning_text(scratch, "member reference type %.*s is a pointer; did you mean to use '->'?", (int)type.length, type.pointer) :
                      check_warning_text(scratch, "member reference base type %.*s is not a structure or union", (int)type.length, type.pointer);
+            if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+            {
+                // The typed action already rejected this member. Spell its first illegal component, or the valid
+                // spelling's out-of-range access, only on this cold path. Clang locates a bad character relative to
+                // the operator (even for ->); boolean vectors reject the whole member at its own token.
+                const bool boolean = check_vector_element(types, record) == BUSTER_TYPE_BOOL;
+                const bool numeric = name.length > 1 && (name.pointer[0] == 's' || name.pointer[0] == 'S');
+                const bool color = name.length != 0 && (name.pointer[0] == 'r' || name.pointer[0] == 'g' || name.pointer[0] == 'b' || name.pointer[0] == 'a');
+                const bool point = name.length != 0 && strchr("xyzwrgba", (unsigned char)name.pointer[0]) != NULL;
+                const char* alphabet = numeric || !point ? "0123456789abcdefABCDEF" : color ? "rgba" : "xyzw";
+                uint32_t bad = BUSTER_CHECK_NONE;
+                for (uint32_t i = numeric ? 1u : 0u; !boolean && bad == BUSTER_CHECK_NONE && i < name.length; i += 1)
+                {
+                    bad = strchr(alphabet, (unsigned char)name.pointer[i]) == NULL ? i : BUSTER_CHECK_NONE;
+                }
+                if (boolean || bad != BUSTER_CHECK_NONE)
+                {
+                    result = check_warning_text(scratch, "illegal vector component name '%.*s'", boolean ? (int)name.length : 1,
+                                                name.pointer + (boolean ? 0 : bad));
+                    *location = boolean ? token + 1 : token;
+                    *character_offset = boolean ? 0 : bad + 1;
+                }
+                else
+                {
+                    result = type.length != 0 ? check_warning_text(scratch, "vector component access exceeds type %.*s", (int)type.length, type.pointer) : NULL;
+                }
+            }
         }
         else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_ARROW && operand_type != 0 && token + 1 < parser->tokens.count)
         {
@@ -2580,6 +2666,27 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             {
                 result = check_warning_text(scratch, "called object type %.*s is not a function or function pointer", (int)type.length, type.pointer);
                 *location = open;
+            }
+        }
+        else if ((report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED || report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED) &&
+                 (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && operand < stream->count &&
+                 (check_stream_value(stream, operand).flags & BUSTER_CHECK_VECTOR_DUPLICATE) != 0)
+        {
+            result = "vector is not assignable (contains duplicate components)";
+        }
+        else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED && op == CHECK_OP_ADDRESS && operand < stream->count &&
+                 (check_stream_value(stream, operand).flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+        {
+            const CheckValue value = check_stream_value(stream, operand);
+            if (value.category == CHECK_LVALUE && (value.flags & BUSTER_CHECK_VECTOR_DUPLICATE) == 0)
+            {
+                result = "address of vector element requested";
+            }
+            else
+            {
+                const String8 type = check_semantic_vector_type(parser, pp, input, stream, types, spell, scratch, operand_type,
+                                                                 check_semantic_operand_spelling(parser, input, stream, types, operand), operand);
+                result = type.length != 0 ? check_warning_text(scratch, "cannot take the address of an rvalue of type %.*s", (int)type.length, type.pointer) : NULL;
             }
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&

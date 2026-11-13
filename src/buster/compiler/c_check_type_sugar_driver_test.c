@@ -1454,6 +1454,79 @@ static const CheckDriverDefaultWarningFixture check_driver_counted_incomplete_fi
     },
 };
 
+// Vector member failures retain the typed action's decision and specialize only its diagnostic (#2096).
+static const CheckDriverDefaultWarningFixture check_driver_vector_member_fixtures[] =
+{
+    {
+        .name = "vector member diagnostics through dot and arrow",
+        .source = "typedef float v4 __attribute__((ext_vector_type(4)));\n"
+                  "typedef float g4 __attribute__((vector_size(16)));\n"
+                  "float a(g4 *p) { return (*p).y; }\n"
+                  "float b(v4 *p) { return (*p).q; }\n"
+                  "void c(v4 *p) { (*p).xx = (*p).zw; }\n"
+                  "float *d(v4 *p) { return &(*p).x; }\n"
+                  "float e(g4 *p) { return p->y; }\n"
+                  "float f(v4 *p) { return p->q; }\n"
+                  "void g(v4 *p) { p->xx = p->zw; }\n"
+                  "float *h(v4 *p) { return &p->x; }\n",
+        .errors = 8,
+    },
+    {
+        .name = "vector component characters and bounds",
+        .source = "typedef float v4 __attribute__((ext_vector_type(4)));\n"
+                  "typedef float v2 __attribute__((ext_vector_type(2)));\n"
+                  "typedef _Bool b4 __attribute__((ext_vector_type(4)));\n"
+                  "void f(v4 v, v4 *p, v2 small, b4 bits)\n{\n"
+                  "    (void)v.xq;\n    (void)v.xr;\n    (void)v.s0g;\n    (void)v.s;\n"
+                  "    (void)v.s04;\n    (void)small.z;\n    (void)bits.x;\n    (void)bits.lo;\n"
+                  "    (void)p->xq;\n    (void)p->s0g;\n    (void)p->s4;\n"
+                  "    (void)p->  xq;\n    (void)v.  xq;\n"
+                  "    (void)v.f;\n    (void)v.fq;\n    (void)v.ABC;\n}\n",
+        .errors = 16,
+    },
+    {
+        .name = "vector duplicate lvalues and element addresses",
+        .source = "typedef float v4 __attribute__((ext_vector_type(4)));\n"
+                  "typedef float v2 __attribute__((ext_vector_type(2)));\n"
+                  "void f(v4 v, const v4 c)\n{\n"
+                  "    v.xx += v.zw;\n    c.xx = v.xy;\n    v.xx[0] = 1;\n"
+                  "    (v + v).xx = v.xy;\n    (v + v).xx[0] = 1;\n"
+                  "    (void)&v[1];\n    (void)&v.x;\n    (void)&v.xx;\n"
+                  "    (void)&(v + v).x;\n    (void)&((v4){0}).x;\n"
+                  "    v.xy = v.zw;\n    v.x += 1;\n}\n",
+        .errors = 10,
+    },
+    {
+        .name = "swizzle aliases exclude fields and typeof aliases",
+        .source = "typedef float v4 __attribute__((ext_vector_type(4)));\n"
+                  "typedef v4 Alias;\n"
+                  "struct S { __typeof__(((v4){0}).xy) wrong; Alias member; };\n"
+                  "typedef __typeof__(((v4){0}).xy) T;\n"
+                  "void f(v4 v, struct S s) { (void)&v.xx; s.member++; }\n"
+                  "typedef float v2 __attribute__((ext_vector_type(2)));\n"
+                  "void g(v4 v) { (void)&v.xx; }\n",
+        .errors = 3,
+    },
+    {
+        .name = "swizzle result names an aligned vector typedef",
+        .source = "typedef float v4 __attribute__((ext_vector_type(4)));\n"
+                  "typedef float v2 __attribute__((ext_vector_type(2), aligned(32)));\n"
+                  "void f(v4 v, const v4 c) { (void)&v.xx; (void)&c.xx; (void)v.xx.z; }\n",
+        .errors = 3,
+    },
+    {
+        .name = "valid vector members and ordinary records",
+        .source = "typedef float v4 __attribute__((ext_vector_type(4)));\n"
+                  "struct S { int q, xx; };\n"
+                  "float f(v4 v, v4 *p, struct S *s)\n{\n"
+                  "    v.xy = p->zw;\n    p->s01 += v.yx;\n    v.x++;\n"
+                  "    s->xx = s->q;\n    int *q = &s->q;\n"
+                  "    return v.x + p->y + v.lo[0] + v.hi[0] + v.even[0] + v.odd[0] + *q;\n}\n",
+        // Swizzle lowering is an existing named refusal, independent of these semantic diagnostics.
+        .syntax_only = true,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
@@ -1471,4 +1544,6 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
                                        BUSTER_ARRAY_LENGTH(check_driver_counted_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_parameter_typedef_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_parameter_typedef_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vector_member_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_vector_member_fixtures));
 }
