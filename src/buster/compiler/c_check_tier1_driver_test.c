@@ -5595,7 +5595,8 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
         uint64_t internal = UINT64_MAX;
         const bool reported = built && check_test_tier1_field(text, "inlined", &inlined) && check_test_tier1_field(text, "internal_failures", &internal);
         free(text);
-        // The straight-line wrappers' and the struct helper's calls are 28 without the helpers with control flow's.
+        // 34: the straight-line wrappers' and the struct helper's calls are 26, which the straight-line splice alone took
+        // (main before #2541), and the helpers with control flow's are 8.
         snprintf(message, sizeof(message), "--tier1 %s the wrappers', the struct helper's and the control flow helpers' calls, not the noinline one's (build %u)", inlining ? "inlines" : "keeps",
                  build);
         check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 34 : inlined == 0), message);

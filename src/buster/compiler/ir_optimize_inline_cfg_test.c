@@ -270,8 +270,12 @@ static IrInlineCfgRun ir_inline_cfg_run(const IrFunction* functions, const Inter
         .bindings = &buffer,
         .binding_count = 1,
     };
+    // The units run a few hundred steps; a bound of 2^20 makes a wrong branch that loops fail at once rather than run the
+    // interpreter's default 2 x 10^8 steps.
+    InterpreterOptions options = interpreter_default_options();
+    options.max_steps = UINT64_C(1) << 20;
     const uint64_t mark = scratch->length;
-    run.result = ir_interpret(&program, 1, arguments, 2, 0, scratch);
+    run.result = ir_interpret(&program, 1, arguments, 2, &options, scratch);
     arena_pop_to(scratch, mark);
     return run;
 }
@@ -531,6 +535,26 @@ static void ir_inline_test_general_by_value(IrInlineTest* test, Arena* input, Ar
                     ir_inline_test_expect(test, result.inlined_calls == 1 && ir_inline_simd_count(out, IR_CALL) == 0 && out->block_count == 1 + 3 + 1 && out->slot_count == 3 + 2 + 2 &&
                                               ir_inline_simd_count(out, IR_LIFETIME) == 8 && ir_inline_simd_count(out, IR_PHI) == 1,
                                           "a by-value callee with two returns is spliced, its result's address a phi");
+                    // The interpreter gives each slot bytes of its own, so it can't see a lifetime that ends too soon: the
+                    // continuation's lifetime ends must follow the loads that copy the result out of the callee's objects,
+                    // through the result's address (the phi that begins the continuation) or an address row off it.
+                    uint32_t continuation = BUSTER_IR_NONE;
+                    for (uint32_t block = 0; block < out->block_count; block += 1)
+                    {
+                        continuation = out->op[out->block_offsets[block]] == IR_PHI ? block : continuation;
+                    }
+                    const uint32_t phi = continuation != BUSTER_IR_NONE ? out->block_offsets[continuation] : BUSTER_IR_NONE;
+                    uint32_t last_load = 0;
+                    uint32_t first_end = UINT32_MAX;
+                    for (uint32_t node = phi; phi != BUSTER_IR_NONE && node < out->block_offsets[continuation + 1]; node += 1)
+                    {
+                        const uint32_t address = out->op[node] == IR_LOAD ? out->a[node] : BUSTER_IR_NONE;
+                        const bool copied = address == phi || (address != BUSTER_IR_NONE && out->op[address] == IR_ADDRESS && out->a[address] == phi);
+                        last_load = copied ? node : last_load;
+                        first_end = out->op[node] == IR_LIFETIME && out->b[node] == 1 && first_end == UINT32_MAX ? node : first_end;
+                    }
+                    ir_inline_test_expect(test, continuation != BUSTER_IR_NONE && last_load != 0 && first_end != UINT32_MAX && last_load < first_end,
+                                          "the callee's objects' lifetimes end after the result's copy");
                     IrFunction inlined = *out;
                     ir_inline_test_expect(test, ir_inline_simd_run(&inlined, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "the spliced by-value caller runs as the unit");
                     IrSroaOptions sroa = ir_sroa_options();
