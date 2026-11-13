@@ -89,7 +89,28 @@ Each phi takes a new select row in the head for the region's two entries, which
 become one entry from the head. That is the shape of LLVM SimplifyCFG's
 `FoldTwoEntryPHINode` and `SpeculativelyExecuteBB`, for the C lowering's
 nested `?:`. The head then branches to the join. Rows are permuted, and the
-only new rows are the folded selects.
+only new rows are the folded selects and the sunk accumulations' zeros (below).
+
+Two cost rules keep a branch or move a select:
+
+- **A recurrence through the condition stays a branch.** The head's condition
+  may read, within 16 rows, a phi that one of the join's phis flows into, as a
+  running maximum's does. Its select would put the comparison on the loop's
+  carried chain: on the 9700X, `cmp; setg; test; cmovne` is four cycles per
+  element against a predicted branch's one, and #1382's running max ran 3.8
+  times main's cycles. LLVM's x86 cmov conversion turns such a `cmov` back into
+  a branch after selection, and clang -O2 keeps branches there.
+- **An accumulation's select sinks below its operation.** An in-place phi may
+  take `s op x` on one edge and `s` on the other: an addition, a subtraction
+  from `s`, an or or a xor of integers, which nothing else reads. The
+  operation's row then selects `x` or zero instead, and the phi becomes
+  `s op select`, as InstCombine folds a select of a binary operation. A
+  conditional sum's accumulator then waits for one addition per element, not
+  for the `cmov` as well, and a predictable condition costs no more than its
+  branch did. The zero is a new constant row in the head that names a zero the
+  constant table already has; a function whose table has none keeps the select
+  outside. A variable binding of the operation's row, whose value changed,
+  becomes unavailable.
 
 A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
@@ -110,8 +131,8 @@ constant costs nothing, an integer multiply three, a select two, and other
 admitted rows (a speculated load among them) one. These conservative bounds
 limit speculation and added live values; they are not measured target
 latencies. The IR has no branch-probability metadata (`__builtin_expect`
-currently lowers to its value), so a predictable branch, such as a running
-maximum's, converts too. Functions containing indirect-branch labels remain
+currently lowers to its value), so a predictable branch converts unless the
+recurrence rule keeps it. Functions containing indirect-branch labels remain
 unchanged.
 
 `ir_if_convert(function, output, scratch, scalar, result)` requires verified
@@ -125,7 +146,8 @@ words stay intact, and surviving phi/call occurrences get appended value
 slices. With no accepted region the result borrows the input and allocates no
 output. Failure preserves the result and output mark; scratch is restored on
 every outcome. The result counts the regions, selects, folded joins, reused
-rows, reused or speculated loads and rounds.
+rows, reused or speculated loads, sunk accumulations, the candidate regions
+each round left for a recurrence, and the rounds.
 
 The existing optimizer command covers the pass with independent execution,
 complete verification, exact twins, hostile speculation cases, guarded tails,
@@ -135,8 +157,8 @@ or a fence, its refusal behind a call, a volatile reload or another offset, and
 the `&&`/`||` truth values with their dead and repeated rows. The C driver
 tests also check native results against Clang and decode actual `cmov`/branch
 shapes. These include #1382's nested clamp, `&&` and `||` values, and loops
-whose only conditional branch is the loop's, plus a reload after a call that
-keeps its branch. Runtime measurements are in
+whose only conditional branch is the loop's. A running max and a reload after
+a call keep their branches. Runtime measurements are in
 [the Tier 1 command guide](commands/ir-optimization.md#bounded-scalar-if-conversion-1382).
 
 SCCP tracks a state and two-word constant per instruction and an executable

@@ -6,8 +6,8 @@
 // object check proves the C lowering/promotion/if-conversion/selection chain reaches cmov for pure max/clamp and
 // conditional arithmetic, while the guarding branches of potentially faulting loads and division remain. #1382's
 // kernels follow: a nested clamp, `&&` and `||` values, and loops whose arms reload the element the head compared
-// (a conditional sum, a select of it or its negation, a running max), whose only conditional branch is the loop's,
-// and a reload after a call, which keeps its branch.
+// (a conditional sum and a select of it or its negation), whose only conditional branch is the loop's. A running max,
+// whose condition reads the maximum its select would carry, and a reload after a call keep their branches.
 
 static const char check_test_tier1_if_convert_header[] =
     "long if_max(long a, long b);\n"
@@ -125,7 +125,7 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
     uint32_t* types = calloc(CHECK_TEST_IF_CONVERT_RECORDS, sizeof(uint32_t));
     const bool ready = written && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
     check_test_expect(test, ready, "if-conversion native code-shape fixture prepares");
-    // Each function's least cmov count and its conditional branches: none, the loop's alone, or a guard's (any).
+    // Each function's least cmov count and its conditional branches: none, the loop's alone, or a kept one (any).
     static const CheckTestIfConvertShape shapes[] = {
         {
             .name = "if_max",
@@ -179,8 +179,8 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
         },
         {
             .name = "if_runmax",
-            .selects = 1,
-            .branches = 1,
+            .selects = 0,
+            .branches = UINT32_MAX,
         },
         {
             .name = "if_load",

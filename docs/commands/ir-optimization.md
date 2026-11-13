@@ -55,7 +55,10 @@ the head, and they must be total or proven loads; the rest stay in an
 unreachable stub and must be droppable. A join with other predecessors keeps
 its phis and takes new selects in the head. Up to four rounds take nested
 regions (a nested `?:`, `&&` and `||` values), with `ir_truth_simplify_values`
-turning the truth values' selects into i1 selects between them. Each arm moves
+turning the truth values' selects into i1 selects between them. A condition
+that reads the value the join carries round a loop (a running max) keeps its
+branch, and an accumulation's select sinks below its addition
+(`s + (c ? x : 0)`). Each arm moves
 at most four non-constant rows, each join takes at most four selects, and the
 moved rows' cost plus two per select is at most eight. These are policy bounds,
 not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
@@ -66,7 +69,9 @@ independent execution before/after cleanup, exact scalar/vector output, every
 guarded candidate-scan tail, multi-phi edge polarity, both triangle
 orientations, sequential, nested and three-predecessor regions over rounds,
 loop-carried values, shared switch/call side-table words, allocation rollback,
-refusal of unsafe or expensive speculation, and the reload and truth fixtures.
+refusal of unsafe or expensive speculation, the reload and truth fixtures,
+a running maximum kept as a branch (and converted with a constant bound), and
+the loop's conditional sum sunk below its addition.
 The reload fixtures reuse a reload, speculate it behind a store or a fence, and
 refuse it behind a call, as a volatile access or at another offset. The truth
 fixtures reduce `&&` and `||` to i1 selects and refuse a dead division.
@@ -74,9 +79,9 @@ fixtures reduce `&&` and `||` to i1 selects and refuse a dead division.
 both scalar paths and rematerialization settings. Its decoded object checks
 require `cmov` without conditional branches for max, the clamps (sequential
 and nested), conditional arithmetic and the `&&`/`||` values, and `cmov` with
-only the loop's branch for the conditional sum, the `?:` sum and the running
-max. They also require the guarding branches to remain for loads, division,
-variable shifts, calls and a reload after a call.
+only the loop's branch for the conditional sum and the `?:` sum. They also
+require the branches to remain for loads, division, variable shifts, calls, a
+reload after a call and the running max.
 
 ## Dominator path policy (#1352)
 

@@ -460,6 +460,50 @@ static bool ir_if_convert_test_truth(Arena* arena, IrFunction* f, uint32_t varia
     return created;
 }
 
+// A running maximum over a parameter's bits: the head compares the loop's maximum, which the join's phi carries back,
+// so variant 0 keeps its branch (a recurrence through the condition). Variant 1 compares with a constant instead and
+// converts.
+static bool ir_if_convert_test_maximum(Arena* arena, IrFunction* f, uint32_t variant)
+{
+    const IrSizes sizes = {
+        .instruction_count = 17,
+        .block_count = 6,
+        .extra_count = 12,
+        .constant_count = 3,
+        .parameter_count = 1,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->parameter_types[0] = IR_I64;
+        f->result_type = IR_I64;
+        f->constants[1].low = 1;
+        f->constants[2].low = 16;
+        const uint32_t offsets[] = { 0, 5, 9, 12, 13, 16, 17 };
+        memcpy(f->block_offsets, offsets, sizeof(offsets));
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 1, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 2, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 3, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 4, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 5, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 6, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 7, IR_ICMP, IR_I1, 5, 3, IR_ULT);
+        ir_optimize_test_instruction(f, 8, IR_CBR, IR_VOID, 7, 2, 5);
+        ir_optimize_test_instruction(f, 9, IR_XOR, IR_I64, 5, 0, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 10, IR_ICMP, IR_I1, 9, variant == 0 ? 6 : 3, IR_UGT);
+        ir_optimize_test_instruction(f, 11, IR_CBR, IR_VOID, 10, 3, 4);
+        ir_optimize_test_instruction(f, 12, IR_BR, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 13, IR_PHI, IR_I64, 8, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 14, IR_ADD, IR_I64, 5, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 15, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 16, IR_RET, IR_VOID, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t extra[] = { 0, 1, 4, 14, 0, 1, 4, 13, 2, 6, 3, 9 };
+        memcpy(f->extra, extra, sizeof(extra));
+    }
+    return created;
+}
+
 static void ir_if_convert_test_guards(IrOptimizeTest* test)
 {
     const long page = sysconf(_SC_PAGESIZE);
@@ -601,6 +645,23 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             {
                 const uint32_t expected = kind == 0 || kind >= 3 ? 2 : 1;
                 ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                if (kind == 1)
+                {
+                    // The loop's conditional sum, `s + (c ? i : 0)`: its phi adds a select of the index or zero.
+                    IrIfConvertResult converted = { 0 };
+                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, false, &converted);
+                    uint32_t sum = BUSTER_IR_NONE;
+                    for (uint32_t i = 0; check.error == IR_OK && i < converted.function.instruction_count; i += 1)
+                    {
+                        const IrFunction* const g = &converted.function;
+                        const uint32_t b = g->b[i];
+                        const bool shaped = g->op[i] == IR_ADD && g->op[b] == IR_SELECT && (g->op[g->b[b]] == IR_CONST || g->op[g->c[b]] == IR_CONST);
+                        sum = shaped ? i : sum;
+                    }
+                    ir_optimize_test_expect(test, check.error == IR_OK && converted.sunk == 1 && sum != BUSTER_IR_NONE,
+                                            "if-conversion sinks an accumulation's select below its addition");
+                    arena_pop_to(&vector, 0);
+                }
                 if (kind == 3 || kind == 4)
                 {
                     IrIfConvertResult converted = { 0 };
@@ -638,6 +699,25 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 const uint32_t reused = variant == 0 ? 3 : expected != 0 ? 1 : 0;
                 ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK && v.loads == expected && s.loads == expected && v.reused == reused && s.reused == reused,
                                         "if-conversion reuses or speculates an arm's reload only behind the head's proof");
+                arena_pop_to(&vector, 0);
+                arena_pop_to(&scalar, 0);
+            }
+            arena_pop_to(&input, 0);
+        }
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            IrFunction f = { 0 };
+            const bool created = ir_if_convert_test_maximum(&input, &f, variant);
+            ir_optimize_test_expect(test, created, "if-conversion running maximum fixture allocation");
+            if (created)
+            {
+                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, variant, variant);
+                IrIfConvertResult v = { 0 };
+                IrIfConvertResult s = { 0 };
+                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
+                const IrCheck sc = ir_if_convert(&f, &scalar, &scratch, true, &s);
+                ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK && v.recurrences == 1 - variant && s.recurrences == 1 - variant,
+                                        "if-conversion keeps the branch of a recurrence through its condition");
                 arena_pop_to(&vector, 0);
                 arena_pop_to(&scalar, 0);
             }

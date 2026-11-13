@@ -31,7 +31,12 @@
 // predecessors keeps its phis: each takes a new select row in the head for the region's two entries, which become one
 // entry from the head (LLVM SimplifyCFG's FoldTwoEntryPHINode and SpeculativelyExecuteBB, for the C lowering's
 // shapes). The head then branches to the join. A region's blocks overlap no other region's in a round, except that a
-// join may head another region (sequential clamps). Rows are permuted, and new ones are only the folded selects.
+// join may head another region (sequential clamps). Rows are permuted, and new ones are only the folded selects and
+// the sunk accumulations' zeros.
+//
+// Two cost rules: a head whose condition reads a phi that the join's phis flow into (a running maximum) stays a
+// branch, since the select would put the comparison on the loop's carried chain; and an in-place phi of `s op x` and
+// `s` becomes `s op select(c, x, 0)`, so that an accumulator waits for the operation alone.
 //
 // A converted head whose only reachable predecessor chain leads up to a conditional branch may now be an arm of an
 // outer region (a nested `?:`, `&&` inside `||`), so the pass runs again, at most four rounds. Between rounds and
@@ -63,6 +68,12 @@
 #define BUSTER_IR_IF_CONVERT_KEY_C 4u
 #define BUSTER_IR_IF_CONVERT_KEY_TYPE 8u
 #define BUSTER_IR_IF_CONVERT_KEY_FLAGS 16u
+// The rows the head reads its condition through, for a recurrence of the join's values (below).
+#define BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS 16u
+// A round's new rows: a folded join's select, and the zero a sunk accumulation selects on its true or false side.
+#define BUSTER_IR_IF_CONVERT_FRESH_SELECT 0u
+#define BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE 1u
+#define BUSTER_IR_IF_CONVERT_FRESH_ZERO_FALSE 2u
 
 typedef struct IrIfConvertResult IrIfConvertResult;
 struct IrIfConvertResult
@@ -75,6 +86,10 @@ struct IrIfConvertResult
     // Arm rows that took an earlier row's value instead of moving, and the arm loads reused or speculated.
     uint32_t reused;
     uint32_t loads;
+    // Accumulations whose select sank below their operation, and the candidate regions each round left as branches
+    // for a recurrence through their condition.
+    uint32_t sunk;
+    uint32_t recurrences;
     uint32_t rounds;
 };
 
@@ -90,9 +105,20 @@ struct IrIfConvertRegion
     uint32_t moved;
     uint32_t moved_count;
     uint32_t phis;
-    // A folded region's first new select among the round's (IrIfConvertWork.select_phis), or BUSTER_IR_NONE where the
-    // join's phis become the selects.
+    // The region's new rows, a slice of IrIfConvertWork.fresh: its sunk accumulations' zeros, then a folded join's
+    // selects, the first of which is `selects` (BUSTER_IR_NONE where the join's phis become the selects).
+    uint32_t fresh;
+    uint32_t zeros;
     uint32_t selects;
+};
+
+typedef struct IrIfConvertFresh IrIfConvertFresh;
+struct IrIfConvertFresh
+{
+    // A select's phi, or a zero's operation row and the phi it accumulates.
+    uint32_t row;
+    uint32_t phi;
+    uint32_t kind;
 };
 
 typedef struct IrIfConvertChain IrIfConvertChain;
@@ -130,7 +156,9 @@ struct IrIfConvertWork
     // Every row's representative: itself, or the earlier row whose value an arm row takes.
     uint32_t* alias;
     uint32_t* moved;
-    uint32_t* select_phis;
+    IrIfConvertFresh* fresh;
+    // A sunk accumulation's phi: its operation row; the operation row: its zero's index in `fresh`.
+    uint32_t* sunk;
     // 1 for an accepted region's arm block, 2 for the candidate's while it is analyzed.
     uint8_t* arms;
     uint8_t* reachable;
@@ -139,10 +167,14 @@ struct IrIfConvertWork
     uint32_t region_count;
     uint32_t select_count;
     uint32_t moved_count;
-    uint32_t new_selects;
+    uint32_t fresh_count;
+    // A zero in the constant table, or BUSTER_IR_NONE: a sunk accumulation's zero rows name it.
+    uint32_t zero;
     uint32_t folded;
     uint32_t reused;
     uint32_t loads;
+    uint32_t sunk_count;
+    uint32_t recurrences;
     // An accepted head could be an arm of an outer region in the next round.
     bool nested;
     bool scalar;
@@ -531,6 +563,127 @@ static uint32_t ir_if_convert_occurrences(const IrCfg* cfg, uint32_t block, uint
     return count;
 }
 
+// Whether the head's condition reads, within a few rows, a phi that one of the join's phis flows into: a recurrence
+// such as a running maximum's. Its select would put the comparison on the loop's carried chain (cmp, setcc, test and
+// cmov per element on the 9700X), where a predicted branch keeps it off; LLVM's x86 cmov conversion turns such a
+// cmov back into a branch after selection, and clang -O2 keeps a branch there.
+static bool ir_if_convert_recurrence(const IrFunction* f, uint32_t condition, uint32_t join_first, uint32_t phis)
+{
+    uint32_t stack[BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS];
+    uint32_t seen[BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS];
+    uint32_t depth = 1;
+    uint32_t visited = 0;
+    bool found = false;
+    stack[0] = condition;
+    while (depth != 0 && !found && visited < BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS)
+    {
+        const uint32_t row = stack[--depth];
+        bool known = false;
+        for (uint32_t k = 0; k < visited; k += 1)
+        {
+            known = known || seen[k] == row;
+        }
+        if (!known)
+        {
+            seen[visited++] = row;
+            if (f->op[row] == IR_PHI)
+            {
+                for (uint32_t p = 0; p < f->b[row]; p += 1)
+                {
+                    const uint32_t value = f->extra[f->a[row] + p * 2 + 1];
+                    found = found || (value >= join_first && value < join_first + phis);
+                }
+            }
+            else
+            {
+                const uint32_t mask = ir_value_mask(f, row);
+                const uint32_t fields[3] = {
+                    f->a[row],
+                    f->b[row],
+                    f->c[row],
+                };
+                for (uint32_t field = 0; field < 3; field += 1)
+                {
+                    if ((mask & (1u << field)) != 0 && depth < BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS)
+                    {
+                        stack[depth++] = fields[field];
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
+// Whether an arm row other than `r`, among the moving ones, or a join phi other than `phi` reads r's value.
+static bool ir_if_convert_shared(const IrIfConvertWork* work, const uint32_t* rows, uint32_t row_count, uint32_t join_first, uint32_t phis, uint32_t phi, uint32_t r)
+{
+    const IrFunction* const f = work->function;
+    bool shared = false;
+    for (uint32_t k = 0; k < row_count && !shared; k += 1)
+    {
+        const uint32_t q = rows[k];
+        const uint32_t mask = q != r && work->moving[q] != 0 ? ir_value_mask(f, q) : 0;
+        for (uint32_t field = 0; field < 3; field += 1)
+        {
+            shared = shared || ((mask & (1u << field)) != 0 && ir_if_convert_field(work, q, field) == r);
+        }
+    }
+    for (uint32_t other = join_first; other < join_first + phis && !shared; other += 1)
+    {
+        for (uint32_t p = 0; other != phi && p < f->b[other]; p += 1)
+        {
+            shared = shared || work->alias[f->extra[f->a[other] + p * 2 + 1]] == r;
+        }
+    }
+    return shared;
+}
+
+// An in-place phi whose arm value is its other value s combined with x, `s op x` (an addition, a subtraction from s,
+// an or or a xor of an integer), and which nothing else reads: the operation's row selects x or zero instead, and the
+// phi becomes `s op select`, so that a loop's accumulator waits for one operation, not for the select as well
+// (InstCombine's fold of a select of a binary operation; clang -O2's conditional sums add a cmov of zero).
+static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint32_t row_count, uint32_t join_first, uint32_t phis, uint32_t true_from, uint32_t false_from)
+{
+    const IrFunction* const f = work->function;
+    const IrCfg* const cfg = &work->cfg;
+    for (uint32_t phi = join_first; work->zero != BUSTER_IR_NONE && phi < join_first + phis; phi += 1)
+    {
+        const uint32_t values[2] = {
+            work->alias[ir_if_convert_incoming(f, phi, true_from)],
+            work->alias[ir_if_convert_incoming(f, phi, false_from)],
+        };
+        uint32_t chosen = BUSTER_IR_NONE;
+        uint32_t side = 0;
+        for (uint32_t s = 0; s < 2 && chosen == BUSTER_IR_NONE; s += 1)
+        {
+            const uint32_t r = values[s];
+            const uint32_t other = values[1 - s];
+            const uint32_t op = f->op[r];
+            const uint32_t type = f->type[r];
+            bool candidate = work->moving[r] != 0 && work->arms[cfg->instruction_blocks[r]] == 2 && work->arms[cfg->instruction_blocks[other]] != 2 &&
+                             work->sunk[r] == BUSTER_IR_NONE && (op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR) && type == f->type[phi] &&
+                             type >= IR_I8 && type <= IR_I64;
+            candidate = candidate && (work->alias[f->a[r]] == other || (op != IR_SUB && work->alias[f->b[r]] == other));
+            candidate = candidate && !ir_if_convert_shared(work, rows, row_count, join_first, phis, phi, r);
+            chosen = candidate ? r : BUSTER_IR_NONE;
+            side = s;
+        }
+        if (chosen != BUSTER_IR_NONE)
+        {
+            work->fresh[work->fresh_count] = (IrIfConvertFresh){
+                .row = chosen,
+                .phi = phi,
+                .kind = side == 0 ? BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE : BUSTER_IR_IF_CONVERT_FRESH_ZERO_FALSE,
+            };
+            work->sunk[chosen] = work->fresh_count;
+            work->sunk[phi] = chosen;
+            work->fresh_count += 1;
+            work->sunk_count += 1;
+        }
+    }
+}
+
 static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
 {
     const IrFunction* const f = work->function;
@@ -587,6 +740,9 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
         safe = phis <= BUSTER_IR_IF_CONVERT_PHI_LIMIT && f->b[i] == predecessors && ir_if_convert_scalar_type(f->type[i]);
     }
     safe = safe && phis != 0;
+    const bool recurrence = safe && ir_if_convert_recurrence(f, f->a[branch], join_first, phis);
+    work->recurrences += recurrence;
+    safe = safe && !recurrence;
     // Mark the candidate's arm blocks, and list their rows, the true side's first: the order they move in.
     uint32_t rows[2 * BUSTER_IR_IF_CONVERT_ARM_ROWS];
     uint8_t side_of[2 * BUSTER_IR_IF_CONVERT_ARM_ROWS];
@@ -708,7 +864,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
             .false_from = false_from,
             .moved = work->moved_count,
             .phis = phis,
-            .selects = fold ? work->new_selects : BUSTER_IR_NONE,
+            .fresh = work->fresh_count,
         };
         for (uint32_t k = 0; k < row_count; k += 1)
         {
@@ -718,9 +874,19 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
             }
         }
         region.moved_count = work->moved_count - region.moved;
+        if (!fold)
+        {
+            ir_if_convert_sink(work, rows, row_count, join_first, phis, true_from, false_from);
+        }
+        region.zeros = work->fresh_count - region.fresh;
+        region.selects = fold ? work->fresh_count : BUSTER_IR_NONE;
         for (uint32_t p = 0; fold && p < phis; p += 1)
         {
-            work->select_phis[work->new_selects++] = join_first + p;
+            work->fresh[work->fresh_count++] = (IrIfConvertFresh){
+                .row = join_first + p,
+                .phi = join_first + p,
+                .kind = BUSTER_IR_IF_CONVERT_FRESH_SELECT,
+            };
         }
         work->regions[index] = region;
         work->heads[head] = index + 1;
@@ -790,7 +956,32 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
     view->b[out] = (mask & 2) != 0 ? values[alias[f->b[i]]] : f->b[i];
     view->c[out] = (mask & 4) != 0 ? values[alias[f->c[i]]] : f->c[i];
     const uint32_t join = f->op[i] == IR_PHI ? work->joins[block] : 0;
-    if (f->op[i] == IR_CBR && work->heads[block] != 0)
+    const uint32_t sunk = work->sunk[i];
+    if (sunk != BUSTER_IR_NONE && f->op[i] != IR_PHI)
+    {
+        // A sunk accumulation's operation selects its other operand x or zero, on the side the operation was.
+        const IrIfConvertFresh zero = work->fresh[sunk];
+        const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[zero.phi]] - 1];
+        const bool on_true = zero.kind == BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE;
+        const uint32_t other = alias[ir_if_convert_incoming(f, zero.phi, on_true ? region.false_from : region.true_from)];
+        const uint32_t x = alias[f->a[i]] == other ? alias[f->b[i]] : alias[f->a[i]];
+        view->op[out] = IR_SELECT;
+        view->a[out] = values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]];
+        view->b[out] = on_true ? values[x] : fresh[sunk];
+        view->c[out] = on_true ? fresh[sunk] : values[x];
+    }
+    else if (sunk != BUSTER_IR_NONE)
+    {
+        // Its phi: the operation of the other value and the select.
+        const IrIfConvertFresh zero = work->fresh[work->sunk[sunk]];
+        const IrIfConvertRegion region = work->regions[join - 1];
+        const bool on_true = zero.kind == BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE;
+        view->op[out] = f->op[sunk];
+        view->a[out] = values[alias[ir_if_convert_incoming(f, i, on_true ? region.false_from : region.true_from)]];
+        view->b[out] = values[sunk];
+        view->c[out] = BUSTER_IR_NONE;
+    }
+    else if (f->op[i] == IR_CBR && work->heads[block] != 0)
     {
         view->op[out] = IR_BR;
         view->a[out] = work->regions[work->heads[block] - 1].join;
@@ -860,12 +1051,12 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
     const uint32_t* const alias = work->alias;
     const uint64_t mark = output->length;
     const uint32_t count = f->instruction_count;
-    const uint64_t total = (uint64_t)count + work->new_selects;
+    const uint64_t total = (uint64_t)count + work->fresh_count;
     const uint32_t blocks = f->block_count;
     bool ok = total < UINT32_MAX;
     uint32_t* order = ir_allocate(scratch, total, 4, &ok);
     uint32_t* values = ir_allocate(scratch, count, 4, &ok);
-    uint32_t* fresh = ir_allocate(scratch, work->new_selects, 4, &ok);
+    uint32_t* fresh = ir_allocate(scratch, work->fresh_count, 4, &ok);
     IrFunction view = *f;
     view.instruction_count = (uint32_t)total;
     view.op = ir_allocate(output, total, 1, &ok);
@@ -917,8 +1108,8 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         {
             memcpy(view.calls, f->calls, (uint64_t)f->call_count * sizeof(IrCall));
         }
-        // A head keeps its rows, then takes its arms' moving rows and a folded region's selects before its branch. An
-        // arm keeps the rows that don't move, as an unreachable stub.
+        // A head keeps its rows, then takes its sunk accumulations' zeros, its arms' moving rows and a folded region's
+        // selects before its branch. An arm keeps the rows that don't move, as an unreachable stub.
         uint32_t next = 0;
         for (uint32_t block = 0; block < blocks; block += 1)
         {
@@ -931,6 +1122,10 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
                 for (uint32_t i = first; i + 1 < end; i += 1)
                 {
                     order[next++] = i;
+                }
+                for (uint32_t z = 0; z < region.zeros; z += 1)
+                {
+                    order[next++] = count + region.fresh + z;
                 }
                 for (uint32_t m = 0; m < region.moved_count; m += 1)
                 {
@@ -966,22 +1161,44 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
             }
         }
         ir_debug_remap(f, &view, values, NULL, NULL);
+        // A sunk accumulation's operation row now holds its select, not the value a binding of it described.
+        for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->binding_count; k += 1)
+        {
+            IrDebugBinding* binding = view.debug->bindings + k;
+            const uint32_t row = binding->kind == IR_DEBUG_BIND_VALUE && binding->value < total ? order[binding->value] : BUSTER_IR_NONE;
+            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
+            {
+                binding->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                binding->value = BUSTER_IR_NONE;
+            }
+        }
+        for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->region_count; k += 1)
+        {
+            IrDebugRegion* scope = view.debug->regions + k;
+            const uint32_t row = scope->kind == IR_DEBUG_BIND_VALUE && scope->value < total ? order[scope->value] : BUSTER_IR_NONE;
+            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
+            {
+                scope->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                scope->value = BUSTER_IR_NONE;
+            }
+        }
         uint32_t extra = f->extra_count;
         for (uint32_t out = 0; out < total; out += 1)
         {
             const uint32_t i = order[out];
             if (i >= count)
             {
-                // A folded region's select of a phi's two entries, in the head.
-                const uint32_t phi = work->select_phis[i - count];
-                const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[phi]] - 1];
-                view.op[out] = IR_SELECT;
-                view.type[out] = f->type[phi];
+                // A folded region's select of a phi's two entries, or a sunk accumulation's zero, in the head.
+                const IrIfConvertFresh entry = work->fresh[i - count];
+                const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[entry.phi]] - 1];
+                const bool select = entry.kind == BUSTER_IR_IF_CONVERT_FRESH_SELECT;
+                view.op[out] = select ? IR_SELECT : IR_CONST;
+                view.type[out] = f->type[entry.row];
                 view.flags[out] = 0;
                 view.alignment_log2[out] = 0;
-                view.a[out] = values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]];
-                view.b[out] = values[alias[ir_if_convert_incoming(f, phi, region.true_from)]];
-                view.c[out] = values[alias[ir_if_convert_incoming(f, phi, region.false_from)]];
+                view.a[out] = select ? values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]] : work->zero;
+                view.b[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.true_from)]] : BUSTER_IR_NONE;
+                view.c[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.false_from)]] : BUSTER_IR_NONE;
                 if (view.debug != NULL)
                 {
                     view.debug->origins[out] = BUSTER_IR_NONE;
@@ -1019,7 +1236,8 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
     work.reachable = ir_allocate(scratch, blocks, 1, &ok);
     work.alias = ir_allocate(scratch, count, 4, &ok);
     work.moved = ir_allocate(scratch, count, 4, &ok);
-    work.select_phis = ir_allocate(scratch, count, 4, &ok);
+    work.fresh = ir_allocate(scratch, count, sizeof(IrIfConvertFresh), &ok);
+    work.sunk = ir_allocate(scratch, count, 4, &ok);
     work.moving = ir_allocate(scratch, count, 1, &ok);
     uint32_t* queue = ir_allocate(scratch, blocks, 4, &ok);
     if (check.error == IR_OK && !ok)
@@ -1061,6 +1279,12 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         for (uint32_t i = 0; i < count; i += 1)
         {
             work.alias[i] = i;
+            work.sunk[i] = BUSTER_IR_NONE;
+        }
+        work.zero = BUSTER_IR_NONE;
+        for (uint32_t k = function->constant_count; k > 0; k -= 1)
+        {
+            work.zero = function->constants[k - 1].low == 0 && function->constants[k - 1].high == 0 ? k - 1 : work.zero;
         }
         for (uint64_t first = first_candidate; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
         {
@@ -1087,10 +1311,12 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
             converted->folded += work.folded;
             converted->reused += work.reused;
             converted->loads += work.loads;
+            converted->sunk += work.sunk_count;
             converted->rounds += 1;
             *again = work.nested;
         }
     }
+    converted->recurrences += check.error == IR_OK ? work.recurrences : 0;
     return check;
 }
 
