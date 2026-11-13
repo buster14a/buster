@@ -509,6 +509,16 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "    __asm__(\".pushsection .data\\n.p2align 2\\ntable: .long 1, 2, 3\\n.popsection\");\n"
           "}\n"
           "int main(void) { data(); printf(\"%s %d\\n\", greeting, table[0] + table[1] + table[2]); return 0; }\n" },
+        // #2551: portable file-scope assembly's percent-prefixed ELF types, including types C never refers to.
+        { "file-scope assembly's percent-prefixed symbol types", "main",
+          "#include <stdio.h>\n"
+          "int percent_entry(int);\nextern int percent_object;\n"
+          "__asm__(\".text\\n.globl percent_entry\\n.type percent_entry,%function\\npercent_entry:\\n"
+          "movl percent_object(%rip),%eax\\naddl %edi,%eax\\nret\\n.size percent_entry,.-percent_entry\\n"
+          ".data\\n.globl percent_object\\n.type percent_object,%object\\npercent_object: .long 11\\n.size percent_object,4\\n"
+          ".type percent_notype,%notype\\npercent_notype: .long 7\\n"
+          ".pushsection .tdata,\\\"awT\\\",@progbits\\n.type percent_tls,%tls_object\\npercent_tls: .long 3\\n.size percent_tls,4\\n.popsection\\n.text\");\n"
+          "int main(void) { printf(\"%d %d\\n\", percent_entry(31), percent_object); return 0; }\n" },
         // File-scope assembly (#619) that defines functions and data C declares and calls, refers to C's function and
         // variables (a static one that C reads too, so that clang emits it), with local, `.L` and numeric labels,
         // a `.pushsection` string, a common symbol and a weak reference.

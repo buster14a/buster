@@ -1838,14 +1838,16 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
     {
         operand->kind = X86_OPERAND_MEMORY;
         operand->mode = BUSTER_X86_MEMORY_ABSOLUTE;
-        uint32_t address = parser->at;
-        while (address < end && parser->tokens[address].kind != '(')
+        // A displacement can contain parenthesized arithmetic before the address's own tuple (#2550).
+        // The expression reader stops at a following '(', but a leading register/comma tuple has no displacement.
+        const uint32_t first = parser->at + 1;
+        X86Operand first_register;
+        const bool tuple = parser->tokens[parser->at].kind == '(' && first < end &&
+                           (parser->tokens[first].kind == '%' || parser->tokens[first].kind == ',' ||
+                            (!parser->prefix && parser->tokens[first].kind == BUSTER_ASM_WORD && asm_token_register(parser, first, &first_register)));
+        if (!tuple)
         {
-            address += 1;
-        }
-        if (address != parser->at)
-        {
-            *expression = asm_expression(parser, address);
+            *expression = asm_expression(parser, end);
         }
         if (asm_take(parser, '('))
         {
@@ -3446,7 +3448,10 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             asm_expect(parser, ',', "expected ',' after symbol");
             if (asm_is(parser, token, ".type"))
             {
-                asm_expect(parser, '@', "expected '@function', '@object' or '@notype'");
+                if (!asm_take(parser, '@') && !asm_take(parser, '%'))
+                {
+                    asm_fail(parser, location, "expected '@' or '%' before symbol type");
+                }
                 uint8_t type = BUSTER_LINK_SYMBOL_NOTYPE;
                 if (asm_is(parser, parser->at, "function"))
                 {

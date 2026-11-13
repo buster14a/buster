@@ -2284,8 +2284,8 @@ struct ExecutableDynamicCounts
     uint64_t ifuncs;
     uint64_t ifunc_stubs;
     // A static executable's and a dynamic PIE's general- and local-dynamic TLS accesses (TLSGD and TLSLD fixups), and
-    // the calls that must be theirs: a static executable's fixups to __tls_get_addr, all of them, and a dynamic PIE's
-    // that follow an access (executable_relaxed_call's rule).
+    // the calls that must be theirs: all fixups to an undefined static __tls_get_addr, otherwise only those that
+    // follow an access (executable_relaxed_call's rule). A definition may also have ordinary calls and references.
     uint64_t tls_accesses;
     uint64_t relaxed_calls;
     // A shared library's initial-exec accesses (GOTTPOFF fixups), with which it needs static TLS (DF_STATIC_TLS).
@@ -3913,6 +3913,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     // Masked loads stay within the columns.
     const Range64 fixup_range = lane_range(fixups->count - 1);
     const FixupId end = (FixupId)fixup_range.end + 1;
+    const bool undefined_relaxed = shared->runtime && shared->relaxed != 0 && !executable_is_defined(link, shared->relaxed);
     __m512i largest = _mm512_setzero_si512();
     uint64_t abs64 = 0;
     uint64_t absolute32 = 0;
@@ -3942,8 +3943,8 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
                                    _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8(BUSTER_LINK_FIXUP_LOAD_GOT)));
         // The fixups to __tls_get_addr, and of them the TLS accesses' calls, which the fixup before each is the access's
         // (executable_relaxed_call's rule; fixup 0, before the first group, is no access): the relaxation consumes those,
-        // which read no slot and reach no stub. Any other is an ordinary call of the loader's function in a dynamic PIE,
-        // and in a static executable one that nothing defines, refused below.
+        // which read no slot and reach no stub. Other references belong to the loader's function in a dynamic PIE or
+        // to the input's definition in a static link. Only an undefined static symbol requires every reference consumed.
         uint64_t to_relaxed = 0;
         for (uint32_t part = 0; shared->relaxed != 0 && part < 4; part += 1)
         {
@@ -3954,7 +3955,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         const __m512i previous = _mm512_and_si512(_mm512_maskz_loadu_epi8(to_relaxed != 0 ? valid : 0, fixups->kind + group - 1), _mm512_set1_epi8(BUSTER_LINK_FIXUP_KIND));
         const uint64_t consumed = to_relaxed & (_mm512_cmpeq_epi8_mask(previous, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD)) |
                                                 _mm512_cmpeq_epi8_mask(previous, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSLD)));
-        relaxed_calls += (uint64_t)__builtin_popcountll(shared->runtime ? to_relaxed : consumed);
+        relaxed_calls += (uint64_t)__builtin_popcountll(undefined_relaxed ? to_relaxed : consumed);
         // Their targets get their bits in this lane's row of the candidates, the others' in its marks, one at a time;
         // executable_reduce_got marks the candidates whose targets don't relax, a word of symbols at a time.
         for (uint64_t got = through_got & ~consumed; got != 0; got &= got - 1)
@@ -4057,10 +4058,9 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     shared->addend_magnitudes[lane] = _mm512_reduce_max_epu32(largest);
     if (shared->relaxes_tls)
     {
-        // A static executable's __tls_get_addr gets no slot, and a static PIE's no stub, whichever row its calls marked:
-        // they must all be the accesses' (the check of the counts refuses the link otherwise). A dynamic PIE's other
-        // calls marked its slot and its stub as any import's.
-        const uint64_t relaxed = shared->runtime && shared->relaxed != 0 ? 1ull << (shared->relaxed % 64) : 0;
+        // An undefined static __tls_get_addr gets no slot or stub: every reference must belong to an access. A
+        // definition's ordinary references keep their slots, as a dynamic PIE's import does.
+        const uint64_t relaxed = undefined_relaxed ? 1ull << (shared->relaxed % 64) : 0;
         marks[shared->relaxed / 64] &= ~relaxed;
         candidates[shared->relaxed / 64] &= ~relaxed;
         if (dynamic)
@@ -5337,7 +5337,7 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
             const bool symbolic = dynamic_symbol && !preempted;
             const bool ifunc = takes_ifuncs && executable_bit(shared->ifunc_bits, symbol);
             const bool stubbed = (ifunc || preempted) && executable_bit(shared->stub_marks, symbol);
-            // __tls_get_addr, whose calls the TLS accesses' relaxation consumes, refers to nothing.
+            // An undefined __tls_get_addr, whose calls the TLS accesses' relaxation consumes, refers to nothing.
             const bool relaxed = symbol == shared->relaxed;
             uint32_t reference = plain ? (uint32_t)(address_of[atom] + value_of[symbol]) : 0;
             reference = stubbed ? reference_of[symbol] : reference;
@@ -7003,8 +7003,8 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     {
         executable_check_relocations(link, shared, lanes, executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes));
     }
-    // A static executable's calls of __tls_get_addr must be its TLS accesses': one each, which their relaxation checks.
-    // A dynamic PIE's accesses must each have its call; its other calls are the loader's function's, through its stub.
+    // An undefined static __tls_get_addr requires every reference to belong to an access. With a definition, and in a
+    // dynamic PIE, each access still needs its call, but ordinary references to the function are preserved.
     const bool relaxes_tls = ok && shared->relaxes_tls;
     uint64_t tls_accesses = 0;
     uint64_t relaxed_calls = 0;

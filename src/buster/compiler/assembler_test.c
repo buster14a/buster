@@ -1687,6 +1687,8 @@ static int run_assembler_tests(int count, char** arguments)
         }
         static const uint8_t indirect[] = {0xff, 0x14, 0x25, 0, 0, 0, 0, 0xff, 0x24, 0x25, 0, 0, 0, 0};
         asm_test_bytes(&test, ".intel_syntax noprefix\ncall qword ptr callback\njmp qword ptr callback\n.data\ncallback: .quad 0\n", 1, indirect, sizeof(indirect), "an explicit memory width makes a branch indirect");
+        static const uint8_t grouped_displacement[] = {0x66, 0x89, 0x44, 0x17, 0xfd};
+        asm_test_bytes(&test, "mov %ax,(-1-2)(%rdi,%rdx)\n", 1, grouped_displacement, sizeof(grouped_displacement), "a parenthesized displacement keeps its arithmetic before the address tuple");
         static const uint8_t dots[] = {0, 0, 0, 0, 4, 0, 0, 0};
         asm_test_bytes(&test, ".data\nstart: .long .-start, .-start\n", 2, dots, sizeof(dots), "'.' in data is the address of its own datum");
         static const uint8_t unlimited[] = {1, 0, 0, 0, 2};
