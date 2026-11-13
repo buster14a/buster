@@ -7,7 +7,8 @@
 // Signed division and remainder by positive powers of two, and pointer differences by power-of-two element sizes
 // (#1386): the signed functions' expectations come from unsigned shifts of the magnitude, the differences' from the
 // indices, and every result is folded into the returned hash, which clang's build of the same source must match. The
-// fixture divides nowhere (the harness checks its entries), so its controls, which keep their division, are another one.
+// fixture divides nowhere (check_test_program_source_native_bounds checks its entries, and that the node templates
+// write them), so its controls, which keep their division, are another one.
 static void check_test_power_divmod_signed(CheckTest* test, const char* clang)
 {
     static const uint32_t shifts32[] = { 0, 1, 2, 4, 15, 16, 29, 30 };
