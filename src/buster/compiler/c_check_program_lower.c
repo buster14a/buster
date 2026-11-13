@@ -3974,14 +3974,112 @@ static uint8_t check_lower_binary(CheckOp op)
     return kind;
 }
 
-// An unsigned 32/64-bit division or remainder by a proven constant power of two. Use the source operand's proof,
-// not the last emitted CONST: a conditional expression can put a label between that entry and its consumer.
-// The replacement constant is normalized to the arithmetic class before the test (e.g. a signed constant converted
-// to unsigned). Evaluated effects and faults, _BitInt conversions and the 128-bit runtime path keep their old rules.
-static bool check_lower_unsigned_power(const CheckLowerWriter* writer, uint32_t node, uint8_t class, uint8_t* kind, uint64_t* right)
+// How the tasks write a division or remainder by a constant power of two (#1386), check_lower_power's answer:
+//   - NONE: as a DIV or a MOD;
+//   - MASK: unsigned (U32, U64) by 2^k, or signed (I32, I64) by 1, as a shift right by k or a mask of k bits, its CONST
+//     in place of operand 1's entries;
+//   - SIGNED: signed (I32, I64) by 2^k, k from 1 to the class's bits less 2 (a positive divisor), as the bias sequence
+//     (check_lower_signed_power_entries), in place of operand 1's entries and the operation's.
+#define BUSTER_CHECK_LOWER_POWER_NONE 0
+#define BUSTER_CHECK_LOWER_POWER_MASK 1
+#define BUSTER_CHECK_LOWER_POWER_SIGNED 2
+// The most entries check_lower_signed_power_entries writes: a remainder's.
+#define BUSTER_CHECK_LOWER_POWER_ENTRIES 10
+
+// The power of two a constant divisor is in the arithmetic `class` (check_lower_power's answer, `*kind` and `*right` as it
+// sets them): `bits`, the constant's value as CheckValue stores it, masked to its own type, whose class is `source` (I8 to
+// U64, not a _BitInt's). The source's sign is restored before the conversion to `class`: (short)-32768 is 0xffff8000 in
+// U32, not the power of two 0x8000, and -2147483648 is no power of two in I64.
+static uint8_t check_lower_power_divisor(uint8_t source, uint64_t bits, uint8_t class, uint8_t* kind, uint64_t* right)
 {
-    bool replace = false;
-    if ((*kind == BUSTER_TYPED_DIV || *kind == BUSTER_TYPED_MOD) && (class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_U64))
+    if (source <= BUSTER_TYPED_CLASS_U32)
+    {
+        const uint32_t width = 8u << ((source - 1) / 2);
+        const uint64_t mask = (UINT64_C(1) << width) - 1;
+        bits &= mask;
+        bits |= (source & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+    }
+    const bool wide = class == BUSTER_TYPED_CLASS_I64 || class == BUSTER_TYPED_CLASS_U64;
+    const bool is_signed = class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_I64;
+    const uint64_t divisor = wide ? bits : (uint32_t)bits;
+    // A signed divisor is positive: below 2^(bits - 1), whose bit is the sign's.
+    const bool power = divisor != 0 && (divisor & (divisor - 1)) == 0 && (!is_signed || (divisor >> (wide ? 63 : 31)) == 0);
+    const uint32_t shift = power ? (uint32_t)__builtin_ctzll(divisor) : 0;
+    uint8_t answer = BUSTER_CHECK_LOWER_POWER_NONE;
+    if (power && is_signed && shift != 0)
+    {
+        answer = BUSTER_CHECK_LOWER_POWER_SIGNED;
+        *right = shift;
+    }
+    else if (power)
+    {
+        answer = BUSTER_CHECK_LOWER_POWER_MASK;
+        *right = *kind == BUSTER_TYPED_DIV ? shift : divisor - 1;
+        *kind = *kind == BUSTER_TYPED_DIV ? BUSTER_TYPED_SHR : BUSTER_TYPED_AND;
+    }
+    return answer;
+}
+
+// The entries of a signed division or remainder (`kind` DIV or MOD) by 2^k (`shift` k, 1 to the class's bits less 2) of
+// the value on top, in `class` (I32 or I64), in the order they run, into `kinds` and `values` (all of `class`): 8 for a
+// division and 10 for a remainder, their count. The bias, the dividend's sign through every bit masked to its low k bits,
+// makes the arithmetic shift round toward zero, as C's division does (W the class's bits):
+//   x / 2^k = (x + ((x >> (W - 1)) & (2^k - 1))) >> k
+//   x % 2^k = x - ((x + ((x >> (W - 1)) & (2^k - 1))) & -2^k)
+// Neither sum overflows: the bias is nonzero only for a negative x. A DUP keeps x for the sum (and the remainder's
+// difference): Tier 0's code is a move (two for a remainder), a sar, an and, an add and a sar (an and and a sub), where
+// clang -O0 divides with idiv. Tier 1's copies are free: a quotient takes as many records as TIER1_RULE_DIVIDE_POWER's,
+// a remainder returned at once up to two moves more.
+static uint32_t check_lower_signed_power_entries(uint8_t kind, uint8_t class, uint32_t shift, uint8_t* kinds, uint64_t* values)
+{
+    const uint32_t bits = class == BUSTER_TYPED_CLASS_I64 ? 64 : 32;
+    const uint64_t mask = (UINT64_C(1) << shift) - 1;
+    const bool remainder = kind == BUSTER_TYPED_MOD;
+    uint32_t count = 0;
+#define BUSTER_CHECK_LOWER_POWER_ENTRY(k, v) do { kinds[count] = (k); values[count] = (v); count += 1; } while (0)
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_DUP, 0);
+    if (remainder)
+    {
+        BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_DUP, 0);
+    }
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_CONST, bits - 1);
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_SHR, 0);
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_CONST, mask);
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_AND, 0);
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_ADD, 0);
+    // A CONST of I32 holds its value sign-extended to 64 bits, as check_lower_value_payload writes one: ~mask is -2^k.
+    BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_CONST, remainder ? ~mask : shift);
+    BUSTER_CHECK_LOWER_POWER_ENTRY(remainder ? BUSTER_TYPED_AND : BUSTER_TYPED_SHR, 0);
+    if (remainder)
+    {
+        BUSTER_CHECK_LOWER_POWER_ENTRY(BUSTER_TYPED_SUB, 0);
+    }
+#undef BUSTER_CHECK_LOWER_POWER_ENTRY
+    return count;
+}
+
+// A signed division or remainder by 2^k as instructions pushed for after the dividend (check_lower_signed_power_entries'
+// entries, which run in the reverse order of their pushes).
+static void check_lower_signed_power(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint32_t shift)
+{
+    uint8_t kinds[BUSTER_CHECK_LOWER_POWER_ENTRIES];
+    uint64_t values[BUSTER_CHECK_LOWER_POWER_ENTRIES];
+    const uint32_t count = check_lower_signed_power_entries(kind, class, shift, kinds, values);
+    for (uint32_t i = count; i != 0; i -= 1)
+    {
+        check_lower_instruction(writer, kinds[i - 1], class, values[i - 1]);
+    }
+}
+
+// A 32/64-bit division or remainder by a proven constant power of two: how the tasks write it (BUSTER_CHECK_LOWER_POWER_*),
+// with `*kind` and `*right` the MASK rewrite's operation and constant, or `*right` the SIGNED one's k. Use the source
+// operand's proof, not the last emitted CONST: a conditional expression can put a label between that entry and its
+// consumer. The constant is normalized to the arithmetic class before the test (check_lower_power_divisor). Evaluated
+// effects and faults, _BitInt conversions and the 128-bit runtime path keep their old rules.
+static uint8_t check_lower_power(const CheckLowerWriter* writer, uint32_t node, uint8_t class, uint8_t* kind, uint64_t* right)
+{
+    uint8_t answer = BUSTER_CHECK_LOWER_POWER_NONE;
+    if ((*kind == BUSTER_TYPED_DIV || *kind == BUSTER_TYPED_MOD) && class >= BUSTER_TYPED_CLASS_I32 && class <= BUSTER_TYPED_CLASS_U64)
     {
         const CheckProgram* program = writer->program;
         const CheckStream* stream = program->stream;
@@ -3995,29 +4093,13 @@ static bool check_lower_unsigned_power(const CheckLowerWriter* writer, uint32_t 
             const uint8_t source_class = check_lower_class(writer, value.type);
             const bool plain_integer = source_class >= BUSTER_TYPED_CLASS_I8 && source_class <= BUSTER_TYPED_CLASS_U64 &&
                                        (check_lower_facts(writer, value.type) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0;
-            uint64_t bits = (uint64_t)value.integer;
-            // CheckValue stores bits masked to its own type. Restore that type's sign before converting to the
-            // unsigned arithmetic width; e.g. (short)-32768 becomes 0xffff8000, not the power of two 0x8000.
-            if (plain_integer && source_class <= BUSTER_TYPED_CLASS_U32)
-            {
-                const uint32_t width = 8u << ((source_class - 1) / 2);
-                const uint64_t mask = (UINT64_C(1) << width) - 1;
-                bits &= mask;
-                bits |= (source_class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
-            }
-            const uint64_t divisor = class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)bits : bits;
-            replace = plain_integer && value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.category == CHECK_RVALUE &&
-                      value.overload_head == 0 && (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
-                      op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
-                      divisor != 0 && (divisor & (divisor - 1)) == 0;
-            if (replace)
-            {
-                *right = *kind == BUSTER_TYPED_DIV ? (uint64_t)__builtin_ctzll(divisor) : divisor - 1;
-                *kind = *kind == BUSTER_TYPED_DIV ? BUSTER_TYPED_SHR : BUSTER_TYPED_AND;
-            }
+            const bool proven = plain_integer && value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.category == CHECK_RVALUE &&
+                                value.overload_head == 0 && (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
+                                op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY;
+            answer = proven ? check_lower_power_divisor(source_class, (uint64_t)value.integer, class, kind, right) : BUSTER_CHECK_LOWER_POWER_NONE;
         }
     }
-    return replace;
+    return answer;
 }
 
 // Whether a class is an integer narrower than 32 bits, which Tier 0 compares only once converted (`!E` is `0 == E`,
@@ -7817,17 +7899,25 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     {
         uint8_t kind = increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op);
         uint64_t power_right = 0;
-        const bool power = !increment && !bit_int && check_lower_unsigned_power(writer, node, computing, &kind, &power_right);
+        const uint8_t power = !increment && !bit_int ? check_lower_power(writer, node, computing, &kind, &power_right) : BUSTER_CHECK_LOWER_POWER_NONE;
         if (bit_int)
         {
             check_lower_bit_int_extend(writer, calculated, true, true);
         }
-        check_lower_operation(writer, kind, computing);
-        if (!increment && !power)
+        if (power == BUSTER_CHECK_LOWER_POWER_SIGNED)
+        {
+            check_lower_signed_power(writer, kind, computing, (uint32_t)power_right);
+        }
+        else
+        {
+            check_lower_operation(writer, kind, computing);
+        }
+        if (!increment && power == BUSTER_CHECK_LOWER_POWER_NONE)
         {
             check_lower_count(writer, kind, right_type);
         }
-        if (power)
+        // A power of two's CONST, or a signed one's sequence, takes the place of operand 1's entries.
+        if (power == BUSTER_CHECK_LOWER_POWER_MASK)
         {
             check_lower_instruction(writer, BUSTER_TYPED_CONST, computing, power_right);
         }
@@ -7848,7 +7938,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
             }
             check_lower_instruction(writer, BUSTER_TYPED_CONST, computing, one);
         }
-        else
+        else if (power == BUSTER_CHECK_LOWER_POWER_NONE)
         {
             if (computing != calculated_class && kind != BUSTER_TYPED_SHL && kind != BUSTER_TYPED_SHR)
             {
@@ -14502,15 +14592,26 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             const uint64_t size = check_lower_stride(writer, pointer_type);
             if (left_pointer && right_pointer && op == CHECK_OP_SUBTRACT)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_I64, 0);
-                if (size != 0)
-                {
-                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size);
-                }
-                else
+                // The bytes' difference is a multiple of the element's size (C makes any other one undefined), so
+                // a size of 2^k divides it exactly as an arithmetic shift by k does, and a size of 1 as nothing does,
+                // as clang -O0's code divides it (#1386: by idiv, a loop of `p[i] - base` took 2.3 times clang -O0's
+                // time on the 9700X). A variable-length array's element's size is the run time's.
+                const bool power = size != 0 && (size & (size - 1)) == 0;
+                if (size == 0)
                 {
                     const TypeId pointee = type_element(types, type_strip_aligned(types, pointer_type));
+                    check_lower_instruction(writer, BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_I64, 0);
                     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_SIZE, .type = pointee });
+                }
+                else if (!power)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_DIV, BUSTER_TYPED_CLASS_I64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, size);
+                }
+                else if (size != 1)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_I64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, (uint64_t)__builtin_ctzll(size));
                 }
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
@@ -14551,13 +14652,20 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else
         {
             uint64_t power_right = 0;
-            const bool power = check_lower_unsigned_power(writer, node, class, &kind, &power_right);
-            check_lower_operation(writer, kind, class);
-            if (power)
+            const uint8_t power = check_lower_power(writer, node, class, &kind, &power_right);
+            if (power == BUSTER_CHECK_LOWER_POWER_SIGNED)
+            {
+                check_lower_signed_power(writer, kind, class, (uint32_t)power_right);
+            }
+            else
+            {
+                check_lower_operation(writer, kind, class);
+            }
+            if (power == BUSTER_CHECK_LOWER_POWER_MASK)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_CONST, class, power_right);
             }
-            else
+            else if (power == BUSTER_CHECK_LOWER_POWER_NONE)
             {
                 check_lower_count(writer, kind, type_b);
                 check_lower_operand(writer, node, 1, false, type_b);

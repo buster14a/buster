@@ -2214,7 +2214,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // The bias in the scratch register: the dividend's sign through every bit, then its low `shift` bits (for a shift
         // of 1 the sign bit alone), added to the dividend by a lea, which leaves the dividend for the remainder's mask,
         // or by an add where allocation put the result in the dividend's register (#1217: a pointer difference's
-        // division by its element's size, luaD_precall's, as clang's add).
+        // division by its element's size, luaD_precall's, as clang's add; since #1386 the lowering writes that one as a
+        // shift).
         const uint8_t bias = BUSTER_TIER1_SELECT_SCRATCH;
         const uint32_t bits = width * 8;
         const uint32_t shift = holes->scale;
