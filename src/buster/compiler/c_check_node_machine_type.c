@@ -2117,8 +2117,8 @@ static __attribute__((cold, noinline)) bool node_machine_same_as_action(const No
     return same;
 }
 
-// A leaf's value, check_graph_leaf_at's, into record `r`'s columns: from its record field by field where the columns hold
-// it whole (no payload row and no overload set: its integer alone), and else made whole first. Its overload set.
+// A leaf's value made whole first, into record `r`'s columns, for a leaf they don't hold field by field: rare (a payload
+// row, an overload set or another category), and kept off T's loop's path. Its overload set.
 static __attribute__((cold, noinline)) uint32_t node_machine_leaf_whole(NodeMachine* machine, uint32_t r, uint32_t slot)
 {
     const CheckValue value = check_graph_leaf_at(machine->graph, slot);
@@ -2126,6 +2126,8 @@ static __attribute__((cold, noinline)) uint32_t node_machine_leaf_whole(NodeMach
     return value.overload_head;
 }
 
+// A leaf's value, check_graph_leaf_at's, into record `r`'s columns: from its record field by field where the columns hold
+// it whole (no payload row and no overload set: its integer alone), and else made whole first. Its overload set.
 static inline __attribute__((always_inline)) uint32_t node_machine_leaf(NodeMachine* machine, uint32_t r, uint32_t node)
 {
     const CheckGraph* graph = machine->graph;
