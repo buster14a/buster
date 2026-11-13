@@ -80,7 +80,9 @@ if [ -s "$output/locks.tsv" ]; then
 fi
 # The merge queue's candidates (#1430): each completed merge_group run, what became of its candidate (merged when its
 # commit is on main; otherwise its own conclusion: passed but invalidated, failed or cancelled), its wall time from its
-# start to its last update, and the sum of its jobs' own times. A candidate whose fate can't be read gives no line.
+# start to its last update, and the sum of its jobs' own times. Then its hosted jobs' waits for a runner (#2031), each
+# from its creation to its start, of the jobs a runner took (a skipped job, or one cancelled before it started, has
+# none): the longest, their sum and their count. A candidate whose fate can't be read gives no line.
 : > "$output/candidates.tsv"
 gh api "repos/$repository/actions/workflows/9700x.yml/runs?event=merge_group&status=completed&per_page=100" > "$output/queue-runs.json"
 jq -e '.workflow_runs | type == "array"' "$output/queue-runs.json" > /dev/null
@@ -105,7 +107,13 @@ while IFS=$'\t' read -r run sha conclusion wall; do
         def epoch: if type == "string" then try fromdateiso8601 catch null else null end;
         [.[].jobs[]? | (.started_at | epoch) as $a | (.completed_at | epoch) as $b | select($a != null and $b != null and $b >= $a) | $b - $a] | add // 0
     ' "$output/queue-jobs-$run.json")
-    printf '%s\t%s\t%s\t%s\n' "$run" "$outcome" "$wall" "$runner" >> "$output/candidates.tsv"
+    waits=$(jq -rs '
+        def epoch: if type == "string" then try fromdateiso8601 catch null else null end;
+        [.[].jobs[]? | select((.runner_id // 0) > 0 and ((.labels // []) | index("self-hosted") | not))
+            | (.created_at | epoch) as $a | (.started_at | epoch) as $b | select($a != null and $b != null and $b >= $a) | $b - $a]
+        | [(max // 0), (add // 0), length] | @tsv
+    ' "$output/queue-jobs-$run.json")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$run" "$outcome" "$wall" "$runner" "$waits" >> "$output/candidates.tsv"
 done < "$output/queue-list.tsv"
 cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/timings.c -o "$output/timings"
 "$output/timings" < "$output/observations.tsv" > "$output/summary.md"

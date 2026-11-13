@@ -573,8 +573,9 @@ static size_t costs_seconds(CostsSlice slice, uint64_t* tenths)
     return valid ? digits + 4 : 0;
 }
 
-// An outcome and its times, `passed in X s, Y s of CPU`, `skipped in ...` or `failed (REASON) in ...`, the whole slice:
-// whether it is one, its time's tenths and whether it is complete (passed or skipped).
+// An outcome and its times, `passed in X s, Y s of CPU`, `skipped in ...` or `failed (REASON) in ...`, the whole slice,
+// with the peak memory `, Z MiB peak` after the CPU time where the runner gives it (#2031): whether it is one, its
+// time's tenths and whether it is complete (passed or skipped).
 static bool costs_outcome(CostsSlice rest, uint64_t* tenths, bool* complete)
 {
     size_t at = 0;
@@ -603,7 +604,12 @@ static bool costs_outcome(CostsSlice rest, uint64_t* tenths, bool* complete)
     const size_t cpu_time = valid ? costs_seconds(costs_after(after, 2), &cpu) : 0;
     valid = valid && cpu_time != 0;
     const CostsSlice tail = valid ? costs_after(after, 2 + cpu_time) : (CostsSlice){ 0 };
-    valid = valid && tail.length == 7 && memcmp(tail.data, " of CPU", 7) == 0;
+    valid = valid && costs_starts(tail, " of CPU");
+    const CostsSlice memory = valid ? costs_after(tail, 7) : (CostsSlice){ 0 };
+    uint64_t mebibytes = 0;
+    const size_t memory_digits = memory.length != 0 && costs_starts(memory, ", ") ? costs_number(costs_after(memory, 2), UINT32_MAX, &mebibytes) : 0;
+    const CostsSlice peak = memory_digits != 0 ? costs_after(memory, 2 + memory_digits) : (CostsSlice){ 0 };
+    valid = valid && (memory.length == 0 || (memory_digits != 0 && peak.length == 9 && memcmp(peak.data, " MiB peak", 9) == 0));
     return valid;
 }
 
@@ -2160,6 +2166,11 @@ static void costs_test_logs(CostsTest* test, const CostsList* list)
     costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 10.0 s"), &tenths, &complete), "a time without its CPU time");
     costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("failed in 1.0 s, 1.0 s of CPU"), &tenths, &complete), "a failure without its reason");
     costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 1.0 s, 1.0 s of CPU and more"), &tenths, &complete), "a line that goes on after its CPU time");
+    costs_expect(test, costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 812 MiB peak"), &tenths, &complete) && tenths == 25 && complete, "a time with its peak memory");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, MiB peak"), &tenths, &complete), "a peak memory without its number");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 8.5 MiB peak"), &tenths, &complete), "a peak memory with a fraction");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 8 MiB peak and more"), &tenths, &complete), "a line that goes on after its peak memory");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 8 MiB"), &tenths, &complete), "a peak memory without its word");
     costs_expect(test, costs_outcome(BUSTER_COSTS_SLICE("failed (timed out) in 600.1 s, 1.0 s of CPU"), &tenths, &complete) && tenths == 6001 && !complete, "a timeout's time, a lower bound");
 }
 
@@ -2176,14 +2187,15 @@ static void costs_test_quantiles(CostsTest* test)
     costs_expect(test, costs_quantile(eleven, 11, 50) == 6, "the median of eleven, the sixth");
 }
 
-// Collects the fixture logs, in the order `order` gives, into the x86-64 plain row's table.
+// Collects the fixture logs, in the order `order` gives, into the x86-64 plain row's table. Revision B's logs give
+// each command's peak memory after its CPU time, as the runner does since #2031, and revision A's don't.
 static bool costs_test_collect(const CostsList* list, const uint32_t* order, CostsBuffer* table, CostsBuffer* report)
 {
     CostsText texts[4] = {
         costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 7763 64-Core Processor", BUSTER_COSTS_TEST_SHA_A, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 10.0 s, 30.0 s of CPU\nBeta: with a colon: passed in 5.0 s, 5.0 s of CPU\n", "14"),
         costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_A, "2 of 2, 3 of 5 commands", "Gamma [2 CPUs]: passed in 3.0 s, 6.0 s of CPU\nDelta: failed (exit status 1) in 2.0 s, 2.0 s of CPU\n", "15"),
-        costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 20.0 s, 60.0 s of CPU\nBeta: with a colon: passed in 7.0 s, 7.0 s of CPU\n", "40"),
-        costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "2 of 2, 3 of 5 commands", "Gamma [2 CPUs]: passed in 4.0 s, 8.0 s of CPU\nDelta: failed (exit status 1) in 3.0 s, 3.0 s of CPU\n", "41"),
+        costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 20.0 s, 60.0 s of CPU, 2048 MiB peak\nBeta: with a colon: passed in 7.0 s, 7.0 s of CPU, 3 MiB peak\n", "40"),
+        costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "2 of 2, 3 of 5 commands", "Gamma [2 CPUs]: passed in 4.0 s, 8.0 s of CPU, 12 MiB peak\nDelta: failed (exit status 1) in 3.0 s, 3.0 s of CPU, 5 MiB peak\n", "41"),
     };
     CostsLog logs[4];
     const char* names[4];

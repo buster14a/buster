@@ -67,8 +67,15 @@ run on, 8 on the 9700X, whose 15 CPUs online would put two tests on a core's SMT
 siblings, which slow each other down, as do the lanes' spinning waits (the job's
 tests took 21.3 to 22.4 s with 8 jobs, and 22.9 to 23.3 s with 15, test-lanes
 2.3 to 2.9 s of them rather than 0.2). The report gives each one's heading, with
-its outcome, its time and its CPU time (`wait4`'s, of its shell and of the
-processes under it that were waited for: over its time, the CPUs it kept busy),
+its outcome, its time, its CPU time (`wait4`'s, of its shell and of the
+processes under it that were waited for: over its time, the CPUs it kept busy)
+and its peak memory (#2031: `passed in 12.3 s, 40.1 s of CPU, 812 MiB peak`,
+`wait4`'s `ru_maxrss` in MiB rounded up: the largest of its shell and of the
+processes under it that were waited for, one process's peak rather than the sum
+of those that ran at once, without what the runner kills after the shell ends;
+it is at least the runner's own peak, 10 MiB for a Develop build and 32 MiB for
+an ASan one, since the shell starts in the runner's memory, whose peak its
+`exec` records),
 then its output, in the list's order as soon as it and every command before it
 have ended; with `--github`, between `::group::` and `::endgroup::`, and an
 `::error::` annotation for each that failed. Then come a summary line, with the
@@ -178,7 +185,13 @@ its CPU time over its time shows (the report gives both). Brief phases on more
 don't count, as the 8-lane checks of the longer test-files runs and of
 test-checker, whose CPU time stays near their time, but lanes that wait for each
 other in loops do. A command whose report shows it keeping more busy than its
-heading says needs a larger count or less work. Run together, the step is bound
+heading says needs a larger count or less work. The summary warns of one that
+keeps clearly more busy (#2031): its CPU time over its time past 1.5 times its
+CPUs, and past them by a second of CPU or more, gets a line `parallel: TITLE
+kept 1.9 CPUs busy, more than the 1 it holds` after the failures' (with
+`--github`, a `::warning`). In the first merge-queue candidate's sanitizer
+shards only the differential harness's lifecycle cases, eight at once, did
+(1.6 to 1.9 CPUs on one); they declare 2. Run together, the step is bound
 by the machine's CPU rather than by its longest test (#465: its tests took 622 s
 of CPU, their times in the job 404 s, in a step of 52.5 s when 8 ran at once on
 15 CPUs; #526's first run: 73.9 s, against 213.5 s one at a time, with 441.5 s
@@ -196,7 +209,7 @@ taskset -c 0-7 ./build/compiler parallel --jobs 8 --timeout 600 < tools/ci/corre
 ```
 
 `./build/compiler test-parallel` (about 7 s) checks it, each report exactly
-as expected with its times and CPU times written as `*`:
+as expected with its times, CPU times and peak memory written as `*`:
 
 - lists: headings, scripts, blank lines and comments before the first heading,
   a heading without its space, a last line without a newline, `==` inside a
@@ -229,6 +242,13 @@ as expected with its times and CPU times written as `*`:
   environment has another value; and the CPU time of a shell's loop and of a
   process it waits for counts, a sleep's comes to next to none, and the
   summary's is their sum;
+- memory (#2031): what a shell holds and what a process it waits for holds,
+  32 MiB past the runner's own peak each, count in their command's peak, a
+  shell that holds nothing comes to under the runner's peak and 16 MiB, and
+  each command's heading gives its own peak in MiB rounded up; then the summary's warnings, from made-up results, both plain
+  and with `--github`: 1.9 CPUs of 1 and 1.6 of 1 are warned of, 2.9 of 2
+  (not past 1.5 times) and 1.9 of 1 for a second (not a second of CPU past)
+  aren't;
 - output: 1 MB from one command, past a pipe's 64 KB;
 - processes: a command past its timeout killed with the process it started,
   what a command leaves running killed when its shell ends, and a shell that

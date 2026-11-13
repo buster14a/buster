@@ -171,6 +171,7 @@
 #: cpu 45 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 10 0.64 Intel(R) Xeon(R) 6973P-C
 #: cpu 33 0.91 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
 #: unmeasured Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: unmeasured Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 0.0 Check unity fixture ownership without rebuilding
@@ -221,7 +222,7 @@
 11.6 Test Tier 0's inlining of always_inline functions
 38.6 Check the repository's translation units with the checker
 67.8 Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
-11.6 Test differential harness accounting, subprocesses and failure preservation
+23.2 Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
 65.1 Test deferred function bodies against source order
 11.0 Test integer builtin actions against Clang (part 1 of 4)
 21.4 Test integer builtin actions against Clang (part 2 of 4)

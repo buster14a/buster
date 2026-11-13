@@ -76,8 +76,9 @@ nothing, since the queue tested it before it landed.
   pull request's later pushes. Its candidate still runs everything. Use it for fixes that must land fast: a
   hotfix that fails does so in the queue, where it costs the entries behind it a rebuild.
 - **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
-  passed but invalidated, failed, cancelled), with their runner-minutes and
-  the merged ones' wall time (`timings --queue`).
+  passed but invalidated, failed, cancelled), with their runner-minutes, the
+  merged ones' wall time and their hosted jobs' waits for a runner
+  (`timings --queue`, #2031).
 - **Policy pins.** `changes --self-test` pins the trigger, the concurrency
   group, the selector's routing, the auxiliary calls and the aggregate's
   coverage step. Its mutants include a path filter, another branch or type, a
