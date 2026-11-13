@@ -146,12 +146,20 @@ function(buster_codegen_tools available missing)
 endfunction()
 
 # The splitters, built once for every configuration with the LLVM they read, at configure-time flags llvm-config gives:
-# split (Release's, after the optimizer) and presplit (Develop's, before it), which share split_bitcode.cpp.
+# split (Release's, after the optimizer) and presplit (Develop's, before it), which share split_bitcode.cpp; and comdat,
+# which the join runs and which reads ELF alone.
 function(buster_codegen_splitter)
     set(directory "${CMAKE_BINARY_DIR}/codegen-tools")
     set(splitter "${directory}/split")
     set(presplitter "${directory}/presplit")
+    set(comdat "${directory}/comdat")
     get_filename_component(tools "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/codegen" ABSOLUTE)
+    add_custom_command(OUTPUT "${comdat}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
+        COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror "${tools}/comdat.c" -o "${comdat}"
+        DEPENDS "${tools}/comdat.c"
+        COMMENT "Building the joins' comdat restorer"
+        VERBATIM)
     set(link "${BUSTER_CODEGEN_LLVM_ldflags}" "${BUSTER_CODEGEN_LLVM_libs}" "${BUSTER_CODEGEN_LLVM_system_libs}")
     add_custom_command(OUTPUT "${directory}/split_bitcode.o"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
@@ -171,9 +179,10 @@ function(buster_codegen_splitter)
             COMMAND_EXPAND_LISTS
             VERBATIM)
     endforeach()
-    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}")
+    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}" "${comdat}")
     set(BUSTER_CODEGEN_SPLIT "${splitter}" PARENT_SCOPE)
     set(BUSTER_CODEGEN_PRESPLIT "${presplitter}" PARENT_SCOPE)
+    set(BUSTER_CODEGEN_COMDAT "${comdat}" PARENT_SCOPE)
 endfunction()
 
 function(buster_codegen_split_unit name output)
@@ -248,19 +257,25 @@ function(buster_codegen_unit name)
     # their bitcode alone.
     add_custom_target(buster_${name}_split DEPENDS "${stamp}")
 
-    # The parts' native code: the same driver's target and PIC defaults, CPU choice, O3 instruction selection and
-    # machine-code pipeline as the unit's own compile, with the IR optimizer disabled, since the module has passed O3.
+    # The parts' native code: the same driver's target and PIC defaults, CPU choice, instruction selection and
+    # machine-code pipeline as the unit's own compile (its optimization level, and a sanitizer build's flags, with its
+    # PIE), with the IR optimizer disabled, since the module has passed it: the sanitizers' instrumentation with it.
     # A part depends on its bitcode alone, which the split rewrites only when it changed (Ninja's restat).
     set(debug "")
     if(NOT "${buster_debug}" STREQUAL "")
         set(debug "$<$<CONFIG:Release>:${buster_debug}>")
     endif()
+    set(optimization -O3)
+    if(NOT "${buster_optimization}" STREQUAL "")
+        set(optimization ${buster_optimization})
+    endif()
     set(objects "")
     foreach(part RANGE ${BUSTER_CODEGEN_PARTITIONS})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} -fno-stack-protector -O3 -Wall -Werror
-                -Xclang -disable-llvm-passes -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} -fno-stack-protector ${buster_sanitizer_flags}
+                ${optimization} -Wall -Werror -Xclang -disable-llvm-passes -Wno-unused-command-line-argument
+                -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Generating ${name}'s native part ${part}"
             COMMAND_EXPAND_LISTS
@@ -272,9 +287,9 @@ function(buster_codegen_unit name)
     add_custom_command(OUTPUT "${native}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
-            "-DREADELF=${BUSTER_CODEGEN_READELF}" -P "${scripts}/BusterCodegenMerge.cmake"
+            "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" -P "${scripts}/BusterCodegenMerge.cmake"
         DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
-            "${BUSTER_CODEGEN_READELF}" "${scripts}/BusterCodegenMerge.cmake"
+            "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s native parts"
         ${explicit}
         VERBATIM)
@@ -327,9 +342,9 @@ function(buster_develop_unit name)
     add_custom_command(OUTPUT "${native}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
-            "-DREADELF=${BUSTER_CODEGEN_READELF}" -P "${scripts}/BusterCodegenMerge.cmake"
+            "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" -P "${scripts}/BusterCodegenMerge.cmake"
         DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
-            "${BUSTER_CODEGEN_READELF}" "${scripts}/BusterCodegenMerge.cmake"
+            "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s parts"
         ${explicit}
         VERBATIM)

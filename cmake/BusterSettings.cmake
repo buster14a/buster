@@ -253,7 +253,8 @@ function(buster_settings_normalize)
 
     # Parallel native generation after the ordinary O3 IR pipeline (BusterCodegen.cmake): auto, the default, takes it
     # where the build's flags allow it and the tools are there (CMakeLists.txt checks them); 1 requires it; 0 never.
-    # Sanitizers, fuzzing, PGO, an explicit host runtime and BUSTER_BUILD_DEFINES keep the single compile.
+    # A sanitizer build takes it too: its module is instrumented by that pipeline, so the parts generate the single
+    # compile's code (#2639). Fuzzing, PGO, an explicit host runtime and BUSTER_BUILD_DEFINES keep the single compile.
     set(parallel_codegen "${BUSTER_PARALLEL_CODEGEN}")
     if(parallel_codegen STREQUAL "")
         set(parallel_codegen auto)
@@ -266,9 +267,9 @@ function(buster_settings_normalize)
         set(parallel_codegen_required TRUE)
     endif()
     if(NOT parallel_codegen STREQUAL "0")
-        if(NOT sanitizer STREQUAL "none" OR fuzz OR pgo OR NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "" OR defines)
+        if(fuzz OR pgo OR NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "" OR defines)
             if(parallel_codegen_required)
-                buster_settings_fail("BUSTER_PARALLEL_CODEGEN=1 requires no sanitizer, fuzzing, PGO, host runtime or BUSTER_BUILD_DEFINES")
+                buster_settings_fail("BUSTER_PARALLEL_CODEGEN=1 requires no fuzzing, PGO, host runtime or BUSTER_BUILD_DEFINES")
             endif()
             set(parallel_codegen 0)
         else()

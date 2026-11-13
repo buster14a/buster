@@ -10,9 +10,13 @@
 # A relocatable link merges SHF_MERGE sections, which the final link at -O0 copies whole from the single object (the
 # checker's parts lost 27,904 bytes of duplicate constants that way): the allocated ones lose the flag first, so that the
 # parts' constants are concatenated in order, as one object's are.
+#
+# llvm-objcopy clears GRP_COMDAT on every section group whose signature symbol is local, as the code generator's
+# sanitizer groups are (AddressSanitizer's module constructor and destructor, which the linker keeps once among the
+# units): COMDAT, tools/codegen/comdat.c, sets it again on the joined object's groups that the parts had as comdats.
 
 cmake_minimum_required(VERSION 3.25)
-foreach(name OUTPUT EXPORTS LOCALS OBJECTS LLD OBJCOPY NM READELF)
+foreach(name OUTPUT EXPORTS LOCALS OBJECTS LLD OBJCOPY NM READELF COMDAT)
     if(NOT DEFINED ${name})
         message(FATAL_ERROR "BusterCodegenMerge.cmake: ${name} is required")
     endif()
@@ -81,6 +85,11 @@ execute_process(COMMAND "${OBJCOPY}" "--keep-global-symbols=${keep}" "${merged}"
 if(NOT status EQUAL 0)
     file(REMOVE "${merged}" "${partial}")
     message(FATAL_ERROR "BusterCodegenMerge.cmake: couldn't restore ${OUTPUT}'s private definitions")
+endif()
+execute_process(COMMAND "${COMDAT}" "${partial}" ${OBJECTS} RESULT_VARIABLE status)
+if(NOT status EQUAL 0)
+    file(REMOVE "${merged}" "${partial}")
+    message(FATAL_ERROR "BusterCodegenMerge.cmake: couldn't restore ${OUTPUT}'s comdat groups")
 endif()
 execute_process(COMMAND "${NM}" --extern-only --defined-only --format=just-symbols "${partial}"
     OUTPUT_VARIABLE actual RESULT_VARIABLE status)

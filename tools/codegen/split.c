@@ -21,8 +21,12 @@
 // - the module's inline assembly (the checker section's placement, main.c) stays in part 0, before every function;
 // - a part starts, in each of its text sections, at a function of the greatest alignment it holds there, so that the
 //   relocatable link's section alignment adds no padding the single module didn't have;
-// - the bitcode keeps the use-list order (split_bitcode.cpp), which instruction selection follows.
-// The merge restores local binding to everything the input didn't export. Read-only data keeps its order and each
+// - the bitcode keeps the use-list order (split_bitcode.cpp), which instruction selection follows;
+// - the entries of llvm.used and of the constructors and destructors go to the part that emits what they name, which
+//   then emits them as the single module did (a sanitizer's module constructor, in a retained section, and
+//   AddressSanitizer's, in a comdat with its .init_array entry); an alias goes with its base object (AddressSanitizer's
+//   private aliases of the globals it describes), and no declaration keeps a comdat.
+// The merge restores local binding to everything the input didn't export, and the comdat flags llvm-objcopy clears. Read-only data keeps its order and each
 // item's alignment, but a part's .rodata takes its greatest item's alignment, so the items after a part boundary can
 // move by less than that alignment. The build's comparison (build-regression) checks the rest: identical functions at
 // identical addresses.
@@ -47,6 +51,7 @@
 
 #include <llvm-c/Analysis.h>
 #include <llvm-c/BitReader.h>
+#include <llvm-c/Comdat.h>
 #include <llvm-c/Core.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/Transforms/PassBuilder.h>
@@ -56,6 +61,8 @@
 
 // split_bitcode.cpp: writes `module` to `path` with its use-list order.
 bool split_write_bitcode(LLVMModuleRef module, const char* path);
+// split_bitcode.cpp: erases `alias` once its dead constant users are gone, and whether it could (nothing else used it).
+bool split_erase_alias(LLVMValueRef alias);
 
 typedef enum SplitSection
 {
@@ -145,6 +152,25 @@ static bool split_local(LLVMValueRef value)
 {
     const LLVMLinkage linkage = LLVMGetLinkage(value);
     return linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage;
+}
+
+// The module's arrays whose entries the code generator emits beside what they name: llvm.used, which gives a definition
+// a section the linker keeps (SHF_GNU_RETAIN: the sanitizers' module constructors), and the constructors and
+// destructors, which go to .init_array or .fini_array, in the group of the entry's key where it has one
+// (AddressSanitizer's). Each part keeps the entries of what it emits (split_part_entries).
+static const char* const split_entry_arrays[] = { "llvm.used", "llvm.global_ctors", "llvm.global_dtors" };
+#define SPLIT_ENTRY_ARRAYS (sizeof(split_entry_arrays) / sizeof(split_entry_arrays[0]))
+
+static bool split_entry_array(LLVMValueRef global)
+{
+    size_t length = 0;
+    const char* name = LLVMGetValueName2(global, &length);
+    bool found = false;
+    for (uint32_t i = 0; i < SPLIT_ENTRY_ARRAYS; i += 1)
+    {
+        found = found || strcmp(name, split_entry_arrays[i]) == 0;
+    }
+    return found;
 }
 
 // A lower bound of the alignment the code generator gives the function's start: the target's preferred 16 bytes but
@@ -274,8 +300,8 @@ static void split_boundaries(SplitPlan* plan)
 }
 
 // The parts whose emitted code or data refers to `value`, as a mask: an instruction's function's part, and a global
-// variable initializer's, the data part's. Constant expressions and aggregates pass references on; an alias or ifunc
-// refers to it under a name every part can use.
+// variable initializer's, the data part's, but an entry array's, whose entries go with what they name. Constant
+// expressions and aggregates pass references on; an alias or ifunc refers to it under a name every part can use.
 static uint64_t split_references(const SplitPlan* plan, LLVMValueRef value)
 {
     uint64_t mask = 0;
@@ -297,7 +323,7 @@ static uint64_t split_references(const SplitPlan* plan, LLVMValueRef value)
             }
             else if (LLVMIsAGlobalVariable(user))
             {
-                mask |= LLVMIsDeclaration(user) ? 0 : UINT64_C(1) << plan->parts;
+                mask |= LLVMIsDeclaration(user) || split_entry_array(user) ? 0 : UINT64_C(1) << plan->parts;
             }
             else if (LLVMIsAGlobalValue(user))
             {
@@ -317,6 +343,68 @@ static uint64_t split_references(const SplitPlan* plan, LLVMValueRef value)
     }
     free(stack);
     return mask;
+}
+
+// The part that emits `value`'s base object (through constant expressions and aliases): its function's code part, or the
+// data part for a global variable or anything no part defines.
+static uint32_t split_owner(const SplitPlan* plan, LLVMValueRef value)
+{
+    LLVMValueRef base = value;
+    for (uint32_t depth = 0; depth < 64 && base != 0; depth += 1)
+    {
+        if (LLVMIsAGlobalAlias(base) != 0)
+        {
+            base = LLVMAliasGetAliasee(base);
+        }
+        else if (LLVMIsAConstantExpr(base) != 0 && LLVMGetNumOperands(base) != 0)
+        {
+            base = LLVMGetOperand(base, 0);
+        }
+    }
+    uint32_t part = plan->parts;
+    if (base != 0 && LLVMIsAFunction(base) != 0)
+    {
+        const uint32_t owner = split_map_get(&plan->owners, base);
+        part = owner == UINT32_MAX ? plan->parts : owner;
+    }
+    return part;
+}
+
+// Whether every entry array's entries can go with what they name: a constructor's or destructor's key (the group its
+// entry joins) emitted by the entry's own part, and the entries of each array in their parts' order, so that the merged
+// object lists them in the single module's order. Says why when not.
+static bool split_entries_kept(const SplitPlan* plan)
+{
+    bool kept = true;
+    for (uint32_t n = 1; n < SPLIT_ENTRY_ARRAYS; n += 1)
+    {
+        LLVMValueRef array = LLVMGetNamedGlobal(plan->module, split_entry_arrays[n]);
+        if (array != 0 && !LLVMIsDeclaration(array))
+        {
+            LLVMValueRef initializer = LLVMGetInitializer(array);
+            const uint64_t count = LLVMGetArrayLength2(LLVMGlobalGetValueType(array));
+            uint32_t previous = 0;
+            for (uint64_t i = 0; i < count; i += 1)
+            {
+                LLVMValueRef entry = LLVMGetAggregateElement(initializer, (unsigned)i);
+                LLVMValueRef function = entry != 0 ? LLVMGetAggregateElement(entry, 1) : 0;
+                LLVMValueRef key = entry != 0 ? LLVMGetAggregateElement(entry, 2) : 0;
+                const uint32_t owner = function != 0 ? split_owner(plan, function) : plan->parts;
+                if (key != 0 && !LLVMIsNull(key) && split_owner(plan, key) != owner)
+                {
+                    fprintf(stderr, "split: %s's entry %llu has its key in another part\n", split_entry_arrays[n], (unsigned long long)i);
+                    kept = false;
+                }
+                if (owner < previous)
+                {
+                    fprintf(stderr, "split: %s's entry %llu comes before an earlier entry's part\n", split_entry_arrays[n], (unsigned long long)i);
+                    kept = false;
+                }
+                previous = owner;
+            }
+        }
+    }
+    return kept;
 }
 
 static void split_hide(LLVMValueRef value)
@@ -393,9 +481,9 @@ static void split_readable_closure(LLVMModuleRef module)
     free(stack);
 }
 
-// The plan's decisions every part shares, made before the parts fork: the boundaries; the appending arrays dropped
-// (they only keep definitions from the optimizer, which no longer runs, and ELF code generation ignores
-// llvm.compiler.used); names for unnamed local definitions; which functions are aliased; and the other local
+// The plan's decisions every part shares, made before the parts fork: the boundaries; llvm.compiler.used dropped (it only
+// keeps definitions from the optimizer, which no longer runs, and ELF code generation ignores it; the entry arrays stay,
+// for split_part_entries); names for unnamed local definitions; which functions are aliased; and the other local
 // definitions another part refers to made hidden external ones.
 static void split_plan(SplitPlan* plan)
 {
@@ -428,7 +516,7 @@ static void split_plan(SplitPlan* plan)
         LLVMValueRef following = LLVMGetNextGlobal(global);
         size_t length = 0;
         const char* name = LLVMGetValueName2(global, &length);
-        if (strcmp(name, "llvm.compiler.used") == 0 || strcmp(name, "llvm.used") == 0)
+        if (strcmp(name, "llvm.compiler.used") == 0)
         {
             LLVMDeleteGlobal(global);
         }
@@ -522,11 +610,63 @@ static void split_delete_body(LLVMValueRef function)
     }
 }
 
+// Part `part`'s entry arrays (split_entry_array): the entries of what it emits, in their order, an array the same as the
+// module's where it keeps them all and none where it keeps none (split_entries_kept checked that the rest can go so).
+static void split_part_entries(const SplitPlan* plan, uint32_t part)
+{
+    LLVMModuleRef module = plan->module;
+    for (uint32_t n = 0; n < SPLIT_ENTRY_ARRAYS; n += 1)
+    {
+        LLVMValueRef array = LLVMGetNamedGlobal(module, split_entry_arrays[n]);
+        if (array != 0 && !LLVMIsDeclaration(array))
+        {
+            LLVMValueRef initializer = LLVMGetInitializer(array);
+            LLVMTypeRef type = LLVMGlobalGetValueType(array);
+            LLVMTypeRef element = LLVMGetElementType(type);
+            const uint64_t count = LLVMGetArrayLength2(type);
+            LLVMValueRef* entries = calloc(count + 1, sizeof(LLVMValueRef));
+            uint64_t kept = 0;
+            for (uint64_t i = 0; i < count; i += 1)
+            {
+                LLVMValueRef entry = LLVMGetAggregateElement(initializer, (unsigned)i);
+                LLVMValueRef subject = n == 0 ? entry : LLVMGetAggregateElement(entry, 1);
+                if (split_owner(plan, subject) == part)
+                {
+                    entries[kept] = entry;
+                    kept += 1;
+                }
+            }
+            if (kept != count)
+            {
+                LLVMValueRef replacement = 0;
+                if (kept != 0)
+                {
+                    replacement = LLVMAddGlobal(module, LLVMArrayType2(element, kept), "");
+                    LLVMSetLinkage(replacement, LLVMAppendingLinkage);
+                    const char* section = LLVMGetSection(array);
+                    if (section != 0 && section[0] != 0)
+                    {
+                        LLVMSetSection(replacement, section);
+                    }
+                    LLVMSetInitializer(replacement, LLVMConstArray2(element, entries, kept));
+                }
+                LLVMDeleteGlobal(array);
+                if (replacement != 0)
+                {
+                    LLVMSetValueName2(replacement, split_entry_arrays[n], strlen(split_entry_arrays[n]));
+                }
+            }
+            free(entries);
+        }
+    }
+}
+
 // Part `part` of the plan, from the planned module, written to `path`. Runs in its own child process, which owns its
 // copy of the module.
 static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
 {
     LLVMModuleRef module = plan->module;
+    split_part_entries(plan, part);
     for (uint32_t i = 0; i < plan->count; i += 1)
     {
         const SplitFunction* entry = &plan->functions[i];
@@ -557,7 +697,7 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
     }
     for (LLVMValueRef global = LLVMGetFirstGlobal(module); global != 0; global = LLVMGetNextGlobal(global))
     {
-        if (part < plan->parts && !LLVMIsDeclaration(global))
+        if (part < plan->parts && !LLVMIsDeclaration(global) && !split_entry_array(global))
         {
             // A code part reads a constant's initializer, available_externally, where the data part defines it: one
             // whose initializer the single module took as definitive, a strong definition's, not a weak one's.
@@ -571,6 +711,23 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
             }
             LLVMGlobalClearMetadata(global);
         }
+    }
+    // An alias goes with its base object: AddressSanitizer's private aliases of the globals it describes, which its
+    // descriptors in the data part name. A part that doesn't emit the object drops the alias, which would be an alias of
+    // a declaration; one that still refers to it there can't be split.
+    bool aliases = true;
+    LLVMValueRef alias = LLVMGetFirstGlobalAlias(module);
+    while (alias != 0)
+    {
+        LLVMValueRef following = LLVMGetNextGlobalAlias(alias);
+        if (split_owner(plan, alias) != part && !split_erase_alias(alias))
+        {
+            size_t length = 0;
+            const char* name = LLVMGetValueName2(alias, &length);
+            fprintf(stderr, "split: part %u refers to the alias %.*s, which goes with another part's definition\n", part, (int)length, name);
+            aliases = false;
+        }
+        alias = following;
     }
     // What another part defines is a declaration here. A local one nothing live refers to (only dead constants left by
     // the deleted bodies, and metadata such as !inline_history) is an ordinary external declaration, which the code
@@ -598,6 +755,12 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
                 {
                     LLVMSetLinkage(value, LLVMExternalLinkage);
                 }
+            }
+            // No declaration is in a comdat (AddressSanitizer puts each global it describes in one): the part that
+            // defines it keeps the comdat, and the code generator emits nothing for a code part's readable copy.
+            if (LLVMIsDeclaration(value) || LLVMGetLinkage(value) == LLVMAvailableExternallyLinkage)
+            {
+                LLVMSetComdat(value, 0);
             }
             value = following;
         }
@@ -633,7 +796,7 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
     {
         fprintf(stderr, "split: part %u fails verification\n", part);
     }
-    else
+    else if (aliases)
     {
         written = split_write_bitcode(module, path);
         if (!written)
@@ -818,7 +981,7 @@ int main(int argc, char** argv)
             {
                 split_report(&plan);
             }
-            status = split_locals(&plan, argv[3]) && split_parts(&plan, argv[3]) ? 0 : 1;
+            status = split_entries_kept(&plan) && split_locals(&plan, argv[3]) && split_parts(&plan, argv[3]) ? 0 : 1;
         }
     }
     return status;
