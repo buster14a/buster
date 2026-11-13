@@ -683,6 +683,7 @@ static void check_test_driver_pack_errors(CheckTest* test, const char* clang, co
         uint32_t errors;
     } cases[] = {
         { "#pragma options align=mac68k\nint value;\n", NULL, 1 },
+        { "#pragma options align=mac68k\n#pragma options foo\nint value;\n", NULL, 1 },
         { "#pragma align=mac68k\n#pragma align=reset\nint value;\n", NULL, 1 },
         { "#pragma pack(push,1)\n#pragma options align=mac68k\nstruct S{char c;int x;};\n"
           "_Static_assert(sizeof(struct S)==5,\"unchanged\");\n#pragma options align=reset\n"
@@ -722,6 +723,9 @@ static void check_test_driver_pack_errors(CheckTest* test, const char* clang, co
                 check_test_expect(test, expected != NULL && (oracle != 0) == (cases[c].errors != 0) &&
                                   check_test_pragma_diagnostics(expected, ": error: ") == cases[c].errors,
                                   "Clang reports the alignment fixture's independent errors");
+                // Macro scratch buffers have implementation-specific coordinates; retain their notes and all
+                // real source locations, as the existing pragma history comparisons do.
+                pp_test_normalize_scratch(expected);
                 for (uint32_t scalar = 0; scalar < 2; scalar += 1)
                 {
                     const bool saved = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
@@ -730,6 +734,7 @@ static void check_test_driver_pack_errors(CheckTest* test, const char* clang, co
                     arguments[count] = scalar != 0 ? "--scalar" : NULL;
                     char* actual = NULL;
                     const int result = check_test_driver_spawn(arguments, &actual);
+                    pp_test_normalize_scratch(actual);
                     const bool equal = expected != NULL && actual != NULL && (result == 0) == (oracle == 0) && strcmp(actual, expected) == 0;
                     if (!equal)
                     {

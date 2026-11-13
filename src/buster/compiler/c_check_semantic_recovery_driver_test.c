@@ -290,6 +290,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "unknown_type a = 1, b, c;\nint x = 2, y = 3;\nint z = 1 + (void)0;\n",
         "void f(unknown_type p, int x);\nint a = 1, b = 2;\nint z = 1 + (void)0;\n",
         "#define Unknown unknown_type\nUnknown a = 1, b = 2;\nint y = 1 + (void)0;\n",
+        // Original pragma errors and atomic literal diagnostics survive the comma-declaration recovery together.
+        "#pragma options align=mac68k\nunknown_type a = \"x\", b = \"y\";\n"
+        "struct S { int x; };\n_Atomic struct S t = (_Atomic struct S){1};\nint after = 1 + (void)0;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its

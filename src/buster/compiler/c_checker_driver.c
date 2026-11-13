@@ -2215,7 +2215,7 @@ static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* p
 {
     const CheckInputVisibilityPragmas* history = input->visibility_pragmas;
     const uint32_t count = history != NULL ? history->count : 0;
-    const CheckInputPackPragmas* packing = input->pack_pragmas;
+    const CheckInputPackPragmas* packing = input->pack_pragmas != NULL && input->pack_pragmas->error_count != 0 ? input->pack_pragmas : NULL;
     const uint32_t pack_count = packing != NULL ? packing->count : 0;
     while (!pp->fatal && (*fp < input->fp_pragma_count || *visibility < count || *pack < pack_count))
     {
@@ -4707,7 +4707,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
-        const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas;
+        const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas != NULL && pragma_input->pack_pragmas->error_count != 0 ?
+                                                  pragma_input->pack_pragmas : NULL;
         uint32_t visibility = 0;
         uint32_t pragma = 0;
         uint32_t pack = 0;
@@ -11353,7 +11354,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         visibility_errors |= record->error;
                     }
                     bool pack_errors = false;
-                    const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas;
+                    const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas != NULL && pragma_input->pack_pragmas->error_count != 0 ?
+                                                              pragma_input->pack_pragmas : NULL;
                     for (uint32_t i = 0; pack_history != NULL && i < pack_history->count; i += 1)
                     {
                         const CheckInputPackPragma* record = pack_history->records + i;

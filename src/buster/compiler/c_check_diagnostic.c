@@ -849,6 +849,168 @@ static uint32_t check_diagnostic_parse_end(const Parser* parser)
     return end;
 }
 
+// A failed parse may erase the declaration containing an align annotation. Retain only its state-free target
+// error at proven item boundaries; do not derive packing state or inspect that unavailable tree. The delimiter
+// scan admits ordinary function/statement/record bodies and freezes inside expressions, enums and initializers.
+// Ambiguous bodies remain unproven. Later item boundaries still matter after an earlier recoverable syntax error.
+static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* handled)
+{
+    const uint64_t retained = reader->arena->length;
+    const uint64_t temporary = reader->scratch->length;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t pragmas = parser->tokens.pragma_count;
+    CheckInputPackPragmas* history = NULL;
+    uint64_t* macros = NULL;
+    uint32_t previous_end = 0;
+    uint32_t previous_token = 0;
+    bool valid = true;
+    for (uint32_t p = 0; valid && p < pragmas; p += 1)
+    {
+        uint32_t source = 0;
+        uint32_t end = 0;
+        uint32_t token = 0;
+        if (check_input_retained_pragma(reader, p, &previous_end, &previous_token, &source, &end, &token) &&
+            check_input_pack_align_name(reader, source, end))
+        {
+            const CheckInputPackPragma record = check_input_pack_align_record(reader, p, source, end, token, &macros);
+            valid = !reader->output->resource;
+            if (valid && record.handled == 1 && record.error)
+            {
+                if (history == NULL)
+                {
+                    history = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputPackPragmas, 1);
+                    CheckInputPackPragma* records = history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputPackPragma, pragmas) : NULL;
+                    valid = records != NULL;
+                    if (valid)
+                    {
+                        *history = (CheckInputPackPragmas){ .records = records, .current = BUSTER_CHECK_NONE };
+                    }
+                }
+                if (valid)
+                {
+                    history->records[history->count++] = record;
+                }
+            }
+        }
+    }
+    uint32_t* stack = valid && history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    uint8_t* blocks = stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count + 1) : NULL;
+    valid &= history == NULL || blocks != NULL;
+    uint32_t cursor = 0;
+    uint32_t depth = 0;
+    uint32_t other = 0;
+    uint32_t unknown = 0;
+    uint8_t parenthesis_keyword = PARSE_KIND_END;
+    bool closed_statement = false;
+    bool initializer = false;
+    bool balanced = true;
+    for (uint32_t r = 0; valid && history != NULL && r < history->count; r += 1)
+    {
+        CheckInputPackPragma* record = history->records + r;
+        while (balanced && cursor < record->token)
+        {
+            const uint8_t kind = parser->tokens.kinds[cursor];
+            const uint8_t previous = cursor != 0 ? parser->tokens.kinds[cursor - 1] : PARSE_KIND_END;
+            if (kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE)
+            {
+                const bool control = previous == PARSE_KIND_R_PAREN && (parenthesis_keyword == PARSE_KIND_IF ||
+                                     parenthesis_keyword == PARSE_KIND_FOR || parenthesis_keyword == PARSE_KIND_WHILE || parenthesis_keyword == PARSE_KIND_SWITCH);
+                const bool outer = depth == 0 && !initializer && previous == PARSE_KIND_R_PAREN && parenthesis_keyword == PARSE_KIND_IDENTIFIER;
+                const bool inner = depth != 0 && blocks[depth - 1] == 1 && other == 0 && unknown == 0 && (control || previous == PARSE_KIND_DO || previous == PARSE_KIND_ELSE ||
+                                   previous == PARSE_KIND_L_BRACE || previous == PARSE_KIND_SEMI || (previous == PARSE_KIND_R_BRACE && closed_statement));
+                const bool member = previous == PARSE_KIND_STRUCT ||
+                                    (previous == PARSE_KIND_IDENTIFIER && cursor >= 2 && parser->tokens.kinds[cursor - 2] == PARSE_KIND_STRUCT);
+                const uint8_t block = kind != PARSE_KIND_L_BRACE ? 0 : member ? 2 : outer || inner ? 1 : 0;
+                blocks[depth] = block;
+                stack[depth++] = cursor;
+                other += kind != PARSE_KIND_L_BRACE;
+                unknown += kind == PARSE_KIND_L_BRACE && block == 0;
+            }
+            else if (kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE)
+            {
+                const uint8_t expected = kind == PARSE_KIND_R_BRACE ? PARSE_KIND_L_BRACE : kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : PARSE_KIND_L_SQUARE;
+                balanced = depth != 0 && parser->tokens.kinds[stack[depth - 1]] == expected;
+                if (balanced)
+                {
+                    const uint32_t opener = stack[--depth];
+                    const bool brace = kind == PARSE_KIND_R_BRACE;
+                    other -= !brace;
+                    unknown -= brace && blocks[depth] == 0;
+                    if (kind == PARSE_KIND_R_PAREN)
+                    {
+                        parenthesis_keyword = opener != 0 ? parser->tokens.kinds[opener - 1] : PARSE_KIND_END;
+                    }
+                    if (brace)
+                    {
+                        closed_statement = blocks[depth] == 1 && (opener == 0 || parser->tokens.kinds[opener - 1] != PARSE_KIND_DO);
+                        initializer &= depth != 0 || !closed_statement;
+                    }
+                }
+            }
+            else if (depth == 0 && (kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_SEMI))
+            {
+                initializer = kind == PARSE_KIND_EQUAL;
+            }
+            cursor += 1;
+        }
+        const uint8_t previous = record->token != 0 ? parser->tokens.kinds[record->token - 1] : PARSE_KIND_END;
+        const uint8_t next = record->token < count ? parser->tokens.kinds[record->token] : PARSE_KIND_END;
+        const bool boundary = record->token == 0 || previous == PARSE_KIND_SEMI || previous == PARSE_KIND_L_BRACE ||
+                              (previous == PARSE_KIND_R_BRACE && closed_statement);
+        // A pragma between an IF/DO body and its ELSE/WHILE is not a new statement. Without a complete tree,
+        // leave either following keyword unproven even where it might instead begin an independent statement.
+        const bool trailing_control = depth != 0 && (next == PARSE_KIND_ELSE || next == PARSE_KIND_WHILE);
+        record->handled = balanced && other == 0 && unknown == 0 && boundary && !trailing_control ? 1 : 0;
+    }
+    for (uint32_t d = 0; valid && history != NULL && d < parser->diagnostic_count; d += 1)
+    {
+        const ParseDiagnostic* diagnostic = parser->diagnostics + d;
+        if (!diagnostic->error || (diagnostic->message != PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR &&
+                                  diagnostic->message != PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION &&
+                                  diagnostic->message != PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST))
+        {
+            continue;
+        }
+        uint32_t low = 0;
+        uint32_t high = history->count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = history->records[middle].token < diagnostic->token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        for (uint32_t r = low; r < history->count && history->records[r].token == diagnostic->token && history->records[r].handled != 0; r += 1)
+        {
+            history->records[r].handled = 0;
+        }
+    }
+    if (valid && history != NULL)
+    {
+        uint32_t written = 0;
+        for (uint32_t r = 0; r < history->count; r += 1)
+        {
+            const CheckInputPackPragma record = history->records[r];
+            if (record.handled == 1)
+            {
+                history->records[written++] = record;
+                handled[record.pragma] = 1;
+            }
+        }
+        history->count = written;
+        history->error_count = written;
+        reader->output->pack_pragmas = history;
+    }
+    else if (!valid)
+    {
+        arena_pop_to(reader->arena, retained);
+        reader->output->resource = true;
+    }
+    arena_pop_to(reader->scratch, temporary);
+    return valid;
+}
+
 // Unknown STDC states have no semantic effect and need no valid tree. Retain their original insertion points,
 // independently of the completed expression prefix used for semantic diagnostics. Recognized states also reject
 // insertion inside an unfinished expression. This syntax-only boundary proof never approves a setting's placement
@@ -872,6 +1034,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         valid = valid && check_input_visibility_pragmas(&reader, handled, false);
         valid = valid && check_input_symbol_pragmas(&reader, handled, false);
         valid = valid && check_input_ms_pragmas(&reader, handled, false);
+        valid = valid && check_diagnostic_original_pack(&reader, handled);
         // Visibility retains its own recovery-aware history. A later pop must still diagnose an unmatched push
         // when the parser skipped that push's annotation while recovering from a missing semicolon.
     }

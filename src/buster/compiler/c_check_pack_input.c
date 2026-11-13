@@ -114,6 +114,8 @@ struct CheckInputPackPragmas
 {
     CheckInputPackPragma* records;
     uint32_t count;
+    // Handled, state-free target errors; ordinary packing histories do not enter the driver's error merge.
+    uint32_t error_count;
     uint32_t maximum_depth;
     uint32_t unmatched_pushes;
     uint8_t final_log2;
@@ -709,6 +711,7 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
         {
             const CheckInputPackPragma* item = &history->records[record];
             handled[item->pragma] = item->handled;
+            history->error_count += item->handled == 1 && item->error;
         }
     }
     else if (!valid)

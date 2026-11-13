@@ -11238,6 +11238,11 @@ declarations are still checked, and an emitting command preserves any existing
 output after the error (#2449). This error cannot be suppressed by warning
 options or diagnostic pragmas. The driver merges it with other retained pragma
 diagnostics in source order, including after a parse error.
+On a failed parse, the original-token view retains this state-free error at
+proven declaration, statement and record-member boundaries without reading the
+discarded parse tree or reconstructing packing state. It excludes expression,
+initializer and enum interiors, missing-semicolon lookaheads, and ambiguous
+boundaries. Only histories containing target errors enter the error merge.
 
 `#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
 `check_input_pack_align_warnings`) are clang's, whole output on both paths:
