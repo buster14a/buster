@@ -105,6 +105,14 @@ configurations, 16 items in one pool of draws, the costliest first. Each
 configuration's item 1 builds its compiler and publishes it; its other items
 install that product (`tools/ci/hosted-product.sh`, #2032). Its race fixture is
 `.github/workflows/vector-claim-race.yml`.
+Artifact rendezvous uses the job-scoped Results service through
+`.github/actions/vector-runtime`, with no REST fallback (#2309). Fresh PR
+vector rows have a 16-request REST ceiling, including quota observations;
+reruns use bounded identity reads and refuse unknown state. The verdict
+reports request ledgers and shared-quota headers; see [Vector REST
+budget](../ci.md#vector-rest-budget-2309). After changes, run the shell
+fixture above and `node tests/ci/vector-runtime.cjs`; both run in the PR's
+hosted evidence job.
 Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by

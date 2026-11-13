@@ -495,13 +495,18 @@ uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
 name. So no candidate claims anything. Each draw's **collector**
 (`collect-1` to `collect-4`, one per draw: the pilot had none for the last
 draw, whose candidates would have waited 30 minutes for nothing) starts with
-its draw and polls the run every 15 s, through the artifacts and jobs APIs
-(`actions: read`). Those calls share the repository's hourly REST limit with
-every other run, so a failed listing doubles the pause, up to 60 s, and the
-jobs fetch `tools/ci/vector-draw.sh` by a one-file checkout rather than the
-contents API (#2309). It waits until as many candidates qualified as items are
+its draw and polls the run's artifacts every 15 s through the same-run Results
+service used by `upload-artifact` and `download-artifact`. These lookups use the
+job's artifact runtime token and consume no repository REST requests (#2309).
+A failed listing doubles the pause, up to 60 s. A small local Node action,
+`.github/actions/vector-runtime`, runs the existing shell with the runtime
+credentials that GitHub supplies to JavaScript actions. It installs no npm
+packages, writes no token to files or workflow outputs, and has no REST
+fallback. The script and action come from the triggering commit through a
+sparse git checkout. The collector waits until as many candidates qualified as items are
 missing, or every candidate has published its verdict or ended, at most 25
-minutes. Then it assigns: the qualifying candidates, by their numbers, get the
+minutes. Only when the artifacts cannot decide does it read one optional jobs
+snapshot, within the page allowance below. Then it assigns: the qualifying candidates, by their numbers, get the
 missing items, the costliest first (`BUSTER_VECTOR_ITEMS`). One
 job decides, and it uploads the decision once, as an artifact whose name holds
 it: `-assign-LEVEL-ITEMxCANDIDATE...`. Nothing can take an item twice. It never
@@ -551,6 +556,79 @@ holder ended without publishing, when its attempt has two products, or after
 90 minutes. Products stay in their run, as the portable rows' do: no cache,
 and a download by name from the run alone.
 
+After its publication step, the builder always uploads
+`vector-OOPT-ATTEMPT-builder-CONFIGURATION-ended`, including after setup,
+build or upload failure. A waiting item checks the product first, then this
+marker; no product plus a marker fails promptly. One optional jobs snapshot
+also detects a builder that already ended without its marker. If the runner
+disappears after that snapshot and cannot publish the marker, the existing
+90-minute product deadline applies. Jobs are never polled repeatedly.
+
+### Vector REST budget (#2309)
+
+The first attempt of a PR's four-item vector row makes at most **16 charged
+REST requests**, regardless of how many artifact polls or candidates run:
+
+| Caller | Maximum charged REST requests |
+| --- | ---: |
+| Four collectors, one optional jobs snapshot each, at most two pages | 8 |
+| Three product consumers, one optional jobs snapshot each, at most two pages | 6 |
+| Before/after quota observations, collector 1 and the verdict | 2 |
+| Candidate assignment waits and artifact/product listings | 0 |
+| **Total** | **16** |
+
+Thirty such PR attempts per hour use at most **480** requests. Against the
+conservative 1,000-request hourly budget in #2309, that leaves 520 for other
+workflows; a token with a larger live limit has more room. This is the vector
+row's bound, not a promise about unrelated workflows' consumption.
+The daily/full pool's twelve product consumers raise its first-attempt bound
+to 34. Job lists larger than their allowance remain unknown; they do not
+extend the budget or permit a partial list to establish that a job is absent.
+
+Failed-job and full reruns need additional job identity reads: the jobs API
+labels carried-over jobs with the new attempt number, so their start time
+must be compared with `run_started_at`. Each rerun command has at most six
+requests, including failed requests and pages; collector 1 gets one extra
+for the initial observation. The product resolves its builder's attempt once
+per holder, then waits through the artifact service. An unavailable,
+ambiguous or incomplete identity fails closed. A rerun is not covered by
+the fresh-PR 16-request bound; its own count is reported separately.
+
+Every REST call reads `X-RateLimit-Remaining` and `X-RateLimit-Reset` and
+refuses another request while the observed remaining quota is at or below
+100 and the reset has not arrived. Missing or malformed headers stop further
+reads in that command. Optional first-attempt status reads can stop while
+artifact progress continues; required rerun identity reads cannot be replaced
+by a guess. The Results-service client has one 20-second request timeout and
+no internal retries; the shell owns its bounded exponential back-off.
+
+Each command keeps a TSV request ledger outside shell subshells, so requests
+inside command substitutions and pipelines still count. The candidate and
+collector always upload those ledgers as
+`vector-OOPT-ATTEMPT-rest-draw-LEVEL-CANDIDATE` and
+`vector-OOPT-ATTEMPT-rest-collect-LEVEL`. The verdict totals this attempt's
+ledgers, checks that completed draw/assignment records have ledgers, enforces
+the first-attempt ceiling and reports the before/after header observations.
+The local request count is exact; the header delta includes other workflows
+sharing the token. If the quota window changed, it reports both observations
+without claiming a comparable delta.
+
+Artifact inventories preserve every attempt and duplicate name. An invalid
+or incomplete listing is never an empty inventory: collectors cannot assign
+without a successful complete listing and every earlier draw's assignment.
+The runtime client conservatively refuses 1,000 or more artifacts instead of
+assuming completeness across many reruns; this is our safeguard, not a
+documented Results-service truncation limit. A fresh workflow run clears that
+condition. The exact upstream protocol references are pinned in the action's
+source header; no third-party implementation is vendored.
+
+Passing assignments through job outputs would require a different rendezvous:
+a candidate must keep its qualifying VM while the collector decides, so making
+it depend on that collector would create a dependency cycle. Splitting probe
+and execution into different jobs would lose the CPU qualification. The
+runtime artifact rendezvous retains the current assignment and product
+contract while removing REST polling.
+
 The trade-off is latency against one tested binary. A waiting item's runner
 is idle while item 1 builds, as long as it would have taken to build its own;
 it then spends the pack, the upload, a poll and the install (about 20 s in the
@@ -588,7 +666,8 @@ draws all passed: re-run all jobs to draw again.
 **Permissions and the race fixture.** Nothing needs write access: every record
 is the run's own artifact, which a fork's pull request can upload too.
 `.github/workflows/vector-claim-race.yml`, on pull requests that change the
-draws (the row workflow, `tools/ci/vector-draw.sh`) or the fixture and on
+draws (the row workflow, `tools/ci/vector-draw.sh`, the runtime action or its
+fixtures) or the race fixture and on
 dispatch, runs 16 racers, each on its own runner, as one draw's candidates at
 one instant, through the same script: about half qualify (by a hash of the
 racer and the run), the collector assigns the 4 items of its one configuration
@@ -599,8 +678,12 @@ assigned. Its control round uploads one name from every racer at once and
 reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
 collector, candidates (reruns among them), a pool's order, the product waits
 (an earlier attempt's product, a rerun builder's, a builder that ended without
-one, an item 1 no draw can assign) and the verdict against a fake `gh`; the
-PR's `evidence` job runs it. `bash tests/ci/hosted-product.sh` tests a vector
+one, an item 1 no draw can assign), request budgets, quota guards, back-off and
+the verdict against fake runtime and REST services. The PR's `evidence` job
+runs it and `node tests/ci/vector-runtime.cjs`, which verifies the runtime
+wire contract, duplicate/all-attempt semantics, malformed responses,
+completeness bound, secret-safe errors and shell action hand-off.
+`bash tests/ci/hosted-product.sh` tests a vector
 product's install on a qualifying runner and its refusals.
 
 ## CI latency baseline
