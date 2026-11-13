@@ -1209,6 +1209,10 @@ struct CheckInput
     // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does the program
     // look for those functions' versions (c_check_program_cpu_dispatch.c).
     bool cpu_dispatch;
+    // Whether a declaration has clang's no_builtin attribute (#1958), which only a function's definition takes, before its
+    // body: only then does a marked library call look for its function's (check_input_no_builtin), which walks back to
+    // the body's brace.
+    bool no_builtin;
     // Whether a function is multiversioned by target strings (#1838, c_check_target_versions.c): several target
     // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
@@ -13069,7 +13073,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
 // unit's declaration of a plain library builtin in that body rather than compute or fold it (EmitDirectCallee's
 // no-builtin-NAME and no-builtins function attributes), though its constant contexts still fold (the constant
 // evaluator doesn't read the attribute). A string clang warns names no builtin ("*" among them) matches none.
-static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name, uint32_t token)
+static __attribute__((noinline)) bool check_input_no_builtin_body(CheckInputReader* reader, IdentId name, uint32_t token)
 {
     const Parser* parser = reader->parser;
     // The body the walk is in, or, where a pass after the walk asks (the reader's expression batches), the one that holds
@@ -13104,6 +13108,13 @@ static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* r
         }
     }
     return covered;
+}
+
+// check_input_no_builtin_body's answer where the unit has a no_builtin attribute (CheckInput.no_builtin), else false: most
+// units have none, and a marked call of memcpy or memset is common (#1373).
+static inline __attribute__((always_inline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name, uint32_t token)
+{
+    return reader->output->no_builtin && check_input_no_builtin_body(reader, name, token);
 }
 
 #include "c_check_literal_table_input.c"

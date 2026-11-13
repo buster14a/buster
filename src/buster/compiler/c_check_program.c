@@ -3546,7 +3546,7 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output,
 // label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
 // the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
 // took sqlite3.c's -c from 126 to 187 ms on the 9700X.
-static uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node)
+static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckProgram* program, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
     const uint32_t member = graph->members[node];
@@ -3567,6 +3567,14 @@ static uint32_t check_program_call_computed(const CheckProgram* program, uint32_
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
     const bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
     return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+}
+
+// check_program_call_marked's answer for a call the reader marked, BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS for any other: the
+// references' pass and the lowering ask of every call, and most are unmarked.
+static inline __attribute__((always_inline)) uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node)
+{
+    const bool marked = (program->input->graph.members[node] & BUSTER_CHECK_LIBRARY_CALL) != 0;
+    return marked ? check_program_call_marked(program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
 }
 
 // Whether a call has a plain library builtin's semantics of its own, which the node machine and its census leave to the
