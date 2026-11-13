@@ -1811,6 +1811,17 @@ static const ChangesFixture changes_fixtures[] = {
         .unmeasured = "checker lexer",
     },
     {
+        // #2053: runtime fixtures and their catalogs are under tests/, never Markdown, which counts as documentation.
+        .name = "the checker's runtime fixtures and catalog are code",
+        .files = "tests/checker/sources/catalog.tsv tests/checker/sources/0001.c",
+        .outputs_true = "code",
+    },
+    {
+        .name = "a Markdown file under tests/ is documentation, so no fixture or catalog is one",
+        .files = "tests/checker/sources/README.md",
+        .outputs_false = "code",
+    },
+    {
         .name = "docs/performance alone counts as code, for the qualification",
         .files = "docs/performance/buster-manifest-v1.schema.json",
         .outputs_true = "code performance",

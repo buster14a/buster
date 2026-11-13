@@ -198,8 +198,9 @@ readable single-line statements, declarations and function headers, and one
 aggregate field or initializer entry per line. Do not import buster-legacy's
 portability or infrastructure to match its style.
 
-Keep private test and benchmark fixtures in their owning unity unit; follow
-the [build ownership rules](docs/commands/build.md#unity-test-dependencies).
+Keep private test and benchmark fixtures in their owning unity unit, and
+regression programs under `tests/` as runtime data; follow the [build
+ownership rules](docs/commands/build.md#unity-test-dependencies).
 
 ## Data-parallel first
 
@@ -299,14 +300,13 @@ computers:
 
 ## Build
 
-Use `./build.sh` (CI's Clang, CMake, Ninja): Develop (`-O3` in parts) by
-default, for edits and tests; `--config Release` (`-O3`) for **every timing
-and benchmark**; `--config Debug` (`-O0 -g`) for a debugger; incremental in
-`build/cmake/VARIANT`, published as `build/compiler`. Respect
-the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits Release's `-g`.
-Read [build details](docs/commands/build.md) before changing translation
-units, flags, baked tables or code-placement experiments. `build/` is
-disposable; never commit generated binaries or captures.
+Use `./build.sh` (CI's toolchain): Develop (parts at `-O3`) by default;
+`--config Release` for **every timing and benchmark**; `--config Debug` for a
+debugger; incremental in `build/cmake/VARIANT`, published as
+`build/compiler`, under the lock and `cores` rules. `BUSTER_DEBUG_INFO=0`
+omits Release's `-g`. Read [build details](docs/commands/build.md) before
+changing translation units, flags, baked tables or code-placement experiments.
+`build/` is disposable; never commit generated binaries or captures.
 
 ## Current repository and exact smoke commands
 

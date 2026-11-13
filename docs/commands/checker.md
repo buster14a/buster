@@ -153,7 +153,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
   don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
-  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--fixtures DIR] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -529,6 +529,33 @@ suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3
 including ordinary function addresses and scalar/vector, eager/lazy headers.
 The object-size attributes currently use conservative unknown bounds, without
 Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
+
+## Runtime fixtures
+
+`test-checker`'s shared source fixtures (`check_test_sources`, 418 cases) are
+runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
+a case, which the test reads when it runs, so that editing a case's source or
+flags, or adding a case, compiles, links and bakes nothing. The catalog's first
+line is `buster-fixtures v1 checker-sources`; each later line not starting with
+`#` is a case, four tab-separated fields:
+
+- **ID**, unique, of letters, digits, `.`, `_` and `-` (the extraction numbered
+  them `0001` to `0418` in the table's order);
+- **FILE**, in the same directory, unique, ending in `.c`: the source's bytes as
+  they are (no NUL; the runner writes a source to its first NUL, as it did);
+- **FLAGS**, comma-separated, or `-`: `rejected`, `unsupported`, `extension`,
+  `gnu23`, `unsigned-char`, `undecided`, `overload-tables`, `overload-none`,
+  and `capacity=NAME` for a type table `check_test_fixture_capacity` names;
+- **NAME**, what the case checks, which a failure prints.
+
+The cases run in the catalog's order, then the 64 generated ones. A missing or
+malformed catalog, a missing or unreadable file, a repeated ID or file, a file
+in the directory that no line names, or an empty catalog fails the run; no case
+is skipped. The fixture root is `tests/` under the working directory, or
+`test-checker --fixtures DIR`. A new ordinary case goes there: its file and its
+line. The cases' bytes are the table's literals as clang compiled them, compared
+byte for byte when they moved (buster-performance's
+`fixtures-runtime-2053-2026-11-13`).
 
 ## System-header token bitmap and MSan (#1610)
 
