@@ -842,18 +842,21 @@ them in full; `--report` prints a plan's parts, files and largest functions):
   executable is the one a clean build of the same sources makes.
 
 **The benchmark units are built on demand**: Develop's executable leaves out
-the 27 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
+the 28 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
 (`cmake/BusterSettings.cmake`) names, whose only entry is a benchmark command's
 `run_*` function and that no test runs: the correctness inventory runs none of
 them. Their object
 libraries have no source in Develop, so Develop's executable doesn't wait for
 them, and `cmake/BusterDevelopAbsent.cmake` writes `Develop/develop/absent.o`
 from their sources, a stand-in for each `run_*` entry, which says that the
-command is Release's and Debug's and fails. `floors_benchmark.c` also holds
-`test-floors-input`'s tests and stays, as does `c_preprocessor_benchmark.c`,
-whose `benchmark-preprocessor` `test-preprocessor` runs for its location
-option, and `tier1_model_measure.c` and the two test units. A test that comes to
-run another benchmark command needs its unit taken off the list.
+command is Release's and Debug's and fails. `test-preprocessor`'s location
+option runs `benchmark-preprocessor` and takes that stand-in's refusal as it
+takes a scalar build's: `c_preprocessor_benchmark.c` was Develop's longest
+compile (7.4 s of a 27.5 s clean build on the 9700X), and the unit an edit of
+the preprocessor waited for (#2624). `floors_benchmark.c` also holds
+`test-floors-input`'s tests and stays, as do `tier1_model_measure.c` and the
+two test units. A test that comes to run another benchmark command needs its
+unit taken off the list, or to accept the stand-in where Release covers it.
 
 **Measured** on the 9700X, eight jobs, the host's clang 23.1.1 ([the record](https://github.com/buster14a/buster-performance/tree/ba33a36de7aecf915f9ffceb48ea9d5cf666ae8a/docs/measurements/develop-configuration-2559-2026-11-12)):
 
