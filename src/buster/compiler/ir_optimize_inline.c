@@ -65,6 +65,11 @@ struct IrInlineUnit
     const uint8_t* flags;
     uint32_t count;
     uint32_t symbol_count;
+    // Each function's cost limit as a callee (#2541's classes), or null for IrInlineOptions.maximum_cost for all.
+    const uint32_t* limits;
+    // 1 + the index of the only function rewritten, or 0 for all (#2541's summaries): the others are callees as they
+    // are, finished bodies the caller copies, neither verified again nor rewritten.
+    uint32_t only;
 };
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -81,6 +86,10 @@ struct IrInlineOptions
     // Whether a callee of any control flow is a candidate (#2541): its blocks spliced at the call (ir_inline_expand_general)
     // rather than one straight line of them cloned in place. Off by default, where such a body is IR_INLINE_BODY.
     bool control_flow;
+    // Whether the unit's functions are verified IR (a lowering's or an optimizer's output) and the caller verifies the result
+    // before anything reads it (#2541's driver: SROA or promotion): neither is verified here, which would make each
+    // expansion's function be verified four times over.
+    bool trusted;
 };
 
 typedef enum IrInlineDecision
@@ -340,7 +349,11 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
     {
         check.error = IR_ERROR_LIMIT;
     }
-    else if ((unit->count != 0 && (!unit->functions || !unit->symbols || !unit->flags)) || (unit->count != 0 && unit->symbol_count < 2))
+    else if ((unit->count != 0 && (!unit->functions || !unit->symbols || !unit->flags)) || (unit->count != 0 && unit->symbol_count < 2) || unit->only > unit->count)
+    {
+        check.error = IR_ERROR_STRUCTURE;
+    }
+    else if (unit->limits != 0 && ir_inline_tail_conflict(unit->limits, (uint64_t)unit->count * 4, output, scratch))
     {
         check.error = IR_ERROR_STRUCTURE;
     }
@@ -383,7 +396,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         {
             check.error = IR_ERROR_METADATA;
         }
-        else
+        else if (!options.trusted && (unit->only == 0 || unit->only - 1 == f))
         {
             const uint64_t mark = scratch->length;
             IrOptimizeWork work = { 0 };
@@ -853,12 +866,40 @@ static IrInlineRows ir_inline_rows(const IrFunction* callee, const IrInlineBody*
     return rows;
 }
 
+// The cost sweep against a limit per call (IrInlineUnit.limits): the same masked 16-lane compare as ir_inline_threshold's,
+// of two columns, with its scalar twin.
+static void ir_inline_threshold_limits(const uint32_t* costs, const uint32_t* maxima, uint32_t count, bool scalar, uint8_t* selected)
+{
+    (void)scalar;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            selected[i] = costs[i] <= maxima[i];
+        }
+    }
+    else
+    {
+        for (uint32_t first = 0; first < count; first += 16)
+        {
+            const uint32_t remaining = count - first;
+            const uint32_t n = remaining < 16 ? remaining : 16;
+            const __mmask16 mask = n == 16 ? UINT16_MAX : (uint16_t)((1u << n) - 1);
+            const __m512i values = _mm512_maskz_loadu_epi32(mask, costs + first);
+            const __m512i limits = _mm512_maskz_loadu_epi32(mask, maxima + first);
+            const __mmask16 fits = mask & _mm512_cmple_epu32_mask(values, limits);
+            _mm_mask_storeu_epi8(selected + first, mask, _mm_maskz_set1_epi8(fits, 1));
+        }
+    }
+}
+
 static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrInlineOptions options, const IrInlineBody* shapes, Arena* scratch, IrInlineResult* result, uint64_t* charged)
 {
     const uint32_t first = result->call_offsets[function];
     const uint32_t end = result->call_offsets[function + 1];
     bool ok = true;
     uint8_t* fits = ir_allocate(scratch, end - first, 1, &ok);
+    uint32_t* maxima = unit->limits != 0 ? ir_allocate(scratch, end - first, 4, &ok) : 0;
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     for (uint32_t call = first; ok && call < end; call += 1)
     {
@@ -914,7 +955,16 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
     }
     if (ok)
     {
-        if (first != end)
+        if (first != end && maxima != 0)
+        {
+            // A call's limit is its callee's; one without a callee has no cost to compare (UINT32_MAX fails every limit).
+            for (uint32_t call = first; call < end; call += 1)
+            {
+                maxima[call - first] = result->callees[call] != BUSTER_IR_NONE ? unit->limits[result->callees[call]] : 0;
+            }
+            ir_inline_threshold_limits(result->costs + first, maxima, end - first, BUSTER_SCALAR_PATH(options.scalar), fits);
+        }
+        else if (first != end)
         {
             ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, BUSTER_SCALAR_PATH(options.scalar), fits);
         }
@@ -1890,12 +1940,26 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
     {
         failed_function = order[position];
         const uint64_t function_mark = scratch->length;
-        check.error = ir_inline_choose(unit, failed_function, options, shapes, scratch, &inlined, &charged);
-        if (check.error == IR_OK)
+        // A function other than the only one rewritten (IrInlineUnit.only) is a finished callee: taken as it is, its calls
+        // kept.
+        const bool rewritten = unit->only == 0 || unit->only - 1 == failed_function;
+        for (uint32_t call = inlined.call_offsets[failed_function]; !rewritten && call < inlined.call_offsets[failed_function + 1]; call += 1)
+        {
+            inlined.costs[call] = UINT32_MAX;
+            inlined.expanded_sizes[call] = 0;
+            inlined.decisions[call] = IR_INLINE_DISABLED;
+        }
+        if (!rewritten)
+        {
+            inlined.functions[failed_function] = unit->functions[failed_function];
+            inlined.output_instructions += unit->functions[failed_function].instruction_count;
+        }
+        check.error = rewritten ? ir_inline_choose(unit, failed_function, options, shapes, scratch, &inlined, &charged) : IR_OK;
+        if (check.error == IR_OK && rewritten)
         {
             check.error = ir_inline_rewrite(unit, failed_function, output, scratch, options, shapes, &kinds, &inlined);
         }
-        if (check.error == IR_OK)
+        if (check.error == IR_OK && rewritten && !options.trusted)
         {
             const uint64_t verification_mark = scratch->length;
             IrOptimizeWork verification = { 0 };
