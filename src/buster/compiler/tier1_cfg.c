@@ -257,10 +257,13 @@ static bool tier1_cfg_input_valid_into(const Tier1CfgInput* input, Arena* scratc
     {
         valid = input->block_starts[b] < input->block_starts[b + 1];
     }
-    // The blocks are in order from 0 to position_count: every position gets one label.
+    // The blocks are in order from 0 to position_count: every position gets one label. Each block's bounds are read
+    // before its stores, which could alias block_starts as far as the compiler knows.
     for (uint32_t b = 0; valid && position_blocks != 0 && b < input->block_count; b += 1)
     {
-        for (uint32_t q = input->block_starts[b]; q < input->block_starts[b + 1]; q += 1)
+        const uint32_t from = input->block_starts[b];
+        const uint32_t to = input->block_starts[b + 1];
+        for (uint32_t q = from; q < to; q += 1)
         {
             position_blocks[q] = b;
         }
