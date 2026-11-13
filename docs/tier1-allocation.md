@@ -391,10 +391,30 @@ definition's: a required one asks that the definition write a register, as an
 instruction's destination does. The checker checks it after the definition, by
 the location it gives the value.
 
-Liveness is `dataflow.c`'s solve over the values used outside their block, phi
-operands among them. A phi operand is a use on its edge: it joins its
-predecessor's use row unless that block defines it, and the predecessor's
-live-out row after the solve.
+Liveness is `dataflow.c`'s solve over values with an ordinary use outside their
+home block or a phi occurrence passed from another block (#1384). A phi
+operand passed only from its home, with no remote ordinary use, needs no dense
+bit: a byte flag extends its home interval through the exit. Every occurrence
+is checked; a single remote occurrence makes the value global. The existing
+home-definition CSR supplies local exit locations to the forward boundary
+sweep, and value-indexed exit stamps let phi moves read either kind of source.
+This includes self-phis, fixed-range splits and all three register classes.
+
+A global phi operand joins its predecessor's use row unless that block defines
+it, then joins its predecessor's live-out row after the solve. Two operand
+scans supply these facts directly, replacing the fifth `passed` matrix. The
+four remaining matrices cost `4 * blocks * 64 * ceil(global_values / 512)`
+bytes, zero when no global value remains. `cross_block_values`,
+`edge_local_values` and `liveness_bytes` report that partition and matrix cost;
+the last excludes CFG columns and other allocator state. Short-circuit chains
+whose global set stays bounded therefore have linear matrix storage. This does
+not impose a sparse fallback or memory ceiling on genuinely nonlocal values.
+
+The successor-edge-to-predecessor-ordinal column is built once in
+`O(blocks + edges)` and retained with the preparation. Its transpose is mapped
+through each target's original predecessor order, preserving phi associations
+even with shuffled rows. Edge moves read it directly rather than searching a
+large join's predecessor row once per incoming edge.
 
 A phi operand may be undefined (`BUSTER_TIER1_CFG_NONE`, #141): the IR's `undef`,
 which the CFG consumer passes as no value. Any value is the phi's along that edge,

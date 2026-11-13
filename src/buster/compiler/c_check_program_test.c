@@ -2608,7 +2608,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                     const uint64_t scratch_mark = scratch.length;
                     CheckLowerShared shared = { 0 };
                     CheckProgramLowered prepared = { 0 };
-                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
+                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, false, &output, &scratch);
                     if (program.body_count == 0)
                     {
                         check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
@@ -2783,6 +2783,278 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+// The dispatch oracle uses C's signed/unsigned comparisons on the original target bits, independently of the
+// planner's sortable keys. Narrow values are truncated before comparing, as the generated 32-bit instructions do.
+static bool check_test_program_switch_less(uint64_t left, uint64_t right, uint8_t class)
+{
+    return class == BUSTER_TYPED_CLASS_I32 ? (int32_t)(uint32_t)left < (int32_t)(uint32_t)right :
+           class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)left < (uint32_t)right :
+           class == BUSTER_TYPED_CLASS_I64 ? (int64_t)left < (int64_t)right : left < right;
+}
+
+// Interpret the actual emitted dispatch, not the tree plan. Its external labels are the 17 case destinations and
+// default (0); other labels must point to an emitted entry. A hard step/comparison budget rejects a loop or a linear
+// dispatch even when it would eventually return the right destination. The surrounding operand is never read here.
+static bool check_test_program_switch_run(const CheckLowerWriter* writer, uint64_t input, uint32_t expected, uint32_t budget)
+{
+    uint64_t stack[2] = { 0 };
+    uint8_t classes[2] = { 0 };
+    uint32_t depth = 0;
+    uint32_t entry = 0;
+    uint32_t comparisons = 0;
+    uint32_t destination = BUSTER_CHECK_NONE;
+    bool valid = true;
+    for (uint32_t step = 0; valid && destination == BUSTER_CHECK_NONE && step < writer->count && entry < writer->count; step += 1)
+    {
+        const uint32_t at = entry++;
+        const uint8_t kind = writer->kinds[at];
+        const uint8_t class = writer->classes[at];
+        const uint64_t value = writer->values[at];
+        if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_CONST)
+        {
+            valid = depth < 2 && (kind != BUSTER_TYPED_LOCAL || value == 0) &&
+                    class >= BUSTER_TYPED_CLASS_I32 && class <= BUSTER_TYPED_CLASS_U64;
+            if (valid)
+            {
+                const uint64_t bits = kind == BUSTER_TYPED_LOCAL ? input : value;
+                stack[depth] = class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)bits : bits;
+                classes[depth++] = class;
+            }
+        }
+        else if (kind == BUSTER_TYPED_LT || kind == BUSTER_TYPED_EQ || kind == BUSTER_TYPED_GE || kind == BUSTER_TYPED_LE)
+        {
+            valid = depth == 2 && classes[0] == classes[1] && class == BUSTER_TYPED_CLASS_I32 && comparisons < budget;
+            if (valid)
+            {
+                const bool less = check_test_program_switch_less(stack[0], stack[1], classes[0]);
+                const bool greater = check_test_program_switch_less(stack[1], stack[0], classes[0]);
+                stack[0] = kind == BUSTER_TYPED_LT ? less : kind == BUSTER_TYPED_EQ ? stack[0] == stack[1] :
+                           kind == BUSTER_TYPED_GE ? !less : !greater;
+                classes[0] = BUSTER_TYPED_CLASS_I32;
+                depth = 1;
+                comparisons += 1;
+            }
+        }
+        else if (kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_JUMP)
+        {
+            const bool conditional = kind != BUSTER_TYPED_JUMP;
+            valid = depth == (conditional ? 1u : 0u) && value < writer->label_count;
+            const bool taken = valid && (!conditional || (stack[0] != 0) == (kind == BUSTER_TYPED_BRANCH_TRUE));
+            depth = 0;
+            if (taken)
+            {
+                if (value < 18)
+                {
+                    destination = (uint32_t)value;
+                }
+                else
+                {
+                    entry = writer->labels[value];
+                    valid = entry < writer->count;
+                }
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    return valid && destination == expected && depth == 0;
+}
+
+// #1371's checked-case producer contract, without another large source string in the compiler. The source-order
+// records are permuted, contain empty intervals and repeated destinations, and span both ends of each integer type.
+// Real source-to-native coverage, including selector effects and control flow, lives in tests/driver/tier1_sparse_switch.c.
+static void check_test_program_sparse_switches(CheckTest* test)
+{
+    CheckTestTypes types = { 0 };
+    Arena output = arena_reserve(UINT64_C(1) << 20);
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool ready = output.base != NULL && scratch.base != NULL && check_test_types_open(&types);
+    const TypeId unusual = ready ? type_bit_int(&types.table, 17, false) : 0;
+    const uint32_t type_count = ready ? types.table.types.count : 0;
+    uint8_t* type_classes = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, type_count) : NULL;
+    uint8_t* type_facts = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, type_count) : NULL;
+    ready = ready && unusual != 0 && type_classes != NULL && type_facts != NULL;
+    check_test_expect(test, ready, "sparse-switch planner fixture storage");
+    if (ready)
+    {
+        check_lower_classify_types_scalar(&types.table, type_count, type_classes, type_facts);
+    }
+    const uint64_t scratch_mark = scratch.length;
+    const TypeId builtin_types[] = { BUSTER_TYPE_INT, BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG };
+    for (uint32_t variant = 0; ready && variant < 9; variant += 1)
+    {
+        const bool dense = variant == 7;
+        const bool enabled = variant != 8;
+        TypeId type = variant < 4 ? builtin_types[variant] : variant == 5 ? BUSTER_TYPE_INT128 : variant == 6 ? unusual : BUSTER_TYPE_INT;
+        const uint8_t class = check_lower_type_class(&types.table, type);
+        const uint32_t count = variant == 4 ? 127 : variant == 1 || variant == 3 ? 129 : 128;
+        const uint32_t case_count = count + 2;
+        const uint32_t copies = variant == 0 ? 2 : 1;
+        const bool signed_type = type == BUSTER_TYPE_INT || type == BUSTER_TYPE_LONG;
+        const uint64_t mask = class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32 ? UINT32_MAX : UINT64_MAX;
+        const uint64_t sign = signed_type ? (mask >> 1) + 1 : 0;
+        CheckProgramCase cases[131] = { 0 };
+        CheckProgramCase original[131];
+        CheckControl controls[133] = { 0 };
+        uint32_t ranks[131] = { 0 };
+        controls[0] = (CheckControl){ .node = 0, .kind = CHECK_CONTROL_SWITCH };
+        for (uint32_t i = 0; i < case_count; i += 1)
+        {
+            const bool empty = i == 0 || i + 1 == case_count;
+            const uint32_t rank = empty ? 0 : ((i - 1) * 73) % count;
+            const uint64_t key = dense ? rank : rank == 0 ? 0 : rank + 1 == count ? mask :
+                                 (mask >> 1) - (uint64_t)(count / 2) * 100003 + (uint64_t)rank * 100003;
+            const uint64_t span = !dense && rank != 0 && rank + 1 != count && rank % 4 == 0 ? 2 : 0;
+            const uint64_t low = variant == 6 ? (uint64_t)rank * 997 : key ^ sign;
+            const uint64_t high = variant == 6 ? low : (key + span) ^ sign;
+            const unsigned __int128 high_bits = variant == 5 ? (unsigned __int128)1 << 100 : 0;
+            cases[i] = (CheckProgramCase){
+                .lower = empty ? 1 : high_bits | low,
+                .upper = empty ? 0 : high_bits | high,
+                .type = type,
+                .token = i + 1,
+                .owner = 0,
+                .target = 1 + rank % 17,
+                .range = empty || span != 0,
+            };
+            controls[i + 1] = (CheckControl){ .token = i + 1, .target = i, .kind = CHECK_CONTROL_CASE };
+            ranks[i] = rank;
+        }
+        controls[case_count + 1] = (CheckControl){ .target = 0, .kind = CHECK_CONTROL_JUMP };
+        memcpy(original, cases, sizeof(cases));
+        CheckProgramBody bodies[2] = {
+            { .count = case_count + 2 },
+            { .count = case_count + 2 },
+        };
+        uint32_t body_options[2] = { 0, 1 };
+        uint32_t switches[1] = { 0 };
+        const CheckStream stream = { .count = 1, .value_types = &type };
+        const CheckProgram program = {
+            .types = &types.table,
+            .stream = &stream,
+            .controls = controls,
+            .bodies = bodies,
+            .body_options = copies == 2 ? body_options : NULL,
+            .cases = cases,
+            .case_count = case_count,
+            .body_count = copies,
+            .switches = switches,
+            .switch_count = 1,
+            .status = CHECK_PROGRAM_OK,
+        };
+        CheckProgramLowered lowered = { 0 };
+        CheckLowerSwitchTrees trees = { 0 };
+        const bool planned = check_lower_switch_tables(&lowered, &trees, &program, enabled, &output, &scratch);
+        const uint32_t expected_trees = variant < 4 ? copies : 0;
+        bool same = planned && trees.count == expected_trees && lowered.table_count == (dense ? 1u : 0u) &&
+                    memcmp(cases, original, sizeof(cases)) == 0;
+        for (uint32_t b = 0; same && b < expected_trees; b += 1)
+        {
+            const CheckLowerSwitchTree* tree = check_lower_switch_tree_of(&trees, b, 0);
+            same = tree != NULL && tree->count == count && tree->controls == case_count && tree->fallback == 0;
+            for (uint32_t i = 0; same && i < count; i += 1)
+            {
+                const CheckLowerCaseRange item = tree->cases[i];
+                same = item.item < case_count && ranks[item.item] == i && item.label == cases[item.item].target && item.lower <= item.upper;
+            }
+        }
+        same = same && check_lower_switch_tree_of(&trees, copies, 0) == NULL && check_lower_switch_tree_of(&trees, 0, 1) == NULL;
+        char description[192];
+        snprintf(description, sizeof(description), "sparse-switch plan %u: exact ordering, source identity, empty intervals, policy and clone ownership", variant);
+        check_test_expect(test, same, description);
+        if (same && expected_trees != 0)
+        {
+            const uint32_t capacity = 4096;
+            uint32_t local = 0;
+            CheckLowerWriter writer = {
+                .program = &program,
+                .output = &lowered,
+                .capacity = capacity,
+                .class_limit = BUSTER_TYPED_CLASSES,
+                .switch_locals = &local,
+                .type_classes = type_classes,
+                .type_facts = type_facts,
+                .type_count = type_count,
+                .label_count = 18,
+                .track = true,
+                .reachable = true,
+                .stack_head = 1,
+                .stack_count = 1,
+                .scalar = true,
+            };
+            bool room = true;
+#define BUSTER_CHECK_TEST_SWITCH_COLUMN(field, element) writer.field = BUSTER_ARENA_PUSH_ARRAY(&scratch, element, capacity); room &= writer.field != NULL
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(kinds, uint8_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(classes, uint8_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(values, uint64_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(labels, uint32_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(label_heads, uint32_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(stack_parents, uint32_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(stack_classes, uint8_t);
+            BUSTER_CHECK_TEST_SWITCH_COLUMN(stack_bytes, uint8_t);
+#undef BUSTER_CHECK_TEST_SWITCH_COLUMN
+            check_test_expect(test, room, "sparse-switch dispatch fixture storage");
+            if (room)
+            {
+                memset(writer.label_heads, 0xff, 18 * sizeof(uint32_t));
+                writer.stack_parents[1] = 0;
+                writer.stack_classes[1] = BUSTER_TYPED_CLASS_U64;
+                writer.stack_bytes[1] = 0;
+                check_lower_switch_tree(&writer, trees.items, 0);
+                bool executed = lowered.status == CHECK_PROGRAM_OK && writer.count < capacity && !writer.reachable && writer.stack_head == 1;
+                for (uint32_t label = 0; label < 18; label += 1)
+                {
+                    executed = writer.label_heads[label] == 1 && executed;
+                }
+                uint32_t budget = 2 * BUSTER_CHECK_LOWER_TREE_LEAF_CASES;
+                for (uint32_t covered = BUSTER_CHECK_LOWER_TREE_LEAF_CASES; covered < count; covered *= 2)
+                {
+                    budget += 1;
+                }
+                for (uint32_t sample = 0; executed && sample < case_count * 4 + 128; sample += 1)
+                {
+                    const uint32_t item = sample / 4;
+                    const uint64_t input = item < case_count ? (uint64_t)(sample % 4 < 2 ? cases[item].lower : cases[item].upper) +
+                                                                  (sample % 4 == 0 ? UINT64_MAX : sample % 4 == 3 ? 1 : 0) :
+                                           ((uint64_t)check_test_random(test) << 32) | check_test_random(test);
+                    uint32_t expected = 0;
+                    for (uint32_t i = 0; expected == 0 && i < case_count; i += 1)
+                    {
+                        const bool within = !check_test_program_switch_less(input, (uint64_t)cases[i].lower, class) &&
+                                            !check_test_program_switch_less((uint64_t)cases[i].upper, input, class);
+                        expected = within ? cases[i].target : 0;
+                    }
+                    executed = check_test_program_switch_run(&writer, input, expected, budget);
+                }
+                check_test_expect(test, executed, "sparse-switch emitted branches match an independent linear oracle within logarithmic depth and keep pending operands");
+            }
+            // Failure in the retained-interval allocation must publish no partial plan or modify the checked cases.
+            CheckLowerCaseRange case_room[131];
+            CheckLowerCaseRange sorted_room[131];
+            CheckLowerSwitchTree failed_tree[1];
+            CheckLowerSwitchTrees failed_trees = { .items = failed_tree, .capacity = 1 };
+            CheckLowerTable failed_table[1];
+            CheckProgramLowered failed = { .tables = failed_table };
+            const uint64_t old_capacity = scratch.capacity;
+            const uint64_t failed_mark = scratch.length;
+            const uint64_t output_mark = output.length;
+            scratch.capacity = failed_mark;
+            const bool failed_ok = check_lower_switch_table(&failed, 1, &failed_trees, &program, 0, 0, class, case_room, sorted_room, &output, &scratch);
+            check_test_expect(test, !failed_ok && failed_trees.count == 0 && failed.table_count == 0 && scratch.length == failed_mark &&
+                                   output.length == output_mark && memcmp(cases, original, sizeof(cases)) == 0,
+                              "sparse-switch interval exhaustion publishes no plan and preserves live prefixes and checked cases");
+            scratch.capacity = old_capacity;
+        }
+        arena_pop_to(&scratch, scratch_mark);
+        arena_pop_to(&output, 0);
+    }
+    check_test_types_close(&types);
+    arena_release(&scratch);
+    arena_release(&output);
 }
 
 #include "c_check_program_select_test.c"
@@ -3802,6 +4074,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     {
         check_test_program_declaring(test);
         check_test_program_refused(test);
+        check_test_program_sparse_switches(test);
         check_test_program_type_facts(test);
         check_test_program_selection(test, clang);
         check_test_program_overloads(test, clang);

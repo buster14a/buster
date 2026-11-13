@@ -15,7 +15,10 @@ for AMD Zen 5. The lexer, x86 encoder, lane base layer, ELF object writer and
 first static-executable path are implemented; a complete C compilation
 pipeline is still being built.
 
-Build with Clang, CMake 3.25 or later and Ninja on the intended host:
+Build on the intended host. `build.sh` builds with CI's toolchain, the official
+Clang, CMake and Ninja releases that `tools/ci/hosted-tools.lock` pins, which it
+stages once in `~/.cache/buster` (`zstd` and the network needed then;
+`BUSTER_TOOLCHAIN=path` uses the Clang 23, CMake 3.25+ and Ninja on `PATH`):
 
 ```sh
 ./build.sh
@@ -24,8 +27,9 @@ Build with Clang, CMake 3.25 or later and Ninja on the intended host:
 
 The build produces one executable, `build/compiler`, using `-march=native`:
 `./build.sh` configures CMake's Ninja Multi-Config tree in `build/cmake/`, builds
-the Release configuration incrementally (`--config Debug` for the other), and
-publishes it there; `CMakePresets.json` drives the same tree with CMake and
+the Develop configuration, the edit loop's, incrementally (`--config Release` for
+the product and for every timing or benchmark, `--config Debug` for a debugger),
+and publishes it there; `CMakePresets.json` drives the same tree with CMake and
 CTest directly ([the build guide](docs/commands/build.md)).
 Its stage 1 link prefers an installed Wild, then mold, then the system linker.
 Set `BUSTER_LINKER=system|wild|mold|lld|bfd` or an absolute executable path to

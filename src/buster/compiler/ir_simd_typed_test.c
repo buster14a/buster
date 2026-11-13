@@ -1156,6 +1156,194 @@ static void ir_simd_typed_test_permutes(IrTestTally* tally)
            decoded_rows[1], decoded_rows[2], decoded_rows[3]);
 }
 
+// The byte shuffles by an immediate (#1840): every front-end rule of pshufd (its 32-byte one AVX2's VEX form), pshuflw,
+// pshufhw, pslldqi and psrldqi at each width (tier1_masks_test_shuffle_immediate_kind), at 8 immediates, decodes as the
+// IR's shuffle by its kind's indices at the immediate's low 8 bits, at exactly AVX512F's, VL's below 64 bytes and BW's
+// for all but pshufd, written out; refused without each and under 9 changes.
+static void ir_simd_typed_test_shuffle_immediates(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX2) };
+    uint32_t decoded_rows[BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS] = { 0 };
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const uint32_t kind = tier1_masks_test_shuffle_immediate_kind(rule);
+        for (uint32_t code = 0; kind < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS && code < 8; code += 1)
+        {
+            const uint32_t immediate = tier1_masks_test_shuffle_immediate_value(kind, code);
+            Tier0Operation row;
+            char description[224];
+            const bool made = check_x86_lower_row_of(&every, rule, immediate, 4, 0, false, &row) == NULL;
+            snprintf(description, sizeof(description), "%s (immediate %u): its row is the front end's", rule->name, immediate);
+            ir_test_expect(tally, made, description);
+            if (!made)
+            {
+                continue;
+            }
+            const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                      (kind != BUSTER_IR_SHUFFLE_IMMEDIATE_DWORDS ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+            IrSimdTypedOperation decoded;
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+            snprintf(description, sizeof(description), "%s (immediate %u): the IR's shuffle by the indices of kind %u at exactly its features", rule->name, immediate, kind);
+            const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.shuffle_immediate == kind + 1 && decoded.immediate == (immediate & 0xff) &&
+                            decoded.permute == 0 && decoded.operation == IR_SIMD_OPERATION_COUNT && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected;
+            ir_test_expect(tally, ok, description);
+            decoded_rows[kind] += ok;
+            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+            {
+                IrSimdTypedOperation without;
+                memset(&without, 0x5a, sizeof(without));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                const bool needed = (expected & features[f]) != 0;
+                snprintf(description, sizeof(description), "%s (immediate %u): without a feature it needs it stays the machine row, and needs no other", rule->name, immediate);
+                ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.shuffle_immediate == kind + 1, description);
+            }
+            for (uint32_t m = 0; m < 9; m += 1)
+            {
+                Tier0Operation changed = row;
+                X86Instruction* first = &changed.records[0];
+                switch (m)
+                {
+                case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+                case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
+                case 2: first->rm = BUSTER_TIER0_ROLE_VECTOR(1); break;
+                case 3:
+                    first->reg = first->reg != 0 ? BUSTER_TIER0_ROLE_VECTOR(1) : 0;
+                    first->vvvv = first->vvvv != 0 ? BUSTER_TIER0_ROLE_VECTOR(1) : 0;
+                    break;
+                case 4: changed.result_bytes = (uint8_t)(rule->bytes == 64 ? 32 : 64); break;
+                case 5:
+                    changed.records[1] = changed.records[0];
+                    changed.record_count = 2;
+                    break;
+                case 6: first->displacement = 4; break;
+                case 7: first->immediate = 256; break;
+                case 8:
+                    changed.operand_count = 2;
+                    changed.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+                    changed.operand_bytes[1] = (uint8_t)rule->bytes;
+                    break;
+                }
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                snprintf(description, sizeof(description), "%s (immediate %u, change %u): not the IR's shuffle by a constant", rule->name, immediate, m);
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && decoded.shuffle_immediate == 0 && !decoded.machine), description);
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows[0] == 3 * 8 && decoded_rows[1] == 3 * 8 && decoded_rows[2] == 3 * 8 && decoded_rows[3] == 3 * 8 && decoded_rows[4] == 3 * 8,
+                   "every byte shuffle by an immediate decodes");
+    printf("  IR SIMD rows: the front end's byte shuffles by an immediate decode to the IR's shuffle by a constant: %u of doublewords, %u and %u of words, %u and %u byte shifts\n",
+           decoded_rows[0], decoded_rows[1], decoded_rows[2], decoded_rows[3], decoded_rows[4]);
+}
+
+// The byte shuffles' indices as vpshufb reads them (#1840): its zeroing bit, else the low 4 bits.
+static void ir_simd_typed_test_effective(const uint8_t* bytes, uint32_t count, uint8_t* effective)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        effective[i] = (uint8_t)((bytes[i] & BUSTER_IR_SHUFFLE_ZERO) != 0 ? BUSTER_IR_SHUFFLE_ZERO : bytes[i] & 15);
+    }
+}
+
+// Tier 1's match of a shuffle by a constant to a byte shuffle by an immediate (#1840, ir_simd_shuffle_immediate_match),
+// against every kind at every immediate, written out by brute force: each kind's indices at each immediate and width
+// match back to the first kind and immediate whose indices are the same, as vpshufb reads them; so do they with the
+// index bits vpshufb ignores set at random; random indices match exactly where some kind's at some immediate are theirs;
+// and indices whose 16-byte lanes differ never match.
+static void ir_simd_typed_test_shuffle_matches(IrTestTally* tally)
+{
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    uint32_t round_trips = 0;
+    uint32_t random_matches = 0;
+    uint32_t random_misses = 0;
+    bool ok = true;
+    for (uint32_t trial = 0; trial < 3 * BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS * 256 + 3 * 4096; trial += 1)
+    {
+        const uint32_t width = 16u << (trial % 3);
+        const bool exhaustive = trial < 3 * BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS * 256;
+        uint8_t indices[64];
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        const uint64_t random = state >> 11;
+        if (exhaustive)
+        {
+            // A kind's indices at an immediate, with the bits vpshufb ignores set at random.
+            ir_simd_shuffle_immediate_indices(trial / 3 / 256, trial / 3 % 256, indices);
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                indices[i] = (uint8_t)(indices[i] | ((random >> i) & 1 ? (random >> (i + 16) & 7) << 4 : 0));
+            }
+        }
+        else
+        {
+            // Random indices: from a kind's at a random immediate with one byte changed, or wholly random.
+            ir_simd_shuffle_immediate_indices((uint32_t)(random % BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS), (uint32_t)(random >> 8) & 255, indices);
+            indices[(random >> 16) & 15] = (uint8_t)(random >> 20);
+            for (uint32_t i = 0; (random >> 28) % 4 == 0 && i < 16; i += 1)
+            {
+                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                indices[i] = (uint8_t)(state >> 56);
+            }
+        }
+        for (uint32_t at = 16; at < width; at += 16)
+        {
+            memcpy(indices + at, indices, 16);
+        }
+        uint8_t lane[16];
+        ir_simd_typed_test_effective(indices, 16, lane);
+        // The brute force: the first kind, and its first immediate, whose indices are the lane's.
+        uint32_t oracle_kind = BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS;
+        uint32_t oracle_immediate = 0;
+        for (uint32_t k = 0; oracle_kind == BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS && k < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS; k += 1)
+        {
+            for (uint32_t immediate = 0; oracle_kind == BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS && immediate < 256; immediate += 1)
+            {
+                uint8_t candidate[16];
+                ir_simd_shuffle_immediate_indices(k, immediate, candidate);
+                const bool match = memcmp(candidate, lane, 16) == 0;
+                oracle_kind = match ? k : oracle_kind;
+                oracle_immediate = match ? immediate : oracle_immediate;
+            }
+        }
+        uint32_t kind = BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS;
+        uint32_t immediate = 0;
+        const bool found = ir_simd_shuffle_immediate_match(indices, width, &kind, &immediate);
+        uint8_t again[16];
+        ir_simd_shuffle_immediate_indices(found ? kind : 0, found ? immediate : 0, again);
+        const bool same = found == (oracle_kind < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS) && (!found || (kind == oracle_kind && memcmp(again, lane, 16) == 0));
+        ok = ok && same;
+        if (!same)
+        {
+            printf("  IR SIMD shuffle match: trial %u at %u bytes: found %u (kind %u, immediate %u), the brute force's kind %u immediate %u\n", trial, width, found ? 1u : 0u, kind, immediate,
+                   oracle_kind, oracle_immediate);
+        }
+        round_trips += exhaustive && found;
+        random_matches += !exhaustive && found;
+        random_misses += !exhaustive && !found;
+        // A later lane changed, as vpshufb reads it: never a match.
+        if (width > 16)
+        {
+            uint8_t changed[64];
+            memcpy(changed, indices, width);
+            const uint32_t at = 16 + (uint32_t)(random >> 40) % (width - 16);
+            changed[at] = (uint8_t)(lane[at % 16] == BUSTER_IR_SHUFFLE_ZERO ? 0 : (lane[at % 16] + 1) & 15);
+            uint32_t unused_kind = 0;
+            uint32_t unused_immediate = 0;
+            const bool uneven = ir_simd_shuffle_immediate_match(changed, width, &unused_kind, &unused_immediate);
+            ok = ok && !uneven;
+        }
+    }
+    ir_test_expect(tally, ok && round_trips == 3 * BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS * 256 && random_matches != 0 && random_misses != 0,
+                   "a shuffle by a constant matches the first byte shuffle by an immediate whose indices it has, at every kind, immediate and width, and no other");
+    printf("  IR SIMD shuffle match: %u kinds' indices at every immediate match back, %u random ones match and %u don't, as the brute force finds\n", round_trips, random_matches,
+           random_misses);
+}
+
 // The shifts by a scalar count (#1840): every front-end rule of the shifts by an int (CHECK_X86_LOWER_SHIFT:
 // __builtin_ia32_psllwi512 to __builtin_ia32_psraqi128, 27 of them) decodes as the IR's scalar shift of its lanes and
 // shift, written out from the builtin's name, at exactly its forms' features and its vectors' moves; refused without
@@ -2510,6 +2698,8 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_selects(tally);
     ir_simd_typed_test_conversions(tally);
     ir_simd_typed_test_permutes(tally);
+    ir_simd_typed_test_shuffle_immediates(tally);
+    ir_simd_typed_test_shuffle_matches(tally);
     ir_simd_typed_test_shifts(tally);
     ir_simd_typed_test_mask_vectors(tally);
     ir_simd_typed_test_lane_ops(tally);

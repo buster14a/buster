@@ -29,6 +29,25 @@ The interface declarations, include guards, build-ownership checks and
 documentation are original project material under the default terms. No new
 upstream implementation or generated input is introduced by this reorganization.
 
+The unknown-type comma-declaration recovery in `c_parser_impl.c`, its private
+diagnostic view in `c_check_prefix.c`, and the original parser and semantic
+driver regressions (#2640) are original project material under the default
+terms. The `ParseDeclGroup` invalid-type gate and declaration recovery in
+LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Parse/ParseDecl.cpp` and `ParseStmt.cpp` were consulted for behavioral
+facts. Clang is an external diagnostic oracle; no upstream implementation or
+test fixture is imported.
+
+The atomic compound-literal diagnostics and the narrow GNU statement-expression
+empty-body recovery in `c_check_initializer_input.c`, `c_checker_driver.c` and
+their semantic-driver regressions (#2441 item 5) are original project material
+under the default terms. LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s `clang/lib/Parse/ParseStmt.cpp`,
+`clang/lib/Sema/SemaExpr.cpp`, `SemaStmt.cpp` and `SemaInit.cpp` were consulted
+for the rejected-expression-statement, empty-body value and outer initialization
+diagnostic behavior. Clang is an external diagnostic oracle; no upstream
+implementation or test fixture is imported.
+
 The command-line warning vocabulary, unknown-option diagnostic policy and
 original CLI regressions in `c_preprocessor_warning_options.c`,
 `c_driver_warning_options_test.c` and their integration (#1467) are original
@@ -270,7 +289,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_types.c`, `src/buster/compiler/c_types_test.c`, `src/buster/compiler/c_types_benchmark.c`, `docs/c-types.md` | Original type table, hash-consing, record layout, conversion kernels, compatibility, composite types and printer, and their tests, benchmark and documentation; Default, with the public-domain SplitMix64 reference below. They follow clang 23's behaviour: clang's source (`ASTContext`, `ItaniumRecordLayoutBuilder`, `SemaExpr`'s conversions, `mergeTypes`, `TypePrinter`) was read for its rules and none of it is copied. clang runs externally as the tests' oracle on C the tests generate, and is not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
-| `src/buster/compiler/c_check_*.c`, `src/buster/compiler/c_checker*.c`, `docs/c-checker.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/) | Original semantic actions, scalar/vector expression checker, source/declaration and binding-event adapters, literal decoder, static-data producer, command, tests, benchmarks and documentation; Default. Existing project type, parser, binding, arena, Link and ELF-writer interfaces are reused. Fixtures and deterministic generated source/expressions are authored for this module; Clang runs externally as an acceptance/diagnostic, numeric-conversion and object-byte/relocation oracle, with no Clang implementation or external corpus imported. C conversion and constant-expression rules and ELF layouts are specification facts; the documentation records the supported subset and oracle configuration. The benchmark's generators, timing, counter and sample-selection helpers are original. |
+| `src/buster/compiler/c_check_*.c`, `src/buster/compiler/c_checker*.c`, `tests/checker/sources/` (the shared source fixtures, moved from `c_checker_test.c`'s table, #2053), `docs/c-checker.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/) | Original semantic actions, scalar/vector expression checker, source/declaration and binding-event adapters, literal decoder, static-data producer, command, tests, benchmarks and documentation; Default. Existing project type, parser, binding, arena, Link and ELF-writer interfaces are reused. Fixtures and deterministic generated source/expressions are authored for this module; Clang runs externally as an acceptance/diagnostic, numeric-conversion and object-byte/relocation oracle, with no Clang implementation or external corpus imported. C conversion and constant-expression rules and ELF layouts are specification facts; the documentation records the supported subset and oracle configuration. The benchmark's generators, timing, counter and sample-selection helpers are original. |
 | `src/buster/compiler/c_check_attribute_clang.inc` | Derived LLVM data, not first-party: the attribute spellings clang 23.1.5 knows in C for x86-64 Linux; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's attribute vocabulary (#147)" below has its inputs and procedure. |
 | `src/buster/compiler/c_check_attribute_subjects.inc` | Derived LLVM data, not first-party: the subjects and facts of clang 23.1.5's attributes in C, generated from `clang-tblgen`'s output for `Attr.td`; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's attribute subjects (#147)" below has its inputs and procedure. |
 | `src/buster/compiler/c_check_attribute_arguments.inc` | Derived LLVM data, not first-party: how clang 23.1.5's parser reads each attribute's arguments, generated from `clang-tblgen --gen-clang-attr-parser-string-switches` of `Attr.td` at `llvmorg-23.1.5` (sha256 `6014bff340878cf3c656bf3d1ccae64cfd33615d8245c4c5472d10ffd4dc6a1d`; the switches' output sha256 `ec0fd6707c4e45b5587c34520924e87b3f288ed69e342909707f6ea3d50e2868`), by apt.llvm.org's clang-tools-23 1:23.1.5; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. `docs/c-checker.md` has its procedure. |

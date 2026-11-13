@@ -208,6 +208,7 @@ resolve Ubuntu's mirrors failed every hosted job of four main runs in setup.
 | baseline runtime's 4 `.deb`s | `setup-baseline-runtime.sh`, through `cached-download.sh` | their SHA-256 digests |
 | frozen corpus | `fetch-corpus.sh`, through `cached-download.sh` | its SHA-256 digest |
 | c-testsuite and SQLite | `fetch-c-testsuite.sh`, `fetch-sqlite.sh` | their commits |
+| Lua 5.4.8 | `hosted-offline.sh lua`, through `cached-download.sh` | the release archive's SHA-256 digest |
 
 **Layout.** The bundle's `apt/` holds the downloaded `.deb`s and `MANIFEST`,
 which records the runner (`ImageOS`, `ImageVersion`, release, architecture),
@@ -222,8 +223,8 @@ records), and the version of each listed package the image already has
 - `hosted-apt-v1-IMAGEOS-IMAGEVERSION-LIST`: the apt closure, which is the
   image's, since it holds what that image lacks.
 - `hosted-ci-v1-SCRIPTS`: the rest, keyed by the contents of the scripts that
-  pin them. Their pins stay in those scripts: `nightly.sh` records
-  `fetch-corpus.sh`'s blob as the corpus identity.
+  pin them, including `hosted-offline.sh` for Lua. Their pins stay in those
+  scripts: `nightly.sh` records `fetch-corpus.sh`'s blob as the corpus identity.
 
 Each input is first read as a consumer reads it, offline. Only an input that
 fails so is acquired, and the log names every input's source
@@ -263,9 +264,16 @@ It then sets `BUSTER_HOSTED_OFFLINE`, `BUSTER_CI_CACHE` and
   image's lists nor its sources play any part, and there is no
   `apt-get update`. It then compares every recorded version with dpkg's, and
   lists them in the step summary.
-- With `BUSTER_CI_OFFLINE=1`, `cached-download.sh`, `fetch-c-testsuite.sh` and
-  `fetch-sqlite.sh` read the bundle alone. A missing file, a hash that doesn't
-  match or a broken mirror fails the step. Nothing is deleted or fetched again.
+- With `BUSTER_CI_OFFLINE=1`, `cached-download.sh`, `fetch-c-testsuite.sh`,
+  `fetch-sqlite.sh` and `hosted-offline.sh lua DIR` read the bundle alone. A
+  missing file, a hash that doesn't match or a broken mirror fails the step.
+  Nothing is deleted or fetched again.
+- `hosted-offline.sh lua DIR` verifies the same Lua 5.4.8 archive as the
+  runtime measurement before extracting its tree, including `src/luac.c`.
+  The hosted code-size qualification consumes that tree and the frozen
+  SQLite amalgamation with `measure-tier1-programs --sizes-only
+  --check-code-size=lua`. It validates both reports and enforces the Lua
+  bound, reusing the row's existing compiler with no timing or 9700X work.
 - A single-job workflow (`build.yml`, an empty `artifact-name`) is its own
   preparation. It restores the same caches and runs `prepare` itself.
 
@@ -299,10 +307,10 @@ The preparation job runs it before preparing. `hosted-inputs-drill.yml` adds
 two real-runner jobs:
 
 - **A shard's setup.** It takes Ubuntu's mirrors (every host apt's sources name,
-  and plain HTTP), packages.microsoft.com and GitHub's release, raw and package
-  hosts down before the handoff's restore, and github.com and
+  and plain HTTP), packages.microsoft.com, Lua and GitHub's release, raw and
+  package hosts down before the handoff's restore, and github.com and
   codeload.github.com right after it. Setup, the baseline runtime, the corpus
-  and both mirrors must still succeed.
+  and both mirrors must still succeed, as must extracting Lua.
 - **A warm preparation.** It prepares cold, keeps the bundle in a cache of its
   own, takes every source down, and requires a fresh restore to prepare with
   every input from the cache.

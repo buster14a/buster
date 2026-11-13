@@ -1034,6 +1034,8 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a Williams design's order, against each other.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+#include "buster/compiler/tier1_code_size.c"
+#include "buster/compiler/tier1_code_size_test.c"
 #include "buster/compiler/tier1_programs_measure.c"
 #endif
 // test-sqlite (#146): SQLite's shell by both tiers against clang's, over SQLite's CLI tests and tests/sqlite's scripts.

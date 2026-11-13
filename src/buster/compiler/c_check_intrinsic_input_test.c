@@ -370,9 +370,12 @@ static void check_test_intrinsic_no_scratch_large(CheckTest* test)
     uint8_t* roles = malloc(COUNT + 1);
     uint8_t* deferred = calloc(COUNT + 1, 1);
     uint32_t* names = malloc((COUNT + 1) * sizeof(uint32_t));
+    // No token closes a call (each one's parent is 0), which the pass reads of each intrinsic's operand.
+    uint32_t* parents = calloc(COUNT + 1, sizeof(uint32_t));
     Arena arena = arena_reserve(4096);
     Arena scratch = arena_reserve(4096);
-    bool ready = kinds != 0 && roles != 0 && deferred != 0 && names != 0 && arena.base != 0 && scratch.base != 0 && intern_initialize(&identifiers);
+    bool ready = kinds != 0 && roles != 0 && deferred != 0 && names != 0 && parents != 0 && arena.base != 0 && scratch.base != 0 &&
+                 intern_initialize(&identifiers);
     for (uint32_t i = 0; ready && i < COUNT; i += 1)
     {
         char spelling[32];
@@ -394,7 +397,7 @@ static void check_test_intrinsic_no_scratch_large(CheckTest* test)
     if (ready)
     {
         Preprocessor pp = { .table = &identifiers };
-        Parser parser = { .tokens = { .kinds = kinds, .names = names, .count = COUNT + 1 }, .tree = { .roles = roles } };
+        Parser parser = { .tokens = { .kinds = kinds, .names = names, .count = COUNT + 1 }, .tree = { .roles = roles, .parents = parents } };
         scratch.capacity = 0;
         deferred[COUNT] = 1;
         for (uint32_t variant = 0; variant < 2; variant += 1)
@@ -425,15 +428,240 @@ static void check_test_intrinsic_no_scratch_large(CheckTest* test)
     arena_release(&scratch);
     arena_release(&arena);
     intern_release(&identifiers);
+    free(parents);
     free(names);
     free(deferred);
     free(roles);
     free(kinds);
 }
 
+// #893's memo of each name's catalogue answer, kept with the intern table: synthetic units of operands, calls, other
+// identifiers and deferred tokens over spellings of rows (generic, x86 and library names, the near misses of each) and
+// of no row (short and long), checked against an independent scan of every token by the exact search alone. Each unit
+// runs on a fresh table on both paths, and in turn on two tables that the units share, one a path's, which grow past
+// their first room between units. Every run must give the oracle's distinct rows and calls, leave each name's code
+// exact and none pending, and give the unit's cache the exact answer of each name it has or UINT32_MAX.
+enum
+{
+    CHECK_TEST_INTRINSIC_MEMO_UNITS = 6,
+    CHECK_TEST_INTRINSIC_MEMO_TOKENS = 3000,
+    CHECK_TEST_INTRINSIC_MEMO_SPELLINGS = 400,
+};
+
+typedef struct CheckIntrinsicMemoUnit CheckIntrinsicMemoUnit;
+struct CheckIntrinsicMemoUnit
+{
+    uint16_t spellings[CHECK_TEST_INTRINSIC_MEMO_TOKENS];
+    uint8_t kinds[CHECK_TEST_INTRINSIC_MEMO_TOKENS];
+    uint8_t roles[CHECK_TEST_INTRINSIC_MEMO_TOKENS];
+    uint8_t deferred[CHECK_TEST_INTRINSIC_MEMO_TOKENS];
+    uint32_t parents[CHECK_TEST_INTRINSIC_MEMO_TOKENS];
+    uint32_t names[CHECK_TEST_INTRINSIC_MEMO_TOKENS];
+    bool deferring;
+};
+
+// The memo code the exact search gives `name` of `table`.
+static uint32_t check_test_intrinsic_exact_code(const InternTable* table, uint32_t name)
+{
+    const InternSpan span = table->spans[name];
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)table->records + span.offset, span.length);
+    return info != NULL ? BUSTER_CHECK_INTRINSIC_ROW + (uint32_t)(info - builtin_intrinsic_infos) : BUSTER_CHECK_INTRINSIC_MISS;
+}
+
+// Runs `unit` on `table` (its spellings interned there first) by one path, and checks it against the oracle.
+static void check_test_intrinsic_memo_run(CheckTest* test, CheckIntrinsicMemoUnit* unit, InternTable* table, char (*spellings)[48], bool scalar,
+                                          const char* description)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < CHECK_TEST_INTRINSIC_MEMO_TOKENS; i += 1)
+    {
+        const char* spelling = spellings[unit->spellings[i]];
+        unit->names[i] = unit->kinds[i] == PARSE_KIND_IDENTIFIER ? intern_find_or_add(table, (const uint8_t*)spelling, (uint32_t)strlen(spelling)) : 0;
+        valid = unit->kinds[i] != PARSE_KIND_IDENTIFIER || unit->names[i] != 0;
+    }
+    Arena arena = arena_reserve(UINT64_C(1) << 22);
+    Arena scratch = arena_reserve(UINT64_C(1) << 22);
+    valid = valid && arena.base != NULL && scratch.base != NULL;
+    Preprocessor pp = { .table = table };
+    Parser parser =
+    {
+        .tokens = { .kinds = unit->kinds, .names = unit->names, .count = CHECK_TEST_INTRINSIC_MEMO_TOKENS },
+        .tree = { .roles = unit->roles, .parents = unit->parents },
+        .options = { .scalar = scalar },
+    };
+    CheckInput output = { .deferred_tokens = unit->deferring ? unit->deferred : NULL };
+    CheckInputReader reader = { .output = &output, .parser = &parser, .pp = &pp, .arena = &arena, .scratch = &scratch };
+    // The oracle: each operand's name by the exact search (`operands` marks the names of operands), a row's first operand
+    // counting a declaration and each of its call-shaped operands a call.
+    uint8_t* operands = valid ? calloc(table->count, 1) : NULL;
+    uint32_t declarations = 0;
+    uint32_t calls = 0;
+    valid = valid && operands != NULL;
+    for (uint32_t token = 0; valid && token < CHECK_TEST_INTRINSIC_MEMO_TOKENS; token += 1)
+    {
+        if (check_input_intrinsic_operand(&reader, token))
+        {
+            const uint32_t name = unit->names[token];
+            if (check_test_intrinsic_exact_code(table, name) != BUSTER_CHECK_INTRINSIC_MISS)
+            {
+                declarations += operands[name] == 0;
+                calls += check_input_intrinsic_call_shape(&parser, token);
+            }
+            operands[name] = 1;
+        }
+    }
+    const bool initialized = valid && check_input_intrinsic_initialize(&reader);
+    bool exact = initialized && table->intrinsic_rows != NULL && output.intrinsic_declaration_capacity == declarations && output.intrinsic_call_capacity == calls &&
+                 (reader.intrinsic_names != NULL) == (declarations != 0);
+    for (uint32_t name = 1; exact && name < table->count; name += 1)
+    {
+        const uint32_t code = table->intrinsic_rows[name];
+        const uint32_t expected = check_test_intrinsic_exact_code(table, name);
+        exact = code == BUSTER_CHECK_INTRINSIC_UNKNOWN ? operands[name] == 0 : code == expected;
+        if (exact && reader.intrinsic_names != NULL)
+        {
+            const uint32_t cached = reader.intrinsic_names[name];
+            const uint32_t answer = expected == BUSTER_CHECK_INTRINSIC_MISS ? 0 : UINT32_C(0x80000000) | (expected - BUSTER_CHECK_INTRINSIC_ROW);
+            exact = cached == answer || (cached == UINT32_MAX && code == BUSTER_CHECK_INTRINSIC_UNKNOWN);
+        }
+    }
+    check_test_expect(test, exact, description);
+    if (!exact)
+    {
+        fprintf(stderr, "intrinsic memo %s (%s): declarations %u of %u, calls %u of %u\n", description, scalar ? "scalar" : "vector",
+                output.intrinsic_declaration_capacity, declarations, output.intrinsic_call_capacity, calls);
+    }
+    free(operands);
+    arena_release(&scratch);
+    arena_release(&arena);
+}
+
+static void check_test_intrinsic_memo(CheckTest* test)
+{
+    // The spellings: rows spread over the catalogue (its generic, x86 and plain library names), a few named ones, a near
+    // miss of each, and names of no row, short ones (the filter's byte loads) and long ones.
+    static char spellings[CHECK_TEST_INTRINSIC_MEMO_SPELLINGS][48];
+    const char* named[] = { "memcpy", "printf", "__builtin_expect", "__builtin_ia32_pause", "__builtin_ia32_crc32si", "abs", "__builtin_popcount" };
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(named); i += 1)
+    {
+        snprintf(spellings[count], sizeof(spellings[count]), "%s", named[i]);
+        snprintf(spellings[count + 1], sizeof(spellings[count + 1]), "%sx", named[i]);
+        count += 2;
+    }
+    for (uint32_t i = 0; count + 2 <= 120; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + (uint64_t)i * 2654435761u % BUSTER_BUILTIN_INTRINSIC_COUNT;
+        if (info->name_length + 2 < sizeof(spellings[0]))
+        {
+            snprintf(spellings[count], sizeof(spellings[count]), "%s", info->name);
+            snprintf(spellings[count + 1], sizeof(spellings[count + 1]), "%.*s", (int)info->name_length - 1, info->name);
+            count += 2;
+        }
+    }
+    for (; count < CHECK_TEST_INTRINSIC_MEMO_SPELLINGS; count += 1)
+    {
+        const uint32_t i = count - 120;
+        if (i % 3 == 0)
+        {
+            snprintf(spellings[count], sizeof(spellings[count]), "%c%c", 'a' + (int)(i % 26), 'a' + (int)(i / 26 % 26));
+        }
+        else
+        {
+            snprintf(spellings[count], sizeof(spellings[count]), "ordinary_memo_operand_%u", i);
+        }
+    }
+    CheckIntrinsicMemoUnit* units = calloc(CHECK_TEST_INTRINSIC_MEMO_UNITS, sizeof(CheckIntrinsicMemoUnit));
+    check_test_expect(test, units != NULL, "intrinsic memo units allocate");
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t u = 0; units != NULL && u < CHECK_TEST_INTRINSIC_MEMO_UNITS; u += 1)
+    {
+        CheckIntrinsicMemoUnit* unit = units + u;
+        // Unit 1 opens with 600 tokens of one row's name and its near miss, so that on a fresh table more than 64 operands
+        // wait for a batch of two names; the others draw each unit's spellings from a band of the pool, so that later
+        // units meet names earlier ones had.
+        unit->deferring = u % 2 == 1;
+        for (uint32_t i = 0; i < CHECK_TEST_INTRINSIC_MEMO_TOKENS;)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            const uint32_t band = 40 + u * 50;
+            const uint32_t spelling = u == 1 ? (i < 600 ? (uint32_t)(state % 2) + 4 : (uint32_t)(state % CHECK_TEST_INTRINSIC_MEMO_SPELLINGS)) :
+                                               (uint32_t)(state >> 20) % band % CHECK_TEST_INTRINSIC_MEMO_SPELLINGS;
+            const uint32_t shape = (uint32_t)(state >> 40) % 8;
+            unit->deferred[i] = (state >> 50) % 13 == 0;
+            unit->spellings[i] = (uint16_t)spelling;
+            unit->kinds[i] = PARSE_KIND_IDENTIFIER;
+            unit->roles[i] = shape == 7 ? PARSE_ROLE_NONE : PARSE_ROLE_OPERAND;
+            unit->parents[i] = 0;
+            if (shape < 3 && i + 3 <= CHECK_TEST_INTRINSIC_MEMO_TOKENS)
+            {
+                unit->kinds[i + 1] = PARSE_KIND_L_PAREN;
+                unit->roles[i + 1] = PARSE_ROLE_OPEN_CALL;
+                unit->kinds[i + 2] = PARSE_KIND_R_PAREN;
+                unit->roles[i + 2] = PARSE_ROLE_CLOSE_CALL;
+                unit->parents[i] = i + 2;
+                unit->parents[i + 1] = i + 2;
+                unit->parents[i + 2] = 0;
+                unit->deferred[i + 1] = unit->deferred[i];
+                unit->deferred[i + 2] = unit->deferred[i];
+                i += 3;
+            }
+            else
+            {
+                i += 1;
+            }
+        }
+    }
+    InternTable shared[2] = { 0 };
+    bool ready = units != NULL && intern_initialize(&shared[0]) && intern_initialize(&shared[1]);
+    check_test_expect(test, ready, "intrinsic memo tables initialize");
+    for (uint32_t u = 0; ready && u < CHECK_TEST_INTRINSIC_MEMO_UNITS; u += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            InternTable fresh = { 0 };
+            const bool fresh_ready = intern_initialize(&fresh);
+            check_test_expect(test, fresh_ready, "a fresh intrinsic memo table initializes");
+            if (fresh_ready)
+            {
+                check_test_intrinsic_memo_run(test, units + u, &fresh, spellings, path == 0, "a unit on a fresh table gives the exact intrinsic sizing and memo");
+            }
+            intern_release(&fresh);
+            check_test_intrinsic_memo_run(test, units + u, &shared[path], spellings, path == 0,
+                                          "a unit on a table earlier units filled gives the exact intrinsic sizing, memo and cache");
+        }
+        // Past the first unit, the shared tables outgrow their first room, which moves their memos to larger ones.
+        for (uint32_t i = 0; u == 1 && i < 2; i += 1)
+        {
+            const uint32_t before = shared[i].capacity;
+            for (uint32_t filler = 0; ready && shared[i].capacity == before; filler += 1)
+            {
+                char spelling[48];
+                const int length = snprintf(spelling, sizeof(spelling), "intrinsic_memo_filler_%u", filler);
+                ready = intern_find_or_add(&shared[i], (const uint8_t*)spelling, (uint32_t)length) != 0;
+            }
+            check_test_expect(test, ready && intern_intrinsic_rows(&shared[i]) != NULL && shared[i].intrinsic_capacity >= shared[i].count,
+                              "a grown intern table's intrinsic memo grows with it and keeps its codes");
+        }
+    }
+    if (ready)
+    {
+        const bool reset = intern_reset(&shared[0]);
+        check_test_expect(test, reset && shared[0].intrinsic_rows == NULL && shared[0].intrinsic_capacity == 0,
+                          "resetting an intern table drops its ids' intrinsic codes");
+        check_test_intrinsic_memo_run(test, units + 0, &shared[0], spellings, false, "a reset table's units look their names up again");
+    }
+    intern_release(&shared[1]);
+    intern_release(&shared[0]);
+    free(units);
+}
+
 static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* test, const char* clang)
 {
     check_test_intrinsic_no_scratch_large(test);
+    check_test_intrinsic_memo(test);
     const CheckIntrinsicInputFixture fixtures[] =
     {
         {

@@ -56,6 +56,8 @@ struct DifferentialOptions
     const char* generator_revision;
     const char* replay;
     const char* source_directory;
+    // Private self-test deadline selection; never accepted or saved as campaign configuration.
+    const char* fixture_timeout_label;
     DifferentialArguments buster_args;
     DifferentialArguments clang_args;
     DifferentialArguments tier0_args;
@@ -1218,6 +1220,16 @@ static bool differential_interesting_result(int result, const DifferentialSummar
     return valid;
 }
 
+static uint32_t differential_timeout_ms(const DifferentialOptions* options, const char* label, bool probe)
+{
+    // Preflight reuses compilation/execution labels. Only the deliberate hang in a fixture case gets a short
+    // watchdog; its versions, probes and other successful stages retain the configured production deadline.
+    const bool selected = options->fixture && !probe && options->fixture_timeout_label != NULL && label != NULL &&
+                          strcmp(label, options->fixture_timeout_label) == 0;
+    const uint32_t result = selected ? 1000 : options->timeout_ms;
+    return result;
+}
+
 static bool differential_compilers(const char* directory, const DifferentialOptions* options, unsigned generator, bool probe, char signature[128], bool* references)
 {
     static const char* const modes[] = {"clang-o0", "clang-o2", "buster-tier0", "buster-tier1"};
@@ -1235,7 +1247,7 @@ static bool differential_compilers(const char* directory, const DifferentialOpti
         DifferentialProcess compiled = {.kind = 5};
         if (valid)
         {
-            compiled = differential_process(directory, label, &arguments, options->timeout_ms, options->output_limit, options->output_limit, BUSTER_DIFFERENTIAL_MAX_BYTES);
+            compiled = differential_process(directory, label, &arguments, differential_timeout_ms(options, label, probe), options->output_limit, options->output_limit, BUSTER_DIFFERENTIAL_MAX_BYTES);
         }
         if (compiled.kind != 0)
         {
@@ -1252,7 +1264,7 @@ static bool differential_compilers(const char* directory, const DifferentialOpti
             DifferentialArguments run = {0};
             differential_add(&run, executable);
             snprintf(label, sizeof(label), "%s-run", modes[mode]);
-            const DifferentialProcess executed = differential_process(directory, label, &run, options->timeout_ms, options->output_limit, options->output_limit, options->source_limit);
+            const DifferentialProcess executed = differential_process(directory, label, &run, differential_timeout_ms(options, label, probe), options->output_limit, options->output_limit, options->source_limit);
             successful[mode] = executed.kind == 0 && executed.output_bytes[0] > 0;
             if (executed.kind != 0)
             {
@@ -1269,7 +1281,7 @@ static bool differential_compilers(const char* directory, const DifferentialOpti
     {
         DifferentialArguments arguments = {0};
         const bool configured = differential_compile_arguments(&arguments, options, 4, generator, 0, probe, false);
-        const DifferentialProcess executed = configured ? differential_process(directory, "buster-interpreter-run", &arguments, options->timeout_ms,
+        const DifferentialProcess executed = configured ? differential_process(directory, "buster-interpreter-run", &arguments, differential_timeout_ms(options, "buster-interpreter-run", probe),
                                                                                options->output_limit, options->output_limit, options->source_limit) : (DifferentialProcess){ .kind = 5 };
         interpreted = executed.kind == 0 && executed.output_bytes[0] > 0;
         if (!interpreted)
@@ -1325,7 +1337,7 @@ static bool differential_generate(const char* directory, const DifferentialOptio
     DifferentialProcess generated = {.kind = 5};
     if (valid)
     {
-        generated = differential_process(directory, "generate", &arguments, options->timeout_ms, generator == 0 ? options->source_limit : options->output_limit, options->output_limit, options->source_limit);
+        generated = differential_process(directory, "generate", &arguments, differential_timeout_ms(options, "generate", false), generator == 0 ? options->source_limit : options->output_limit, options->output_limit, options->source_limit);
     }
     valid = generated.kind == 0;
     if (!valid)

@@ -1999,6 +1999,58 @@ probe.
 3.50.4's `-c -g -Wall -Wextra` objects and diagnostics are the same bytes as main's on the vector path and with
 `--scalar`.
 
+## The intrinsics' set-up from a memo of each name's answer (#893)
+
+**What cost.** After #914's filter, the search in `check_input_intrinsic_initialize` was mostly gone, but the pass
+was still 1.62% of the cycles of musl's 1,336 units as one command, and about 0.6% of `-c sqlite3.c`, on the 9700X
+at main `26f0bb0e`. Each unit:
+
+- cleared a 4-byte cache as long as the lane's intern table, which grows with a command's units;
+- tested every operand again by scalar loads;
+- looked every distinct operand name up again, though the answer is the spelling's alone;
+- walked the operands twice.
+
+**Now.** [The design](builtin-intrinsic-filter.md#the-set-ups-memo-of-each-names-answer):
+
+- **The memo.** The intern table keeps each id's code (`InternTable.intrinsic_rows`), so a command's units look
+  each spelling up once.
+- **The pass.** One pass gathers 16 operands' codes at once and takes out of line only the operands that aren't a
+  miss's (`check_input_intrinsic_take`): a name not looked up yet, an operand waiting for a pending one, and a row's.
+- **Storage.** Only a unit with a row's name allocates. Its name cache is made from the memo, and the tables'
+  capacities are unchanged.
+
+**Measured on the 9700X.** Main `26f0bb0e` against the branch's `2c52baea`, each build from fresh copies (`time-runs
+--copies`), every step its own hold of the lock. [The
+record](https://github.com/buster14a/buster-performance/tree/72e69cbe7259088e6faf1ca04d4044ed833b6d93/docs/measurements/intrinsic-memo-893-2026-11-13)
+keeps the scripts, the receipts and the profiles.
+
+| workload | wall time | user cycles |
+| --- | ---: | ---: |
+| musl's 1,336 units, one command | 816.9 → 797.5 ms, −2.37% (−2.58% to −2.29% over copies) | −2.79% |
+| c-testsuite's 220 units, one command | 66.17 → 64.70 ms, −2.22% (−2.94% to −1.79%) | −3.16% |
+| `-c sqlite3.c` | 124.11 → 124.11 ms, −0.00% (−0.22% to +0.22%) | +0.10% (−0.36% to +0.37%) |
+| three c-testsuite units, one process each | within the copies' spread | −0.66%, −0.31%, −0.50% |
+
+- **musl's command.** The set-up's functions fall from 883 to 308 samples (−65%), and `memcmp` from 702 to 575.
+- **Byte-for-byte.** The objects and diagnostics of all three workloads are the same bytes as main's on the vector
+  path and with `--scalar`.
+
+**Three steps on the way, in the record:**
+
+- **The first version spilled.** It took each operand in the pass's own loop, and clang kept the loop's mask and the
+  batch's counts in stack memory around the inlined batch search: on `sqlite3.c` the function took more cycles than
+  main's for fewer instructions.
+- **A scalar loop for the mask instead of the gathers** gained −1.33% and −0.87% on the two commands, against the
+  gathers' −2.10% and −1.94%.
+- **The memo's first reservation** was the table's whole id room, 82 KB. That is past the arena's 64 KB of base
+  pages, so every process took the huge-page advice and a split mapping, +0.6% for a single-file process. It now
+  starts at 8 KB and doubles.
+
+**What's left.** A unit whose names the table has never seen still pays for looking each of them up. `-c sqlite3.c`
+has 10.8 K: the filter's key loads from the spellings, and the false positives' binary searches. The set-up takes
+384 samples of 20 compiles against main's 399, which is about 3.8 M cycles a compile, the same as before. A sharper
+filter or an exact table is the next step there.
+
 ## What remains of check-input (#1671)
 
 After #1692 and #1694, `check-input` is 43.15 ms on `-c sqlite3.c` (main `829eb71a`, the 9700X). A study found no
@@ -2534,6 +2586,100 @@ The record ([buster-performance#237](https://github.com/buster14a/buster-perform
 has the harness, BOLT's raw counts of main and of this change, the variants' patches, the coverage counts, the hint probe
 and the receipts.
 
+## Branch-free forms at the mispredicted sites (#892)
+
+[#892](https://github.com/buster14a/buster/issues/892) lists the sites of `-c sqlite3.c`'s mispredicted branches that
+have a branch-free form. #975 took its items 1, 3 and most of 4, and #1478's coded walk, which iterates compressed
+lists of the acting tokens, took item 2. This change takes item 4's last part, item 5 and other sites of a fresh LBR
+list at main `26f0bb0e`, and measures item 6.
+
+**How it was measured.** On the 9700X, CPU 2, each run under the lock with its holder's line kept as a receipt:
+`-c --lanes 1` of the frozen `sqlite3.c` with the CI's defines.
+- **The totals:** `perf stat -r 11` of the user-mode counters.
+- **The sites:** `perf record -j any,u -e cycles:u -c 200003` over 8 compiles. Each LBR entry's source is attributed
+  to its innermost inlined line with `llvm-symbolizer`.
+- **The objects:** `-c` by default, on one lane, with `--scalar`, `--verify` and `-g`, and the self-check's
+  diagnostics, each the same bytes as main's.
+- **The time:** `ab --lock` of `time-runs` (#509's method, `docs/profiling.md`). Each round is one locked process: main,
+  the change, the change with item 6's blocks (below) and main again, each at three placements of the checker's code
+  (`BUSTER_CHECKER_OFFSET` 0, 1040 and 2080, #1233), each from three fresh copies on tmpfs.
+
+At main, a compile retires 205.0 M branches, and 3.61 M of them mispredict. That is 2.67 per 1,000 instructions, at
+13 or more cycles each, about 8% of the compile's 600 M user cycles. The LBR's mispredicted entries are flat: the top 10
+sites hold 17% of them and the top 150 hold 56%.
+
+The largest are dispatches inside the walks:
+- the coded walk's `switch` on the class, 3.4%;
+- its splice of the children's values, 3.2% (#1646 measured its branch-free form slower);
+- `check_input_resolve_range`'s test for a plain name, 2.1%;
+- `check_program_references`' leaf test in its search, 1.5%;
+- `check_control_expand`'s statement dispatch, 1.3%.
+
+These need the walks restructured (#1671, #1050), not a select, so this change leaves them alone.
+
+**The sites taken,** with their mispredicted LBR entries at main and at the change, of 14,941 and 14,103 in all:
+
+| site | its test | branch-free form | main | change |
+| --- | --- | --- | ---: | ---: |
+| `parse_brackets_avx512` | each opener still open at a block's end | the block's open openers compressed into `open_stack`, a masked store a quarter: a delta is −1, 0 or 1, so their depths are consecutive | 298 | 0 |
+| `check_input_binding_answers` (item 5) | each event's operation, then its answer | the uses listed and the events counted by operation 64 at a time, each use's answer tested by selects | 151 | 0 |
+| `check_input_discarded_set` | the operator's kind and holder, read where found | the columns read at safe indices, then selected | 73 | 19, its separators' loop below |
+| `tier0_select_vector_entries` (item 4's per-call counts) | the loop over a call's argument classes | the floating classes counted by a masked compare of 64 | 43 | 0 |
+| `check_common_next_op`, `check_common_next_token` | whether the group's items were all taken | 64 items or more listed per refill (the operators, roles and kinds they read are written by no pass) | 278 | 0 |
+| `check_common_unreachable` | each entry: an unreached expression's root | the store through a selected pointer, the entry's own mark rewritten where it clears none | 101 | 0 |
+| `check_program_reference_roots` | each entry's push | the marks' last slot a sink, and the push stored past the top where the node is marked | 72 | 0 |
+
+**What it changes.** Against main, with `perf stat -r 11`:
+
+| | main | change | |
+| --- | ---: | ---: | ---: |
+| mispredicted branches | 3.607 M | 3.426 M | −5.0% |
+| per 1,000 instructions | 2.67 | 2.51 | −5.9% |
+| mispredicted taken branches | 1.912 M | 1.796 M | −6.1% |
+| retired branches | 204.9 M | 204.4 M | −0.3% |
+| instructions | 1,352.1 M | 1,364.8 M | +0.9% |
+
+Over the placements, in three rounds:
+
+| | user cycles | its range over the placements | wall time |
+| --- | ---: | ---: | ---: |
+| the change against main | −0.54%, −0.42%, −0.56% | −1.04% to −0.20% | −0.46%, −0.45%, −0.35% |
+| main against itself | +0.10%, −0.18%, −0.03% | −0.42% to +0.35% | +0.03%, −0.26%, +0.05% |
+
+In each round the change's range over the placements excludes 0, and its median is outside main's against itself:
+by `docs/profiling.md`'s rule, outside the floor.
+
+**Item 6, the graph run's leaves, not taken.** The form takes `check_graph_run`'s nodes in blocks of 64, a block's
+leaves first. That is exact: a leaf's record is its own, and every other node reads only earlier ones. It took the
+leaf test's entries off the list (155 at main). It also saved 7.7 M instructions and 0.24 ms of `check-expressions`
+(11.47 to 11.23 ms, medians of 12 runs from fresh copies). But the compile missed as many branches with it as
+without: 3.434 M against 3.426 M. The actions' own tests missed more, since the leaf tests had been part of their
+history. Over the same placements and rounds, the change with the blocks was 0.31%, 0.27% and 0.36% faster than main,
+against 0.54%, 0.42% and 0.56% without them.
+
+The LBR's totals by function move with a build's layout. `check_graph_run`'s mispredicted entries were 514 at main, 573
+with the blocks and 590 without them, where its code is main's. So the site counts above, not the functions' totals,
+show what each form removed.
+
+**Not taken:**
+- **`check_common_evaluated_tree`'s roots** (0.75% of the entries). `sqlite3.c` has dropped ranges, so each root
+  still tests its token. A form that tests every node's token is no cheaper than the misses it saves.
+- **`check_common_parents`' edge stores** (0.95%). Storing all 16 lanes through a sink adds about as many stores as
+  the misses cost.
+- **`check_input_resolve_next`'s scan of a second line** (0.47%). The scan would load another line at each visit, which
+  costs more than the misses it saves.
+- **The flush's chain of purities** (`check_input_batch_record`, 1.5%). It is serial through the purity mask, and a
+  fixed 16-lane loop is no faster.
+
+**A trap in the method.** An executable run many times from the same file had its text collapsed into file huge pages
+(`peak-rss-start-kb` 5,636 against 1,908). That took about 3 ms of user time and added as much system time, which
+skewed the first comparisons by stage. Every figure above comes from fresh copies.
+
+The record ([buster-performance#494](https://github.com/buster14a/buster-performance/pull/494),
+[`branch-free-sites-892-2026-11-13`](https://github.com/buster14a/buster-performance/tree/b9f27bd6f79544a96c4225a6a36be84b86130dfa/docs/measurements/branch-free-sites-892-2026-11-13))
+has the scripts, every run's counters, site lists and object hashes, the placements' and the stages' runs, and the
+receipts.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
@@ -2884,7 +3030,7 @@ It fails rather than report part of the attribution:
 
 - **The reference.** tcc 0.9.28rc 2026-01-17 (`/usr/bin/tcc`, sha256
   `49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082`).
-- **The compiler.** Built by the job with `BUSTER_DEBUG_INFO=0 ./build.sh`
+- **The compiler.** Built by the job with `BUSTER_DEBUG_INFO=0 ./build.sh --config Release`
   (clang 23, `-O3 -march=native`).
 
 **What it leaves out.**
