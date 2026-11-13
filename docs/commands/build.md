@@ -727,6 +727,11 @@ regression also builds the real opt-in compiler once and runs its baking checks.
 The parts are made after the optimizer, so a unit's `-O3` pipeline is still one
 serial job. The Develop configuration ([below](#develop)) moves the split in
 front of the optimizer, in a configuration of its own; Release keeps this one.
+Release split before the optimizer as Develop is, the design's step 5, failed
+its gate on the 9700X: `benchmark-assembler` ran 9.6% slower, and 4.6% after
+five changes to the splitter, where its clean build took 77.6 s against 86.4 s
+and an edit of `c_check_input.c` 32.5 s against 75.1 s ([A faster stage 1
+build](../stage1-build-design.md#step-5-measured), #2559).
 
 ## Develop
 
