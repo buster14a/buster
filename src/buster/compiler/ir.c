@@ -1286,7 +1286,7 @@ typedef enum IrRule
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
     X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
-    X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
+    X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | (1u << IR_F32) | (1u << IR_F64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0) \
     X(IR_MASKED_LOAD,   7, 7, BUSTER_IR_VECTORS, IR_RULE_MASKED_LOAD, 0) \
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0)
@@ -2113,7 +2113,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE)
                 {
-                    valid = ir_vector_type(type) && ir_vector_type(ta) && b == BUSTER_IR_NONE && ir_convert_flags_valid(c, ta, type, part);
+                    // An extension's source may be an SSE carrier (#1840: an F32 or F64, a vector of 4 or 8 bytes, #1280),
+                    // whose bytes it reads as a vector's low ones.
+                    const bool carrier = c == BUSTER_IR_INTRINSIC_EXTEND && (ta == IR_F32 || ta == IR_F64);
+                    valid = ir_vector_type(type) && (ir_vector_type(ta) || carrier) && b == BUSTER_IR_NONE && ir_convert_flags_valid(c, ta, type, part);
                 }
                 else if (c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
                 {
@@ -2139,11 +2142,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK)
                 {
-                    // One lane's zero-extended bits, or the lanes' sign bits, of a vector: a lane's index below its lanes.
+                    // One lane's zero-extended bits, or the lanes' sign bits, of a vector: a lane's index below its lanes. Lane 0
+                    // of doublewords or quadwords may be an SSE carrier too (#1840: an F32 or F64 of the vector's low 4 or 8
+                    // bytes, a cast's).
                     const uint32_t size = part & 3;
                     const uint32_t lanes = ir_vector_type(ta) ? ir_type_bits[ta] / (8u << size) : 0;
+                    const bool carrier = (part == 2 && type == IR_F32) || (part == 3 && type == IR_F64);
                     valid = b == BUSTER_IR_NONE && lanes != 0 &&
-                            (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
+                            (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? (type == (size == 3 ? IR_I64 : IR_I32) || carrier) && (part >> 2) < lanes :
                                                                     type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_REDUCE)

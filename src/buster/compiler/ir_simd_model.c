@@ -347,8 +347,11 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                 const bool extend = action->operation == IR_SIMD_EXTEND;
                 const uint32_t lanes = extend ? ir_simd_bits(type) / (8u << result) : ir_simd_bits(a) / (8u << source);
                 const uint32_t bits = lanes * (8u << result);
-                valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
-                        (extend ? result > source && mode <= 1 && lanes * (8u << source) <= ir_simd_bits(a) :
+                // An extension of an SSE carrier (#1840, a scalar to the model: no shape) reads its value's low 8 bytes at most,
+                // the verifier checking its type's bytes.
+                const bool carrier = extend && a == IR_SIMD_NONE;
+                valid = valid && ir_simd_vector(type) && (ir_simd_vector(a) || carrier) && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
+                        (extend ? result > source && mode <= 1 && lanes * (8u << source) <= (carrier ? 64u : ir_simd_bits(a)) :
                                   result < source && mode <= 2 && ir_simd_bits(type) == (bits > 128 ? bits : 128));
             } break;
             case IR_SIMD_LANE_OP:

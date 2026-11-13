@@ -736,9 +736,10 @@ static void ir_test_permutes(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 12 + 3 + 42 + 260, "every permute's valid flags are admitted, and no other");
 }
 
-// The conversions (#1840): extend and truncate between every pair of vector widths at every flags byte below 64, admitted
-// by both verifiers exactly where the lanes' sizes, mode and widths agree as written out here, and the model's lanes
-// against C's conversions of each lane on random vectors.
+// The conversions (#1840): extend and truncate between every pair of vector widths, and an extension of an SSE carrier
+// (an F32 or F64 of 4 or 8 bytes) into each width, at every flags byte below 64, admitted by both verifiers exactly where
+// the lanes' sizes, mode and widths agree as written out here, and the model's lanes against C's conversions of each lane
+// on random vectors.
 static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -747,7 +748,8 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
     for (uint32_t kind = BUSTER_IR_INTRINSIC_EXTEND; kind <= BUSTER_IR_INTRINSIC_TRUNCATE; kind += 1)
     {
         const bool extend = kind == BUSTER_IR_INTRINSIC_EXTEND;
-        for (uint32_t from = 0; from < 3; from += 1)
+        // The source: a vector of 16, 32 or 64 bytes, or a carrier (from 3, an F32; 4, an F64), which only an extension takes.
+        for (uint32_t from = 0; from < 5; from += 1)
         {
             for (uint32_t to = 0; to < 3; to += 1)
             {
@@ -756,12 +758,13 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
                     const uint32_t source = 1u << (flags & 3);
                     const uint32_t result = 1u << ((flags >> 2) & 3);
                     const uint32_t mode = flags >> 4;
-                    const uint32_t from_bytes = 16u << from;
+                    const bool carrier = from >= 3;
+                    const uint32_t from_bytes = carrier ? 4u << (from - 3) : 16u << from;
                     const uint32_t to_bytes = 16u << to;
                     const uint32_t lanes = extend ? to_bytes / result : from_bytes / source;
                     const uint32_t used = lanes * result;
                     const bool admitted = extend ? result > source && mode <= 1 && lanes * source <= from_bytes :
-                                                   result < source && mode <= 2 && to_bytes == (used > 16 ? used : 16);
+                                                   !carrier && result < source && mode <= 2 && to_bytes == (used > 16 ? used : 16);
                     admitted_count += admitted;
                     IrFunction function = {0};
                     const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
@@ -770,7 +773,7 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
                         ir_test_expect(test, false, "conversion verifier fixture allocation");
                         continue;
                     }
-                    const IrType a = (IrType)(IR_V4I32 + from);
+                    const IrType a = carrier ? (from == 3 ? IR_F32 : IR_F64) : (IrType)(IR_V4I32 + from);
                     const IrType type = (IrType)(IR_V4I32 + to);
                     function.result_type = IR_VOID;
                     function.block_offsets[1] = 3;
@@ -786,8 +789,10 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
                         {
                             state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
                             // Now and then a word of extreme lanes, at the saturations' edges.
-                            value_a.words[w] = w >= from_bytes / 8 ? 0 : (state & 3) == 0 ? UINT64_C(0x807f80017fff8000) : (state & 3) == 1 ? UINT64_MAX : state;
+                            value_a.words[w] = 8 * w >= from_bytes ? 0 : (state & 3) == 0 ? UINT64_C(0x807f80017fff8000) : (state & 3) == 1 ? UINT64_MAX : state;
                         }
+                        // A carrier's value is its type's bits alone, as the interpreter holds an F32's.
+                        value_a.words[0] = from_bytes == 4 ? value_a.words[0] & UINT32_MAX : value_a.words[0];
                         const IrSimdValue* operands[3] = { &value_a, 0, 0 };
                         const IrSimdAction action = {
                             .operation = extend ? IR_SIMD_EXTEND : IR_SIMD_TRUNCATE,
@@ -833,8 +838,10 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
         }
     }
     // Extends of each of the 6 pairs, zero and signed, to each width from each width wide enough, and truncates of each
-    // pair and mode from each width into the one its lanes fill (counted apart, by the conditions above: 156).
-    ir_test_expect(test, admitted_count == 156, "every conversion of the IR's vector widths is admitted, and no other");
+    // pair and mode from each width into the one its lanes fill (counted apart, by the conditions above: 156); and the
+    // carriers' extends, zero and signed, into each width whose lanes they hold: an F64's 10 pairs and widths, an F32's 4
+    // (2 * (10 + 4)).
+    ir_test_expect(test, admitted_count == 156 + 28, "every conversion of the IR's vector widths and carriers is admitted, and no other");
 }
 
 // The shifts by a scalar count (#1840): shift at every vector width, every flags byte below 32 and a count of each of
@@ -1080,8 +1087,9 @@ static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
 
 // One lane's moves and the lanes' sign bits (#1840): both verifiers admit lane_extract, lane_insert and movemask exactly
 // where the flags' lane is below the vector's lanes, the scalar an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of
-// 8 (movemask an I32 of a vector of 16 or 32 bytes, of bytes, doublewords or quadwords); and the model gives C's lane,
-// C's replaced lane and C's sign bits on random vectors.
+// 8, or an extraction's lane 0 of doublewords or quadwords into an SSE carrier, an F32 or an F64 (movemask an I32 of a
+// vector of 16 or 32 bytes, of bytes, doublewords or quadwords); and the model gives C's lane, C's replaced lane and C's
+// sign bits on random vectors.
 static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -1094,14 +1102,18 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
         {
             for (uint32_t flags = 0; flags < 256; flags += 1)
             {
-                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                // The scalar: the lane's integer, the other integer, or an SSE carrier (#1840: an F32 for lanes of 4 bytes or
+                // less, an F64 for 8), which lane 0 of doublewords or quadwords alone extracts into.
+                for (uint32_t scalar = 0; scalar < 3; scalar += 1)
                 {
                     const IrType vector = (IrType)(IR_V4I32 + width);
                     const uint32_t size = flags & 3;
                     const uint32_t lanes = (16u << width) >> size;
                     const IrType right = size == 3 ? IR_I64 : IR_I32;
-                    const IrType given = scalar == 0 ? right : right == IR_I64 ? IR_I32 : IR_I64;
-                    const bool admitted = kind == 2 ? scalar == 0 && flags <= 3 && flags != 1 && width < 2 : scalar == 0 && (flags >> 2) < lanes;
+                    const IrType given = scalar == 0 ? right : scalar == 1 ? (right == IR_I64 ? IR_I32 : IR_I64) : size == 3 ? IR_F64 : IR_F32;
+                    const bool admitted = kind == 2 ? scalar == 0 && flags <= 3 && flags != 1 && width < 2 :
+                                          kind == 0 ? (scalar == 0 && (flags >> 2) < lanes) || (scalar == 2 && (flags == 2 || flags == 3)) :
+                                                      scalar == 0 && (flags >> 2) < lanes;
                     expected_count += admitted;
                     IrFunction function = {0};
                     const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
@@ -1120,7 +1132,7 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
                     }
                     else
                     {
-                        const IrType result = kind == 2 ? (scalar == 0 ? IR_I32 : IR_I64) : given;
+                        const IrType result = kind == 2 ? (scalar == 0 ? IR_I32 : scalar == 1 ? IR_I64 : IR_F32) : given;
                         ir_test_instruction(&function, 2, IR_INTRINSIC, result, 0, BUSTER_IR_NONE, kind == 0 ? BUSTER_IR_INTRINSIC_LANE_EXTRACT : BUSTER_IR_INTRINSIC_MOVEMASK);
                     }
                     ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);

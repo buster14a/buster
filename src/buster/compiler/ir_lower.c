@@ -850,7 +850,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     else if (operation->lane_move != 0)
     {
         // One lane of a vector or its lanes' sign bits (#1840), its flags the lane: an extraction's I32 or I64 narrowed to
-        // the row's integer, and an insertion's integer widened to its I32 first.
+        // the row's integer (or an SSE carrier's F32 or F64, lane 0's), and an insertion's integer widened to its I32 first.
         const uint32_t kind = operation->lane_move - 1u;
         const uint32_t size = operation->immediate & 3;
         const IrType scalar = size == 3 ? IR_I64 : IR_I32;
@@ -863,7 +863,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         }
         else
         {
-            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : scalar;
+            // A cast into an SSE carrier (#1840: an F32 or F64) is lane 0's extraction at the carrier's type itself.
+            const bool carrier = type == IR_F32 || type == IR_F64;
+            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : carrier ? type : scalar;
             value = ir_typed_emit(sink, IR_INTRINSIC, produced, operands[0], BUSTER_IR_NONE, kind, 0);
             ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
             if (type != produced)

@@ -830,6 +830,77 @@ The tests:
   source, which an earlier version took as signed.
 - `test-checker-driver`'s machine-rows unit: 59 rows and 32 moves.
 
+## Casts into SSE carriers and their extensions (#1840)
+
+An SSE carrier (#1280) is a vector of 4 or 8 bytes, an `f32` or `f64` in the IR,
+in the vector class's registers. clang's headers make one before many
+conversions. `_mm256_cvtepu8_epi32`, for example, shuffles a vector's first
+8 bytes into a narrower vector, then converts that. The front end gives the
+pair as two rows: a cast with no record, then the extension of the carrier.
+Both are now the IR's, with no new operation:
+
+```text
+%3 = intrinsic.f64 %1 lane_extract 3
+%5 = intrinsic.v8i32 %3 extend 8
+```
+
+- **The cast** (`ir_simd_typed_carrier_cast`): a row of no record of a vector of
+  16, 32 or 64 bytes into one of 4 or 8. It is `lane_extract` of lane 0 of
+  doublewords or quadwords at the carrier's type. The verifier now admits an
+  `f32` or `f64` result for that lane alone, and `IR_INTRINSIC`'s result types
+  include them. Every other kind's rule still refuses them.
+- **The extension** (`ir_simd_typed_convert`): `extend`'s source may be a
+  carrier, whose bytes it reads as a vector's low ones. The verifier checks the
+  lanes against the type's bytes. The model takes the scalar operand's bits
+  (no shape), at most 8 bytes of them.
+- **The target** needs AVX512F, VL and the vectors' moves, as the conversions do.
+
+**Tier 1:**
+- The cast (`BUSTER_TIER1_VECTOR_LANE_EXTRACT`, `source_width` the carrier's
+  bytes) is nothing where the carrier takes the vector's register. Elsewhere
+  it is `tier1_select_carrier_move` into its own register, zero-extended. A
+  carrier may hold anything past its bytes, and every row reads one
+  zero-extended.
+- The extension is its form, which reads the carrier register's low bytes.
+- In the compiler's own units the allocator gives every such carrier its
+  vector's register. A fold of the cast into the extension (reading the vector
+  directly) gave the same records, so there is none.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Develop builds)
+compiling this change's sources, against main (`26f0bb0e`), with the byte
+shuffles by an immediate above:
+
+| Unit | Rows before | Rows after | Records before | Records after |
+| --- | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 1 | 1 | 635,525 | 635,525 |
+| `main_unit_backend.c` | 268 | 132 | 1,602,817 | 1,602,779 |
+
+The 19 casts and 19 extensions (`vpmovzxbd` of 32 bytes, `vpmovzxbq` of 64)
+leave the units. The 38 records fewer are the moves each extension's row made
+of its carrier into its role.
+
+The tests:
+
+- **`test-ir`:**
+  - both verifiers admit `extend` of an `f32` or `f64` into every width whose
+    lanes it holds, at every flags byte (28 forms), and the model's lanes are
+    C's;
+  - `lane_extract` into an `f32` or `f64` is admitted for lane 0 of
+    doublewords or quadwords alone, at every width.
+- **`test-ir-parse`:** `tests/ir/carriers.ir` round-trips.
+- **`test-ir-simd`:**
+  - the 6 casts (4 and 8 bytes, from 16, 32 and 64) and the real producer's 18
+    whole-lane extensions of a carrier decode at exactly their features;
+  - each is refused without each feature and under changes.
+- **`test-tier1-masks`:** 48 programs through both lowering paths and Tier 1
+  natively, against C:
+  - the 18 extensions of a cast, and of a carrier loaded from memory, through
+    the interpreter at every stage too;
+  - the 6 casts stored whole;
+  - the 6 casts whose vector stays live past them into a machine row's
+    `vpaddd` or `vpaddq`, so the carrier needs its own register. With the
+    carrier's move left out, these 48 runs fail.
+
 ## Shifts by a scalar count (#1840)
 
 One more binary kind of `intrinsic`, `shift` (`BUSTER_IR_INTRINSIC_SHIFT`),

@@ -1661,6 +1661,16 @@ static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles
     {
         tier1_select_append(result, tier1_select_register_record(ir_simd_movemask_forms[size][width == 32], x, holes->left & 15));
     }
+    else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT && holes->source_width != 0)
+    {
+        // Lane 0 into an SSE carrier (#1840, `source_width` its bytes, 4 or 8): the vector's low bytes in the carrier's
+        // register, which may hold anything past them (every row reads a carrier zero-extended); moved zero-extended into
+        // another register, and nothing in its own.
+        if (x != (holes->left & 15))
+        {
+            tier1_select_append(result, tier1_select_carrier_move(x, holes->left & 15, holes->source_width, holes->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX));
+        }
+    }
     else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT)
     {
         uint8_t source = holes->left & 15;
@@ -6587,10 +6597,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     else if (forest->vectors && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK) && a < function->instruction_count)
     {
         // A vector's lane, or its lanes' sign bits, into a general register (#1840): TIER1_RULE_VECTOR's of the vector's
-        // width, its destination the general one.
+        // width, its destination the general one; or lane 0 into an SSE carrier, `source_width` its bytes.
         base.rule = TIER1_RULE_VECTOR;
         base.width = (uint8_t)tier1_select_vector_width(function->type[a]);
         base.scale = c == BUSTER_IR_INTRINSIC_MOVEMASK ? BUSTER_TIER1_VECTOR_MOVEMASK : BUSTER_TIER1_VECTOR_LANE_EXTRACT;
+        base.source_width = (uint8_t)(c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? tier1_select_float_width(type) : 0);
         base.immediate = function->flags[node];
         base.values[0] = a;
         base.intrinsic_cost = 1;

@@ -1425,6 +1425,73 @@ static void ir_simd_typed_test_shifts(IrTestTally* tally)
     printf("  IR SIMD rows: the front end's %u shifts by an int decode to the IR's shift\n", decoded_rows);
 }
 
+// The casts into an SSE carrier (#1840): a row of no record of a vector of 16, 32 or 64 bytes into one of 4 or 8 bytes,
+// as c_check_program_vector_builtins.c's shuffle of a vector's first elements makes it (check_vector_shuffle_row, in the
+// checker's unit: written out here), decodes as the IR's lane_extract of lane 0 of doublewords or quadwords at exactly
+// AVX512F's and VL's and the vectors' moves; refused without each and under 5 changes.
+static void ir_simd_typed_test_carrier_casts(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW) };
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    for (uint32_t carrier = 4; carrier <= 8; carrier *= 2)
+    {
+        for (uint32_t bytes = 16; bytes <= 64; bytes *= 2)
+        {
+            Tier0Operation row;
+            memset(&row, 0, sizeof(row));
+            row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+            row.result_bytes = (uint8_t)carrier;
+            row.operand_count = 1;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_bytes[0] = (uint8_t)bytes;
+            const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+            IrSimdTypedOperation decoded;
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+            char description[160];
+            snprintf(description, sizeof(description), "the cast of %u bytes into a carrier of %u: lane 0's lane_extract at exactly its features", bytes, carrier);
+            const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.lane_move == BUSTER_IR_INTRINSIC_LANE_EXTRACT + 1 && decoded.immediate == (carrier == 8 ? 3 : 2) &&
+                            decoded.width_change == 0 && decoded.operation == IR_SIMD_OPERATION_COUNT && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected;
+            ir_test_expect(tally, ok, description);
+            decoded_rows += ok;
+            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+            {
+                IrSimdTypedOperation without;
+                memset(&without, 0x5a, sizeof(without));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                ir_test_expect(tally, (expected & features[f]) != 0 ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.lane_move != 0,
+                               "a cast into a carrier without a feature it needs stays the machine row, and needs no other");
+            }
+            for (uint32_t m = 0; m < 5; m += 1)
+            {
+                Tier0Operation changed = row;
+                switch (m)
+                {
+                case 0:
+                    changed.records[0] = (X86Instruction){ .form = X86_FORM_VMOVQ_X_XM64_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(0) };
+                    changed.record_count = 1;
+                    break;
+                case 1: changed.result_bytes = 2; break;
+                case 2: changed.operand_bytes[0] = 8; break;
+                case 3: changed.operand_classes[0] = BUSTER_TYPED_CLASS_MASK; break;
+                case 4:
+                    changed.operand_count = 2;
+                    changed.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+                    changed.operand_bytes[1] = (uint8_t)bytes;
+                    break;
+                }
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && decoded.lane_move == 0 && !decoded.machine),
+                               "a changed cast into a carrier is not the IR's lane_extract");
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 2 * 3, "every cast into a carrier decodes");
+    printf("  IR SIMD rows: %u casts of a vector into an SSE carrier decode to the IR's lane_extract of lane 0\n", decoded_rows);
+}
+
 // The conversions (#1840): every __builtin_convertvector row between integer vectors of other element sizes, by the real
 // producer (check_vector_convert_row) at every pair of sizes and signedness, every result width and the operand widths it
 // takes, decodes as the IR's extend or truncate of its lanes' sizes and sign, written out, at exactly its form's features
@@ -1444,6 +1511,7 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
     uint32_t truncates = 0;
     uint32_t masked = 0;
     uint32_t partial = 0;
+    uint32_t carriers = 0;
     TypeTestTable table = {0};
     const bool ready = type_test_table_open(&table, 512) && x86_encoder_initialize() && tier0_initialize();
     ir_test_expect(tally, ready, "conversion decoder producer type table");
@@ -1463,7 +1531,9 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
                     {
                         continue;
                     }
-                    for (uint32_t operand = source_bytes < 16 ? 16 : source_bytes; operand <= 64; operand *= 2)
+                    // A source of 4 or 8 bytes is an SSE carrier operand of its own bytes too (#1840), then 16 bytes and wider.
+                    const bool carried = source_bytes == 4 || source_bytes == 8;
+                    for (uint32_t operand = carried ? source_bytes : source_bytes < 16 ? 16 : source_bytes; operand <= 64; operand = operand < 16 ? 16 : operand * 2)
                     {
                         const TypeId source = type_vector(&table.table, elements[sign][from], lanes, false);
                         const TypeId result = type_vector(&table.table, elements[sign][to], lanes, false);
@@ -1490,6 +1560,7 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
                                        description);
                         extends += extend && status == IR_SIMD_TYPED_OK;
                         truncates += !extend && status == IR_SIMD_TYPED_OK;
+                        carriers += extend && operand < 16 && status == IR_SIMD_TYPED_OK;
                         for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
                         {
                             IrSimdTypedOperation without;
@@ -1556,8 +1627,13 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
     }
     type_test_table_close(&table);
     ir_test_expect(tally, extends != 0 && truncates != 0 && masked != 0 && partial != 0, "the conversions decode, and partial masked truncations stay rows");
-    printf("  IR SIMD rows: the front end's conversions decode to the IR's: %u extensions and %u truncations of convertvector, %u masked truncations (%u partial ones stay rows)\n",
-           extends, truncates, masked, partial);
+    // The extensions of an SSE carrier's whole lanes (#1840), zero and signed: of 8 bytes into 16 (bytes to words, words to
+    // doublewords, doublewords to quadwords), 32 (bytes to doublewords, words to quadwords) and 64 (bytes to quadwords);
+    // of 4 bytes into 16 (bytes to doublewords, words to quadwords) and 32 (bytes to quadwords).
+    ir_test_expect(tally, carriers == 2 * 9, "every extension of an SSE carrier's lanes decodes");
+    printf("  IR SIMD rows: the front end's conversions decode to the IR's: %u extensions (%u of a carrier) and %u truncations of convertvector, %u masked truncations (%u partial "
+           "ones stay rows)\n",
+           extends, carriers, truncates, masked, partial);
 }
 
 // The lane operations (#1840): clang's __builtin_elementwise_min, _max, _add_sat and _sub_sat of every integer element
@@ -2699,6 +2775,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_conversions(tally);
     ir_simd_typed_test_permutes(tally);
     ir_simd_typed_test_shuffle_immediates(tally);
+    ir_simd_typed_test_carrier_casts(tally);
     ir_simd_typed_test_shuffle_matches(tally);
     ir_simd_typed_test_shifts(tally);
     ir_simd_typed_test_mask_vectors(tally);

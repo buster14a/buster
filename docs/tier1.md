@@ -412,7 +412,10 @@ shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
 as the immediate form the constant's indices are, and as `vpshufb` otherwise.
 Their integer lanes' extensions and truncations, `__builtin_convertvector`'s and
 the `vpmov*` builtins', are its `extend` and `truncate` (#1840, its
-"Conversions"), each one EVEX instruction of `BUSTER_TIER1_VECTOR_CONVERT`.
+"Conversions"), each one EVEX instruction of `BUSTER_TIER1_VECTOR_CONVERT`; an
+extension's source may be an SSE carrier, and a cast into one is a
+`lane_extract` of lane 0, moved into the carrier's register where it isn't the
+vector's (#1840, its "Casts into SSE carriers and their extensions").
 A vector's shift by one scalar count, the x86 builtins' shifts by an int, is
 its `shift` (#1840, its "Shifts by a scalar count"), `BUSTER_TIER1_VECTOR_SHIFT`:
 the immediate form where the count is a constant, else `vmovd` of the count into
