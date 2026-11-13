@@ -982,18 +982,85 @@ receiving block; `JUMP_VALUE` therefore preserves conditional-expression arms
 even with an outer expression still live.
 
 A separate preheader materializes slot addresses and initializes parameters.
-It also defines, once, each jump table's base that #1740's column names, and
-each direct symbol address the function takes at least twice
-(`ir_typed_plan_hoisted`, #2574): a `GLOBAL_ADDRESS` of a U64 whose symbol the
-access column reaches directly, counted in an open-addressed table of the
-symbols and numbered in entry order. Every entry that takes it reads that one
-value, which Tier 1 keeps in a register around a loop that reads it on every
-iteration (Lua's dispatch table) and otherwise recomputes where it is read
-([the allocation guide](tier1-allocation.md)'s "Recomputable values read on
-every iteration"). A GOT slot's or a thread-local's address stays where it is
-taken. `test-ir-lowering` checks both lowering paths and the interpreter's
-result for a symbol taken three times, one taken once and one through its GOT
-slot.
+It also defines, once, each jump table's base that #1740's column names. Each
+direct symbol address the function takes at least twice
+(`ir_typed_plan_hoisted`, #2574) is one value too: a `GLOBAL_ADDRESS` of a U64
+whose symbol the access column reaches directly, counted in an open-addressed
+table of the symbols and numbered in entry order. Every entry that takes it
+reads that one value, which Tier 1 keeps in a register around a loop that reads
+it on every iteration (Lua's dispatch table) and otherwise recomputes where it
+is read ([the allocation guide](tier1-allocation.md)'s "Recomputable values
+read on every iteration"). A GOT slot's or a thread-local's address stays where
+it is taken.
+
+Where the value is defined is `ir_typed_plan_places`'s (#2593), over the typed
+CFG the emission's branches make (the preheader, each source block and the
+dispatch block), its dominators and natural loops (`dominators.c`'s; the loops
+only where an edge goes back in block order). The definition goes to the start
+of its reachable takes' nearest common dominator, P, and then:
+
+- where P is inside a loop, to its outermost loop's header's immediate
+  dominator, outside it, if some take is inside that loop, as loop-invariant
+  code motion hoists it: `luaV_execute` defines `disptab` before its dispatch
+  loop. Where none is (`yy_find_shift_action`'s `yy_action`, read on two of
+  the loop's exits alone), the takes stay their own;
+- otherwise at P, where some take is inside a loop or where every path from P
+  takes it before leaving the function (`sqlite3GetToken`'s `aiClass`, read by
+  its switch). A path that takes it nowhere (`powerOfTen`'s `aBase`,
+  `sqlite3VdbeMemSetText`'s destructor compared on two branches) leaves the
+  takes their own, as before #2574; #2601's sharing in Tier 1's selection still
+  joins those of one block.
+
+P must also precede every take in source order, which the emission's numbering
+needs and a backward `goto` can break: P then rises to its dominators until it
+does. A take in an unreachable block stays its own, and dominators past their
+matrices' limit leave every definition in the preheader, as #2574 did. At the
+block's start, a definition no register keeps until a read is left out by Tier
+1 (`tier1_emit_cfg_dead_definition`); at the block's end, where an edge seems to
+read its register, it stayed, and speedtest1 ran 0.8 M more instructions.
+
+#2574 had put every definition in the preheader. A path that never read it
+computed it anyway, as `yy_find_shift_action`'s two tables on its early
+return, and one live across a call took a callee-saved register that the
+prologue saved on every call. By callgrind with #1189's `gap.c` (the inputs of
+#1217's record) against main `df85213e`, speedtest1 runs 3,010.68 M
+instructions before and 3,002.54 M after (−8.13 M; without any hoist,
+3,006.43 M), and Lua's `luaV_execute` the same 2,420.29 M (without any hoist,
+2,456.45 M). The rules measured on the way, as speedtest1's instructions
+against main's:
+
+| Rule | speedtest1 | `luaV_execute` |
+| --- | ---: | ---: |
+| no hoist | −4.25 M | +36.2 M |
+| nearest common dominator alone | +5.42 M | +101.5 M |
+| it, lifted out of its outermost loop | −4.31 M | 0 |
+| a definition per outermost loop, none outside loops | −4.48 M | 0 |
+| this rule | −8.13 M | 0 |
+| this rule, and a symbol taken once in a loop | −2.14 M | 0 |
+| this rule without the every-path test | −6.25 M | 0 |
+| this rule, a definition per loop where P's paths don't all take it | −8.55 M | 0 |
+
+A symbol taken once in a loop, hoisted out of it, also cost Lua 22 M in
+`match`, `classend` and `luaV_finishset`. The last rule gains
+`jsonTranslateBlobToText` (−0.89 M) and loses `sqlite3GetToken` (+0.64 M) for
+two more passes over the takes, and isn't taken.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/201fb8b8aae14d797d47f7a3ace0aa754f992a91/docs/measurements/tier1-hoist-places-2593-2026-11-13),
+#2574's method), Lua's time doesn't move (0.9996, 95% interval 0.9966 to
+1.0026 over six link orders), and speedtest1's user cycles fall 0.66% over
+six layouts (0.9934, 0.9863 to 1.0006) with 0.27% fewer instructions at
+every one. The placement costs `sqlite3.c`'s `--tier1 -c` 0.14% more
+instructions, in the same time and cycles: by callgrind on a baseline build,
+7.6 M of 15,078 M, of which the dominators' analysis is 4.0 M and the CFG's
+construction and the walks 2.9 M. What the hoist still costs is the allocator's: a definition before a
+loop that reads it on few iterations takes a callee-saved register over the
+loop, or adds to its pressure (`sqlite3_str_vappendf`, 1.07 M more than
+without the hoist; `hexFunc`, `sqlite3FindFunction`). `test-ir-lowering`
+checks both lowering paths, the verifiers, the interpreter's results and
+promotion for a symbol taken three times, one taken once and one through its
+GOT slot, and each of the rules above: a definition past an early return, two
+takes of three paths left their own, a definition every path from a branch
+takes, one before a loop and two takes on a loop's exits left their own.
 Backedges to source entry zero skip that initialization. The typed stream's U64
 pointer representation becomes explicit `inttoptr` / `ptrtoint` at memory and
 address operations; ordinary U64 arithmetic remains integer arithmetic. Integer

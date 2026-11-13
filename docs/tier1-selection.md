@@ -102,9 +102,11 @@ patterns are:
   the addition's zero-extended `a` as sign-extended and faulted in SQLite's
   `autoindex5.test`). Before #2574, it took `sqlite3StatusUp`'s five `lea`s
   of `sqlite3Stat` to two, one per block (speedtest1's 1.73 M to 0.97 M).
-  #2574's hoist now keeps one for both blocks, and what this sharing adds on
-  top is the index's extensions (speedtest1's `movslq`s, 60.6 M to 59.5 M,
-  buster-performance#473). The sharing stays within a block and leaves
+  #2574's hoist now keeps one for both blocks (#2593 defines it in the first,
+  which takes it), and what this sharing adds on top is the index's
+  extensions (speedtest1's `movslq`s, 60.6 M to 59.5 M,
+  buster-performance#473), and the takes that #2593's placement leaves their
+  own. The sharing stays within a block and leaves
   moving an address past its blocks to #2574's hoist: #2572's experiment,
   which hoisted it here, made `luaV_execute`'s `disptab` worse, where the
   loop's pressure evicted it. The walk takes either leaf one node past its bound: the typed stream

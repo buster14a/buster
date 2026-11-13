@@ -72,7 +72,11 @@ and transactional failures. A loop whose `?:` joins carry a U64 and an I32 at
 one depth (#1189), and the same loop in a statement expression under a pending
 U64, whose slot then crosses the backedge, must lower to a depth slot per depth
 and type, each reached by one type alone, compute what C does, and promote to no
-slot, load or store. Every lowered function is also promoted by both SSA
+slot, load or store. A symbol's address taken more than once is one value
+(#2574) defined where `ir_typed_plan_places` puts it (#2593): past an early
+return, at a branch every path from which takes it, before a loop that takes
+it, and not at all where a path takes it nowhere or only a loop's exits do,
+each checked by its blocks and the function's results. Every lowered function is also promoted by both SSA
 paths, verified, and must keep its objects' slots. Tier 0's random long double
 and `__int128` programs (four times the count) run through the shared IR's
 interpreter (#176) against their stack machines. The default count is 32
