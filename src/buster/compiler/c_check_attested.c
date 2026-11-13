@@ -295,6 +295,9 @@ struct CheckAttested
     Arena key_arena;
     CheckAttestedKey* keys;
     uint64_t* list_marks;
+    // By key: the bodies' marks of their lists' entries (check_attested_list_body), and the lane's last body's number.
+    uint64_t* body_marks;
+    uint64_t body_stamp;
     // By IdentId: the name's facts (BUSTER_ATTESTED_ID_*), a `__builtin_X` name's X (0 until it is interned), and how
     // many of the table's names have them.
     uint8_t* id_facts;
@@ -706,6 +709,9 @@ struct CheckAttestedListing
     uint8_t* stack_roles;
     uint8_t* stack_flags;
     uint8_t* stack_bases;
+    // The bodies' marks by key (CheckAttested.body_marks) and the last body's number in the lane.
+    uint64_t* body_marks;
+    uint64_t body_stamp;
     uint32_t declaration;
     uint32_t names_count;
     uint32_t strings;
@@ -897,7 +903,25 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
         }
     }
     listing->declaration_flags |= strings != listing->strings ? BUSTER_ATTESTED_STRINGS : 0;
-    listing->names_count = count;
+    // The body's entries each once by key and class (the first, in order): a name a body spells again is the same lookup
+    // and the same declaration, and the reach and the events' test then take each once. A key's mark is the body's number
+    // and the classes it was seen with (a bit of each of the eight).
+    listing->body_stamp += 1;
+    const uint64_t owner = listing->body_stamp << 8;
+    uint64_t* const marks = listing->body_marks;
+    uint32_t kept = listing->names_count;
+    for (uint32_t n = listing->names_count; n < count; n += 1)
+    {
+        const uint32_t entry = listing->name_entries[n];
+        const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
+        const uint64_t mark = marks[key];
+        const uint64_t seen = (mark & ~UINT64_C(0xff)) == owner ? mark & 0xff : 0;
+        const uint64_t bit = UINT64_C(1) << (entry >> BUSTER_ATTESTED_CLASS_SHIFT);
+        listing->name_entries[kept] = entry;
+        kept += (seen & bit) == 0 ? 1u : 0u;
+        marks[key] = owner | seen | bit;
+    }
+    listing->names_count = kept;
     listing->declared_count = declared;
     listing->strings = strings;
 }
@@ -932,6 +956,8 @@ static bool check_attested_lists_walk(CheckAttested* census, const Parser* parse
         .stack_roles = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
         .stack_flags = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
         .stack_bases = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
+        .body_marks = census->body_marks,
+        .body_stamp = census->body_stamp,
     };
     const bool valid = listing.stack_roles != NULL && listing.stack_flags != NULL && listing.stack_bases != NULL;
     if (valid)
@@ -971,6 +997,7 @@ static bool check_attested_lists_walk(CheckAttested* census, const Parser* parse
     census->name_count = listing.names_count;
     census->string_count = listing.strings;
     census->any_definition = listing.any_definition;
+    census->body_stamp = listing.body_stamp;
     // (The walk keeps nothing in the lists' cache.)
     memset(census->list_blocks, 0xff, (uint64_t)declaration * sizeof(uint32_t));
     arena_pop_to(&census->unit_arena, mark);
@@ -1461,6 +1488,8 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         .stack_roles = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
         .stack_flags = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
         .stack_bases = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
+        .body_marks = census->body_marks,
+        .body_stamp = census->body_stamp,
     };
     const bool valid = listing.stack_roles != NULL && listing.stack_flags != NULL && listing.stack_bases != NULL;
     if (valid)
@@ -1546,6 +1575,7 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
     census->name_count = listing.names_count;
     census->string_count = listing.strings;
     census->any_definition = listing.any_definition;
+    census->body_stamp = listing.body_stamp;
     arena_pop_to(&census->unit_arena, mark);
     return valid;
 }
@@ -3164,11 +3194,12 @@ static bool check_attested_open(CheckAttested* census)
     census->memo_arena = arena_reserve(2 * (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
     census->memo = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_MEMO_FIRST_SLOTS, sizeof(CheckAttestedHash), 64);
     census->memo_mask = BUSTER_ATTESTED_MEMO_FIRST_SLOTS - 1;
-    census->key_arena = arena_reserve(keys * (sizeof(CheckAttestedKey) + sizeof(uint64_t)) + (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t)) +
+    census->key_arena = arena_reserve(keys * (sizeof(CheckAttestedKey) + 2 * sizeof(uint64_t)) + (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t)) +
                                       2 * ((uint64_t)runtimes + 1) * sizeof(uint32_t) + 16 * 4096);
     Arena* arena = &census->key_arena;
     census->keys = arena_push_array(arena, keys, sizeof(CheckAttestedKey), 4096);
     census->list_marks = arena_push_array(arena, keys, sizeof(uint64_t), 4096);
+    census->body_marks = arena_push_array(arena, keys, sizeof(uint64_t), 4096);
     census->id_facts = arena_push_array(arena, BUSTER_ATTESTED_MAX_IDS, sizeof(uint8_t), 4096);
     census->builtin_targets = arena_push_array(arena, BUSTER_ATTESTED_MAX_IDS, sizeof(uint32_t), 4096);
     census->runtime_keys = arena_push_array(arena, runtimes + 1, sizeof(uint32_t), 4096);
@@ -3187,7 +3218,8 @@ static bool check_attested_open(CheckAttested* census)
     census->tree_pool_arena = arena_reserve((uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint16_t) + 4096);
     census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint16_t), 64);
     check_attested_actions(census->kind_actions, census->role_actions);
-    return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL &&
+    return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->body_marks != NULL && census->runtime_lengths != NULL &&
+           census->unit_arena.base != NULL &&
            census->list_slots != NULL && census->list_pool != NULL && census->tree_pool != NULL;
 }
 
