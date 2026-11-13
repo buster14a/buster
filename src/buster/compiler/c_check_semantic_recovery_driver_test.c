@@ -1170,6 +1170,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     snprintf(object, sizeof(object), "%s/semantic-recovery.o", directory);
     for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
+        bool mismatch_reported = false;
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool stress = strncmp(fixtures[f], "/* typo stress */", 17) == 0;
         const uint64_t stress_length = stress ? check_test_typo_stress(stress_text, sizeof(stress_text)) : 0;
@@ -1235,7 +1236,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
                              options[o] != NULL ? options[o] : "", mode, status, oracle, actual_lines, expected_lines);
-                    check_test_expect(test, same && (status != 0) == (oracle != 0) && !written, description);
+                    const bool correct = same && (status != 0) == (oracle != 0) && !written;
+                    if (!correct && !mismatch_reported)
+                    {
+                        // One fixture can exhaust the shared failure-detail limit across its language and reader
+                        // variants. Keep the first difference of every later fixture visible in hosted logs too.
+                        fprintf(stderr, "semantic recovery first mismatch: %s\n", description);
+                        mismatch_reported = true;
+                    }
+                    check_test_expect(test, correct, description);
                     free(actual);
                 }
                 free(expected);
