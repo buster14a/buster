@@ -65,6 +65,7 @@ static const uint8_t check_common_candidate_classes[128] =
 };
 _Static_assert(CHECK_OP_COUNT <= BUSTER_ARRAY_LENGTH(check_common_candidate_classes), "the candidate classes fit two byte-permute tables");
 _Static_assert(CHECK_COMMON_CANDIDATE_COUNT == 8, "one byte holds the common-warning candidate classes");
+_Static_assert(CHECK_OP_VALUE == 0, "zeroed invalid operators have no candidate classes");
 
 // The classifier's scalar twin, expressed as the consumers' operator predicates rather than reading the vector table.
 static uint8_t check_common_candidate_scalar(CheckOp op)
@@ -94,8 +95,8 @@ static uint8_t check_common_candidate_scalar(CheckOp op)
 }
 
 // Classifies every node once, 64 at a time on the vector path: four operator vectors narrowed to one byte vector, one
-// table lookup and eight mask tests, writing four adjacent 16-node masks per class. The low byte is used only after
-// excluding operators outside CHECK_OP_COUNT, so an invalid operator cannot alias a real one. The tail takes masked
+// table lookup and eight mask tests, writing four adjacent 16-node masks per class. Operators outside CHECK_OP_COUNT
+// become VALUE before the lookup, so an invalid operator has no class and cannot alias a real one. The tail takes masked
 // 16-node loads and every output mask is written, including the empty classes and the last block's high zero bits.
 // No graph column other than ops is read.
 static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratch, bool scalar, CheckCommonCandidates* candidates)
@@ -117,18 +118,19 @@ static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratc
         const __m512i b = _mm512_loadu_si512(operators + first + 16);
         const __m512i c = _mm512_loadu_si512(operators + first + 32);
         const __m512i d = _mm512_loadu_si512(operators + first + 48);
-        __m512i indices = _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(a));
-        indices = _mm512_inserti32x4(indices, _mm512_cvtepi32_epi8(b), 1);
-        indices = _mm512_inserti32x4(indices, _mm512_cvtepi32_epi8(c), 2);
-        indices = _mm512_inserti32x4(indices, _mm512_cvtepi32_epi8(d), 3);
-        const uint64_t present = (uint64_t)_mm512_cmplt_epu32_mask(a, limit) |
-                                 (uint64_t)_mm512_cmplt_epu32_mask(b, limit) << 16 |
-                                 (uint64_t)_mm512_cmplt_epu32_mask(c, limit) << 32 |
-                                 (uint64_t)_mm512_cmplt_epu32_mask(d, limit) << 48;
+        // Mask each narrowing from its full-width operators rather than joining four masks through scalar registers.
+        const __m128i first_bytes = _mm_maskz_mov_epi8(_mm512_cmplt_epu32_mask(a, limit), _mm512_cvtepi32_epi8(a));
+        const __m128i second_bytes = _mm_maskz_mov_epi8(_mm512_cmplt_epu32_mask(b, limit), _mm512_cvtepi32_epi8(b));
+        const __m128i third_bytes = _mm_maskz_mov_epi8(_mm512_cmplt_epu32_mask(c, limit), _mm512_cvtepi32_epi8(c));
+        const __m128i fourth_bytes = _mm_maskz_mov_epi8(_mm512_cmplt_epu32_mask(d, limit), _mm512_cvtepi32_epi8(d));
+        __m512i indices = _mm512_zextsi128_si512(first_bytes);
+        indices = _mm512_inserti32x4(indices, second_bytes, 1);
+        indices = _mm512_inserti32x4(indices, third_bytes, 2);
+        indices = _mm512_inserti32x4(indices, fourth_bytes, 3);
         const __m512i classes = _mm512_permutex2var_epi8(low, indices, high);
         for (uint32_t kind = 0; kind < CHECK_COMMON_CANDIDATE_COUNT; kind += 1)
         {
-            const uint64_t selected = _mm512_mask_test_epi8_mask((__mmask64)present, classes, _mm512_set1_epi8((char)(1u << kind)));
+            const uint64_t selected = _mm512_test_epi8_mask(classes, _mm512_set1_epi8((char)(1u << kind)));
             // Four masks in little-endian node order; memcpy permits the first block to have only uint16_t alignment.
             memcpy(masks + (uint64_t)kind * blocks + block, &selected, sizeof(selected));
         }
