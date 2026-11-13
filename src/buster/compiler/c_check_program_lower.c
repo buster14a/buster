@@ -773,6 +773,9 @@ struct CheckLowerWriter
     const uint8_t* type_facts;
     const uint32_t* type_templates;
     uint32_t type_count;
+    // Each member's bit-field access unit, made before the bodies (check_lower_bit_units, CheckLowerShared's); null in a
+    // unit without bit-fields.
+    const uint16_t* bit_units;
     uint32_t hidden;
     // A variadic definition's (#137): va_start's offsets past the named registers, from the function's own call as
     // abi_assign gives it, and the anchors of its incoming frame (the register save area and the overflow area), made at
@@ -3758,54 +3761,80 @@ static bool check_lower_bit_place(const TypeTable* types, uint64_t offset, uint3
            field->class != BUSTER_TYPED_CLASS_VOID;
 }
 
-// The anonymous struct or union of `record`, or of one in it, that holds member `member`, which the name `name` finds
-// in `record`: `record` itself where its own members have it; 0 where none does.
-static TypeId check_lower_bit_owner(const TypeTable* types, TypeId record, uint32_t name, uint32_t member)
+// A bit-field's unit in CheckLowerWriter.bit_units: BUSTER_CHECK_LOWER_BIT_UNIT, the member's bit in its unit (0 to 63)
+// and the unit's bytes (1 to 8) from BUSTER_CHECK_LOWER_BIT_UNIT_BYTES; 0 for a member that keeps the bytes that hold
+// its bits.
+#define BUSTER_CHECK_LOWER_BIT_UNIT 0x8000u
+#define BUSTER_CHECK_LOWER_BIT_UNIT_SHIFT 0x3fu
+#define BUSTER_CHECK_LOWER_BIT_UNIT_BYTES 6
+
+// Each member's access unit (#1372), made once, before the bodies, into `*units` from `arena` (left null where no member
+// is a bit-field): for a bit-field of a struct, the unit clang reads and writes it through, of its run of bit-fields
+// (CGRecordLowering::accumulateBitFields, which abi_bit_field_unit computes for the calling convention, from `abi`'s
+// classification). That is the integer of the run's bytes, and of the runs after it while the span fits 8 bytes, that
+// fits before the next member clang stores or the record's end; in the issue's `struct { unsigned x : 3, y : 7, z : 13,
+// w : 9; }` 4 bytes at 0 for every field, where the bytes that hold each field's bits overlap the others' without
+// matching. Each record's units are chained from its first member, as abi_storage chains them; an anonymous struct's
+// are its own, as clang's. A union's bit-fields, an ms_struct record's (clang's discrete units, which
+// abi_bit_field_unit doesn't model) and one in a unit of more than 8 bytes keep 0. A scalar pass over the members, once
+// per unit; false where the arena can't hold the column.
+static bool check_lower_bit_units(const TypeTable* types, const AbiTable* abi, Arena* arena, uint16_t** units)
 {
-    TypeId owner = record;
-    bool owned = false;
-    for (uint32_t depth = 0; owner != 0 && !owned && depth < types->tags.count; depth += 1)
+    const uint32_t count = types->members.count;
+    bool any = false;
+    for (uint32_t m = 1; m < count; m += 1)
     {
-        const uint32_t tag = types->types.index[type_index(owner)];
-        const uint32_t begin = types->tags.member_begin[tag];
-        const uint32_t count = types->tags.member_count[tag];
-        owned = member >= begin && member - begin < count;
-        TypeId next = 0;
-        for (uint32_t i = 0; !owned && next == 0 && i < count; i += 1)
-        {
-            const uint32_t candidate = begin + i;
-            const TypeId child = type_unqualified(type_strip_aligned(types, types->members.type[candidate]));
-            const uint8_t kind = type_kind(types, child);
-            const bool anonymous = types->members.name[candidate] == 0 && (types->members.flags[candidate] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
-                                   (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
-            uint64_t offset = 0;
-            uint32_t qualifiers = 0;
-            next = anonymous && type_lookup_member(types, child, name, &offset, &qualifiers) == member ? child : 0;
-        }
-        owner = owned ? owner : next;
+        any = any || (types->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
     }
-    return owned ? owner : 0;
+    uint16_t* column = any ? BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, (uint64_t)count + 1) : NULL;
+    if (column != NULL)
+    {
+        memset(column, 0, ((uint64_t)count + 1) * sizeof(*column));
+    }
+    for (uint32_t tag = 1; column != NULL && tag < types->tags.count; tag += 1)
+    {
+        const uint32_t index = type_index(types->tags.type[tag]);
+        const uint32_t begin = types->tags.member_begin[tag];
+        const uint32_t end = begin + types->tags.member_count[tag];
+        const uint64_t size = types->types.size[index];
+        const bool record = types->types.kind[index] == BUSTER_TYPE_KIND_STRUCT && type_is_complete(types, types->tags.type[tag]) && types->tags.ms_struct[tag] == 0;
+        AbiUnit unit = {
+            .offset = 0,
+            .bytes = 0,
+            .end = begin,
+            .storage = 0,
+            .clipped = false,
+        };
+        for (uint32_t m = begin; record && m < end; m += 1)
+        {
+            const uint32_t width = types->members.bit_width[m];
+            const bool in_unit = (types->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && width != 0;
+            if (in_unit && m >= unit.end)
+            {
+                unit = abi_bit_field_unit(abi, types, m, end, size);
+            }
+            // The member's bit in its record, and its unit's.
+            const uint64_t own = types->members.offset[m];
+            const uint64_t first = unit.offset * 8;
+            const bool fits = in_unit && unit.bytes != 0 && unit.bytes <= 8 && own >= first && own - first + width <= unit.bytes * 8;
+            column[m] = fits ? (uint16_t)(BUSTER_CHECK_LOWER_BIT_UNIT | (own - first) | unit.bytes << BUSTER_CHECK_LOWER_BIT_UNIT_BYTES) : 0;
+        }
+    }
+    *units = column;
+    return !any || column != NULL;
 }
 
 // The unit clang reads and writes the bit-field that MEMBER or ARROW node `node` designates through (#1372), put in
-// `field`, which check_lower_bit_place made of the node's offset and width. It is the access unit of the run of
-// bit-fields the field is in (CGRecordLowering::accumulateBitFields, which abi_bit_field_unit computes for the calling
-// convention): the integer of the run's bytes, and of the runs after it while they fit 8 bytes, that fits before the
-// next member clang stores or the record's end; in the issue's `struct { unsigned x : 3, y : 7, z : 13, w : 9; }` 4
-// bytes at 0 for every field, where the bytes that hold each field's bits overlap the others'. The member is the one
-// the node's name finds (CheckGraph.members), in the anonymous struct or union that holds it (check_lower_bit_owner),
-// whose units clang computes as a record's own; the units are chained from the member after the last one before it
-// that isn't a bit-field, past which none reaches (as abi_storage chains them from a record's first). A union's
-// bit-fields, an ms_struct record's (clang's discrete units, which abi_bit_field_unit doesn't model), one in a unit
-// of more than 8 bytes, and a node whose member isn't found keep the bytes that hold the field's bits. A scalar step
-// per bit-field access (0.27% of sqlite3.c's nodes, docs/c-lowering.md), and a walk over its run's members.
+// `field`, which check_lower_bit_place made of the node's offset and width: its member's (check_lower_bit_units), the
+// one the node's name finds (CheckGraph.members), whose own record's offset in the node's record is the node's offset
+// less the member's. A member without a unit, and a node whose member isn't found, keep the bytes that hold the field's
+// bits. A member's lookup and a column's read per bit-field access (0.27% of sqlite3.c's nodes, docs/c-lowering.md).
 static void check_lower_bit_unit_place(const CheckLowerWriter* writer, uint32_t node, CheckLowerBitField* field)
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
-    const AbiTable* abi = writer->abi_table;
     const TypeId base = graph->ops[node] == CHECK_OP_ARROW ? type_element(types, stream->conversions[node].operands[0].type) :
                                                              check_stream_type(stream, graph->operand0[node]);
     const TypeId record = type_unqualified(type_strip_aligned(types, base));
@@ -3814,47 +3843,18 @@ static void check_lower_bit_unit_place(const CheckLowerWriter* writer, uint32_t 
     const uint64_t at = stream->member_offsets[node];
     uint64_t offset = 0;
     uint32_t qualifiers = 0;
-    const bool lookup = name != 0 && abi != NULL && abi->storage != NULL && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
+    const bool lookup = writer->bit_units != NULL && name != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
     const uint32_t member = lookup ? type_lookup_member(types, record, name, &offset, &qualifiers) : 0;
-    const bool found = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN && offset == at && (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 &&
+    const bool found = member != 0 && member < types->members.count && offset == at && (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 &&
                        types->members.bit_width[member] == field->width;
-    const TypeId owner = found ? check_lower_bit_owner(types, record, name, member) : 0;
-    const uint32_t tag = owner != 0 ? types->types.index[type_index(owner)] : 0;
-    if (owner != 0 && type_kind(types, owner) == BUSTER_TYPE_KIND_STRUCT && types->tags.ms_struct[tag] == 0)
+    const uint32_t unit = found ? writer->bit_units[member] : 0;
+    const uint32_t shift = unit & BUSTER_CHECK_LOWER_BIT_UNIT_SHIFT;
+    const uint64_t own = found ? types->members.offset[member] : 0;
+    if ((unit & BUSTER_CHECK_LOWER_BIT_UNIT) != 0 && at >= own && (at - own) % 8 == 0)
     {
-        const uint32_t begin = types->tags.member_begin[tag];
-        const uint32_t end = begin + types->tags.member_count[tag];
-        const uint64_t size = types->types.size[type_index(owner)];
-        uint32_t start = member;
-        while (start > begin && (types->members.flags[start - 1] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0)
-        {
-            start -= 1;
-        }
-        AbiUnit unit = {
-            .offset = 0,
-            .bytes = 0,
-            .end = start,
-            .storage = 0,
-            .clipped = false,
-        };
-        for (uint32_t probe = start; probe <= member; probe += 1)
-        {
-            const bool in_unit = (types->members.flags[probe] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && types->members.bit_width[probe] != 0;
-            if (in_unit && probe >= unit.end)
-            {
-                unit = abi_bit_field_unit(abi, types, probe, end, size);
-            }
-        }
-        // The member's bit in its owner, and the owner's in the node's record.
-        const uint64_t own = types->members.offset[member];
-        const uint64_t unit_bit = unit.offset * 8;
-        const bool fits = unit.bytes != 0 && unit.bytes <= 8 && own >= unit_bit && own - unit_bit + field->width <= unit.bytes * 8 && at >= own && (at - own) % 8 == 0;
-        if (fits)
-        {
-            field->first = (at - own) / 8 + unit.offset;
-            field->shift = (uint32_t)(own - unit_bit);
-            field->bytes = (uint32_t)unit.bytes;
-        }
+        field->first = (at - shift) / 8;
+        field->shift = shift;
+        field->bytes = unit >> BUSTER_CHECK_LOWER_BIT_UNIT_BYTES & 15;
     }
 }
 
@@ -16947,6 +16947,8 @@ struct CheckLowerShared
     uint8_t* type_facts;
     uint32_t* type_templates;
     uint32_t type_count;
+    // Each member's bit-field access unit (check_lower_bit_units), or null where no member is a bit-field.
+    uint16_t* bit_units;
     // Whether the program's type table has a _BitInt type (CheckLowerWriter.bit_ints).
     bool bit_ints;
     // Whether an operand may name an overload set or take a selected overload's address (CheckLowerWriter.overloads): only
@@ -17597,7 +17599,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // and a variadic definition's named registers its va_start; abi_assign takes each part's signatures together after.
     // The lowering makes no type, so the table needs rows for the types the unit has, not for the type table's room.
     // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
-    // table, so a unit without a body needs neither its columns nor its classifications (#613).
+    // table, so a unit without a body needs neither its columns nor its classifications (#613). The bodies' bit-field
+    // accesses read their units, which the classification's storage bounds (check_lower_bit_units).
     valid = valid && (program->body_count == 0 ||
                       abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target.features), types->types.count));
     if (valid && program->body_count != 0)
@@ -17610,6 +17613,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         {
             abi_classify_all(&shared->table, types);
         }
+        valid = check_lower_bit_units(types, &shared->table, scratch, &shared->bit_units);
+        lowered->status = valid ? lowered->status : CHECK_PROGRAM_RESOURCE;
+        lowered->reason = valid ? lowered->reason : "lowering bit-field units";
     }
     if (valid)
     {
@@ -17857,6 +17863,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .type_facts = shared->type_facts,
         .type_templates = shared->type_templates,
         .type_count = shared->type_count,
+        .bit_units = shared->bit_units,
         .local_map = shared->local_map,
         .switch_locals = shared->switch_locals,
         .chain_labels = shared->chain_labels,

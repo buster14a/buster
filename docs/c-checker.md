@@ -3880,7 +3880,7 @@ What the lowering covers past scalars (#145's programs):
   says; a store reads the unit, clears the field's bits, puts the value's in and
   writes the unit back, and its value is the field's as it now reads. `++`, `--`
   and compound assignment read, operate and store the same way. Through `.` and
-  `->`, the unit is clang's (#1372, `check_lower_bit_unit_place`): the access
+  `->`, the unit is clang's (#1372, `check_lower_bit_units`): the access
   unit of the field's run of bit-fields that `CGRecordLowering::accumulateBitFields`
   makes, which `abi_bit_field_unit` computes for the calling convention
   ([its guide](calling-convention.md)'s "Bit-fields' access units"). The
@@ -3893,8 +3893,11 @@ What the lowering covers past scalars (#145's programs):
   each field's access is 4 bytes at 0, where the bytes that hold each field's
   bits (2 at 0, 1 and 2) overlap without matching and fail store-to-load
   forwarding; the issue's four-field update took 3.5 times clang -O0's cycles.
-  The member is the one the node's name finds, in the anonymous struct or union
-  that holds it, whose units are its own. A constant address of a field's lvalue
+  The lowering's preparation chains each struct's units once, from its first
+  member (an anonymous struct's are its own, as clang's), into a column of 2
+  bytes per member: the member's bit in its unit and the unit's bytes. A
+  bit-field access reads its member's, the one its name finds
+  (`check_lower_bit_unit_place`). A constant address of a field's lvalue
   (a local's or a global's, the checker's of the field's first byte) is its
   unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
   `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,

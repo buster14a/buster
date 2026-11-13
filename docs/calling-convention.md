@@ -271,7 +271,7 @@ accesses), which `abi_bit_field_unit` works out the same way, one unit at a
 time: the twin's `abi_storage`, `abi_layout` and `abi_wide_alignment` and the
 vector path's `abi_member_part` call it at a unit's first bit-field and keep
 the unit for the bit-fields after it. The checker's lowering reads and writes a
-bit-field through the same unit (#1372, `check_lower_bit_unit_place`), as
+bit-field through the same unit (#1372, `check_lower_bit_units`), as
 clang's code does ([the checker's guide](c-checker.md)'s "Bit-fields").
 
 - A **run** is a bit-field that starts at a byte and those after it that start
