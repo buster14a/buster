@@ -735,20 +735,33 @@ static void parallel_test_memory(ParallelTest* test)
     ParallelSummary summary;
     ParallelResult* results = 0;
     const ParallelOptions options = { .jobs = 4 };
-    // Peak memory (#2031): a shell's own and a process's it waits for come to the 32 MiB each holds, a shell that holds
-    // nothing to a few MiB, and each command's report gives its own. The child's command isn't its script's last, which
-    // bash would run in place of itself.
-    const String8 report = parallel_test_run(test,
-                                             parallel_test_string("== shell\nv=$(head -c 33554432 /dev/zero | tr '\\0' x)\ntest ${#v} -eq 33554432\n"
-                                                                  "== child\nbash -c 'v=$(head -c 33554432 /dev/zero | tr \"\\0\" x); test ${#v} -eq 33554432'\ntrue\n"
-                                                                  "== small\ntrue\n"),
-                                             options, &summary, &results);
-    const uint64_t held = 32 * 1024;
-    const bool measured = results != 0 && results[0].memory >= held && results[1].memory >= held && results[2].memory != 0 && results[2].memory < held / 2;
+    // Peak memory (#2031). A command's shell starts in the runner's memory (posix_spawn), whose peak its exec records,
+    // so every command's peak is at least the runner's own: 10 MiB for a Develop build, 32 MiB for an ASan one. Each
+    // command here holds 32 MiB past the runner's peak so far, so that only its own memory reaches it: a shell's own and
+    // a process's it waits for count, a shell that holds nothing comes to the runner's peak and bash's few MiB, and each
+    // command's report gives its own. The child's command isn't its script's last, which bash would run in place of
+    // itself.
+    struct rusage before;
+    memset(&before, 0, sizeof(before));
+    getrusage(RUSAGE_SELF, &before);
+    const uint64_t held = (before.ru_maxrss > 0 ? (uint64_t)before.ru_maxrss : 0) + 32 * 1024;
+    char list[512];
+    snprintf(list, sizeof(list),
+             "== shell\nv=$(head -c %llu /dev/zero | tr '\\0' x)\ntest ${#v} -eq %llu\n"
+             "== child\nbash -c 'v=$(head -c %llu /dev/zero | tr \"\\0\" x); test ${#v} -eq %llu'\ntrue\n"
+             "== small\ntrue\n",
+             (unsigned long long)held * 1024, (unsigned long long)held * 1024, (unsigned long long)held * 1024, (unsigned long long)held * 1024);
+    const String8 report = parallel_test_run(test, parallel_test_string(list), options, &summary, &results);
+    struct rusage after;
+    memset(&after, 0, sizeof(after));
+    getrusage(RUSAGE_SELF, &after);
+    const uint64_t runner = after.ru_maxrss > 0 ? (uint64_t)after.ru_maxrss : 0;
+    const bool measured = results != 0 && results[0].memory >= held && results[1].memory >= held && results[2].memory != 0 && results[2].memory < runner + 16 * 1024;
     const bool reported = results != 0 && parallel_test_memory_reported(&results[0]) && parallel_test_memory_reported(&results[1]) && parallel_test_memory_reported(&results[2]);
     if (results != 0 && !measured)
     {
-        printf("  peak memory: %llu, %llu and %llu KiB\n", (unsigned long long)results[0].memory, (unsigned long long)results[1].memory, (unsigned long long)results[2].memory);
+        printf("  peak memory: %llu, %llu and %llu KiB, holding %llu KiB, the runner's %llu KiB\n", (unsigned long long)results[0].memory, (unsigned long long)results[1].memory,
+               (unsigned long long)results[2].memory, (unsigned long long)held, (unsigned long long)runner);
     }
     parallel_test_check(test, "memory: the commands' peak memory", summary.succeeded && measured && reported, report, 0);
     test->arena.length = 0;

@@ -72,7 +72,10 @@ processes under it that were waited for: over its time, the CPUs it kept busy)
 and its peak memory (#2031: `passed in 12.3 s, 40.1 s of CPU, 812 MiB peak`,
 `wait4`'s `ru_maxrss` in MiB rounded up: the largest of its shell and of the
 processes under it that were waited for, one process's peak rather than the sum
-of those that ran at once, without what the runner kills after the shell ends),
+of those that ran at once, without what the runner kills after the shell ends;
+it is at least the runner's own peak, 10 MiB for a Develop build and 32 MiB for
+an ASan one, since the shell starts in the runner's memory, whose peak its
+`exec` records),
 then its output, in the list's order as soon as it and every command before it
 have ended; with `--github`, between `::group::` and `::endgroup::`, and an
 `::error::` annotation for each that failed. Then come a summary line, with the
@@ -239,10 +242,10 @@ as expected with its times, CPU times and peak memory written as `*`:
   environment has another value; and the CPU time of a shell's loop and of a
   process it waits for counts, a sleep's comes to next to none, and the
   summary's is their sum;
-- memory (#2031): the 32 MiB a shell holds and the 32 MiB a process it waits
-  for holds each count in their command's peak, a shell that holds nothing
-  comes to under 16 MiB, and each command's heading gives its own peak in MiB
-  rounded up; then the summary's warnings, from made-up results, both plain
+- memory (#2031): what a shell holds and what a process it waits for holds,
+  32 MiB past the runner's own peak each, count in their command's peak, a
+  shell that holds nothing comes to under the runner's peak and 16 MiB, and
+  each command's heading gives its own peak in MiB rounded up; then the summary's warnings, from made-up results, both plain
   and with `--github`: 1.9 CPUs of 1 and 1.6 of 1 are warned of, 2.9 of 2
   (not past 1.5 times) and 1.9 of 1 for a second (not a second of CPU past)
   aren't;

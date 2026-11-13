@@ -610,7 +610,8 @@ struct ParallelResult
     uint64_t cpu;
     // The peak resident memory, in KiB, of the largest of its shell and the processes under it that were waited for:
     // wait4's ru_maxrss, once it has ended (#2031). It is one process's peak, not the sum of those that ran at once, and
-    // a process the runner killed after the shell ended isn't counted.
+    // a process the runner killed after the shell ended isn't counted. It is at least the runner's own peak: the shell
+    // starts in the runner's memory (posix_spawn), whose peak its exec records.
     uint64_t memory;
     // Why it couldn't start (an errno), or 0.
     int start_error;
