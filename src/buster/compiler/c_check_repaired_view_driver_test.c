@@ -46,6 +46,7 @@ static void check_test_driver_repaired_view(CheckTest* test, const char* clang, 
         { "-Wall", "-Wextra" },
         { "-Wall", "-Werror=unused-variable" },
         { "-Wall", "-Wno-unused-variable" },
+        { "-Wall", "-Werror=unused-parameter" },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

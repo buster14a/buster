@@ -575,7 +575,9 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
         const bool unit_end = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
                                event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF) &&
                               event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
-        promoted = !unit_end && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
+        const bool open_parameter = repair != NULL && event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER &&
+                                    event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER && event->completion >= repair->original_closed;
+        promoted = !unit_end && !open_parameter && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                    event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && (repair == NULL || check_repair_warning_event(repair, event)) &&
                    check_driver_warning_severity(pp, input, event) >= CHECK_WARNING_ERROR;
     }
@@ -2785,9 +2787,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     // A retained scope closer may be at the repair's cut. Its following original token, rather than
                     // the view's synthetic outer closer, is where clang pops that scope (#2515).
                     const bool scope_pop = event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER &&
-                                           (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL);
+                                           (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER ||
+                                            event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL);
                     const Parser* publication_parser = repair != NULL && scope_pop ? repair->original : parser;
-                    const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? pp->output.count + 1 :
+                    const bool open_parameter = repair != NULL && event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && scope_pop &&
+                                                event->completion >= repair->original_closed;
+                    const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END || open_parameter ? pp->output.count + 1 :
                         check_driver_publication_position(publication_parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;

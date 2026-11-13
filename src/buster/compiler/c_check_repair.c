@@ -418,9 +418,12 @@ static bool check_repair_warning_token(const CheckRepair* repair, uint32_t token
 // Scope-pop warnings require an original scope closer: a complete declaration alone does not end its scope (#2515).
 static bool check_repair_warning_event(const CheckRepair* repair, const CheckWarningEvent* event)
 {
+    // A repair inserts only compound closers: every retained parameter already has its complete original header.
+    const bool parameter = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && repair->status == CHECK_REPAIR_READY &&
+                           event->token < repair->original_end;
     const bool scoped = event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER &&
                         (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL);
-    const bool result = check_repair_warning_token(repair, event->token) && (!scoped || event->completion < repair->original_closed);
+    const bool result = (parameter || check_repair_warning_token(repair, event->token)) && (!scoped || event->completion < repair->original_closed);
     return result;
 }
 
