@@ -2402,16 +2402,31 @@ What the lowering covers past scalars (#145's programs):
   memset calls and 1.9% less text.
   A whole-object initializer whose one value is a call (`T x = f(...);`)
   can use `x` as the call's hidden result object (#1549), removing the separate
-  temporary and copy before either backend sees the stream. The result and
-  destination must be the same unqualified record type, with matching sizes,
-  no volatile part and enough alignment for the result's canonical ABI type.
-  Register returns retain their previous path. The immutable source binding
+  temporary and copy before either backend sees the stream. The call writes
+  the plan's one part, at offset 0 and of the object's size: the object, or
+  its only member or element (`struct Outer o = { make(n) };`,
+  `struct S a[1] = { make(n) };`), so the part's type, not the object's, must
+  be the result's unqualified record type. The object needs no volatile or
+  atomic part and enough alignment for the result's canonical ABI type.
+  Register returns retain their previous path. Such a call leaves no value:
+  its hidden pointer is the only use of `x`'s address, so no `lea` follows it
+  to be discarded. The immutable source binding
   column is scanned only across that initializer, 16 tokens at a time on the
   vector path with a scalar tail and twin: any reference to `x`, even inside
-  another argument's call, retains the temporary. Bodies with source labels
-  or a reference to a known returns-twice function retain it too, because
-  reentry can find a destination whose address escaped after an earlier
-  initialization. The first candidate scans that body's bindings and
+  another argument's call, retains the temporary. So does a label that can run
+  the declaration again while `x` lives, after an earlier visit let its
+  address escape: one between the opener of the declaration's innermost
+  group (its block, a statement expression's or a `for` header) and the
+  initializer's end, which a backward `goto` within the block reaches. `x`
+  lives from its block's entry (C11 6.2.4p6), so a label past the initializer
+  (a `goto out;` cleanup's) or outside the block, whose reentry begins a new
+  lifetime, leaves it in place, and so do case labels, which only their
+  switch's head reaches. The scan reads the parser's depths and roles back
+  from the initializer's end, 16 tokens a vector, and stops at the nearest
+  label or at the nearest token below the initializer's depth, the group's
+  opener; it runs only in a body with labels. A reference to a known
+  returns-twice function anywhere in the body retains the temporary too. The
+  first candidate scans that body's bindings and
   intrinsic IDs once and caches the latter decision, before any argument
   tasks run, so an initializer's nested `__builtin_setjmp` is covered too.
   The existing declaration pass records `returns_twice` by object when it

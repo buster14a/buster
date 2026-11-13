@@ -8,7 +8,8 @@
 // the declared object as its hidden result. Include after c_check_program_copy_test.c. Clang is the result oracle.
 
 // What a unit's lowering makes of its functions, by each path: whether it calls memset (`clears`) and memmove (`moves`),
-// its largest function's typed entries and object bytes, its inline copies, and how many jumps go back (a loop's).
+// its largest function's typed entries and object bytes, its inline copies, the addresses it discards as soon as it
+// makes them (an in-place call's dead lea before #1549's follow-up), and how many jumps go back (a loop's).
 typedef struct CheckTestClearShape CheckTestClearShape;
 struct CheckTestClearShape
 {
@@ -17,6 +18,7 @@ struct CheckTestClearShape
     uint32_t entries;
     uint32_t backward;
     uint32_t copies;
+    uint32_t dead_addresses;
     uint64_t object_bytes;
 };
 
@@ -70,6 +72,7 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
             const bool branch = kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_BRANCH_FALSE;
             shape->backward += branch && function->values[i] <= i;
             shape->copies += kind == BUSTER_TYPED_COPY;
+            shape->dead_addresses += kind == BUSTER_TYPED_DISCARD && i != 0 && function->kinds[i - 1] == BUSTER_TYPED_LOCAL_ADDRESS;
         }
     }
     parse_release(&parser);
@@ -108,17 +111,21 @@ static void check_test_program_clear_shape(CheckTest* test, const char* source, 
 }
 
 // The result initialization must remove both the copy and its temporary, while the excluded paths retain them.
-// Each fixture has one defined function, so the object's bytes also distinguish a nested call's separate result.
+// Each fixture has one defined function, so the object's bytes also distinguish a nested call's separate result. A
+// fixture without a copy writes in place, whose call leaves no address to discard either.
 static void check_test_program_call_initializer_shape(CheckTest* test, const char* source, const char* name, uint32_t copies, bool moves, uint64_t bytes)
 {
+    const bool placed = copies == 0 && !moves;
     for (uint32_t path = 0; path < 2; path += 1)
     {
         CheckTestClearShape shape = { 0 };
-        char description[256];
+        char description[320];
         const bool lowered = check_test_program_clear_lower(source, path == 0, &shape);
-        snprintf(description, sizeof(description), "%s: %s path emits %u inline copies, memmove %u, and %" PRIu64 " object bytes (got %u, %u, %" PRIu64 ")",
-                 name, path == 0 ? "scalar" : "vector", copies, moves, bytes, shape.copies, shape.moves, shape.object_bytes);
-        check_test_expect(test, lowered && shape.copies == copies && shape.moves == moves && shape.object_bytes == bytes, description);
+        snprintf(description, sizeof(description),
+                 "%s: %s path emits %u inline copies, memmove %u, %" PRIu64 " object bytes and %s discarded addresses (got %u, %u, %" PRIu64 ", %u)", name,
+                 path == 0 ? "scalar" : "vector", copies, moves, bytes, placed ? "no" : "any", shape.copies, shape.moves, shape.object_bytes, shape.dead_addresses);
+        check_test_expect(test, lowered && shape.copies == copies && shape.moves == moves && shape.object_bytes == bytes && (!placed || shape.dead_addresses == 0),
+                          description);
     }
 }
 
@@ -220,6 +227,69 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
                                                     "int resume(void);int resume(void)__attribute__((returns_twice));int resume(void);"
                                                     "int f(void){struct S s=make(resume());return read(&s);}",
                                               "initializer-call-redeclared-returns-twice-keeps-copy", 0, true, 600);
+    // Labels: only one between the opener of the declaration's innermost group and the initializer's end can run the
+    // declaration again in the object's lifetime. A cleanup label after it, a label outside its block (whose entry
+    // begins a new lifetime) and a for statement's body's label, past its header's declaration, leave it in place; a
+    // label before it in its own block, in a nested block too, keeps the copy. The long statements put the label, or the
+    // group's opener, past one vector of tokens from the initializer, so the vector path finds them in a later block.
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){struct S s=make(n);if(n<0)goto out;n=read(&s);out:return n;}",
+                                              "initializer-call-cleanup-label-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){again:;if(n-->5)goto again;{struct S s=make(n);return read(&s);}}",
+                                              "initializer-call-enclosing-label-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){int r=0;for(int i=0;i<n;i++){if(i==2)goto skip;r+=i;skip:;}"
+                                                    "{struct S s=make(n);r+=read(&s);}return r;}",
+                                              "initializer-call-sibling-block-label-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){int r=0;again:r++;if(r<3)goto again;for(int i=0;i<n;i++){struct S s=make(i);r+=read(&s);}return r;}",
+                                              "initializer-call-loop-body-after-label-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){int r=0;for(struct S s=make(n);r<3;r++){if(r==1)goto next;r+=read(&s);next:;}return r;}",
+                                              "initializer-call-for-header-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){again:;if(n-->5)goto again;"
+                                                    "{int k=n+1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16;struct S s=make(k+1+2+3+4+5+6+7+8);return read(&s);}}",
+                                              "initializer-call-enclosing-label-vector-in-place", 0, false, 300);
+    // One vector from the initializer's end starts at the enclosing label's colon, two tokens before the block's opener:
+    // the nearer, the opener, decides.
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){again:;{struct S s=make(~n+1+2);if(n-->5)goto again;return read(&s);}}",
+                                              "initializer-call-label-and-opener-in-one-vector-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){again:;n=n+1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16;"
+                                                    "struct S s=make(n+1+2+3+4+5+6+7+8);if(n<100)goto again;return read(&s);}",
+                                              "initializer-call-earlier-label-vector-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){{again:;n--;}struct S s=make(n);if(n>0)goto again;return read(&s);}",
+                                              "initializer-call-nested-earlier-label-keeps-copy", 0, true, 600);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){int r=0;for(int i=0;i<n;i++){if(i==2)goto skip;r+=i;skip:;}struct S s=make(n);return r+read(&s);}",
+                                              "initializer-call-earlier-loop-label-keeps-copy", 0, true, 600);
+    // The part the call writes may be the object's only member or element, of the object's size: its type is the
+    // result's. A wider object, or a volatile member, keeps the copy.
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct O{struct S s;};struct S make(int);int read(const struct O*);"
+                                                    "int f(int n){struct O o={make(n)};return read(&o);}",
+                                              "initializer-call-member-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct O{struct S s;};struct S make(int);int read(const struct O*);"
+                                                    "int f(int n){struct O o={.s=make(n)};return read(&o);}",
+                                              "initializer-call-designated-member-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct O{struct S s;};struct P{struct O o;};struct S make(int);"
+                                                    "int read(const struct P*);int f(int n){struct P p={{make(n)}};return read(&p);}",
+                                              "initializer-call-nested-member-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct S make(int);int read(const struct S*);"
+                                                    "int f(int n){struct S a[1]={make(n)};return read(a);}",
+                                              "initializer-call-element-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};union W{struct S s;char c[300];};struct S make(int);int read(const union W*);"
+                                                    "int f(int n){union W w={make(n)};return read(&w);}",
+                                              "initializer-call-union-member-in-place", 0, false, 300);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct O{struct S s;int extra;};struct S make(int);int read(const struct O*);"
+                                                    "int f(int n){struct O o={make(n)};return read(&o);}",
+                                              "initializer-call-wider-member-keeps-copy", 0, true, 604);
+    check_test_program_call_initializer_shape(test, "struct S{char c[300];};struct O{volatile struct S s;};struct S make(int);int read(const struct O*);"
+                                                    "int f(int n){struct O o={make(n)};return read(&o);}",
+                                              "initializer-call-volatile-member-object-keeps-copy", 2, false, 600);
     // A union's member smaller than the union leaves bytes the clear writes.
     check_test_program_clear_shape(test, "struct M{char c[200];};union U{struct M m;long l[40];};int read(const union U*,int);"
                                          "int f(const struct M*p,int n){union U u={*p};return read(&u,n);}",
@@ -310,4 +380,17 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
         "c.a[0]!=n+3L||((unsigned long)&c&63)!=0||v.a[39]!=n+43L||v.flags!=n+4||d.flags!=n+14||"
         "e.a[3]!=2L*n+16||e.flags!=2*n+13;return bad?123456+bad:calls;}",
         "initializer-call-nesting-aliases-and-alignment", clang);
+    // Members, elements, labels around in-place calls, and a backward goto whose callee's argument reads the earlier
+    // visit's object through an escaped pointer, which keeps its copy.
+    check_test_program_source(test,
+        "struct S{long a[40];int flags;};struct O{struct S s;};union W{struct S s;long l[41];};static int calls;"
+        "static struct S make(int n){struct S s;for(int i=0;i<40;i++)s.a[i]=n+i;s.flags=n;calls=calls*3+1;return s;}"
+        "static long sum(const struct S*s){long t=s->flags;for(int i=0;i<40;i++)t+=s->a[i]*(i+1);return t;}"
+        "int tested(int n){calls=0;long r=0;struct O o={make(n)};r+=sum(&o.s);struct S a[1]={make(n+1)};r+=sum(a);"
+        "union W w={make(n+2)};r+=sum(&w.s);struct O d={.s=make(n+3)};r+=sum(&d.s)*2;"
+        "for(int i=0;i<3;i++){if(i==1)goto skip;r+=i;skip:;}{struct S x=make(n+4);r+=sum(&x)*3;}"
+        "for(struct S y=make(n+5);y.flags<n+8;y.flags++){if(y.flags==n+6)goto next;r+=sum(&y);next:;}"
+        "struct S*seen=0;int visits=0;again:;struct S b=make(seen!=0?(int)seen->a[1]+1:n);seen=&b;if(++visits<3)goto again;"
+        "r+=sum(&b)*5;if(n<-1000)goto out;{struct S z=make(n+9);r+=sum(&z)*7;}out:return (int)(r%1000003)+calls%1009;}",
+        "initializer-call-members-labels-and-reentry", clang);
 }

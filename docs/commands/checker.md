@@ -173,8 +173,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
   a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
-  The same group covers #1549's hidden-result call initializers: copy and temporary elimination, nested and indirect
-  calls, alignment, volatile and self-reference fallbacks, assignments and reentry. `tests/interpreter/source.c`
+  The same group covers #1549's hidden-result call initializers: copy, temporary and discarded-address elimination,
+  nested and indirect calls, only members and elements, alignment, volatile and self-reference fallbacks, assignments,
+  reentry, and which labels keep the copy, at both scan paths' lengths. `tests/interpreter/source.c`
   also exercises direct, nested and indirect aggregate call initializers through the typed and Tier 1 source checks.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
