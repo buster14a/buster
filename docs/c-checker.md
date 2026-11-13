@@ -3892,7 +3892,15 @@ What the lowering covers past scalars (#145's programs):
   store forwards from it: in `struct { unsigned x : 3, y : 7, z : 13, w : 9; }`
   each field's access is 4 bytes at 0, where the bytes that hold each field's
   bits (2 at 0, 1 and 2) overlap without matching and fail store-to-load
-  forwarding; the issue's four-field update took 3.5 times clang -O0's cycles.
+  forwarding. On the 9700X the issue's two updates and four reads of those
+  fields, 50 M calls, took 2,464.19 M cycles at Tier 1 and 2,570.16 M at Tier 0,
+  with 300 M and 372 M store-to-load conflicts; through the units they take
+  771.49 M and 776.94 M, with about 1,000 conflicts, against clang -O0's
+  720.79 M. Each struct's units are made once: a walk per access cost a stress
+  of 32,768 accesses 266 M more instructions to compile, and the column 3.3 M
+  fewer than before; `sqlite3.c`'s `-c` runs 0.17 M fewer. [The measurement
+  record](https://github.com/buster14a/buster-performance/tree/9284eb6355c30ab4232b22716521a7d4d9d3c82e/docs/measurements/bit-field-units-1372-2026-11-13)
+  has the harness, counters and limitations.
   The lowering's preparation chains each struct's units once, from its first
   member (an anonymous struct's are its own, as clang's), into a column of 2
   bytes per member: the member's bit in its unit and the unit's bytes. A
