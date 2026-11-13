@@ -2930,8 +2930,8 @@ static __mmask16 ir_dominance_earlier(const IrCfg* cfg, const IrDominance* domin
     return bad;
 }
 
-// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's and a call's, whose
-// operands are in extra; a use of a value at or after its own instruction, which is an error within the block; and,
+// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's, a call's and a
+// ternary intrinsic's, whose operands are in extra; a use at or after its instruction, an error within the block; and,
 // with a dominator tree, a use of an earlier block's value whose block doesn't dominate the use's. Any other use is of
 // an earlier value of its own block, which needs nothing more (#786).
 static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t first, uint32_t count)
@@ -2948,7 +2948,11 @@ static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const
     const __m512i two = _mm512_set1_epi32(2);
     const __m512i four = _mm512_set1_epi32(4);
     const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT));
+    const __m512i kind = _mm512_and_si512(c, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
+    const __mmask16 ternary = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_INTRINSIC)) &
+                             _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
+                             _mm512_cmplt_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
+    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT)) | ternary;
     const __mmask16 direct = active & ~extra;
     const __mmask16 use_a = direct & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
     const __mmask16 use_b = direct & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
