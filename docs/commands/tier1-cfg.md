@@ -23,7 +23,11 @@ requirements. [Command index](README.md).
   the successor's entry from one forward sweep of that value's intervals (#1399), and emission resolves a position
   from the first interval overlapping its block when that column fits. Validation fills the position-to-block
   column that allocation and emission then read (to 2^20 positions), and checks each use against its definition's
-  block start with one compare instead of a search per use and definition. The verifier and the certificate keep the
+  block start with one compare instead of a search per use and definition: on the 9700X, sqlite3.c's single-lane
+  `--tier1` compile took 0.8% fewer cycles, and validation's lines fell from 0.78% of them to 0.18%, the most a vector
+  pass over the uses could take off
+  ([record](https://github.com/buster14a/buster-performance/tree/9e1b1d03ac4ceffdfaf513a9d04112699aeaaf44/docs/measurements/tier1-cfg-validation-1399-2026-11-13)).
+  The verifier and the certificate keep the
   binary search and check both results against it; `test-tier1-cfg` compares the two validations over every
   placement of a definition and two uses in a small CFG, and runs fixtures and random SSA over random CFGs of the
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
