@@ -138,6 +138,13 @@ struct CheckUnitsLane
     // for one (--shared-parts' report).
     const struct CheckUnitsRun* run;
     uint32_t discarded_huge;
+    // #2531's attested declarations (c_check_attested.c): the lane's memo and its names' states, which its units share as
+    // they share its intern table, opened by its first unit of a command of several source files with --attested=on or
+    // verify (null otherwise, or where it couldn't be reserved), and closed with the table.
+    struct CheckAttested* attested;
+    bool attested_tried;
+    // Its counts, kept past the state's close for --time-stages' report (check_attested_summary).
+    uint64_t attested_counts[CHECK_ATTESTED_SUMMARY];
 };
 
 #include "c_driver_mixed.c"
@@ -176,6 +183,22 @@ struct CheckUnitsRun
 // Whether a unit of `lane`'s run is still to be taken, which a lane that finishes its unit takes next, likely this one,
 // pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in whole huge pages
 // where none was left to take.
+static CheckAttested* check_attested_lane_open(uint8_t mode);
+static void check_attested_lane_close(CheckAttested* attested);
+static void check_attested_begin(CheckAttested* attested, bool again);
+static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
+static bool check_attested_again(const CheckAttested* attested, bool failed);
+
+// The last command's counts of attested declarations (check_attested_summary, by CheckAttestedSummary), which --time-stages
+// reports and the tests read (c_check_attested_test.c).
+static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
+
+// The lane's attested declarations' state, for check_driver_unit (null where it has none).
+static CheckAttested* check_units_attested(const CheckUnitsLane* lane)
+{
+    return lane->attested;
+}
+
 static bool check_units_unit_left(const CheckUnitsLane* lane)
 {
     return lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
@@ -2199,6 +2222,10 @@ static void check_units_lane_release(CheckUnitsLane* lane)
 {
     file_cache_release(&lane->cache);
     intern_release(&lane->identifiers);
+    check_attested_summary(lane->attested, lane->attested_counts);
+    check_attested_lane_close(lane->attested);
+    lane->attested = NULL;
+    lane->attested_tried = false;
     lane->ready = false;
     arena_release(&lane->output);
     arena_release(&lane->scratch);
@@ -2269,8 +2296,57 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         }
         else
         {
+            // The lane's attested declarations (#2531), opened by its first unit of a command of several source files.
+            if (!lane->attested_tried && command->attested != CHECK_ATTESTED_MODE_OFF && command->source_count > 1)
+            {
+                lane->attested = check_attested_lane_open(command->attested);
+                lane->attested_tried = true;
+            }
+            check_attested_begin(lane->attested, false);
             unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
                                              &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL, &unit->fatal);
+            // A unit that skipped attested declarations where its reading may have depended on them (an error, a failure
+            // of any stage, the typo corrector, an unlisted name: check_attested_after) is read again from its start with
+            // nothing skipped, as it would be without them: its stream from its start, and its arenas as the next unit
+            // would find them. Only the first reading can skip, so this is the last.
+            if (check_attested_again(lane->attested, unit->status != 0 || unit->fatal))
+            {
+                fflush(errors);
+                fseeko(errors, 0, SEEK_SET);
+                check_program_lanes_settle(&lane->functions);
+                arena_pop_to(&lane->output, 0);
+                arena_pop_to(&lane->scratch, 0);
+                arena_pop_to(&lane->arena, 0);
+                arena_pop_to(&lane->functions.arenas[0].scratch, 0);
+                const Arena kept_columns = lane->functions.arenas[0].scratch;
+                lane->functions = (CheckProgramLanes){
+                    .lanes = run->board != NULL ? run->board->lanes : 1,
+                    .board = run->board,
+                    .board_lane = (uint32_t)(lane - run->lanes),
+                    .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
+                    .tier1 = command->tier1,
+                    .tier1_strict = command->tier1_strict,
+                    .tier1_no_rematerialize = command->tier1_no_rematerialize,
+                    .tier1_gvn = command->tier1_gvn,
+                    .tier1_no_lifetimes = command->tier1_no_lifetimes,
+                    .tier1_no_inline = command->tier1_no_inline,
+                    .tier0_no_inline = command->tier0_no_inline,
+                    .tier1_schedule = command->tier1_schedule,
+                    .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+                    .helper_reporting = command->helper_report != NULL,
+                    .units_lane = lane,
+                    .helper_forms = command->helper_forms,
+                };
+                lane->functions.arenas[0].scratch = kept_columns;
+                unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
+                unit->fatal = false;
+                memset(ticks, 0, sizeof(ticks));
+                check_attested_begin(lane->attested, true);
+                unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch,
+                                                 &lane->output, &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency,
+                                                 &lane->kept, NULL, &unit->fatal);
+                check_attested_begin(lane->attested, false);
+            }
         }
         arena_small_floor = 0;
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
@@ -2718,6 +2794,29 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
                 fprintf(stderr, "units' scratch: %u gave %s pages back in whole huge pages, for a unit left to take\n", discarded_huge,
                         discarded_huge != 1 ? "their" : "its");
+            }
+            // The lanes that took units closed their states (check_units_lane_release), but the last one in a command
+            // that doesn't release its memory, whose counts are its state's yet.
+            uint64_t* const counts = check_units_attested_last;
+            memset(counts, 0, sizeof(check_units_attested_last));
+            for (uint32_t l = 0; l < active; l += 1)
+            {
+                for (uint32_t c = 0; c < CHECK_ATTESTED_SUMMARY; c += 1)
+                {
+                    counts[c] += states[l].attested_counts[c];
+                }
+                check_attested_summary(states[l].attested, counts);
+            }
+            if (stage_clock != NULL && command->attested != CHECK_ATTESTED_MODE_OFF && command->source_count > 1)
+            {
+                const uint64_t outside = counts[CHECK_ATTESTED_SUMMARY_OUTSIDE_TOKENS];
+                fprintf(stderr, "attested declarations: %" PRIu64 " of %" PRIu64 " units skipped %" PRIu64 " of %" PRIu64 " file-scope declarations, %" PRIu64 " of %" PRIu64
+                                " tokens outside definitions (%.2f%%); %" PRIu64 " units read again; %" PRIu64 " hashes in the memos; %" PRIu64 " contradictions; %" PRIu64
+                                " unlisted events\n",
+                        counts[CHECK_ATTESTED_SUMMARY_SKIPPING], counts[CHECK_ATTESTED_SUMMARY_UNITS], counts[CHECK_ATTESTED_SUMMARY_SKIPPED],
+                        counts[CHECK_ATTESTED_SUMMARY_DECLARATIONS], counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS], outside,
+                        outside != 0 ? 100.0 * (double)counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] / (double)outside : 0.0, counts[CHECK_ATTESTED_SUMMARY_AGAIN],
+                        counts[CHECK_ATTESTED_SUMMARY_HASHES], counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS], counts[CHECK_ATTESTED_SUMMARY_UNLISTED]);
             }
             if (command->units_memory != 0)
             {

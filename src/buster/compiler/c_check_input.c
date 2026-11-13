@@ -941,6 +941,9 @@ struct CheckInput
     // Beside each, whether it declares an unknown builtin, a `__builtin_` name: clang's "use of unknown builtin" (#2121).
     bool* implicit_function_builtins;
     uint32_t implicit_function_count;
+    // Whether the reader readied its typo corrector (c_check_typo.c), which looks at every name the unit declared, so
+    // that a unit whose attested declarations were skipped is read again with none skipped (#2531).
+    bool typo_searched;
     // The uses a typo's correction recovered (#1447, c_check_typo.c), in source order, at most its search limit: a warning
     // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
     uint32_t* corrected_tokens;
@@ -16551,9 +16554,42 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
     return result;
 }
 
+// #2531's attested declarations (c_check_attested.c): the marks of the declarations a unit's walk passes, and the test of
+// each reading's binding events against its declaration's list, made as the reader ends, while it has them.
+typedef struct CheckAttested CheckAttested;
+static const uint64_t* check_attested_skips(const CheckAttested* attested);
+static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count);
+
+// The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
+// a word, none past the unit's last token) given no visit and ignored, as -flazy-system-headers' deferred body is: the
+// walk then passes them, and the expressions' walk acts at none of them. A word at a time, by its bits as a store's mask;
+// the scalar path's bit at a time is its twin.
+static void check_input_skip(CheckInputReader* reader, const uint64_t* skips, uint32_t count, bool scalar)
+{
+    const uint32_t words = count / 64 + 1;
+    uint8_t* const visits = reader->visits;
+    uint8_t* const ignored = reader->ignored;
+    uint32_t w = 0;
+    for (; !BUSTER_SCALAR_PATH(scalar) && w < words; w += 1)
+    {
+        const uint64_t bits = skips[w];
+        _mm512_mask_storeu_epi8(visits + (uint64_t)w * 64, bits, _mm512_setzero_si512());
+        _mm512_mask_storeu_epi8(ignored + (uint64_t)w * 64, bits, _mm512_set1_epi8(1));
+    }
+    for (; w < words; w += 1)
+    {
+        for (uint64_t bits = skips[w]; bits != 0; bits &= bits - 1)
+        {
+            const uint64_t token = (uint64_t)w * 64 + (uint64_t)__builtin_ctzll(bits);
+            visits[token] = 0;
+            ignored[token] = 1;
+        }
+    }
+}
+
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
-                            CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
+                            CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output, CheckAttested* attested)
 {
     // The output columns whose empty value is zero need no clearing where `arena`'s bytes past its length are as the kernel
     // mapped them (arena_untouched), which a caller that knows no copy of the arena pushed past its length says with
@@ -17202,6 +17238,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             }
             if (!input->resource)
             {
+                const uint64_t* skips = attested != NULL ? check_attested_skips(attested) : NULL;
+                if (skips != NULL)
+                {
+                    check_input_skip(&reader, skips, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+                }
                 check_input_resolve_range(&reader, 0, count);
             }
             if (deferred != 0)
@@ -17242,6 +17283,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             }
             check_input_bindings(&reader, binding_mode);
             check_typo_finish(&reader);
+            input->typo_searched = reader.typo != NULL;
             if (reader.fallthrough_count != 0 && !input->resource)
             {
                 check_input_fallthrough_placements(&reader);
@@ -17398,6 +17440,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         // rejected.
         const bool recovered = input->recovered_published != 0 && input->recovered_published == input->report_count;
         valid = !input->resource && (input->report_count == 0 || recovered) && reader.bindings.valid;
+        if (valid && attested != NULL)
+        {
+            check_attested_events(attested, pp, &reader.bindings, reader.tag_completions, types, count);
+        }
         if (valid && environment)
         {
             valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
@@ -17432,13 +17478,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false, NULL);
 }
 
 // Exact source oracle for the compact literal-table producer: retain ordinary per-expression checking/planning.
 static __attribute__((unused)) bool check_input_tables_reference(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false, false, NULL);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -17446,7 +17492,7 @@ static __attribute__((unused)) bool check_input_tables_reference(CheckInput* inp
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true, false, NULL);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -17455,14 +17501,14 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false, NULL);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false, NULL);
 }
 
 // The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
@@ -17472,7 +17518,7 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
     return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
-                           false, true, true);
+                           false, true, true, NULL);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -17480,5 +17526,5 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true, false, NULL);
 }

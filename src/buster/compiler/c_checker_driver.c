@@ -9973,6 +9973,37 @@ static const char* check_driver_test_failed_types;
 
 // What every translation unit of a command reads, and none writes: run_check_command_mode's options.
 typedef struct CheckDriverCommand CheckDriverCommand;
+// --attested=MODE (#2531, docs/attested-declarations.md): `on`, the default, skips the file-scope declarations that a
+// lane's earlier units read silently and purely and that the unit's own code doesn't reach; `verify` reads them, and
+// fails the unit where one's reading isn't what the lane's memo attests; `off` runs none of the passes. A command of one
+// source file has no memo and runs none, and --scalar is `off`: its reader, which reads every declaration, is the skip's
+// oracle.
+typedef enum CheckAttestedMode
+{
+    CHECK_ATTESTED_MODE_ON,
+    CHECK_ATTESTED_MODE_VERIFY,
+    CHECK_ATTESTED_MODE_OFF,
+} CheckAttestedMode;
+
+// The lanes' counts that --time-stages reports for a command of several source files (check_attested_summary): its units
+// (each once, whether read again or not), those that skipped and those read again; their file-scope declarations, and the
+// skipped ones; the tokens outside function definitions, and the skipped ones; the hashes in the lanes' memos; the hits
+// that their readings contradicted; and the readings' binding events outside their declarations' lists.
+typedef enum CheckAttestedSummary
+{
+    CHECK_ATTESTED_SUMMARY_UNITS,
+    CHECK_ATTESTED_SUMMARY_SKIPPING,
+    CHECK_ATTESTED_SUMMARY_AGAIN,
+    CHECK_ATTESTED_SUMMARY_DECLARATIONS,
+    CHECK_ATTESTED_SUMMARY_SKIPPED,
+    CHECK_ATTESTED_SUMMARY_OUTSIDE_TOKENS,
+    CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS,
+    CHECK_ATTESTED_SUMMARY_HASHES,
+    CHECK_ATTESTED_SUMMARY_CONTRADICTIONS,
+    CHECK_ATTESTED_SUMMARY_UNLISTED,
+    CHECK_ATTESTED_SUMMARY,
+} CheckAttestedSummary;
+
 struct CheckDriverCommand
 {
     // The preprocessor's, from -E's options on the command line, for every unit.
@@ -9990,6 +10021,9 @@ struct CheckDriverCommand
     // --deferred-bodies: a unit's function bodies read apart, on the command's lanes (#151, check_input_deferred_compile);
     // --no-deferred-bodies reads them in source order.
     bool deferred_bodies;
+    // --attested=MODE (#2531): what a command of several source files does with the file-scope declarations its lanes'
+    // earlier units read silently and purely (CheckAttestedMode, c_check_attested.c).
+    uint8_t attested;
     // -Wreturn-type's: whether to warn, whether -Werror promotes it, and -Werror=return-type's (1) or
     // -Wno-error=return-type's (-1) say.
     bool return_warning;
@@ -10614,6 +10648,13 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
                                  bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, const char* path);
 static void check_attested_after(CheckAttested* census, const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, bool valid,
                                  bool complete);
+// The compile's own (#2531's steps 1 and 2, --attested): the lane's state of a unit of several (check_units_attested,
+// null in a command of one source file), its reader with the passes before it, and --attested=verify's failure.
+static CheckAttested* check_units_attested(const struct CheckUnitsLane* lane);
+static bool check_attested_read(CheckAttested* attested, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                                bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens);
+static void check_attested_contradiction(const CheckAttested* attested, Preprocessor* pp, FILE* errors);
+static bool check_attested_verifying(const CheckAttested* attested);
 
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
@@ -10626,6 +10667,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     Arena index_arena = { 0 };
     // The thread's last arena failure as the unit starts, against which its end tells a commit the unit was refused.
     const ArenaFailure failure_before = arena_failure;
+    // #2531's attested declarations: the lane's state where the unit is one of a command's several (none for the census's).
+    CheckAttested* const attested = check_driver_attested == NULL && lanes != NULL && lanes->units_lane != NULL ? check_units_attested(lanes->units_lane) : NULL;
     const bool scalar = command->scalar;
     const bool verify = command->verify;
     const bool dump = command->dump;
@@ -10838,6 +10881,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 input_valid = check_attested_input(check_driver_attested, &input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                    repairing ? repair.original_end : checking->tokens.count, selected, path);
+            }
+            else if (attested != NULL)
+            {
+                input_valid = check_attested_read(attested, &input, checking, checking_pp, &types, arena, scratch, !prefix_only,
+                                                  repairing ? repair.original_end : checking->tokens.count, selected);
             }
             else
             {
@@ -11652,6 +11700,17 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 check_attested_after(check_driver_attested, checking, pp, &input, &types, input_valid && result == 0 && !driver_fatal && !pp->fatal, !prefix_only);
             }
+            else if (attested != NULL)
+            {
+                // Each reading's record, the memo's new hashes, and whether a unit that skipped is read again
+                // (check_units_compile); with --attested=verify, a hit that its reading here contradicts fails the unit.
+                check_attested_after(attested, checking, pp, &input, &types, input_valid && result == 0 && !driver_fatal && !pp->fatal, !prefix_only);
+                if (check_attested_verifying(attested))
+                {
+                    check_attested_contradiction(attested, pp, errors);
+                    driver_fatal = true;
+                }
+            }
         }
         if (parse_failed)
         {
@@ -11999,6 +12058,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --deferred-bodies reads a unit's function bodies apart, on the command's lanes (#151); --no-deferred-bodies, the
     // default, reads them in source order.
     bool deferred_bodies = false;
+    // --attested=on|verify|off (CheckAttestedMode).
+    CheckAttestedMode attested = CHECK_ATTESTED_MODE_ON;
+    bool invalid_attested = false;
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
     bool lower_all = false;
@@ -12371,6 +12433,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             shared_parts = true;
         }
+        else if (match.joined == C_OPTION_ATTESTED_EQ)
+        {
+            const char* mode = arguments[i] + 11;
+            attested = strcmp(mode, "on") == 0 ? CHECK_ATTESTED_MODE_ON : strcmp(mode, "verify") == 0 ? CHECK_ATTESTED_MODE_VERIFY : CHECK_ATTESTED_MODE_OFF;
+            invalid_attested |= strcmp(mode, "on") != 0 && strcmp(mode, "verify") != 0 && strcmp(mode, "off") != 0;
+        }
         else if (match.joined == C_OPTION_UNITS_MEMORY_EQ)
         {
             char* end = NULL;
@@ -12515,7 +12583,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && !invalid_tier1_schedule && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
@@ -12589,6 +12657,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .lower_all = lower_all,
         // The scalar path keeps source order's reader, the twin the deferred one is checked against.
         .deferred_bodies = deferred_bodies && !scalar,
+        // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's
+        // too, so -g skips nothing; --attested=verify, which skips nothing, still runs.
+        .attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ? CHECK_ATTESTED_MODE_OFF :
+                              attested),
         .return_warning = return_warning,
         .warning_errors = warning_errors,
         .return_error = return_error,
@@ -12649,7 +12721,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

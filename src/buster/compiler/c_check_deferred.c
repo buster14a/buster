@@ -3051,7 +3051,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     // check_deferred_bodies ends the top level's span, which starts here.
     deferred->top_ns = valid && deferred->timing ? check_deferred_now() : 0;
     deferred->top.changes = valid ? &deferred->top_changes : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, !compile, true, compile);
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, !compile, true, compile, NULL);
     deferred->top.changes = 0;
     check_deferred_give_back(deferred);
     deferred->unsupported |= !valid;
