@@ -1433,8 +1433,16 @@ static bool node_machine_call_rule(NodeMachine* machine, uint32_t r, uint32_t no
     }
     if (taken)
     {
+        // The value's type and flags alone, into the columns, but where an argument's fault came with them.
         value.flags = check_value_source_flags(CHECK_OP_CALL, value.flags);
-        node_machine_put_value(machine, r, &value);
+        if (value.fault == CHECK_FAULT_NONE)
+        {
+            node_machine_record(machine, r, value.type, CHECK_RVALUE, value.flags, CHECK_CONSTANT_NONE, 0, 0);
+        }
+        else
+        {
+            node_machine_put_value(machine, r, &value);
+        }
         const CheckConversion none = { 0 };
         node_machine_conversions(machine, r, &callee_conversion, &none, 0);
     }
@@ -1888,6 +1896,56 @@ static __attribute__((noinline)) bool node_machine_comma(NodeMachine* machine, u
     return taken;
 }
 
+// T's conditional at record `r` (node `node`) of records `a` (the condition), `b` and `c` (the arms), by
+// check_action_conditional's steps where the condition is a scalar and the arms are of builtin arithmetic types that the
+// add's row takes (whose conversions are the usual arithmetic ones the conditional makes) or either is void, each as the
+// common conversions take it and held whole by the columns: whether it typed the node. The values are made whole for the
+// action's own conversions and check_action_conditional_provenance.
+static __attribute__((noinline)) bool node_machine_conditional(NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a, uint32_t b, uint32_t c)
+{
+    TypeTable* types = machine->types;
+    NodeMachineOperand condition;
+    NodeMachineOperand left;
+    NodeMachineOperand right;
+    CheckConversion conversions[3];
+    bool taken = b < r && c < r && ((machine->columns->standings[a] | machine->columns->standings[b] | machine->columns->standings[c]) & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                 node_machine_operand_value(machine, a, &condition, conversions) && node_machine_operand_value(machine, b, &left, conversions + 1) &&
+                 node_machine_operand_value(machine, c, &right, conversions + 2) && check_action_is_scalar(types, condition.type);
+    const uint32_t code_left = type_index(left.type);
+    const uint32_t code_right = type_index(right.type);
+    const bool arithmetic = taken && ((left.type | right.type) & BUSTER_TYPE_QUALIFIERS) == 0 && code_left < BUSTER_NODE_MACHINE_KINDS &&
+                            code_right < BUSTER_NODE_MACHINE_KINDS && node_machine_row_kind(code_left) && node_machine_row_kind(code_right);
+    const NodeMachineRow* row = arithmetic ? &node_machine_rows[NODE_MACHINE_ROW_ADD][code_left][code_right] : NULL;
+    const bool void_arm = taken && !arithmetic &&
+                          (check_action_kind(types, left.type) == BUSTER_TYPE_KIND_VOID || check_action_kind(types, right.type) == BUSTER_TYPE_KIND_VOID);
+    taken = (row != NULL && row->result != 0) || void_arm;
+    if (taken)
+    {
+        CheckValue values[3];
+        node_machine_operand_whole(machine, &condition, values);
+        node_machine_operand_whole(machine, &left, values + 1);
+        node_machine_operand_whole(machine, &right, values + 2);
+        TypeId common = BUSTER_TYPE_VOID;
+        if (row != NULL)
+        {
+            check_action_promote(types, values + 1, conversions + 1, node);
+            check_action_promote(types, values + 2, conversions + 2, node);
+            common = BUSTER_TYPE_BUILTIN(row->converted[0]);
+        }
+        check_action_conversion(types, values + 1, common, values[1].type == common ? 0 : BUSTER_CHECK_CONVERT_ARITHMETIC, conversions + 1, node);
+        check_action_conversion(types, values + 2, common, values[2].type == common ? 0 : BUSTER_CHECK_CONVERT_ARITHMETIC, conversions + 2, node);
+        bool truth = false;
+        const bool known = check_action_truth(types, values, &truth);
+        CheckValue value;
+        memset(&value, 0, sizeof(value));
+        check_action_conditional_provenance(types, &value, common, values, values + 1, values + 2, known, truth);
+        value.flags = check_value_source_flags(CHECK_OP_CONDITIONAL, value.flags);
+        node_machine_put_value(machine, r, &value);
+        node_machine_conversions(machine, r, conversions, conversions + 1, 0);
+    }
+    return taken;
+}
+
 static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
 {
     bool typed = false;
@@ -1902,6 +1960,10 @@ static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, C
     else if (op == CHECK_OP_COMMA)
     {
         typed = node_machine_comma(machine, r, a, b);
+    }
+    else if (op == CHECK_OP_CONDITIONAL)
+    {
+        typed = node_machine_conditional(machine, r, node, a, b, node_machine_operand(machine, r, 2));
     }
     else if (op == CHECK_OP_POSITIVE || (node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && op != CHECK_OP_ADD && op != CHECK_OP_SUBTRACT))
     {
@@ -2109,7 +2171,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             {
                 refusal = NODE_MACHINE_REFUSED_CALLEE;
             }
-            else if (!machine->scalar && (a != UINT32_MAX || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && c == UINT32_MAX &&
+            else if (!machine->scalar && (a != UINT32_MAX || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && (c == UINT32_MAX || op == CHECK_OP_CONDITIONAL) &&
                      ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
             {
                 machine->row_nodes += 1;
