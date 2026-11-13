@@ -15,14 +15,19 @@ staging=$(mktemp -d "$runtime/staging.XXXXXXXX")
 trap 'rm -rf "$staging"' EXIT
 
 # Exact package hashes from Ubuntu's resolute-updates (glibc) and resolute
-# (GCC 15) amd64 Packages indexes. Download only generic amd64 packages.
+# (GCC 15) amd64 Packages indexes. Download only generic amd64 packages, from
+# Ubuntu's snapshot archive as of `snapshot`: archive.ubuntu.com's pool drops a
+# version once -updates supersedes it, and libc6 2.43-2ubuntu2.4's URL there
+# returned 404 from 2026-11-13, failing every preparation whose cache missed
+# (merge-queue run 43519713018). A snapshot URL serves the same bytes for good.
+snapshot=20261110T000000Z
 fetch_package()
 {
     local path="$1" digest="$2" filename="${1##*/}"
     # cached-download.sh checks the SHA-256 and retries every error for 240 s (a transport reset failed main's x86-64
     # shard 3 in run 42888849321). A hosted job reads the copy its preparation job acquired, with no network
     # (BUSTER_CI_CACHE and BUSTER_CI_OFFLINE, tools/ci/hosted-offline.sh).
-    bash "$(dirname "$0")/cached-download.sh" "https://archive.ubuntu.com/ubuntu/$path" "$digest" "$staging/$filename"
+    bash "$(dirname "$0")/cached-download.sh" "https://snapshot.ubuntu.com/ubuntu/$snapshot/$path" "$digest" "$staging/$filename"
     printf '%s  %s\n' "$digest" "$staging/$filename" | sha256sum --check --status
     ar p "$staging/$filename" data.tar.zst | tar --zstd -xf - -C "$staging" --no-same-owner
 }
