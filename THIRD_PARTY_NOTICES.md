@@ -29,6 +29,15 @@ The interface declarations, include guards, build-ownership checks and
 documentation are original project material under the default terms. No new
 upstream implementation or generated input is introduced by this reorganization.
 
+The unknown-type comma-declaration recovery in `c_parser_impl.c`, its private
+diagnostic view in `c_check_prefix.c`, and the original parser and semantic
+driver regressions (#2640) are original project material under the default
+terms. The `ParseDeclGroup` invalid-type gate and declaration recovery in
+LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Parse/ParseDecl.cpp` and `ParseStmt.cpp` were consulted for behavioral
+facts. Clang is an external diagnostic oracle; no upstream implementation or
+test fixture is imported.
+
 The command-line warning vocabulary, unknown-option diagnostic policy and
 original CLI regressions in `c_preprocessor_warning_options.c`,
 `c_driver_warning_options_test.c` and their integration (#1467) are original

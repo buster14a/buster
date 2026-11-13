@@ -455,25 +455,27 @@ static bool check_prefix_pragma_between(const Parser* view, uint32_t token)
 // pragma between (check_prefix_pragma_between).
 static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diagnostic, uint32_t limit)
 {
+    const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token;
     bool valid = diagnostic->error && (diagnostic->resumed || diagnostic->resume_colon) && diagnostic->token < limit && diagnostic->token != 0 &&
-                 (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, diagnostic->token));
+                 begin <= diagnostic->token && (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, begin));
     if (valid && diagnostic->resume_end != 0)
     {
         valid = diagnostic->resume_end >= diagnostic->token && diagnostic->resume_end <= view->tokens.count;
-        valid &= !diagnostic->resume_delete || diagnostic->resume_end > diagnostic->token;
+        valid &= !diagnostic->resume_delete || diagnostic->resume_end > begin;
         // Do not move an annotation out of a discarded K&R tail. Those pragmas need their own parser recovery.
         uint32_t low = 0;
         uint32_t high = view->tokens.pragma_count;
         while (low < high)
         {
             const uint32_t middle = low + (high - low) / 2;
-            const bool before = view->tokens.pragma_positions[middle] < diagnostic->token;
+            const bool before = view->tokens.pragma_positions[middle] < begin;
             low = before ? middle + 1 : low;
             high = before ? high : middle;
         }
         valid &= low == view->tokens.pragma_count || view->tokens.pragma_positions[low] >= diagnostic->resume_end;
     }
     valid &= !diagnostic->resume_delete || diagnostic->resume_end != 0;
+    valid &= diagnostic->resume_begin == 0 || (diagnostic->resume_delete && diagnostic->resume_end != 0);
     return valid;
 }
 
@@ -488,6 +490,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.resumed = false;
     result.resume_delete = false;
     result.resume_end = 0;
+    result.resume_begin = 0;
     result.resume_colon = false;
     return result;
 }
@@ -693,9 +696,11 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* diagnostic = diagnostics + d;
-            // (A parameter's missing or unknown type, which the parse read in place, doesn't stop the rounds: the
-            // prefix view reads it as `int`, check_prefix_type_view.)
-            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !check_prefix_parameter_error(diagnostic);
+            // Unknown types were read as specifiers before recovery erased the declaration's tree. They do not stop
+            // a later declarator's proven tail repair (#2640); the reparse retains their errors and the prefix view
+            // marks their recovered types invalid. Missing parameter types likewise do not stop the rounds.
+            const bool type = check_prefix_parameter_error(diagnostic) || diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME;
+            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !type;
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
             // The original parser abandoned this K&R header. Later diagnostics may have treated its remaining
             // parameter declarations as file scope, so re-establish the header before considering those repairs.
@@ -713,11 +718,12 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         {
             const ParseDiagnostic* diagnostic = diagnostics + d;
             const bool taken = check_prefix_resumes(current, diagnostic, limit);
-            ordered &= !taken || diagnostic->token > last;
+            const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token;
+            ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
             insert += taken && !diagnostic->resume_delete;
             repairs += taken;
-            discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - diagnostic->token : 0;
+            discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
         }
         const uint32_t total = count + insert - discard;
         work += total;
@@ -738,7 +744,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             {
                 const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? diagnostics + d : 0;
                 const bool taken = diagnostic == 0 || check_prefix_resumes(current, diagnostic, limit);
-                const uint32_t to = diagnostic != 0 ? diagnostic->token : count;
+                const uint32_t to = diagnostic != 0 ? (diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token) : count;
                 if (taken)
                 {
                     const uint32_t length = to - from;
@@ -771,6 +777,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                         pending[pending_count].resumed = false;
                         pending[pending_count].resume_delete = false;
                         pending[pending_count].resume_end = 0;
+                        pending[pending_count].resume_begin = 0;
                         pending[pending_count].resume_colon = false;
                         pending_count += 1;
                     }

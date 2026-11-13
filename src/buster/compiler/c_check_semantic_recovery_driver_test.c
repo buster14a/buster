@@ -275,6 +275,21 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void) { unknown_type z = \"x\"; }\nint y = 1 + (void)0;\n",
         "unknown_type a = \"x\";\nint b = a + 1;\nint y = 1 + (void)0;\n",
         "unknown_type z = \"x\";\nint g(void) { return 1 + (void)0; }\nint h(void) { return 2 + (void)0; }\n",
+        // Later declarators of an unknown type never reach clang's initializer handler (#2640). Its missing ';'
+        // follows the later declarator, and the skipped names cannot hide errors in subsequent declarations.
+        "unknown_type a = \"x\", b = \"y\";\nint y = 1 + (void)0;\n",
+        "unknown_type a, b = 2;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b, c = 2;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b = (1, (2 + (void)0)), c = absent;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b[] = { 2, 3 };\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, (*b)(void) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type first = 1, never_declared = 2;\nint *use = &never_declared;\nint y = 1 + (void)0;\n",
+        "void f(void) { unknown_type a = 1, b = 2; int y = 1 + (void)0; }\nint z = 2 + (void)0;\n",
+        "unknown_type a = 1, b = 2;\nunknown_type c = 3, d = 4;\nint y = 1 + (void)0;\n",
+        // A missing initializer on later declarators is no missing ';', and the declaration's state must not leak.
+        "unknown_type a = 1, b, c;\nint x = 2, y = 3;\nint z = 1 + (void)0;\n",
+        "void f(unknown_type p, int x);\nint a = 1, b = 2;\nint z = 1 + (void)0;\n",
+        "#define Unknown unknown_type\nUnknown a = 1, b = 2;\nint y = 1 + (void)0;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its

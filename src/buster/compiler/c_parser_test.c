@@ -1299,6 +1299,19 @@ static uint32_t parse_test_check_resumed(const char* directory)
         { "void f(const p);\n", "1:14 parameter type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
         { "const p;\n", "1:7 type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
         { "void f(Unknown p);\n", "1:8 parameter unknown type name 'Unknown'\n" },
+        // An unknown type's first initializer is read, but later declarators stop before theirs (#2640). The
+        // diagnostic follows the later name; its recovery drops the whole later list from the first comma.
+        { "unknown_type a = \"x\", b = \"y\";\nint z = ;\n",
+          "1:1 unknown type name 'unknown_type'\n1:24 resumed deleting 4 expected ';' after top level declarator\n2:9 expected expression\n" },
+        { "unknown_type a = 1, b, c = 2;\n",
+          "1:1 unknown type name 'unknown_type'\n1:25 resumed deleting 6 expected ';' after top level declarator\n" },
+        { "unknown_type a, b = 2;\n",
+          "1:1 unknown type name 'unknown_type'\n1:18 resumed deleting 4 expected ';' after top level declarator\n" },
+        { "void f(void) { unknown_type a = 1, b = 2; }\n",
+          "1:16 unknown type name 'unknown_type'\n1:37 resumed deleting 4 expected ';' at end of declaration\n" },
+        { "unknown_type a = 1, b, c;\nint x = 2, y = 3;\n", "1:1 unknown type name 'unknown_type'\n" },
+        { "unknown_type a;\nint x = 2, y = 3;\n", "1:1 unknown type name 'unknown_type'\n" },
+        { "typedef int Known;\nKnown a = 1, b = 2;\n", "" },
         // Skips to a closer (resume_delete), #1867 and #1447: a comma in an array's size, and what isn't a name in a GNU
         // attribute list; without the closer before a `;`, none.
         { "int u[1, 2];\nint d[3] = { [1, (2, 3)] = 3 };\n", "1:8 resumed deleting 2 expected ']'\n2:16 resumed deleting 6 expected ']'\n" },
@@ -1339,7 +1352,8 @@ static uint32_t parse_test_check_resumed(const char* directory)
                 char deleting[32] = "";
                 if (diagnostic->resume_delete)
                 {
-                    snprintf(deleting, sizeof(deleting), "deleting %u ", diagnostic->resume_end - diagnostic->token);
+                    const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token;
+                    snprintf(deleting, sizeof(deleting), "deleting %u ", diagnostic->resume_end - begin);
                 }
                 const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s%s%s\n", line, column, diagnostic->resumed ? "resumed " : "", deleting,
                                              diagnostic->parameter_type ? "parameter " : "", message);
@@ -2446,7 +2460,7 @@ static uint32_t parse_test_tree_only(const Parser* full, Parser* tree, Preproces
             const ParseDiagnostic* b = &tree->diagnostics[d];
             same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error &&
                    a->note == b->note && a->resumed == b->resumed && a->parameter_type == b->parameter_type && a->resume_delete == b->resume_delete &&
-                   a->resume_end == b->resume_end && a->resume_colon == b->resume_colon;
+                   a->resume_end == b->resume_end && a->resume_begin == b->resume_begin && a->resume_colon == b->resume_colon;
         }
         if (same && parsed)
         {
@@ -3588,7 +3602,7 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
         const ParseDiagnostic* y = &b->diagnostics[d];
         result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ||
                  x->note != y->note || x->resumed != y->resumed || x->parameter_type != y->parameter_type || x->resume_delete != y->resume_delete ||
-                 x->resume_end != y->resume_end || x->resume_colon != y->resume_colon ? "diagnostics" : 0;
+                 x->resume_end != y->resume_end || x->resume_begin != y->resume_begin || x->resume_colon != y->resume_colon ? "diagnostics" : 0;
     }
     return result;
 }
