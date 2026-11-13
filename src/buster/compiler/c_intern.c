@@ -467,9 +467,9 @@ struct InternTable
     uint32_t id_limit;
     // Each id's answer from the intrinsic catalogue: a 16-bit code per id from id 0, which c_check_intrinsic_input.c
     // gives its meaning (#893), zero for an id it hasn't looked up. The answer is the spelling's alone, so the units of a
-    // command that share the table look each spelling up once. Its own reservation of room for `intrinsic_capacity` ids,
-    // fresh (so zero), made at its first use and made again larger, copied, when the table has outgrown it
-    // (intern_intrinsic_rows); intern_reset and intern_release drop it.
+    // command that share the table look each spelling up once. Its own reservation of room for `intrinsic_capacity` ids
+    // and a padding, fresh (so zero), made at its first use and made again twice as large, copied, when the table has
+    // outgrown it (intern_intrinsic_rows); intern_reset and intern_release drop it.
     uint16_t* intrinsic_rows;
     uint32_t intrinsic_capacity;
     Arena intrinsic_arena;
@@ -1043,17 +1043,25 @@ static __attribute__((unused)) void intern_release(InternTable* table)
 
 // Codes past the ids' room in InternTable.intrinsic_rows, zero: a gather's 32-bit read of the last id's code reads into them.
 #define BUSTER_INTERN_INTRINSIC_PADDING 32u
+// The codes' first reservation, padding included: 8 KB, which a small unit's ids fit. Each growth doubles it, so that a
+// table of up to 32,736 ids (sqlite3.c and its headers intern 22,800) keeps its codes in the arena's base pages
+// (BUSTER_ARENA_SMALL_BYTES, 64 KB), where a reservation takes no huge-page advice and splits no mapping.
+#define BUSTER_INTERN_INTRINSIC_FIRST 4096u
 
 // The table's intrinsic codes (InternTable.intrinsic_rows), with room for every id it has: at the first call, and again
-// when the table has grown past them, a fresh reservation as long as the ids' room (`capacity`) and the padding, and the
-// codes it had.
+// when the table has grown past them, a fresh reservation of the first size, doubled until the ids fit with the padding,
+// with the codes it had.
 // Null, the codes left as they were, if the memory can't be reserved.
 static __attribute__((unused)) uint16_t* intern_intrinsic_rows(InternTable* table)
 {
     if (table->intrinsic_rows == NULL || table->count > table->intrinsic_capacity)
     {
-        const uint32_t capacity = table->capacity > table->count ? table->capacity : table->count;
-        const uint64_t bytes = ((uint64_t)capacity + BUSTER_INTERN_INTRINSIC_PADDING) * sizeof(uint16_t);
+        uint64_t total = table->intrinsic_rows != NULL ? (uint64_t)table->intrinsic_capacity + BUSTER_INTERN_INTRINSIC_PADDING : BUSTER_INTERN_INTRINSIC_FIRST;
+        while (total - BUSTER_INTERN_INTRINSIC_PADDING < table->count)
+        {
+            total *= 2;
+        }
+        const uint64_t bytes = total * sizeof(uint16_t);
         Arena arena = arena_reserve(bytes);
         uint16_t* rows = arena.base != NULL ? arena_push(&arena, bytes, 64) : NULL;
         if (rows != NULL)
@@ -1065,7 +1073,7 @@ static __attribute__((unused)) uint16_t* intern_intrinsic_rows(InternTable* tabl
             arena_release(&table->intrinsic_arena);
             table->intrinsic_arena = arena;
             table->intrinsic_rows = rows;
-            table->intrinsic_capacity = capacity;
+            table->intrinsic_capacity = (uint32_t)(total - BUSTER_INTERN_INTRINSIC_PADDING);
         }
         else
         {
