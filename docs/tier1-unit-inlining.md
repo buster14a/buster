@@ -851,7 +851,7 @@ vector rebase of the callee's operand columns and its scalar twin, lifetime
 brackets for the callee's unmarked slots and the aggregate arguments' copies,
 and the callee's calls with ABI records, offered by `--tier1` to its
 `always_inline` callees. Its gate, on the 9700X against main `df85213e`
-([the record](https://github.com/buster14a/buster-performance/tree/7d92d74ba76c06da1fa552be9e97dd53c4823443/docs/measurements/tier1-unit-inlining-step0-2541-2026-11-13)):
+([the record](https://github.com/buster14a/buster-performance/tree/9f3680a0b6dbb3de7b1662b4f769b6a75d455213/docs/measurements/tier1-unit-inlining-step0-2541-2026-11-13)):
 
 | Gate | Result |
 | --- | --- |
