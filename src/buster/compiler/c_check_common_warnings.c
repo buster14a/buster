@@ -4479,6 +4479,10 @@ static inline __attribute__((always_inline)) void check_common_root_frames(Check
     }
 }
 
+// check_common_next_op's and check_common_next_token's items listed at once, at least this many unless the scan reaches its
+// end (#892).
+#define BUSTER_CHECK_SCAN_ITEMS 64u
+
 // A pass's walk over the items its own test needs first (check_common_next_token, check_common_next_op and
 // check_common_next_reach): a group of them at a time, each a bit of the group's mask until visited. Zeroed, it starts at 0.
 typedef struct CheckCommonScan CheckCommonScan;
@@ -4489,7 +4493,30 @@ struct CheckCommonScan
     uint32_t next;
     // The group's items still to visit, a bit each.
     uint64_t pending;
+    // check_common_next_op's and check_common_next_token's: their groups' items, listed in order (`listed` of them, room for
+    // a group past BUSTER_CHECK_SCAN_ITEMS), of which `taken` were visited. Each scan reads a column no pass writes, the
+    // graph's operators or the tokens' roles and kinds, so it lists items ahead of the pass.
+    uint32_t taken;
+    uint32_t listed;
+    uint32_t items[BUSTER_CHECK_SCAN_ITEMS + 64];
 };
+
+// The listed scan's next item, or `count` where its groups are done.
+static uint32_t check_common_scan_listed(CheckCommonScan* scan, uint32_t count)
+{
+    const bool left = scan->taken < scan->listed;
+    const uint32_t result = left ? scan->items[scan->taken] : count;
+    scan->taken += left;
+    return result;
+}
+
+// Appends the items of `selected` from `first` (16 lanes) to the scan's list.
+static void check_common_scan_list(CheckCommonScan* scan, uint32_t first, __mmask16 selected)
+{
+    const __m512i items = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+    _mm512_storeu_si512(scan->items + scan->listed, _mm512_maskz_compress_epi32(selected, items));
+    scan->listed += (uint32_t)__builtin_popcount(selected);
+}
 
 // The scan's group's lowest pending item, which it then takes off, or `count` where the groups are done.
 static uint32_t check_common_scan_take(CheckCommonScan* scan, uint32_t count)
@@ -4501,35 +4528,44 @@ static uint32_t check_common_scan_take(CheckCommonScan* scan, uint32_t count)
 
 // The scan's next token below `count` whose role is one of the `role_count` `roles` and, unless `kind` is BUSTER_CHECK_NONE,
 // whose kind is `kind`, or `count`: what a token pass's own test needs first. The vector path tests 64 tokens at a time;
-// the scalar path, its twin, gives every token, so that its caller tests each.
+// the scalar path, its twin, gives every token, so that its caller tests each. Both take the tokens from the scan's list.
 static uint32_t check_common_next_token(const Parser* parser, uint32_t count, uint32_t kind, const uint8_t* roles, uint32_t role_count,
                                         CheckCommonScan* scan, bool vector)
 {
-    while (scan->pending == 0 && scan->next < count)
+    // Groups listed until BUSTER_CHECK_SCAN_ITEMS tokens or the end, once the list is taken (#892): a group at a time, the
+    // test of whether the group's tokens were all visited was missed at most groups on the 9700X.
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = count - first < 64 ? count - first : 64;
-        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
-        uint64_t selected = lanes;
-        if (vector)
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
         {
-            const __m512i role_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + first);
-            selected = 0;
-            for (uint32_t r = 0; r < role_count; r += 1)
+            const uint32_t first = scan->next;
+            const uint32_t live = count - first < 64 ? count - first : 64;
+            const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+            uint64_t selected = lanes;
+            if (vector)
             {
-                selected |= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, role_bytes, _mm512_set1_epi8((char)roles[r]));
+                const __m512i role_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + first);
+                selected = 0;
+                for (uint32_t r = 0; r < role_count; r += 1)
+                {
+                    selected |= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, role_bytes, _mm512_set1_epi8((char)roles[r]));
+                }
+                if (kind != BUSTER_CHECK_NONE)
+                {
+                    const __m512i kind_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + first);
+                    selected &= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)kind));
+                }
             }
-            if (kind != BUSTER_CHECK_NONE)
+            scan->next = first + live;
+            for (uint32_t part = 0; part < 64; part += 16)
             {
-                const __m512i kind_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + first);
-                selected &= _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kind_bytes, _mm512_set1_epi8((char)kind));
+                check_common_scan_list(scan, first + part, (__mmask16)(selected >> part));
             }
         }
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = selected;
     }
-    const uint32_t result = check_common_scan_take(scan, count);
+    const uint32_t result = check_common_scan_listed(scan, count);
     return result;
 }
 
@@ -4567,18 +4603,24 @@ static uint32_t check_common_op_lanes(const CheckCommonOps* set, __m512i ops, __
 // caller tests each.
 static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonOps* set, CheckCommonScan* scan, bool vector)
 {
-    while (scan->pending == 0 && scan->next < graph->count)
+    // Groups listed until BUSTER_CHECK_SCAN_ITEMS nodes or the end, once the list is taken (#892), as
+    // check_common_next_token's.
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-        const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
-        const uint32_t selected = vector ? check_common_op_lanes(set, _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first), (__mmask16)lanes) :
-                                           lanes;
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = selected;
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < graph->count)
+        {
+            const uint32_t first = scan->next;
+            const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+            const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+            const uint32_t selected = vector ? check_common_op_lanes(set, _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->ops + first), (__mmask16)lanes) :
+                                               lanes;
+            scan->next = first + live;
+            check_common_scan_list(scan, first, (__mmask16)selected);
+        }
     }
-    const uint32_t result = check_common_scan_take(scan, graph->count);
+    const uint32_t result = check_common_scan_listed(scan, graph->count);
     return result;
 }
 
@@ -9326,16 +9368,22 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
         }
         check_common_body_reached(program, body, seen, queue);
         const CheckControl* entries = program->controls + body->first;
+        // The kinds whose `node` is a source expression's value, a bit each.
+        const uint64_t expressions = UINT64_C(1) << CHECK_CONTROL_EVALUATE | UINT64_C(1) << CHECK_CONTROL_VLA | UINT64_C(1) << CHECK_CONTROL_RETURN |
+                                     UINT64_C(1) << CHECK_CONTROL_SWITCH | UINT64_C(1) << CHECK_CONTROL_BRANCH_FALSE |
+                                     UINT64_C(1) << CHECK_CONTROL_BRANCH_TRUE | UINT64_C(1) << CHECK_CONTROL_JUMP_INDIRECT |
+                                     UINT64_C(1) << CHECK_CONTROL_RESULT;
+        _Static_assert(CHECK_CONTROL_RESULT < 64 && CHECK_CONTROL_JUMP_INDIRECT < 64, "the expressions' kinds are bits of a 64-bit mask");
         for (uint32_t i = 0; i < body->count; i += 1)
         {
             const uint8_t kind = entries[i].kind;
-            const bool expression = kind == CHECK_CONTROL_EVALUATE || kind == CHECK_CONTROL_VLA || kind == CHECK_CONTROL_RETURN ||
-                                    kind == CHECK_CONTROL_SWITCH || kind == CHECK_CONTROL_BRANCH_FALSE || kind == CHECK_CONTROL_BRANCH_TRUE ||
-                                    kind == CHECK_CONTROL_JUMP_INDIRECT || kind == CHECK_CONTROL_RESULT;
-            if (expression && seen[i] == 0 && entries[i].node < graph->count)
-            {
-                evaluated[entries[i].node] = 0;
-            }
+            // An unreached expression's root cleared without a branch (#892): where the entry clears none, the store writes its
+            // own mark again. Tested by its kind, its mark and its node in turn, the entries' test was missed at nearly half
+            // the entries on the 9700X.
+            const bool expression = kind < 64 && (expressions >> kind & 1) != 0;
+            const bool cleared = expression & (seen[i] == 0) & (entries[i].node < graph->count);
+            uint8_t* root = cleared ? evaluated + entries[i].node : seen + i;
+            *root = cleared ? 0 : seen[i];
             if (kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
                 entries[i].target < program->initializers->count && *blocked == NULL)
             {
