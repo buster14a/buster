@@ -4,14 +4,20 @@
 # Regenerates the hosted rows' shard costs, tools/ci/costs/ (#2031; docs/commands/ci.md, "Shard costs"), from the job
 # logs of the given runs of 9700x.yml: API glue only. tools/ci/costs.c reads and checks every log, and rejects one that
 # lacks a line it needs, or the same job twice. Pass full runs (the nightly snapshot's, or a dispatched `full` run) for
-# the sanitizer rows, and main pushes for more plain samples. Needs `gh` with read access to the repository; run it from
-# the repository's root.
+# the sanitizer rows, and merge-queue candidates for more samples. With --peaks it writes only the commands' peak memory
+# and the runners' (#2031; `costs peaks`) into the existing tables, keeping their costs: for runs whose logs carry
+# `MiB peak`. Needs `gh` with read access to the repository; run it from the repository's root.
 #
-#   bash tools/ci/costs.sh LOGS_DIRECTORY RUN...
+#   bash tools/ci/costs.sh [--peaks] LOGS_DIRECTORY RUN...
 set -euo pipefail
-logs=${1:?usage: costs.sh LOGS_DIRECTORY RUN...}
+step=collect
+if [ "${1:-}" = --peaks ]; then
+    step=peaks
+    shift
+fi
+logs=${1:?usage: costs.sh [--peaks] LOGS_DIRECTORY RUN...}
 shift
-(( $# > 0 )) || { echo 'usage: costs.sh LOGS_DIRECTORY RUN...' >&2; exit 2; }
+(( $# > 0 )) || { echo 'usage: costs.sh [--peaks] LOGS_DIRECTORY RUN...' >&2; exit 2; }
 repository=buster14a/buster
 mkdir -p "$logs"
 # An API call, again after 2, 4 and 8 s when GitHub fails it (a 502 or 503 now and then over many runs' logs).
@@ -46,5 +52,9 @@ for run in "$@"; do
 done
 cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/costs.c -o "$logs/costs"
 (( ${#fetched[@]} > 0 )) || { echo 'costs.sh: the runs have no shard logs' >&2; exit 1; }
-"$logs/costs" collect --tests tools/ci/correctness.tests --output tools/ci/costs "${fetched[@]}"
+if [ "$step" = peaks ]; then
+    "$logs/costs" peaks --tests tools/ci/correctness.tests --costs tools/ci/costs "${fetched[@]}"
+else
+    "$logs/costs" collect --tests tools/ci/correctness.tests --output tools/ci/costs "${fetched[@]}"
+fi
 "$logs/costs" check --tests tools/ci/correctness.tests --costs tools/ci/costs

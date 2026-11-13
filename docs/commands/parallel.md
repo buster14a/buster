@@ -124,6 +124,17 @@ can't see that a long command starts only after the 8-CPU commands before it on
 its shard, which hold every CPU. A line `#: first-shard SECONDS` (once) gives the
 time of the steps that a row's shard 1 alone runs besides its commands; the
 scheduled deal counts shard 1 as ending that much later, so it gets less.
+Lines `#: peak MIB TITLE` give commands' peak memory, and `#: runner-memory MIB`
+(once) the runner's (#2031). The runner then admits a command only when the
+running commands' peaks and its own fit in 90% of the machine's memory
+(`--memory MIB`, or MemTotal by default; `test_deal_memory_fits`), as it admits
+one only when its CPUs fit. A command that doesn't fit yet holds back the ones
+after it, so the list's order stays the schedule. A command alone always starts,
+so one past the budget still runs, alone, and the summary names it: `parallel:
+TITLE needs N MiB at its peak, past the M MiB the commands at once may hold, so
+it ran alone` (a `::warning` with `--github`). With the runner's memory too, the
+scheduled deal holds each simulated shard to the same rule, by the file's
+memory rather than the machine's. A command without a peak holds none.
 Either way the deal depends on the list and the
 file alone, never on the machine or `--jobs`, so the N shards run every command
 once. The hosted rows' tables, `tools/ci/costs/ROW.costs`, are
@@ -274,13 +285,19 @@ as expected with its times, CPU times and peak memory written as `*`:
   the last with none, which the deal takes without room for each shard (past the
   list's commands, no shard gets one); costs that name their runner's CPUs
   (`#: runner-cpus 4`), whose deal gives a 60 s command a shard of its own while
-  the same costs without them put an 8-CPU command before it; then each error of
+  the same costs without them put an 8-CPU command before it; costs with peaks
+  and the runner's memory (#2031), whose deal keeps two 600 MiB commands of a
+  1,000 MiB runner apart while the same costs without the runner's memory put
+  them together; a run under `--memory 1000` in which the second 600 MiB command
+  starts only once the first has ended, while under `--memory 100000` they run at
+  once, and a 2,000 MiB command runs alone and is named in the summary; then each error of
   the options (`--shard` 0/2, 3/2, 1/0, 2, a/b, /2, twice and without a value,
   and `--costs` without `--shard`, each with the usage) and of the costs, at its
   line (letters for seconds, a title without its blank, none, a '.' without
   digits, four digits after it, a sign, too many seconds, a title twice and a NUL
   byte), of the runner's CPUs (0, past 1,024, letters after the count, none, and
-  twice), and costs that can't be read;
+  twice), of the runner's memory (0, a unit, too many, twice) and of peaks (no
+  number, no title, no blank, a title twice), and costs that can't be read;
 - the command: its report and exit status for lists on standard input and in a
   file that pass and fail, a report with no reader (the run stops, and the
   runner ends at once with its command killed), with SIGPIPE at its default and
