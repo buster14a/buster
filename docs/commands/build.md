@@ -947,6 +947,59 @@ checks make each refusal before any tree is configured, and
 `.github/workflows/build-pgo.yml` runs them on GitHub's runner with a `clang`
 that fails at any compile.
 
+## The start's code order
+
+A small compile's code is spread over the executable: on the 9700X, an empty
+file's `-fsyntax-only` ran 185 functions in 52 of `.text`'s 64 KB windows, the
+stretch the kernel maps at a fault on a file's pages (fault-around), and
+`hello.c`'s `-c` 532 in 106 (#1444). Each window it touches is a fault. So
+where lld links the static executable, the functions that small compiles run
+go first, together, in a section of their own before `.text`
+(`.text.buster_start`), and the C library's ones right after it, first in
+`.text`. The checker's own code stays in its section, `.text.buster_checker`
+(one section of each unit, `main.c`'s pragmas, #502), which holds 18 of the
+empty file's windows and 60 of `hello.c`'s.
+
+- **The list:** `cmake/BusterStartOrder.txt`, the functions in the order the
+  profiled build had them, `UNIT NAME` for a local function of one of
+  `main.c`'s units and `- NAME` for any other: a global one, whose name is the
+  link's alone, or the C library's.
+- **Each unit's copy apart:** every unit compiles a copy of the static helpers
+  it uses, and a symbol ordering file, which names symbols, moves every copy:
+  one built so faulted more (75 times against 69 in `.text`, #1444's opening
+  report). So the units are compiled with `-ffunction-sections`, and the link
+  script (`cmake/BusterStartOrder.cmake` writes `start-order.ld` into the
+  tree at configuration) names each function by its unit's object, the unit's
+  own (`*/UNIT.c.o`) or its parallel parts' join (`*/UNIT/native.o`), and its
+  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). The
+  others go by name in a symbol ordering file (`start-order.symbols`), which
+  puts their sections first in `.text`, right after; `start-order` leaves out
+  any whose name a unit's static shares, which the name would move too.
+- **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
+  goes in `.text.buster_start` right before the shift source's first
+  function, so that the shift moves that unit's code there too.
+- **Where:** a static link by lld (`start order: TRUE` in the configure
+  step's status line). The sanitizers', fuzzing and `BUSTER_HOST_RUNTIME`'s
+  dynamic links, and the other linkers, keep their layout and compile without
+  `-ffunction-sections`. `-ffunction-sections` alone made `.text` 6 KB longer
+  (0.02%): a jump to another function's section can't take the assembler's
+  short form.
+- **A stale list:** a function that is gone, renamed or no longer an object's
+  matches nothing and stays out; a link whose list matches nothing at all
+  fails (the script's `ASSERT`), which a changed object path would make.
+
+Refresh the list when small compiles' code has moved, from a Release build of
+the tree as the benchmark builds are, on the 9700X under its lock: sample each
+control (`perf record -b -e instructions:u -c 4999`, a few hundred processes
+of each of an empty file's `-fsyntax-only` and `-E -P`, `tiny.c`'s `-c` and
+`hello.c`'s `-c`, `perf script -F ip,brstack` of each), take the executable's
+symbols (`readelf -sW`), then write the list with `start-order` below the
+header, which names the revision, the host and the commands:
+
+```sh
+./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt > body.txt
+```
+
 ## Experiments
 
 `./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with other
