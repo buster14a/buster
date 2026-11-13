@@ -107,7 +107,11 @@ static bool ir_lower_test_frame(IrLowerTestFrame* frame, const IrFunction* funct
     if (ok)
     {
         memset(frame->values, 0, ((uint64_t)function->instruction_count + 1) * sizeof(uint64_t));
-        memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
+        // A call without arguments may pass none (a null pointer), which memcpy may not take even for no bytes.
+        if (count != 0)
+        {
+            memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
+        }
         for (uint32_t s = 0; s < function->slot_count && ok; s += 1)
         {
             // A variadic definition's anchors, as an all-integer call lays them out: the arguments' first six in the
