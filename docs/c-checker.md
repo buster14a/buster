@@ -6762,25 +6762,56 @@ path, the twin, visits every item and runs the same tests.
 A static selection's unselected arms and controlling expression
 (`check_common_unselected_roots`, which `check_common_evaluated` and the
 returned-address check use) are the roots inside its range, from past its
-keyword to its closing token, but outside the operand it chooses, between that
-operand's top-level commas (`check_common_chosen_span`): a statement
-expression's statements there are roots of their own, evaluated where the
-selection is (#2023); the ranges' bits leave each one's chosen operand out,
-the selections found by their closing tokens, sorted. One pass finds
-them for every selection (#1341, #1360): the `SELECT` nodes 16 at a time by
-operator, their closing tokens as bits; their keywords from one pass down the
-tokens below the last of them, 64 kinds at a time, each closing token claimed
-by its last `_Generic` or type-argument child before it, as the definition
-finds it; the ranges in order, merged into bits; and the roots in them, 16
-nodes at a time by a gather of their tokens' bits. An `__extension__`, which
-the reader also makes a `SELECT` and which has no keyword, costs a bit. It
-was a walk to the keyword and a pass over every node per selection, which
-made a unit quadratic in its selections: every glibc `assert` in a GNU mode
-is an `__extension__`, so `sqlite3.c -DSQLITE_DEBUG` spent 12.1 s there. The
-walk (`check_common_unselected_walk`) remains for a selection whose selected
-node is among the roots, which none of the callers' roots is, and as the
-tests' oracle; `test-checker-driver` compares both paths with it on fixtures
-and random trees and graphs whose columns end at `PROT_NONE` pages.
+keyword to its closing token, but outside the operand it chooses. Statements
+inside a chosen statement expression remain evaluated unless an enclosing
+selection excludes them (#2023).
+
+The pass keeps its work linear in the graph nodes, parser tokens and selections
+(#1341, #1360). It finds `SELECT` nodes 16 at a time by operator and their
+closing tokens as bits; one reverse scan tests 64 token kinds at a time and
+claims each close with its last `_Generic` or type-argument child. Radix-sorted
+closing-token and keyword keys join in one sweep. Only matched selections get
+chosen-span records: an `__extension__` has no keyword and needs no span scan.
+The temporary records and sorting buffers scale with the number of selections,
+not the number of graph nodes.
+
+Short chosen arms use `check_common_chosen_span`, sharing a token-count budget
+across the pass. Once their total scanned span length reaches the unit's token
+count, `check_common_chosen_spans` answers the remaining queries together. It
+sorts them by their chosen token, then makes forward and reverse sweeps. The
+forward sweep tracks the most recent shallower token or comma at each depth;
+the reverse sweep tracks the next comma at that depth. A statement expression's
+internal commas cannot end its enclosing chosen arm. Both sweeps preserve the
+original walk's boundaries even when a test's chosen token is unrelated to its
+selection. The vector path filters depth changes, commas and queries in blocks;
+the scalar twin visits every token.
+
+The index validates that maximum depth is no greater than the token count and
+that total upward depth movement is at most twice that count, bounds satisfied
+by the parser's bracket and secondary-group depths. It uses one position slot
+per depth and restores its scratch after the queries. Synthetic depth arrays
+outside those bounds keep the exact walk. The old whole-graph walk
+(`check_common_unselected_walk`) also remains for a selected node among the
+roots, which normal callers' parentless roots cannot contain, and as the tests'
+oracle.
+
+Each selection contributes at most two excluded intervals. Sorting them by
+start and merging their union before setting token bits prevents nested
+unselected arms from repeatedly writing the same range. The final node scan
+gathers those bits 16 roots at a time. Duplicate closing tokens contribute
+the union of their exclusions, preserving the intersection of their chosen
+spans. All scratch planning completes before marks change, including when marks
+alias the root bytes; an allocation failure leaves those bytes unchanged.
+
+`test-checker-driver` compares both paths with the walk on hand-checked and
+random trees and graphs whose columns end at `PROT_NONE` pages. Deep chosen,
+unchosen and alternating nests include conversion wrappers, reversed graph
+order, duplicate closes and malformed depths. Deterministic work counts bound
+raw chosen-span visits by twice the token count and indexed token/position work
+by six times that count plus two, with at most one indexed query per selection.
+A separate interval-union test bounds touched bit words by the token word count
+plus the number of pieces, including deep overlaps, gaps and a protected tail.
+The tests also fail each allocation of both shallow and indexed paths in turn.
 
 `test-checker-driver`'s `check_test_driver_common_warnings` compares the
 filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,

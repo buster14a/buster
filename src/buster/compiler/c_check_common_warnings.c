@@ -9384,6 +9384,17 @@ struct CheckCommonRange
     uint32_t end;
 };
 
+// Only selections with a matching keyword need an operand span. The keyword pass and the closing-token sort join
+// these records once, so neither an __extension__ nor a selection's lookup scans the other selections.
+typedef struct CheckCommonSelection CheckCommonSelection;
+struct CheckCommonSelection
+{
+    uint32_t close;
+    uint32_t node;
+    uint32_t first;
+    CheckCommonRange chosen;
+};
+
 // The tokens of the operand the static selection `node` chooses, from just past the top-level comma before it (or the
 // selection's `(`) up to the comma after it (or its `)`), which it excludes: a root there, a statement of a statement
 // expression in the chosen arm, is evaluated where the selection is (#2023). Its operand is the selection's first,
@@ -9421,6 +9432,270 @@ static CheckCommonRange check_common_chosen_span(const CheckGraph* graph, const 
     return result;
 }
 
+// The token under a static selection's conversions at its closing parenthesis. A conversion cycle has that closing
+// token too, so, like check_common_chosen_span, the bounded walk yields no chosen span (the token is not before it).
+static uint32_t check_common_chosen_token(const CheckGraph* graph, const Parser* parser, uint32_t node)
+{
+    const uint32_t nodes = graph->count;
+    const uint32_t count = parser->tokens.count;
+    const CheckOp* const ops = graph->ops;
+    const uint32_t* const tokens = graph->tokens;
+    const uint32_t* const operands = graph->operand0;
+    const uint32_t close = ops[node] == CHECK_OP_SELECT ? tokens[node] : BUSTER_CHECK_NONE;
+    uint32_t chosen = close < count ? operands[node] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; chosen < nodes && ops[chosen] == CHECK_OP_CONVERT && tokens[chosen] == close && steps < nodes; steps += 1)
+    {
+        chosen = operands[chosen];
+    }
+    const uint32_t result = chosen < nodes ? tokens[chosen] : BUSTER_CHECK_NONE;
+    return result;
+}
+
+typedef struct CheckCommonSelectionWork CheckCommonSelectionWork;
+struct CheckCommonSelectionWork
+{
+    uint64_t walked;
+    uint64_t indexed;
+    uint64_t queries;
+};
+
+// Parser depths count open bracket and secondary (? / case) groups. There are at most count openers, and the sum of
+// positive depth changes is linear in their count (parse_brackets_* and parse_secondary_*); 2 * count also covers the
+// closer's depth adjustment. Check that bound before the index fills an entry for each newly entered depth. Synthetic
+// trees with arbitrary depths retain the exact walk, rather than allocating by an unchecked depth or filling gaps
+// quadratically. The vector path checks 16 depths at a time; the scalar twin checks every adjacent pair.
+static bool check_common_chosen_depths(const Parser* parser, bool vector, uint32_t* maximum, uint64_t* visited)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t* const depths = parser->tree.depths;
+    uint32_t highest = 0;
+    uint32_t previous = 0;
+    uint64_t rises = 0;
+    bool bounded = depths != NULL;
+    for (uint32_t first = 0; bounded && first < count;)
+    {
+        const uint32_t live = count - first < 16 ? count - first : 16;
+        if (BUSTER_VECTOR_PATH(vector))
+        {
+            const __mmask16 lanes = (__mmask16)((1u << live) - 1);
+            const __m512i values = _mm512_maskz_loadu_epi32(lanes, depths + first);
+            const __m512i before = _mm512_alignr_epi32(values, _mm512_set1_epi32((int)previous), 15);
+            const __mmask16 rising = _mm512_mask_cmpgt_epu32_mask(lanes, values, before);
+            const __m512i increments = _mm512_maskz_sub_epi32(rising, values, before);
+            const uint32_t high = _mm512_reduce_max_epu32(values);
+            highest = high > highest ? high : highest;
+            rises += (uint64_t)_mm512_reduce_add_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(increments)));
+            rises += (uint64_t)_mm512_reduce_add_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(increments, 1)));
+            previous = depths[first + live - 1];
+        }
+        else
+        {
+            for (uint32_t lane = 0; lane < live; lane += 1)
+            {
+                const uint32_t depth = depths[first + lane];
+                highest = depth > highest ? depth : highest;
+                rises += depth > previous ? depth - previous : 0;
+                previous = depth;
+            }
+        }
+        bounded = highest <= count && rises <= (uint64_t)count * 2;
+        first += live;
+        *visited += live;
+    }
+    *maximum = highest;
+    return bounded;
+}
+
+// Fill every selection's chosen range. Short operands keep the walk: its visited tokens are exactly end - first,
+// so switching after count visits bounds that work by 2 * count, including the final operand. Only overlapping long
+// operands pay for the index. Queries sorted by their chosen token read two sweeps: the nearest earlier token below
+// their depth or comma at that depth, and the next comma at that depth. A query's depth is its selection's closing
+// depth + 1, even when a test's chosen token is unrelated to that selection. This preserves the walk's exact meaning.
+// Selections live below this helper's scratch mark and do not overlap the immutable graph or parser columns.
+static bool check_common_chosen_spans(const CheckGraph* graph, const Parser* parser, CheckCommonSelection* selections, uint32_t selection_count,
+                                      bool vector, Arena* scratch, CheckCommonSelectionWork* work)
+{
+    const uint32_t count = parser->tokens.count;
+    uint64_t visited = 0;
+    uint64_t indexed_work = 0;
+    uint64_t indexed_queries = 0;
+    uint32_t completed = 0;
+    while (completed < selection_count && visited < count)
+    {
+        const CheckCommonRange chosen = check_common_chosen_span(graph, parser, selections[completed].node);
+        selections[completed].chosen = chosen;
+        visited += chosen.end - chosen.first;
+        completed += 1;
+    }
+    uint32_t maximum = 0;
+    const bool indexed = completed < selection_count && check_common_chosen_depths(parser, vector, &maximum, &indexed_work);
+    bool valid = true;
+    if (completed < selection_count && !indexed)
+    {
+        for (uint32_t i = completed; i < selection_count; i += 1)
+        {
+            const CheckCommonRange chosen = check_common_chosen_span(graph, parser, selections[i].node);
+            selections[i].chosen = chosen;
+            visited += chosen.end - chosen.first;
+        }
+    }
+    else if (indexed)
+    {
+        uint32_t queries = 0;
+        uint32_t last = 0;
+        for (uint32_t i = completed; i < selection_count; i += 1)
+        {
+            const uint32_t token = check_common_chosen_token(graph, parser, selections[i].node);
+            const uint32_t close = selections[i].close;
+            // The temporary range holds the query's token and bound until the two sweeps replace them.
+            selections[i].chosen = token < close ? (CheckCommonRange){ .first = token, .end = close } : (CheckCommonRange){ 0 };
+            queries += token < close;
+            last = token < close && close > last ? close : last;
+        }
+        const uint64_t mark = scratch->length;
+        uint64_t* keys = queries != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, queries) : NULL;
+        uint64_t* temporary = queries != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, queries) : NULL;
+        uint32_t* positions = queries != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)maximum + 1) : NULL;
+        valid = queries == 0 || (keys != NULL && temporary != NULL && positions != NULL);
+        if (valid && queries != 0)
+        {
+            indexed_queries = queries;
+            uint32_t used = 0;
+            uint32_t any = 0;
+            uint32_t every = UINT32_MAX;
+            for (uint32_t i = completed; i < selection_count; i += 1)
+            {
+                const uint32_t token = selections[i].chosen.first;
+                if (selections[i].chosen.end > token)
+                {
+                    keys[used] = (uint64_t)token << 32 | i;
+                    used += 1;
+                    any |= token;
+                    every &= token;
+                }
+            }
+            const uint64_t* const sorted = c_bindings_sort(keys, temporary, queries, vector, any ^ every);
+            const uint32_t* const depths = parser->tree.depths;
+            const uint8_t* const kinds = parser->tokens.kinds;
+            const uint32_t through = (uint32_t)(sorted[queries - 1] >> 32) + 1;
+            positions[0] = 0;
+            indexed_work += 1;
+            uint32_t previous = 0;
+            uint32_t query = 0;
+            for (uint32_t first = 0; first < through;)
+            {
+                const uint32_t live = through - first < 16 ? through - first : 16;
+                const uint32_t lanes = (1u << live) - 1;
+                uint32_t pending = lanes;
+                if (BUSTER_VECTOR_PATH(vector))
+                {
+                    const __m512i values = _mm512_maskz_loadu_epi32((__mmask16)lanes, depths + first);
+                    const __m512i before = _mm512_alignr_epi32(values, _mm512_set1_epi32((int)previous), 15);
+                    const __m512i codes = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+                    pending = _mm512_mask_cmpneq_epu32_mask((__mmask16)lanes, values, before) |
+                              (uint32_t)_mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, codes, _mm512_set1_epi8((char)PARSE_KIND_COMMA));
+                    for (uint32_t q = query; q < queries && (uint32_t)(sorted[q] >> 32) < first + live; q += 1)
+                    {
+                        pending |= 1u << ((uint32_t)(sorted[q] >> 32) - first);
+                    }
+                }
+                while (pending != 0)
+                {
+                    const uint32_t lane = (uint32_t)__builtin_ctz(pending);
+                    pending &= pending - 1;
+                    const uint32_t at = first + lane;
+                    // Start is exclusive of the previous comma, so answer before processing this token.
+                    while (query < queries && (uint32_t)(sorted[query] >> 32) == at)
+                    {
+                        const uint32_t i = (uint32_t)sorted[query];
+                        const uint32_t depth = depths[selections[i].close] + 1;
+                        selections[i].chosen.first = depth <= previous ? positions[depth] : at;
+                        query += 1;
+                    }
+                    const uint32_t depth = depths[at];
+                    // A newly entered depth starts just after the last shallower token. Each filled entry is charged
+                    // to the checked sum of positive depth changes; leaving a depth needs no clearing.
+                    for (uint32_t level = previous; level < depth;)
+                    {
+                        const uint32_t fill = depth - level < 16 ? depth - level : 16;
+                        if (BUSTER_VECTOR_PATH(vector))
+                        {
+                            _mm512_mask_storeu_epi32(positions + level + 1, (__mmask16)((1u << fill) - 1), _mm512_set1_epi32((int)at));
+                        }
+                        else
+                        {
+                            for (uint32_t d = 1; d <= fill; d += 1)
+                            {
+                                positions[level + d] = at;
+                            }
+                        }
+                        level += fill;
+                        indexed_work += fill;
+                    }
+                    if (kinds[at] == PARSE_KIND_COMMA)
+                    {
+                        positions[depth] = at + 1;
+                    }
+                    previous = depth;
+                }
+                first += live;
+                indexed_work += live;
+            }
+            memset(positions, 0xff, ((uint64_t)maximum + 1) * sizeof(uint32_t));
+            indexed_work += (uint64_t)maximum + 1;
+            query = queries;
+            for (uint32_t end = last; end != 0 && query != 0;)
+            {
+                const uint32_t first = end > 64 ? end - 64 : 0;
+                const uint32_t live = end - first;
+                const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+                uint64_t pending = lanes;
+                if (BUSTER_VECTOR_PATH(vector))
+                {
+                    const __m512i codes = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+                    pending = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, codes, _mm512_set1_epi8((char)PARSE_KIND_COMMA));
+                    for (uint32_t q = query; q != 0 && (uint32_t)(sorted[q - 1] >> 32) >= first; q -= 1)
+                    {
+                        pending |= UINT64_C(1) << ((uint32_t)(sorted[q - 1] >> 32) - first);
+                    }
+                }
+                while (pending != 0)
+                {
+                    const uint32_t lane = 63 - (uint32_t)__builtin_clzll(pending);
+                    pending &= ~(UINT64_C(1) << lane);
+                    const uint32_t at = first + lane;
+                    if (kinds[at] == PARSE_KIND_COMMA)
+                    {
+                        positions[depths[at]] = at;
+                    }
+                    // End is inclusive of the chosen token when it is itself a comma, so answer after processing it.
+                    while (query != 0 && (uint32_t)(sorted[query - 1] >> 32) == at)
+                    {
+                        const uint32_t i = (uint32_t)sorted[query - 1];
+                        const uint32_t close = selections[i].close;
+                        const uint32_t depth = depths[close] + 1;
+                        const uint32_t comma = depth <= maximum ? positions[depth] : BUSTER_CHECK_NONE;
+                        selections[i].chosen.end = comma < close ? comma : close;
+                        query -= 1;
+                    }
+                }
+                end = first;
+                indexed_work += live;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    if (work != NULL)
+    {
+        *work = (CheckCommonSelectionWork){
+            .walked = visited,
+            .indexed = indexed_work,
+            .queries = indexed_queries,
+        };
+    }
+    return valid;
+}
+
 // check_common_unselected_roots by its definition, a selection at a time: each walks back from its token for its keyword,
 // then visits every node. That is O(selections × (tokens + nodes)), seconds on a unit of many asserts or _Generic
 // selections (#1341, #1360). The exact path for a selection whose selected node `roots` holds, which none of the callers'
@@ -9454,8 +9729,9 @@ static void check_common_unselected_walk(const CheckGraph* graph, const Parser* 
 }
 
 // Sets the bits from `first` up to `end`, which it excludes, a word at a time.
-static void check_common_set_bits(uint64_t* bits, uint32_t first, uint32_t end)
+static uint32_t check_common_set_bits(uint64_t* bits, uint32_t first, uint32_t end)
 {
+    uint32_t touched = 0;
     for (uint32_t at = first; at < end;)
     {
         const uint32_t word = at >> 6;
@@ -9464,182 +9740,215 @@ static void check_common_set_bits(uint64_t* bits, uint32_t first, uint32_t end)
         const uint64_t ones = width == 64 ? UINT64_MAX : ((UINT64_C(1) << width) - 1) << (at & 63);
         bits[word] |= ones;
         at = stop;
+        touched += 1;
     }
+    return touched;
+}
+
+// Union of nonempty intervals sorted by first (the key's high half). Charge a word only when new bits are added:
+// every interval contributes at most one shared boundary word, and every other touched word is new. The return value
+// lets the regression check that bound without timing; production only needs the union and its final end.
+static uint64_t check_common_merge_ranges(uint64_t* bits, const uint64_t* ranges, uint32_t count, uint32_t* covered)
+{
+    uint64_t touched = 0;
+    uint32_t end = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t first = (uint32_t)(ranges[i] >> 32);
+        const uint32_t next = (uint32_t)ranges[i];
+        const uint32_t begin = first > end ? first : end;
+        touched += check_common_set_bits(bits, begin, next);
+        end = next > end ? next : end;
+    }
+    *covered = end;
+    return touched;
 }
 
 // A static selection (_Generic, __builtin_choose_expr) checks every arm but evaluates only the chosen one; its other
-// arms are otherwise unreferenced roots, and so is its controlling expression. Sets `marks` to `value` at each such
-// root, the nodes `roots` has set inside a selection's parentheses that are not the one it selects (marks may be roots).
-// A selection's range starts past its keyword, its token's last child before it of _Generic's kind or a type argument
-// keyword's, and ends at its token; a selection without one, an `__extension__`'s, has none. In O(nodes + tokens / 64 +
-// selections) rather than the walk's O(selections × (tokens + nodes)) (#1341, #1360): the selections' tokens, found 16
-// nodes at a time by their operator, as bits; their keywords, from one pass down the tokens below the last of them that
-// tests 64 tokens' kinds at a time, each token claimed once, by its last such child, as the walk finds it; the ranges,
-// in order and merged, as bits; and the roots in them, 16 nodes at a time by a gather of their tokens' bits. The scalar
-// path, the twin, visits every token and node and runs the same tests. A selection whose selected node `roots` holds,
-// which the bits can't exclude from the other ranges, takes the walk. False where scratch can't hold the bits, leaving
-// `marks` as it was.
+// arms and controlling expression are otherwise unreferenced roots. Set their marks to value (marks may be roots).
+// Find all closing tokens and their last keyword child in batched scans, join them by a radix sort, and find the chosen
+// spans together. Sort the at most two excluded pieces per selection by start and merge them while setting their bits:
+// nested unselected arms never write an already covered word again apart from their boundary word (#1341, #1360).
+// Work is linear in nodes, tokens and selections for parser-produced depths. An __extension__ has no matching keyword
+// and needs no chosen-span work. The defensive walk remains for a selected node in roots; callers supply parentless
+// roots, so a production selection's operand cannot take it. A failed scratch allocation leaves marks unchanged.
 static bool check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value,
                                           Arena* scratch)
 {
+    // These borrowed columns remain unchanged through the scratch-only planning; marks may alias roots, not the graph
+    // or parser. Cache their counts and pointers before writing scratch and the final marks.
     const uint32_t count = parser->tokens.count;
+    const uint32_t nodes = graph->count;
+    const CheckOp* const ops = graph->ops;
+    const uint32_t* const tokens = graph->tokens;
+    const uint32_t* const operands = graph->operand0;
+    const uint8_t* const kinds = parser->tokens.kinds;
+    const uint32_t* const parents = parser->tree.parents;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     const uint64_t mark = scratch->length;
-    const uint64_t words = ((uint64_t)count + 63) / 64;
     static const CheckOp selects[] = { CHECK_OP_SELECT };
     const CheckCommonOps set = check_common_ops(selects, BUSTER_ARRAY_LENGTH(selects));
-    uint64_t* bits = NULL;
-    // Each selection's `)` above its node, which the ranges find their chosen operands by (check_common_chosen_span).
-    uint64_t* keys = NULL;
-    uint64_t* temporary = NULL;
-    bool valid = true;
-    bool walk = false;
     uint32_t selections = 0;
     uint32_t last = 0;
+    bool walk = false;
     CheckCommonScan scan = { 0 };
-    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); valid && node < graph->count; node = check_common_next_op(graph, &set, &scan, vector))
+    for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < nodes; node = check_common_next_op(graph, &set, &scan, vector))
     {
-        const uint32_t close = graph->tokens[node];
-        if (graph->ops[node] == CHECK_OP_SELECT && close < count)
+        const uint32_t close = tokens[node];
+        if (ops[node] == CHECK_OP_SELECT && close < count)
         {
-            if (bits == NULL)
-            {
-                bits = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words);
-                keys = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count);
-                temporary = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count);
-                valid = bits != NULL && keys != NULL && temporary != NULL;
-                if (valid)
-                {
-                    memset(bits, 0, words * sizeof(uint64_t));
-                }
-            }
-            if (valid)
-            {
-                bits[close >> 6] |= UINT64_C(1) << (close & 63);
-                keys[selections] = (uint64_t)close << 32 | node;
-            }
-            const uint32_t selected = graph->operand0[node];
-            walk |= selected < graph->count && roots[selected] != 0;
+            const uint32_t selected = operands[node];
+            walk |= selected < nodes && roots[selected] != 0;
             selections += 1;
             last = close >= last ? close + 1 : last;
         }
     }
-    CheckCommonRange* ranges = valid && selections != 0 && !walk ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonRange, selections) : NULL;
-    valid &= selections == 0 || walk || ranges != NULL;
-    const uint64_t* closes = ranges != NULL ? c_bindings_sort(keys, temporary, selections, vector, UINT32_MAX >> __builtin_clz(last)) : NULL;
-    uint32_t used = 0;
-    // Once every selection has its keyword, no token before them claims one.
-    for (uint32_t end = ranges != NULL ? last : 0; end != 0 && used < selections;)
+    bool valid = true;
+    if (selections != 0 && !walk)
     {
-        const uint32_t first = end > 64 ? end - 64 : 0;
-        const uint32_t live = end - first;
-        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
-        uint64_t pending = lanes;
-        if (vector)
+        // Both sorts need at most two keys per selection. Their count is uint32_t; refuse an unrepresentable count
+        // before allocating or changing marks, just as an arena unable to hold these columns is refused.
+        valid = selections <= UINT32_MAX / 2;
+        const uint64_t words = ((uint64_t)last + 63) / 64;
+        uint64_t* const bits = valid ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words) : NULL;
+        uint64_t* const keys = bits != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, (uint64_t)selections * 2) : NULL;
+        uint64_t* const temporary = keys != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, (uint64_t)selections * 2) : NULL;
+        CheckCommonSelection* const records = temporary != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonSelection, selections) : NULL;
+        valid = records != NULL;
+        uint32_t used = 0;
+        if (valid)
         {
-            const __m512i kinds = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + first);
-            pending = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_GENERIC)) |
-                      _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_TYPE_ARGUMENT));
-        }
-        while (pending != 0)
-        {
-            const uint32_t lane = 63 - (uint32_t)__builtin_clzll(pending);
-            pending &= ~(UINT64_C(1) << lane);
-            const uint32_t at = first + lane;
-            const uint8_t kind = parser->tokens.kinds[at];
-            const uint32_t parent = parser->tree.parents[at];
-            if ((kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT) && at < parent && parent < last &&
-                (bits[parent >> 6] & (UINT64_C(1) << (parent & 63))) != 0)
+            memset(bits, 0, words * sizeof(uint64_t));
+            scan = (CheckCommonScan){ 0 };
+            for (uint32_t node = check_common_next_op(graph, &set, &scan, vector); node < nodes; node = check_common_next_op(graph, &set, &scan, vector))
             {
-                bits[parent >> 6] &= ~(UINT64_C(1) << (parent & 63));
-                ranges[used] = (CheckCommonRange){ .first = at + 1, .end = parent };
-                used += 1;
-            }
-        }
-        end = first;
-    }
-    if (used != 0)
-    {
-        // The claims came in descending keyword order: the ranges in ascending order. Each sets its bits but its chosen
-        // operand's, whose roots are evaluated where the selection is (#2023); the ranges nest, and one inside an earlier
-        // range that left nothing out adds nothing.
-        memset(bits, 0, ((uint64_t)last + 63) / 64 * sizeof(uint64_t));
-        uint32_t covered = 0;
-        uint32_t lowest = UINT32_MAX;
-        for (uint32_t i = used; i-- > 0;)
-        {
-            const uint32_t close = ranges[i].end;
-            // (The selection whose `)` this is: the sorted keys' first at or past it, a binary search.)
-            uint32_t low = 0;
-            uint32_t high = selections;
-            while (low < high)
-            {
-                const uint32_t middle = low + (high - low) / 2;
-                const bool before = (uint32_t)(closes[middle] >> 32) < close;
-                low = before ? middle + 1 : low;
-                high = before ? high : middle;
-            }
-            // (Selections that share a `)`, which only a test's graph has, leave out what each of them chooses.)
-            CheckCommonRange chosen = { .first = 0, .end = UINT32_MAX };
-            for (uint32_t k = low; k < selections && (uint32_t)(closes[k] >> 32) == close; k += 1)
-            {
-                const CheckCommonRange own = check_common_chosen_span(graph, parser, (uint32_t)closes[k]);
-                chosen.first = own.first > chosen.first ? own.first : chosen.first;
-                chosen.end = own.end < chosen.end ? own.end : chosen.end;
-            }
-            const bool split = chosen.end > chosen.first && chosen.end > ranges[i].first && chosen.first < close;
-            const uint32_t gap = split && chosen.first > ranges[i].first ? chosen.first : ranges[i].first;
-            const uint32_t resume = split && chosen.end < close ? chosen.end : close;
-            const CheckCommonRange pieces[] = {
-                { .first = ranges[i].first, .end = split ? gap : close },
-                { .first = split ? resume : close, .end = close },
-            };
-            for (uint32_t k = 0; ranges[i].end > covered && k < BUSTER_ARRAY_LENGTH(pieces); k += 1)
-            {
-                if (pieces[k].end > pieces[k].first)
+                const uint32_t close = tokens[node];
+                if (ops[node] == CHECK_OP_SELECT && close < count)
                 {
-                    check_common_set_bits(bits, pieces[k].first, pieces[k].end);
-                    lowest = pieces[k].first < lowest ? pieces[k].first : lowest;
+                    bits[close >> 6] |= UINT64_C(1) << (close & 63);
+                    keys[used] = (uint64_t)close << 32 | node;
+                    used += 1;
                 }
             }
-            covered = !split && close > covered ? close : covered;
         }
-        covered = last;
-        // The vector path gathers the bits of the roots whose tokens the ranges span alone: from the lowest range's
-        // first token to the highest's end.
-        for (uint32_t first = 0; first < graph->count; first += 16)
+        const uint32_t varying = last != 0 ? UINT32_MAX >> __builtin_clz(last) : 0;
+        const uint64_t* const closes = valid ? c_bindings_sort(keys, temporary, selections, vector, varying) : NULL;
+        used = 0;
+        // The two halves do not overlap the closing-token keys. Claim each closing token once, by its last keyword
+        // child, exactly as the oracle's backward walk does. Sort these sparse claims to join the closing-token keys.
+        for (uint32_t end = valid ? last : 0; end != 0 && used < selections;)
         {
-            const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-            const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+            const uint32_t first = end > 64 ? end - 64 : 0;
+            const uint32_t live = end - first;
+            const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+            uint64_t pending = lanes;
             if (vector)
             {
-                const __m512i root_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, roots + first);
-                const __m512i tokens = _mm512_maskz_loadu_epi32((__mmask16)lanes, graph->tokens + first);
-                const __mmask16 candidates = (__mmask16)_mm512_mask_test_epi8_mask((__mmask64)lanes, root_bytes, root_bytes) &
-                                             _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, tokens, _mm512_set1_epi32((int)covered)) &
-                                             _mm512_mask_cmpge_epu32_mask((__mmask16)lanes, tokens, _mm512_set1_epi32((int)lowest));
-                if (candidates != 0)
+                const __m512i block = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+                pending = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, block, _mm512_set1_epi8((char)PARSE_KIND_GENERIC)) |
+                          _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, block, _mm512_set1_epi8((char)PARSE_KIND_TYPE_ARGUMENT));
+            }
+            while (pending != 0)
+            {
+                const uint32_t lane = 63 - (uint32_t)__builtin_clzll(pending);
+                pending &= ~(UINT64_C(1) << lane);
+                const uint32_t at = first + lane;
+                const uint8_t kind = kinds[at];
+                const uint32_t parent = parents[at];
+                if ((kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT) && at < parent && parent < last &&
+                    (bits[parent >> 6] & (UINT64_C(1) << (parent & 63))) != 0)
                 {
-                    const __m512i covers = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(tokens, 5), bits, 4);
-                    const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(tokens, _mm512_set1_epi32(31)));
-                    const __mmask16 marked = _mm512_mask_test_epi32_mask(candidates, covers, bit);
-                    _mm512_mask_storeu_epi8(marks + first, (__mmask64)marked, _mm512_set1_epi8((char)value));
+                    bits[parent >> 6] &= ~(UINT64_C(1) << (parent & 63));
+                    keys[selections + used] = (uint64_t)parent << 32 | (at + 1);
+                    used += 1;
                 }
             }
-            else
+            end = first;
+        }
+        const uint64_t* const keywords = valid ? c_bindings_sort(keys + selections, temporary + selections, used, vector, varying) : NULL;
+        uint32_t matched = 0;
+        uint32_t keyword = 0;
+        for (uint32_t i = 0; valid && i < selections && keyword < used; i += 1)
+        {
+            const uint32_t close = (uint32_t)(closes[i] >> 32);
+            while (keyword < used && (uint32_t)(keywords[keyword] >> 32) < close)
             {
-                for (uint32_t node = first; node < first + live; node += 1)
+                keyword += 1;
+            }
+            if (keyword < used && (uint32_t)(keywords[keyword] >> 32) == close)
+            {
+                records[matched] = (CheckCommonSelection){
+                    .close = close,
+                    .node = (uint32_t)closes[i],
+                    .first = (uint32_t)keywords[keyword],
+                };
+                matched += 1;
+            }
+        }
+        valid = valid && check_common_chosen_spans(graph, parser, records, matched, vector, scratch, NULL);
+        uint32_t pieces = 0;
+        for (uint32_t i = 0; valid && i < matched; i += 1)
+        {
+            const uint32_t first = records[i].first;
+            const uint32_t close = records[i].close;
+            const CheckCommonRange chosen = records[i].chosen;
+            const bool split = chosen.end > chosen.first && chosen.end > first && chosen.first < close;
+            const uint32_t gap = split && chosen.first > first ? chosen.first : first;
+            const uint32_t resume = split && chosen.end < close ? chosen.end : close;
+            const uint32_t end = split ? gap : close;
+            if (first < end)
+            {
+                keys[pieces++] = (uint64_t)first << 32 | end;
+            }
+            if (split && resume < close)
+            {
+                keys[pieces++] = (uint64_t)resume << 32 | close;
+            }
+        }
+        const uint64_t* const ranges = valid ? c_bindings_sort(keys, temporary, pieces, vector, varying) : NULL;
+        uint32_t covered = 0;
+        const uint32_t lowest = pieces != 0 ? (uint32_t)(ranges[0] >> 32) : last;
+        if (valid && pieces != 0)
+        {
+            memset(bits, 0, words * sizeof(uint64_t));
+            check_common_merge_ranges(bits, ranges, pieces, &covered);
+            // Duplicate closing tokens simply contribute their own pieces to the union. That excludes the intersection
+            // of their chosen spans, including an empty one, without a binary lookup or another node scan per selection.
+            for (uint32_t first = 0; first < nodes;)
+            {
+                const uint32_t live = nodes - first < 16 ? nodes - first : 16;
+                const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+                if (vector)
                 {
-                    const uint32_t token = graph->tokens[node];
-                    if (roots[node] != 0 && token < last && (bits[token >> 6] & (UINT64_C(1) << (token & 63))) != 0)
+                    const __m512i root_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, roots + first);
+                    const __m512i places = _mm512_maskz_loadu_epi32((__mmask16)lanes, tokens + first);
+                    const __mmask16 candidates = (__mmask16)_mm512_mask_test_epi8_mask((__mmask64)lanes, root_bytes, root_bytes) &
+                                                 _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, places, _mm512_set1_epi32((int)covered)) &
+                                                 _mm512_mask_cmpge_epu32_mask((__mmask16)lanes, places, _mm512_set1_epi32((int)lowest));
+                    if (candidates != 0)
                     {
-                        marks[node] = value;
+                        const __m512i covers = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(places, 5), bits, 4);
+                        const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(places, _mm512_set1_epi32(31)));
+                        const __mmask16 marked = _mm512_mask_test_epi32_mask(candidates, covers, bit);
+                        _mm512_mask_storeu_epi8(marks + first, (__mmask64)marked, _mm512_set1_epi8((char)value));
                     }
                 }
+                else
+                {
+                    for (uint32_t node = first; node < first + live; node += 1)
+                    {
+                        const uint32_t token = tokens[node];
+                        if (roots[node] != 0 && token < covered && token >= lowest && (bits[token >> 6] & (UINT64_C(1) << (token & 63))) != 0)
+                        {
+                            marks[node] = value;
+                        }
+                    }
+                }
+                first += live;
             }
         }
     }
-    if (valid && walk)
+    if (walk)
     {
         check_common_unselected_walk(graph, parser, roots, marks, value);
     }
