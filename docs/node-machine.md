@@ -1460,9 +1460,10 @@ inputs.
 
 ### T's loop: its column stores and its operands, and two levers that didn't pay
 
-T is instruction-bound: in the profile of its loop by retired instructions and by
-cycles, each line's shares match. At main `26f0bb0e` its own bookkeeping was a
-large part of them:
+In the profile of T's loop by retired instructions and by cycles, each line's
+shares match (which doesn't make it instruction-bound: stalls spread over the
+loop's lines match too, [below](#the-sweeps-front-end-ts-rare-paths-out-of-line)).
+At main `26f0bb0e` its own bookkeeping was a large part of them:
 - the node index, recomputed for each operand (`node_machine_node`, 6% of T's
   instructions);
 - the operands' search (`node_machine_operand`, 6%);
