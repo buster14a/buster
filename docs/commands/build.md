@@ -988,6 +988,14 @@ empty file's windows and 60 of `hello.c`'s.
   matches nothing and stays out; a link whose list matches nothing at all
   fails (the script's `ASSERT`), which a changed object path would make.
 
+On the 9700X, the empty file's `-fsyntax-only` then took 54 faults in the
+executable's code (44 in `.text`, 10 in `.text.buster_start`) against 67, and
+`hello.c`'s `-c` 90 against 114, with 18% to 33% fewer iTLB misses in the
+small compiles. With the same change's `.bss` advice and token columns, they
+ran 4.1% to 5.8% faster from a cold start, a file-first `-c` 8.7%, while
+`main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed within their floors
+([the record](https://github.com/buster14a/buster-performance/tree/0880281cac17cceb9749d19b1554873e51028928/docs/measurements/start-order-1444-2026-11-13)).
+
 Refresh the list when small compiles' code has moved, from a Release build of
 the tree as the benchmark builds are, on the 9700X under its lock: sample each
 control (`perf record -b -e instructions:u -c 4999`, a few hundred processes
