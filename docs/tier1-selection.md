@@ -802,7 +802,11 @@ copy, and an `imul` 3 with its immediate form's penalty. An addition of a load
 costs 2 both ways, as the load and a `lea` of two registers and as an `add` from
 memory. The grammar lists the memory form first so that it wins the tie (#2602):
 it writes one record where the sum takes the other operand's register, two
-elsewhere, and never more than the `lea`'s two, in one register fewer. An
+elsewhere, and never more than the `lea`'s two, in one register fewer.
+Against #2605's main, speedtest1 and Lua run 0.12% fewer instructions, all of
+them `mov`s, with no spill changed; speedtest1's 0.5% more cycles at its
+driver-linked placement averages 0.16% fewer at four others ([the
+record](https://github.com/buster14a/buster-performance/tree/6f4962f1ce21b47c92ba3f52059170b58f25c867/docs/measurements/tier1-load-addition-2602-2026-11-13)). An
 addition of two loads likewise costs 3 both ways, whose records are 3 and 2 at most
 (`mov`, `mov`, `lea` against `mov`, `add`). Before #1395, only the vector path used the costed
 cover, and the scalar production path used maximal munch. The following
