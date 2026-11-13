@@ -821,7 +821,8 @@ stage counters of the command with the skip:
   every unit looks its operands' names up among the intrinsics' again
   ([#893](https://github.com/buster14a/buster/issues/893) has the lookup's
   cost in one unit), and the answer is a name's, which the lane's intern
-  table could keep (step 3 takes the skipped tokens' share of it).
+  table could keep (step 3 takes the skipped tokens' share of it). The table
+  keeps it now (#893's memo, `docs/builtin-intrinsic-filter.md`).
 - **The parser (6%) and the emission (4%; 8% of `sqlite3.c`)**, which no
   measurement here puts above the others.
 

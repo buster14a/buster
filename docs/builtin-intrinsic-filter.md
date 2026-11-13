@@ -42,19 +42,30 @@ around the search rather than the search. Each unit:
 
 The intern table now keeps each id's answer (`InternTable.intrinsic_rows`, a
 16-bit code: not looked up, no row, or the row plus 2). It lives in its own
-fresh reservation, made at its first use and made again larger when the table
-has outgrown it (`intern_intrinsic_rows`); `intern_reset` and
-`intern_release` drop it. The units of a command that share a table look each
-spelling up once.
+fresh reservation (`intern_intrinsic_rows`), with 32 codes of zero padding for
+the gathers' 32-bit reads:
+
+- **Its first size is 8 KB**, which a small unit's names fit. It doubles when
+  the table outgrows it, copying the codes.
+- **Up to 32,736 ids it stays in base pages**, the arena's first 64 KB
+  (sqlite3.c and its headers intern 22,800). There a reservation takes no
+  huge-page advice and splits no mapping.
+- **`intern_reset` and `intern_release` drop it.**
+
+The units of a command that share a table look each spelling up once.
 
 - **One pass.** The set-up reads each operand's code once. It counts the
   distinct rows (a bit per row) and the call-shaped operands of rows together,
   which size the tables as before.
 - **The vector path** takes the 64-token mask's operands without testing each
-  again. It queues a name not yet looked up for the eight-lane filter and
-  search, marking it pending, and the operands that meet a pending name wait
-  for it: at most 8 names and 64 operands, after which the batch is looked up
-  and its waiting operands are counted.
+  again, and gathers their names' codes 16 at once
+  (`check_input_intrinsic_unresolved`). A miss's code never changes, so most
+  operands need nothing more. The others go to an out-of-line handler
+  (`check_input_intrinsic_take`), which reads each one's code again. There, a
+  name not yet looked up is queued for the eight-lane filter and search and
+  marked pending, and the operands that meet a pending name wait for it. After
+  at most 8 names or 64 waiting operands, the batch is looked up and its
+  waiting operands are counted.
 - **The scalar path**, its twin, tests each token and looks each name up by
   the unfiltered exact search. Both give every name its exact code and the
   same counts, and no code is left pending.
@@ -103,10 +114,9 @@ metadata blob `1d5cb30be9261cadb98ab80fc288de1749ea3d2d` at repository commit
 llvmorg-23.1.1 references remain in
 `docs/builtin-metadata/clang-23.1.1-inputs.json` and `LICENSES/LLVM.txt`.
 
-Correct rejection is not a throughput claim. Acceptance still needs locked
-9700X assembly inspection and A/B whole-compilation and intrinsic-setup
-measurements on SQLite and small inputs, including filter loads, hashing,
-collisions and remaining binary searches. Compare scalar and vector output,
-retain generated-program quality, and store raw performance evidence in
-buster-performance rather than this repository. The original issue remains
-open until that acceptance is established.
+Correct rejection is not a throughput claim. The filter's locked 9700X
+measurements are buster-performance's #146 and #164 (#914), and the memo's are
+in `docs/compile-time.md` ("The intrinsics' set-up from a memo of each name's
+answer"), each with its raw evidence in buster-performance. A unit whose names
+the table has never seen still pays the filter's key loads from its
+spellings and its false positives' binary searches.
