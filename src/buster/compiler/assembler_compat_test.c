@@ -167,6 +167,18 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
 {
     static const char* const accepted[] =
     {
+        // #2550: the displacement's arithmetic groups precede the address tuple; bare grouped expressions remain
+        // absolute memory operands. Cover RIP relocations, no-base indexes and register names without prefixes too.
+        ".text\ngrouped_displacements:\n"
+        "mov %ax,(-1-2)(%rdi,%rdx)\nmov %eax,(-1-2-4)(%rdi,%rdx)\n"
+        "mov %rax,((2+3)*4)(%rdi,%rdx,2)\nmovl (external+4)(%rip),%eax\n"
+        "movl (7),%eax\nmovl (0)+(8*2)(,%rdx,4),%eax\n"
+        ".att_syntax noprefix\nmov eax,(-1-2)(rdi,rdx)\nmov eax,(rdi)\n",
+        // #2551: GNU's alternate prefix preserves all four ELF symbol types.
+        ".text\n.globl percent_function\n.type percent_function,%function\npercent_function: ret\n.size percent_function,.-percent_function\n"
+        ".data\n.type percent_object,%object\npercent_object: .long 7\n.size percent_object,4\n"
+        ".type percent_notype,%notype\npercent_notype: .long 3\n"
+        ".section .tdata,\"awT\",@progbits\n.type percent_tls,%tls_object\npercent_tls: .long 11\n.size percent_tls,4\n",
         ".data\nexpr: .long 1<<4,64>>3,1+2<<3,(1+2)<<3,3*2<<2,32>>1*2\n"
         ".long 1==1,1!=1,1<>2,1<2,2>1,2<=2,3>=4,0xffffffffffffffff<0\n"
         ".long 1||0&&0,0||2&&3,!0,!9,1!2,4+1==5,1|2+4,1==2+3\n"
@@ -286,6 +298,14 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
     }
     static const char* const rejected[] =
     {
+        "movl (1+)(%rax),%eax\n",
+        "movl ((1+2)(%rax),%eax\n",
+        "movl (1+2)(%rax,%rcx,3),%eax\n",
+        "movl (1+2)(%rax,%rcx,4,%rdx),%eax\n",
+        ".type f,%unknown\n",
+        ".type f,%\n",
+        ".type f,%%function\n",
+        ".type f,$function\n",
         ".equiv unique,1\n.equiv unique,2\n",
         ".long 1<<\n",
         ".long 1&&\n",

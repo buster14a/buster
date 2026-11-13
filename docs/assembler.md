@@ -103,6 +103,8 @@ immediate address, as does GCC's `OFFSET FLAT:symbol`; a bare symbol in an ordin
 a branch its destination, unless a width asks for memory: `call qword ptr
 callback` calls through the pointer at `callback`. AT&T uses `%register`,
 `$immediate`, displacement/base/index/scale, and `*` for indirect calls/jumps.
+The displacement can contain parenthesized arithmetic before the address tuple,
+such as `(-1-2)(%rdi,%rdx)`; a grouped expression alone denotes absolute memory.
 A complete alias (`jnb`, `jnl`, `sal`, `setz`, `cmovnae`) is never read as a
 suffix. `pushw` covers the 16-bit register and memory forms as well as
 immediates. AT&T extension spellings (`movzbl`, `movzwl`, `movsbl`, `movsbq`,
@@ -316,7 +318,7 @@ Directives:
 | Purpose | Supported directives |
 | --- | --- |
 | Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
-| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
+| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`, prefixed by `@` or `%`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
