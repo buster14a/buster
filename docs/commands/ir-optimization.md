@@ -14,7 +14,8 @@ requirements. [Command index](README.md).
   fixtures: SIMD callees' rows, vector constants and slots, and by-value vectors
   run on the IR's interpreter through inlining, SROA's `simd`/`flagged` options
   and promotion; #2541's generated units of callees with control flow, by both
-  splice twins, through the same steps); `test-ir-optimize` also runs
+  splice twins, through the same steps, and its per-callee limits and caller-only
+  rewrite); `test-ir-optimize` also runs
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
   through both parser paths, both twins, the canonical printer and the
   independent executor (`--print-text` prints them for review).
