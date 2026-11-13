@@ -246,9 +246,11 @@ struct CheckAttested
     CheckAttestedHash* memo;
     uint64_t memo_mask;
     uint64_t memo_count;
-    // By key: the names' states.
+    // By key: the names' states, and the events' test's marks (check_attested_events): the classes a declaration's list
+    // gives the key, with the declaration and the unit's stamp.
     Arena key_arena;
     CheckAttestedKey* keys;
+    uint64_t* list_marks;
     // By IdentId: the name's facts (BUSTER_ATTESTED_ID_*), a `__builtin_X` name's X (0 until it is interned), and how
     // many of the table's names have them.
     uint8_t* id_facts;
@@ -496,7 +498,8 @@ static uint32_t check_attested_runtime_count(void)
 static void check_attested_ids(CheckAttested* census, const InternTable* table)
 {
     const uint32_t count = table->count < BUSTER_ATTESTED_MAX_IDS ? table->count : BUSTER_ATTESTED_MAX_IDS;
-    const uint32_t runtimes = check_attested_runtime_count();
+    // (The compile's reach takes no runtime functions' names: only the census looks them up.)
+    const uint32_t runtimes = census->production ? 0 : check_attested_runtime_count();
     for (uint32_t id = census->ids_known > 1 ? census->ids_known : 1; id < count; id += 1)
     {
         const uint8_t* bytes = intern_bytes(table, id);
@@ -2107,10 +2110,27 @@ static const uint64_t* check_attested_skips(const CheckAttested* attested)
     return attested->skipped ? attested->marks : NULL;
 }
 
+// Declaration `d`'s list marked by key (CheckAttested.list_marks): each key's mark the unit's stamp, `d` and the classes
+// its entries give the key. A mark of another unit or declaration is replaced, and so is the one an earlier marking left.
+static void check_attested_mark_list(CheckAttested* census, uint32_t d)
+{
+    const uint64_t owner = ((uint64_t)(census->stamp & 0xffffffu) << 40) | ((uint64_t)d << 8);
+    uint64_t* const marks = census->list_marks;
+    for (uint32_t n = census->name_starts[d]; n < census->name_starts[d + 1]; n += 1)
+    {
+        const uint32_t entry = census->name_entries[n];
+        const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
+        const uint64_t mark = marks[key];
+        const uint64_t kept = (mark & ~UINT64_C(0xff)) == owner ? mark : owner;
+        marks[key] = kept | (entry >> BUSTER_ATTESTED_CLASS_SHIFT);
+    }
+}
+
 // Each file-scope DECLARE event, and each USE event, of a declaration's reading against its list, and each tag it
 // completes: a declaration whose reading declared, completed or looked up a name its list doesn't hold is unlisted
 // (never learned, and a unit that skipped is read again). The events come in nearly source order, so each one's
-// declaration is the last one's or a search's.
+// declaration is the last one's or a search's; a declaration's list is marked by key as its events start (a function
+// body's has every name it spells, so that a scan of the list for each event would take the body's square).
 static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count)
 {
     const bool ready = census->unit_ready && count == census->token_count;
@@ -2124,7 +2144,8 @@ static void check_attested_events(CheckAttested* census, Preprocessor* pp, const
     const uint32_t name_capacity = bindings->name_capacity;
     const uint32_t* const firsts = census->firsts;
     const uint32_t* const lasts = census->lasts;
-    uint32_t d = 0;
+    const uint64_t stamp = (uint64_t)(census->stamp & 0xffffffu) << 40;
+    uint32_t d = declarations;
     for (uint32_t e = 0; ready && name_capacity != 0 && e < bindings->count; e += 1)
     {
         const uint8_t operation = bindings->operation[e];
@@ -2134,11 +2155,18 @@ static void check_attested_events(CheckAttested* census, Preprocessor* pp, const
         const bool use = operation == C_BINDING_USE && space <= C_BINDING_TAG;
         const uint32_t point = bindings->point[e];
         const bool here = d < declarations && firsts[d] <= point && point <= lasts[d];
-        d = (file_declare || use) && !here ? check_attested_declaration_of(census, point) : d;
+        const uint32_t at = (file_declare || use) && !here ? check_attested_declaration_of(census, point) : d;
+        if (at != d && at < declarations)
+        {
+            check_attested_mark_list(census, at);
+        }
+        d = at;
         if ((file_declare || use) && d < declarations)
         {
             const uint32_t key = id * 2 + (space == C_BINDING_TAG ? 1u : 0u);
-            const bool held = check_attested_lists_hold(census, d, key, file_declare ? BUSTER_ATTESTED_DECLARES : BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP);
+            const uint64_t mark = key < 2 * BUSTER_ATTESTED_MAX_IDS ? census->list_marks[key] : 0;
+            const uint8_t classes = file_declare ? BUSTER_ATTESTED_DECLARES : BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP;
+            const bool held = (mark & ~UINT64_C(0xff)) == (stamp | (uint64_t)d << 8) && (mark & classes) != 0;
             census->declare_events += file_declare ? 1 : 0;
             census->use_events += use ? 1 : 0;
             census->unlisted_declares += file_declare && !held ? 1 : 0;
@@ -2312,9 +2340,10 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         const uint32_t last = census->lasts[d];
         const uint32_t tokens = last - first + 1;
         const uint8_t flags = census->flags[d];
-        // Its reading's consequences, by the reader's facts at its tokens.
+        // Its reading's consequences, by the reader's facts at its tokens (none where the walk passed it: no reading).
+        const bool passed = census->skipped && census->hits[d] != 0 && census->reached[d] == 0;
         CheckAttestedOutcome impure = CHECK_ATTESTED_OUTCOMES;
-        for (uint32_t t = first; bits != NULL && t <= last && impure == CHECK_ATTESTED_OUTCOMES; t += 1)
+        for (uint32_t t = first; bits != NULL && !passed && t <= last && impure == CHECK_ATTESTED_OUTCOMES; t += 1)
         {
             const uint8_t b = bits[t];
             const CheckInputAttributes* attributes = (b & (BUSTER_CHECK_BITS_STATIC | BUSTER_CHECK_BITS_DEFINED)) != 0 || check_input_linkage(bits, t) != 0 ?
@@ -2485,10 +2514,11 @@ static bool check_attested_open(CheckAttested* census)
     census->memo_arena = arena_reserve(2 * (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
     census->memo = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_MEMO_FIRST_SLOTS, sizeof(CheckAttestedHash), 64);
     census->memo_mask = BUSTER_ATTESTED_MEMO_FIRST_SLOTS - 1;
-    census->key_arena = arena_reserve(keys * sizeof(CheckAttestedKey) + (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t)) +
+    census->key_arena = arena_reserve(keys * (sizeof(CheckAttestedKey) + sizeof(uint64_t)) + (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t)) +
                                       2 * ((uint64_t)runtimes + 1) * sizeof(uint32_t) + 16 * 4096);
     Arena* arena = &census->key_arena;
     census->keys = arena_push_array(arena, keys, sizeof(CheckAttestedKey), 4096);
+    census->list_marks = arena_push_array(arena, keys, sizeof(uint64_t), 4096);
     census->id_facts = arena_push_array(arena, BUSTER_ATTESTED_MAX_IDS, sizeof(uint8_t), 4096);
     census->builtin_targets = arena_push_array(arena, BUSTER_ATTESTED_MAX_IDS, sizeof(uint32_t), 4096);
     census->runtime_keys = arena_push_array(arena, runtimes + 1, sizeof(uint32_t), 4096);
@@ -2499,7 +2529,7 @@ static bool check_attested_open(CheckAttested* census)
     }
     census->unit_arena = arena_reserve(UINT64_C(1) << 36);
     check_attested_actions(census->kind_actions, census->role_actions);
-    return census->memo != NULL && census->keys != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL;
+    return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->runtime_lengths != NULL && census->unit_arena.base != NULL;
 }
 
 static void check_attested_close(CheckAttested* census)
