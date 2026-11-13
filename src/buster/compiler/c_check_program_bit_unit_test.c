@@ -209,7 +209,7 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                   "struct __attribute__((packed)) P{unsigned char k:4;unsigned long long x:44;};struct Q{unsigned a:8,b:8,c:8;};"
                                   "struct U3{unsigned char a:8,b:8,c:8;};union V{unsigned a:3;unsigned b:12;};"
                                   "struct A{char c;struct{unsigned x:4,y:12;};char d;};struct N{int i;struct B b;};struct C{unsigned a:8,b:8,c:16;};"
-                                  "struct C gc;";
+                                  "struct C gc;struct F{unsigned a:24;char tail[];};struct E{};struct M{unsigned a:24;struct E e;};";
     static const char functions[] = "unsigned issue(struct B*b){b->y+=b->x;b->z^=b->w;return b->x+b->y+b->z+b->w;}"
                                     "void guard(struct G*p,unsigned v){p->x=v;p->x++;}"
                                     "void clipped(struct T*p){p->a+=1;}"
@@ -220,7 +220,9 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                     "void anon(struct A*p){p->y=p->x;}"
                                     "void nested(struct N*p){p->b.z=p->b.x;}"
                                     "unsigned local(unsigned n){struct C s;s.a=n;s.b=n;s.c=n;return s.c+s.b;}"
-                                    "void global(unsigned n){gc.c=n;_Generic(0,int:gc.b)=n;gc.a++;}";
+                                    "void global(unsigned n){gc.c=n;_Generic(0,int:gc.b)=n;gc.a++;}"
+                                    "void flexible(struct F*p){p->a+=1;}"
+                                    "void empty(struct M*p){p->a+=1;}";
     typedef struct CheckTestBitCase CheckTestBitCase;
     struct CheckTestBitCase
     {
@@ -232,7 +234,9 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
     // a [6 x i8] (4 and 2) for both its fields; Q's 24 bits an i32 at 0, its tail padding; U3's a and b an i16, whose
     // i24 of all three takes 4 bytes the record hasn't, and c an i8 at 2; V's fields their own bytes; A's anonymous
     // struct's fields an i16 at the struct's 4; N's b's an i32 at 4; C's an i32 at 0, through a local's and a global's
-    // constant addresses and a _Generic selection.
+    // constant addresses and a _Generic selection; F's a [3 x i8] before its flexible array member, which clang stores
+    // (its first element is in what would be an i32's last byte), and M's an i32 past its member of an empty struct,
+    // which clang doesn't.
     static const CheckTestBitCase cases[] = {
         { "issue", "r0:4 w0:4" },
         { "guard", "r0:1 w0:1" },
@@ -245,6 +249,8 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         { "nested", "r4:4 w4:4" },
         { "local", "r0:4 w0:4" },
         { "global", "r0:4 w0:4" },
+        { "flexible", "r0:2 r2:1 w0:2 w2:1" },
+        { "empty", "r0:4 w0:4" },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     char source[sizeof(records) + sizeof(functions)];
@@ -263,6 +269,9 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        // Tier 0's records and the traces' columns, apart from `scratch`: each lowered function's access column
+        // (Tier0Function.symbol_access) is the emission's, in what it left of `scratch` (check_program_access).
+        Arena work = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
         const CheckOptions checking = { .scalar = path == 0 };
         CheckInput input = { 0 };
@@ -271,7 +280,7 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         CheckAsms asms = { 0 };
         CheckProgram program = { 0 };
         CheckProgramCode code = { 0 };
-        bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+        bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && work.base != 0 && check_test_types_open(&types) &&
                      parse_initialize(&parser, &parsing, preprocessing.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
                      check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
                      check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
@@ -287,18 +296,19 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         for (uint32_t f = 0; ready && f < count && f < code.lowered.count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];
-            const Tier0Code scalar = tier0_compile_scalar(function, &scratch);
-            const Tier0Code vector = tier0_compile(function, &scratch);
+            const Tier0Code scalar = tier0_compile_scalar(function, &work);
+            const Tier0Code vector = tier0_compile(function, &work);
             const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && scalar.count == vector.count &&
                                   memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0 &&
                                   tier0_validate(function).error == TIER0_OK;
-            const CheckTestBitTrace trace = check_test_bit_trace(function, &scratch);
+            const CheckTestBitTrace trace = check_test_bit_trace(function, &work);
             snprintf(description, sizeof(description), "bit-field units (%s path): %s's %u accesses are \"%s\" (clang's \"%s\"), compiled by Tier 0's two paths alike",
                      way, cases[f].name, trace.accesses, trace.text, cases[f].trace);
             check_test_expect(test, compiled && strcmp(trace.text, cases[f].trace) == 0, description);
         }
         parse_release(&parser);
         check_test_types_close(&types);
+        arena_release(&work);
         arena_release(&scratch);
         arena_release(&bytes);
         arena_release(&output);
