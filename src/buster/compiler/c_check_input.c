@@ -13026,7 +13026,9 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
         reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, token), reader->output->function_flags[token]);
         check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, token), reader->late_attribute_kinds + 2 * (uint64_t)reader->objects[token]);
     }
-    if (reader->output->visibility_pragmas != NULL || (reader->declaration_storage != NULL && reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN) ||
+    // (The storage class is a rare column, read through BUSTER_CHECK_RARE, #628: a plain read at every declaration
+    // touched nearly every page of its 4 bytes a token, though few are written, 536 of sqlite3.c's faults, #1489.)
+    if (reader->output->visibility_pragmas != NULL || (reader->declaration_storage != NULL && BUSTER_CHECK_RARE(reader, declaration_storage, token) == C_NAME_PRIVATE_EXTERN) ||
         (check_sparse_wide_present(reader->output->attributes) && check_input_attributes_at(reader->output, token) != NULL))
     {
         check_input_visibility_declare(reader, token, point);
