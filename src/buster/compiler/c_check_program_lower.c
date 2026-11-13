@@ -14210,8 +14210,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         // A struct's or union's member, at the offset the checker found it at (CheckStream.member_offsets), for a node it
         // checked without a diagnostic; not a vector's elements (`v.y`), which share the operator. A bit-field's address,
         // which only its stores ask for, is its first byte's.
-        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : check_stream_type(stream, a);
-        const uint8_t record_kind = check_action_kind(types, record);
+        TypeId record = type_strip_aligned(types, op == CHECK_OP_ARROW ? type_element(types, type_a) : check_stream_type(stream, a));
+        uint8_t record_kind = type_kind(types, record);
+        if (__builtin_expect(record_kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+        {
+            // A demoted/suppressed atomic-record diagnostic leaves the member's declared access. Its base is an
+            // address below, so finding the underlying record never reads the atomic aggregate.
+            record = type_strip_aligned(types, type_element(types, record));
+            record_kind = type_kind(types, record);
+        }
         const uint64_t offset = stream->member_offsets[node];
         const bool bit_field = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0;
         CheckLowerBitField field = { 0 };

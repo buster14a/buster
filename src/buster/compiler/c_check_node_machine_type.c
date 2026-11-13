@@ -777,7 +777,12 @@ static inline __attribute__((always_inline)) bool node_machine_member(NodeMachin
         space = taken ? type_address_space(type_extended_qualifiers(types, type_element(types, record))) : 0;
         record = taken ? type_strip_aligned(types, type_element(types, record)) : record;
     }
-    const uint8_t kind = type_kind(types, record);
+    uint8_t kind = type_kind(types, record);
+    if (__builtin_expect(kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+    {
+        record = type_strip_aligned(types, type_element(types, record));
+        kind = type_kind(types, record);
+    }
     // A `.` of an address constant, a static object's member (its base held whole by the columns, so with no bit offset).
     const bool address = !arrow && base.constant_kind == CHECK_CONSTANT_ADDRESS && (machine->columns->standings[a] & BUSTER_NODE_MACHINE_WIDE) == 0;
     taken = taken && space == 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && (base.constant_kind == CHECK_CONSTANT_NONE || address);

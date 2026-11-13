@@ -304,7 +304,14 @@ needs a pointer, is refused), written or a typedef's, with clang's
 (`-Wunderlying-cv-qualifier-ignored`, #1952) once, at the base's first token
 that isn't a qualifier; they aren't the declaration's own, so a declaration of
 the enum alone gives no "'const' ignored on this declaration" for them. An
-integer type of any width but `_BitInt` takes it. GNU attributes among the base's specifiers are the base type's, as
+integer type of any width but `_BitInt` takes it. A formed non-integral base
+reports "non-integral type 'T' is an invalid underlying type" with its full
+typedef spelling, at the retained type specifier (#2492). Clang's recovered
+enum stays fixed with `int` as its base, so its body and later declarations
+are still checked. An atomic base is stripped first, with
+`-Wunderlying-atomic-qualifier-ignored` (an error by default, demotable or
+suppressible); CV warnings precede an invalid-base error too.
+GNU attributes among the base's specifiers are the base type's, as
 clang has them: ignored, but one that would make it a vector's (`vector_size`,
 `ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
 declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
@@ -5639,9 +5646,7 @@ Still stopping the reader:
 
 - a storage class's conflict (`register _Thread_local int r;` in a block);
 - a type of no keyword dropped in an operand reader's type name
-  (`typeof(int typeof(int))`);
-- an enum's base of no integer type (`enum E : float`, clang's "non-integral
-  type 'float' is an invalid underlying type").
+  (`typeof(int typeof(int))`).
 
 Error-free lists never reach this. The semantic-recovery fixtures cover each
 kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
@@ -10832,9 +10837,10 @@ enables, which this checker doesn't all give.
     them once every argument is built (#2481): each error is published at the
     call's token with the warnings (`check_driver_pointer_arguments`), and
     each takes its argument's first token's place among them
-    (`pp_diagnostic_suborder`). Still apart: a parenthesized argument's
-    conversion diagnostics are at its first token inside the parentheses,
-    where clang's are at its `(`;
+    (`pp_diagnostic_suborder`). Each conversion uses the whole argument's
+    beginning, including its enclosing parentheses (#2521,
+    `check_semantic_argument_begin`); the argument's inner expressions keep
+    their own diagnostic locations;
   - the types as written: an array's and a function's unconverted, a qualified
     lvalue's qualified, with their typedefs;
   - clang's fix-it words (`check_driver_conversion_hint`,

@@ -550,6 +550,9 @@ struct TypeTable
     // such a unit's source reader decodes a `->` member's name as a swizzle (check_input_vector_member), since `p->y`
     // can name one only through a pointer to an extended vector.
     bool ext_vectors;
+    // Whether an atomic struct/union has been made, monotonic like ext_vectors: only such a unit needs the
+    // -Watomic-access member candidates in the common runtime-warning walk.
+    bool atomic_records;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, tags and members besides record 0,
@@ -2162,6 +2165,11 @@ static uint32_t type_append(TypeTable* table, uint8_t kind, uint8_t flags, TypeI
         types->kind[result] = kind;
         table->extended |= kind == BUSTER_TYPE_KIND_QUALIFIED;
         table->ext_vectors |= kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        if (__builtin_expect(kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+        {
+            const uint8_t base_kind = type_kind(table, type_strip_aligned(table, base));
+            table->atomic_records |= base_kind == BUSTER_TYPE_KIND_STRUCT || base_kind == BUSTER_TYPE_KIND_UNION;
+        }
         types->code[result] = properties.code;
         types->flags[result] = flags | properties.flags;
         types->alignment_log2[result] = properties.alignment_log2;
@@ -7125,6 +7133,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->types.kind, source->types.kind, count * sizeof(*table->types.kind));
         table->extended = source->extended;
         table->ext_vectors = source->ext_vectors;
+        table->atomic_records = source->atomic_records;
         memcpy(table->types.code, source->types.code, count * sizeof(*table->types.code));
         memcpy(table->types.flags, source->types.flags, count * sizeof(*table->types.flags));
         memcpy(table->types.alignment_log2, source->types.alignment_log2, count * sizeof(*table->types.alignment_log2));
