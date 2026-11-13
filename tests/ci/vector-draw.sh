@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# tools/ci/vector-draw.sh's collector, candidates, product waits and verdict (#2033, #2032) against a fake `gh` that
-# applies each call's own --jq filter to a fixture of the run's artifacts and jobs: an assignment by rank, early when
+# tools/ci/vector-draw.sh's collector, candidates, product waits and verdict (#2033, #2032) against separate fake
+# artifact and REST services: an assignment by rank, early when
 # enough qualified and late when every candidate decided or ended; a later draw's missing items; a pool of four
 # configurations, the costliest items first; a candidate that takes its item and its configuration's settings, one
 # ranked out, one that doesn't qualify; a rerun of the failed jobs, whose holder retakes its item or fails on a CPU that
 # doesn't qualify; an item that waits for its configuration's product, from the attempt its builder last ran in, and
 # fails when the builder ended without one, when no candidate can build it, or on two; and the verdict's passes, its
-# incomplete and failed items, its products and its reruns. No network.
+# incomplete and failed items, its products and its reruns. The REST fake charges each page and emits quota headers;
+# artifact polling must never reach REST. Request bounds, reserve handling and complete snapshots cover #2309. No network.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d)
@@ -24,38 +25,87 @@ export LC_ALL=C GITHUB_REPOSITORY=buster14a/buster GITHUB_RUN_ID=7 BUSTER_VECTOR
 export BUSTER_VECTOR_ITEMS="$every" VECTOR_DRAW_POLL=0 VECTOR_DRAW_COLLECT_LIMIT=2 VECTOR_DRAW_TAKE_LIMIT=2 VECTOR_DRAW_PRODUCT_LIMIT=2 VECTOR_DRAW_PRODUCT_POLL=0 GH_TOKEN=fixture
 export RUNNER_TEMP="$work/runner" FIXTURE="$work/api"
 mkdir -p "$RUNNER_TEMP" "$FIXTURE" "$work/bin"
+: > "$FIXTURE/rest-calls"
+printf '0\n' > "$FIXTURE/artifact-calls"
 p=vector-O3
 products=vector-product-O3
 sha=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 other=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 
-# gh api [--paginate] [-H ...] PATH --jq FILTER: the filter over the fixture's JSON for that path.
+# gh api --include -H ... PATH: a charged response with quota headers. Jobs are explicitly paginated, and the
+# artifacts endpoint is forbidden even if the other service fails. Every process appends to the same request log.
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
-path='' filter='.'
+set -euo pipefail
+path='' included=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        api|--paginate) shift ;;
-        --jq) filter=$2; shift 2 ;;
+        api) shift ;;
+        --include) included=1; shift ;;
+        --paginate|--jq) echo 'fake gh: unaccounted pagination/filtering' >&2; exit 1 ;;
         -H) shift 2 ;;
         *) path=$1; shift ;;
     esac
 done
+[ "$included" -eq 1 ] || { echo 'fake gh: quota headers were not requested' >&2; exit 1; }
+printf '%s\n' "$path" >> "$FIXTURE/rest-calls"
+count=$(wc -l < "$FIXTURE/rest-calls")
+status=${FIXTURE_HTTP_STATUS:-200}
+page=0
 case "$path" in
-    */artifacts\?*) file="$FIXTURE/artifacts.json" ;;
-    */attempts/*/jobs\?*) attempt=${path#*/attempts/}; file="$FIXTURE/jobs-${attempt%%/*}.json" ;;
-    */attempts/[0-9]*) attempt=${path##*/attempts/}; file="$FIXTURE/attempt-$attempt.json"; printf '{"run_started_at":"2026-11-11T15:31:37Z"}\n' > "$file" ;;
+    */artifacts*) echo 'fake gh: REST artifact polling is forbidden' >&2; exit 1 ;;
+    */attempts/*/jobs\?per_page=100\&page=*)
+        attempt=${path#*/attempts/}
+        file="$FIXTURE/jobs-${attempt%%/*}.json"
+        page=${path##*&page=}
+        [[ "$page" =~ ^[1-9][0-9]*$ ]] || exit 1
+        [ "${FIXTURE_FAIL_PAGE:-0}" -ne "$page" ] || status=503
+        ;;
+    */attempts/[0-9]*) file='' ;;
     *) echo "fake gh: unexpected $path" >&2; exit 1 ;;
 esac
-[ -e "$file" ] || { echo "fake gh: no $file" >&2; exit 1; }
-jq -r "$filter" "$file"
+printf 'HTTP/2.0 %s Fixture\r\n' "$status"
+if [ "${FIXTURE_OMIT_HEADERS:-0}" -eq 0 ]; then
+    printf 'X-RateLimit-Remaining: %s\r\nX-RateLimit-Reset: %s\r\n' "${FIXTURE_REMAINING:-$((900 - count))}" "${FIXTURE_RESET:-4102444800}"
+fi
+printf '\r\n'
+if [ "$status" -ne 200 ]; then printf '{"message":"fixture REST failure"}\n'; exit 1; fi
+if [ "$page" -eq 0 ]; then
+    printf '{"run_started_at":"2026-11-11T15:31:37Z"}\n'
+else
+    [ -e "$file" ] || { echo "fake gh: no $file" >&2; exit 1; }
+    jq --argjson start "$(((page - 1) * 100))" '{total_count: (.jobs | length), jobs: .jobs[$start:($start + 100)]}' "$file"
+fi
 GH
 chmod +x "$work/bin/gh"
 export PATH="$work/bin:$PATH"
 
+cat > "$work/bin/artifacts" <<'ARTIFACTS'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 1 ] && [ "$1" = list ] || exit 1
+count=$(($(cat "$FIXTURE/artifact-calls") + 1))
+printf '%s\n' "$count" > "$FIXTURE/artifact-calls"
+if [ "${FIXTURE_ARTIFACT_FAIL:-0}" -eq 1 ] || [ "$count" -le "${FIXTURE_ARTIFACT_FAILURES:-0}" ]; then
+    echo 'fixture Results service unavailable' >&2
+    exit 1
+fi
+[ "$count" -ne "${FIXTURE_ARTIFACT_EMPTY_CALL:-0}" ] || exit 0
+jq -r '.artifacts[].name' "$FIXTURE/artifacts.json"
+if [ -n "${FIXTURE_PRODUCT_AFTER_JOBS:-}" ] && grep -q '/jobs?' "$FIXTURE/rest-calls"; then
+    printf '%s\n' "$FIXTURE_PRODUCT_AFTER_JOBS"
+fi
+ARTIFACTS
+export VECTOR_ARTIFACT_NODE=bash VECTOR_ARTIFACT_HELPER="$work/bin/artifacts"
+reset_calls() { : > "$FIXTURE/rest-calls"; printf '0\n' > "$FIXTURE/artifact-calls"; }
+rest_calls() { wc -l < "$FIXTURE/rest-calls"; }
+job_calls() { grep -c '/jobs?' "$FIXTURE/rest-calls" || true; }
+charged() { awk 'END { print NR - 1 }' "$RUNNER_TEMP/vector-rest/$1.tsv"; }
+
 # The run's artifacts, by name.
 artifacts()
 {
+    [ $# -gt 0 ] || { printf '{"artifacts":[]}\n' > "$FIXTURE/artifacts.json"; return 0; }
     printf '%s\n' "$@" | jq -R . | jq -s '{ artifacts: map({ name: . }) }' > "$FIXTURE/artifacts.json"
 }
 # Attempt $1's jobs: NAME|STATUS|ATTEMPT[|CONCLUSION] each, as the API lists them: a job an earlier attempt ran, which
@@ -68,7 +118,7 @@ jobs()
     [ $# -gt 0 ] || { printf '{ "jobs": [] }\n' > "$FIXTURE/jobs-$attempt.json"; return 0; }
     printf '%s\n' "$@" | jq -R --argjson listed "$attempt" 'split("|") | { name: .[0], status: .[1], run_attempt: $listed,
         started_at: (if (.[2] | tonumber) == $listed then "2026-11-11T15:31:41Z" else "2026-11-11T15:28:15Z" end),
-        conclusion: (if (.[3] // "") == "" then null else .[3] end) }' | jq -s '{ jobs: . }' > "$FIXTURE/jobs-$attempt.json"
+        conclusion: (if (.[3] // "") == "" then null else .[3] end) }' | jq -s '{jobs: (to_entries | map(.value + {id: (.key + 1)}))}' > "$FIXTURE/jobs-$attempt.json"
 }
 label() { printf '(Clang 23, %s, O3)' "$BUSTER_VECTOR_CONFIGURATIONS"; }
 draw() { printf 'Tests on Ubuntu 26.04 (vector, %s, O3) / Vector draw %s, candidate %s %s|%s|%s|%s' "$BUSTER_VECTOR_CONFIGURATIONS" "$1" "$2" "$(label)" "$3" "$4" "${5:-}"; }
@@ -85,9 +135,11 @@ export GITHUB_RUN_ATTEMPT=1 GITHUB_OUTPUT="$work/output" GITHUB_ENV="$work/env"
 : > "$GITHUB_OUTPUT"
 artifacts "$p-1-probe-1-5-yes" "$p-1-probe-1-2-no" "$p-1-probe-1-9-yes" "$p-1-probe-1-3-yes" "$p-1-probe-1-12-yes" other-artifact
 jobs 1
+reset_calls
 bash "$draw_script" assign 1 12 4 > "$work/log"
 [ "$(output name)" = "$p-1-assign-1-n1x3-n2x5-n3x9-n4x12" ] || fail "an early assignment by rank: $(output name)"
 [ "$(output count)" = 0 ] && [ "$(output candidates)" = '[]' ] || fail 'a complete draw asks for another'
+[ "$(rest_calls)" -eq 1 ] && [ "$(job_calls)" -eq 0 ] && [ "$(charged assign)" -eq 1 ] || fail 'an artifact-decided collector spends only its opening quota sample'
 pass
 
 # A first draw of another size than 3 per item is refused.
@@ -95,7 +147,7 @@ if bash "$draw_script" assign 1 6 4 > "$work/log" 2>&1; then fail 'a first draw 
 grep -q 'at least 3 per item' "$work/log" || fail 'a first draw of the wrong size refused without its reason'
 pass
 
-artifacts "$p-1-probe-2-5-yes" "$p-1-probe-2-2-no" "$p-1-probe-2-11-yes" "$p-1-probe-2-1-no"
+artifacts "$p-1-assign-1" "$p-1-probe-2-5-yes" "$p-1-probe-2-2-no" "$p-1-probe-2-11-yes" "$p-1-probe-2-1-no"
 jobs 1 "$(draw 2 3 completed 1)" "$(draw 2 4 completed 1)" "$(draw 2 6 in_progress 1)"
 bash "$draw_script" assign 2 6 4 > "$work/log"
 [ "$(output name)" = "$p-1-assign-2-n1x5-n2x11" ] || fail "an assignment once every candidate decided or ended: $(output name)"
@@ -148,6 +200,7 @@ pass
 export BUSTER_VECTOR_CONFIGURATIONS=none
 take()
 {
+    reset_calls
     : > "$GITHUB_ENV"
     record "$1" "$2" "AMD EPYC 9V45" "$3" "$work/record"
     bash "$draw_script" take "$1" "$2" "$3" "$work/record" > "$work/log" 2>&1
@@ -156,6 +209,7 @@ setting() { sed -n "s/^$1=//p" "$GITHUB_ENV"; }
 artifacts "$p-1-assign-1-n1x3-n2x5-n3x9-n4x12"
 jobs 1
 take 1 9 qualified || fail 'a candidate that takes its item'
+[ "$(rest_calls)" -eq 0 ] && [ "$(charged take)" -eq 0 ] || fail 'a first-attempt candidate uses REST'
 [ "$(setting BUSTER_VECTOR_ITEM)" = n3 ] && [ "$(setting BUSTER_SHARD)" = 3 ] && [ "$(setting BUSTER_SANITIZER)" = none ] || fail 'the item a candidate takes'
 [ "$(setting BUSTER_VECTOR_SHARDS)" = 4 ] && [ "$(setting BUSTER_VECTOR_BUILDER)" = 0 ] || fail "the item's shard count and builder"
 grep -qx "$(printf 'decision\ttook n3')" "$work/record" && grep -qx 'Vector item n3: none, shard 3 of 4' "$work/log" || fail "the take's record and costs line"
@@ -198,6 +252,7 @@ pass
 export BUSTER_VECTOR_CONFIGURATIONS='none address thread memory' GITHUB_RUN_ATTEMPT=1
 product()
 {
+    reset_calls
     : > "$GITHUB_OUTPUT"
     bash "$draw_script" product "$1" > "$work/log" 2>&1
 }
@@ -205,6 +260,7 @@ product()
 artifacts "$p-1-assign-1-m1x2-t2x3" "$p-1-assign-2-t1x4" "$products-1-thread-$sha" "$products-1-memory-$other"
 jobs 1 "$(draw 2 4 in_progress 1)" "$(draw 1 2 in_progress 1)"
 product thread || { cat "$work/log"; fail 'a published product'; }
+[ "$(rest_calls)" -eq 0 ] && [ "$(charged product)" -eq 0 ] || fail 'a published first-attempt product reads jobs'
 [ "$(output name)" = "$products-1-thread-$sha" ] && [ "$(output digest)" = "$sha" ] || fail "the product's name and digest: $(output name)"
 pass
 # Not yet published while its builder runs: the limit fails it.
@@ -258,11 +314,25 @@ evidence()
     record "$level" "$candidate" "Intel Xeon 8370C" qualified "$records/$p-$at-evidence-$item/record"
     printf 'decision\t%s\ntarget\t-march=x86-64-v4\nhost-vector\t1\nkernels\tok\nitem\t%s\nconfiguration\t%s\nshard\t%s\nproduct\t%s\nsuite\tpassed\n' \
         "$decision" "$item" "$BUSTER_VECTOR_CONFIGURATIONS" "${item:1}" "$product" >> "$records/$p-$at-evidence-$item/record"
+    ledger "$p-$at-rest-draw-$level-$candidate" take 0
+    if [[ "$product" == installed\ * ]]; then ledger "$p-$at-rest-draw-$level-$candidate" product 0; fi
 }
-verdict() { bash "$draw_script" verdict "$records" > "$work/log" 2>&1; }
+# Uploaded ledgers are independent fixtures: each line is one charged request, including failed requests.
+ledger()
+{
+    local directory="$records/$1" command=$2 requests=${3:-0} i
+    mkdir -p "$directory"
+    printf 'request\tstatus\tremaining\treset\tendpoint\n' > "$directory/$command.tsv"
+    for ((i = 1; i <= requests; i += 1)); do
+        printf '%s\t200\t%s\t4102444800\trepos/buster14a/buster/actions/runs/7/attempts/1\n' "$i" "$((900 - i))" >> "$directory/$command.tsv"
+    done
+}
+verdict() { reset_calls; bash "$draw_script" verdict "$records" > "$work/log" 2>&1; }
 debug() { cat "$work/log" >&2; }
 rm -rf -- "$records"
 mkdir -p "$records/$p-1-assign-1-n1x3-n2x5-n3x9" "$records/$p-1-draw-1-3"
+ledger "$p-1-rest-collect-1" assign 1
+ledger "$p-1-rest-draw-1-3" take 0
 record 1 3 "AMD EPYC 9V45" qualified "$records/$p-1-draw-1-3/record"
 printf 'decision\ttook n1\n' >> "$records/$p-1-draw-1-3/record"
 export GITHUB_RUN_ATTEMPT=1
@@ -270,10 +340,29 @@ evidence 1 n1 1 3; evidence 1 n2 1 5; evidence 1 n3 1 9
 if verdict; then fail 'an item without a holder passes'; fi
 grep -q 'incomplete: no qualifying CPU drawn for item(s) n4' "$work/log" || { debug; fail 'an unheld item is incomplete'; }
 mkdir -p "$records/$p-1-assign-2-n4x2"
+ledger "$p-1-rest-collect-2" assign 0
 evidence 1 n4 2 2
 verdict || fail "every item's holder passing fails: $(cat "$work/log")"
 grep -q "| n4 | none | 4 | 2 | 2 | 1 | Intel Xeon 8370C | installed ${sha:0:12} | passed |" "$work/log" || { debug; fail "the verdict's table"; }
 grep -q '| 1 | 1 | 3 | AMD EPYC 9V45 | qualified | took n1 |' "$work/log" || fail "the verdict's draws"
+grep -Fq 'Counted **2 REST requests**' "$work/log" || fail 'the verdict includes its own quota sample in the request count'
+grep -Fq 'Hard first-attempt ceiling: **16** (480 at 30 runs/hour).' "$work/log" || fail 'the PR request ceiling leaves room at thirty runs per hour'
+pass
+
+rm -- "$records/$p-1-rest-collect-2/assign.tsv"
+if verdict; then fail 'an assignment without its REST ledger passes'; fi
+grep -q 'REST accounting is incomplete' "$work/log" || fail 'missing request evidence is not reported'
+ledger "$p-1-rest-collect-2" assign 0
+pass
+
+rm -- "$records/$p-1-rest-draw-1-5/product.tsv"
+if verdict; then fail 'a passing product consumer without its request ledger passes'; fi
+grep -q 'REST accounting is incomplete' "$work/log" || fail 'missing product request evidence is not reported'
+ledger "$p-1-rest-draw-1-5" product 0
+: > "$records/$p-1-rest-collect-2/assign.tsv"
+if verdict; then fail 'an empty ledger passes as zero requests'; fi
+grep -q 'invalid REST ledger' "$work/log" || fail 'an empty ledger was not rejected'
+ledger "$p-1-rest-collect-2" assign 0
 pass
 
 # Evidence by another candidate than the holder, incomplete evidence, or an item 1 that didn't build, doesn't count.
@@ -305,6 +394,7 @@ grep -q '| n3 | none | 3 | 1 | 9 | 2 | Intel Xeon 8370C |' "$work/log" || fail "
 # Rerunning every job: attempt 3's assignments replace the earlier ones, and the earlier passes don't count.
 export GITHUB_RUN_ATTEMPT=3
 mkdir -p "$records/$p-3-assign-1-n1x1-n2x2-n3x3-n4x4"
+ledger "$p-3-rest-collect-1" assign 1
 if verdict; then fail "a full rerun passes on an earlier attempt's executions"; fi
 evidence 3 n1 1 1; evidence 3 n2 1 2; evidence 3 n3 1 3; evidence 3 n4 1 4
 verdict || fail "a full rerun's executions fail: $(cat "$work/log")"
@@ -314,6 +404,7 @@ pass
 rm -rf -- "$records"
 export BUSTER_VECTOR_CONFIGURATIONS='none thread' GITHUB_RUN_ATTEMPT=1
 mkdir -p "$records/$p-1-assign-1-t1x1-t2x2-t3x3-t4x4-n1x5-n2x6-n3x7-n4x8"
+ledger "$p-1-rest-collect-1" assign 1
 for item in t1 t2 t3 t4 n1 n2 n3 n4; do
     BUSTER_VECTOR_CONFIGURATIONS=$([ "${item:0:1}" = t ] && echo thread || echo none) evidence 1 "$item" 1 "$(( $(printf '%s\n' t1 t2 t3 t4 n1 n2 n3 n4 | grep -nx "$item" | cut -d : -f 1) ))"
 done
@@ -322,36 +413,166 @@ grep -q '| t3 | thread | 3 | 1 | 3 | 1 |' "$work/log" || { debug; fail "a pool's
 BUSTER_VECTOR_CONFIGURATIONS=none evidence 1 t3 1 3
 if verdict; then fail "an item's evidence of another configuration passes"; fi
 
-# A failing listing (the repository's REST limit, #2309) doubles the pause, up to VECTOR_DRAW_POLL_LIMIT, and a listing
-# that succeeds ends the back-off. The collector's first three calls fail (the artifacts' listing, the jobs', the
-# artifacts' again); its fifth lists no artifact yet, so it polls once more at the base pause.
+# A failing Results listing doubles the pause to the cap. The fourth listing succeeds but is empty, resetting the
+# pause; the fifth supplies the assignment's inputs. Failures depend on artifact calls, never REST request ordering.
 mkdir -p "$work/flaky"
-cat > "$work/flaky/gh" <<'GH'
-#!/usr/bin/env bash
-count=$(($(cat "$FLAKY_COUNT") + 1))
-printf '%s\n' "$count" > "$FLAKY_COUNT"
-if [ "$count" -le 3 ]; then
-    echo 'gh: API rate limit exceeded for installation (HTTP 403)' >&2
-    exit 1
-fi
-[ "$count" -ne 5 ] || exit 0
-exec "$REAL_GH" "$@"
-GH
 cat > "$work/flaky/sleep" <<'SLEEP'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >> "$SLEEPS"
 SLEEP
-chmod +x "$work/flaky/gh" "$work/flaky/sleep"
-echo 0 > "$work/flaky/count"
+chmod +x "$work/flaky/sleep"
 : > "$work/flaky/sleeps"
 export BUSTER_VECTOR_CONFIGURATIONS=none GITHUB_RUN_ATTEMPT=1
 : > "$GITHUB_OUTPUT"
 artifacts "$p-1-probe-1-5-yes" "$p-1-probe-1-9-yes" "$p-1-probe-1-3-yes" "$p-1-probe-1-12-yes"
 jobs 1
-FLAKY_COUNT="$work/flaky/count" SLEEPS="$work/flaky/sleeps" REAL_GH="$work/bin/gh" PATH="$work/flaky:$PATH" \
+reset_calls
+FIXTURE_ARTIFACT_FAILURES=3 FIXTURE_ARTIFACT_EMPTY_CALL=4 SLEEPS="$work/flaky/sleeps" PATH="$work/flaky:$PATH" \
     VECTOR_DRAW_POLL=2 VECTOR_DRAW_POLL_LIMIT=5 VECTOR_DRAW_COLLECT_LIMIT=600 bash "$draw_script" assign 1 12 4 > "$work/log"
-[ "$(tr '\n' ' ' < "$work/flaky/sleeps")" = '4 5 2 ' ] || fail "a failing listing's back-off: $(tr '\n' ' ' < "$work/flaky/sleeps")"
+[ "$(tr '\n' ' ' < "$work/flaky/sleeps")" = '4 5 5 2 ' ] || fail "a failing listing's back-off: $(tr '\n' ' ' < "$work/flaky/sleeps")"
 [ "$(output name)" = "$p-1-assign-1-n1x3-n2x5-n3x9-n4x12" ] || fail "the assignment after the back-off: $(output name)"
+[ "$(rest_calls)" -eq 2 ] && [ "$(job_calls)" -eq 1 ] || fail 'artifact retries consume REST requests'
+pass
+
+# A bounded jobs snapshot must page all 101 jobs, and charge both requests. A failed page is never a partial
+# decision: the builder on the first page has failed, but an incomplete snapshot cannot establish that identity.
+export BUSTER_VECTOR_CONFIGURATIONS=none GITHUB_RUN_ATTEMPT=1
+many_jobs=("$(draw 1 3 completed 1 failure)")
+for ((i = 2; i <= 101; i += 1)); do many_jobs+=("unrelated $i|completed|1|success"); done
+jobs 1 "${many_jobs[@]}"
+artifacts "$p-1-assign-1-n1x3"
+if product none; then fail 'a completed builder without its product'; fi
+grep -q 'ended (failure) in attempt 1 without publishing' "$work/log" || fail 'a paginated builder failure lost its reason'
+[ "$(rest_calls)" -eq 2 ] && [ "$(charged product)" -eq 2 ] || fail 'both jobs pages were not counted'
+grep -q 'page=1$' "$FIXTURE/rest-calls" && grep -q 'page=2$' "$FIXTURE/rest-calls" || fail 'the paginated jobs snapshot skipped a page'
+pass
+
+if FIXTURE_FAIL_PAGE=2 product none; then fail 'a missing product with a failed jobs page'; fi
+grep -q 'no product of none' "$work/log" || fail 'a partial jobs snapshot decided the builder ended'
+[ "$(rest_calls)" -eq 2 ] && [ "$(charged product)" -eq 2 ] || fail 'a failed jobs page or retry escaped the allowance'
+grep -q "$(printf '^2\t503\t')" "$RUNNER_TEMP/vector-rest/product.tsv" || fail 'the failed page was not charged'
+pass
+
+# Waiting through many successful artifact polls does not repeat the jobs snapshot. A third page would exceed
+# the product waiter's allowance, so even a completed builder in its first page remains unproven.
+for ((i = 102; i <= 201; i += 1)); do many_jobs+=("unrelated $i|completed|1|success"); done
+jobs 1 "${many_jobs[@]}"
+if product none; then fail 'an unpublished product after an over-budget jobs snapshot'; fi
+grep -q 'no product of none' "$work/log" || fail 'a truncated over-budget snapshot decided builder completion'
+[ "$(rest_calls)" -eq 2 ] && [ "$(charged product)" -eq 2 ] || fail 'a product waiter exceeded two jobs pages'
+[ "$(cat "$FIXTURE/artifact-calls")" -gt 2 ] || fail 'the repeated artifact wait was not exercised'
+pass
+
+# A builder's final marker proves it cannot publish any more, without any jobs request.
+artifacts "$p-1-assign-1-n1x3" "$p-1-builder-none-ended"
+if product none; then fail 'an ended builder without its product'; fi
+grep -q 'ended (publication finished)' "$work/log" || fail 'the builder-ended marker did not explain failure'
+[ "$(rest_calls)" -eq 0 ] && [ "$(charged product)" -eq 0 ] || fail 'a builder-ended marker still lists jobs'
+pass
+
+# The product appears after the builder's completion was read. The first artifact snapshot is now stale and must
+# be refreshed before a completed job can be diagnosed as failed publication.
+jobs 1 "$(draw 1 3 completed 1 success)"
+artifacts "$p-1-assign-1-n1x3"
+FIXTURE_PRODUCT_AFTER_JOBS="$products-1-none-$sha" product none || { cat "$work/log"; fail 'a product published between artifact and jobs reads'; }
+[ "$(output digest)" = "$sha" ] && [ "$(cat "$FIXTURE/artifact-calls")" -ge 2 ] || fail 'the product snapshot was not refreshed after the completed status'
+[ "$(rest_calls)" -eq 1 ] || fail 'a completed builder required repeated jobs reads'
+pass
+
+# Reserve observations stop new REST requests while artifact-only assignment can still finish. The exhausted
+# response is itself counted. No headers likewise stops further requests instead of assuming quota is available.
+for mode in reserve headers; do
+    artifacts "$p-1-probe-1-3-yes"
+    jobs 1
+    reset_calls
+    : > "$GITHUB_OUTPUT"
+    if [ "$mode" = reserve ]; then
+        FIXTURE_REMAINING=100 VECTOR_DRAW_COLLECT_LIMIT=0 bash "$draw_script" assign 1 12 4 > "$work/log" 2>&1
+        grep -q 'preserving the REST reserve' "$work/log" || fail 'the low-quota response did not preserve its reserve'
+    else
+        FIXTURE_OMIT_HEADERS=1 VECTOR_DRAW_COLLECT_LIMIT=0 bash "$draw_script" assign 1 12 4 > "$work/log" 2>&1
+        grep -q 'lacks valid quota headers' "$work/log" || fail 'missing headers did not close further REST reads'
+    fi
+    [ "$(output name)" = "$p-1-assign-1-n1x3" ] || fail 'a REST guard blocked an artifact-derived assignment'
+    [ "$(rest_calls)" -eq 1 ] && [ "$(job_calls)" -eq 0 ] || fail 'a REST guard allowed another request'
+    pass
+done
+
+# A wholly failed artifact read, or an earlier assignment absent from a successful read, is never empty evidence
+# authorizing a new assignment. Both must leave GITHUB_OUTPUT empty at the deadline, even with every REST read failed.
+reset_calls
+: > "$GITHUB_OUTPUT"
+if FIXTURE_HTTP_STATUS=503 FIXTURE_ARTIFACT_FAIL=1 VECTOR_DRAW_COLLECT_LIMIT=0 bash "$draw_script" assign 1 12 4 > "$work/log" 2>&1; then
+    fail 'a collector published an assignment without any successful artifact read'
+fi
+[ ! -s "$GITHUB_OUTPUT" ] && grep -q 'no complete artifact listing' "$work/log" || fail 'a failed artifact read published partial output'
+[ "$(rest_calls)" -eq 1 ] && [ "$(charged assign)" -eq 1 ] || fail 'a failed quota sample was not charged'
+pass
+reset_calls
+: > "$GITHUB_OUTPUT"
+artifacts "$p-1-probe-2-1-yes" "$p-1-probe-2-2-yes" "$p-1-probe-2-3-yes" "$p-1-probe-2-4-yes"
+if VECTOR_DRAW_COLLECT_LIMIT=0 bash "$draw_script" assign 2 4 4 > "$work/log" 2>&1; then fail 'a later draw assigned without its earlier assignment'; fi
+[ ! -s "$GITHUB_OUTPUT" ] && grep -q 'earlier assignment is missing or ambiguous' "$work/log" || fail 'an unknown earlier assignment was treated as empty'
+[ "$(rest_calls)" -eq 0 ] || fail 'missing assignment polling reached REST'
+pass
+
+# A rerun needs a complete, valid job identity before reusing old artifacts. A low reserve or malformed snapshot
+# cannot turn unknown identity into "the collector/builder did not rerun".
+export GITHUB_RUN_ATTEMPT=2
+artifacts "$p-1-assign-1-n1x3-n2x5" "$products-1-none-$sha"
+jobs 2 "$(collector 1 completed 1)" "$(draw 1 3 completed 1 success)" "$(draw 1 5 in_progress 2)"
+if FIXTURE_REMAINING=100 take 1 5 qualified; then fail 'a rate-limited rerun reused its earlier assignment'; fi
+[ ! -s "$GITHUB_ENV" ] && grep -q 'refusing an earlier assignment' "$work/log" || fail 'the rerun assignment failure was not explicit'
+[ "$(rest_calls)" -eq 1 ] && [ "$(job_calls)" -eq 0 ] || fail 'a rerun candidate consumed its reserve'
+if FIXTURE_REMAINING=100 product none; then fail 'a rate-limited rerun reused its earlier product'; fi
+[ ! -s "$GITHUB_OUTPUT" ] && grep -q 'refusing an earlier product' "$work/log" || fail 'the rerun product failure was not explicit'
+[ "$(rest_calls)" -eq 1 ] && [ "$(job_calls)" -eq 0 ] || fail 'a rerun product waiter consumed its reserve'
+pass
+
+many_jobs=("$(collector 1 completed 1)" "$(draw 1 3 completed 1 success)" "$(draw 1 5 in_progress 2)")
+for ((i = 4; i <= 101; i += 1)); do many_jobs+=("unrelated $i|completed|1|success"); done
+jobs 2 "${many_jobs[@]}"
+take 1 5 qualified || { cat "$work/log"; fail 'a rerun with a complete two-page identity'; }
+[ "$(setting BUSTER_VECTOR_ITEM)" = n2 ] && [ "$(rest_calls)" -eq 3 ] || fail 'a rerun failed to charge its metadata and both job pages'
+if FIXTURE_FAIL_PAGE=2 take 1 5 qualified; then fail 'a rerun reused an assignment from a partial jobs page'; fi
+[ ! -s "$GITHUB_ENV" ] && [ "$(rest_calls)" -eq 3 ] || fail 'a partial rerun snapshot wrote a decision or retried'
+pass
+
+jq '.jobs[100].id = .jobs[0].id' "$FIXTURE/jobs-2.json" > "$work/invalid-jobs"
+mv -- "$work/invalid-jobs" "$FIXTURE/jobs-2.json"
+if take 1 5 qualified; then fail 'a duplicated job across pages established rerun identity'; fi
+[ ! -s "$GITHUB_ENV" ] && [ "$(rest_calls)" -eq 3 ] || fail 'a duplicate jobs snapshot wrote an assignment'
+jobs 2 "$(collector 1 completed 1)" "$(draw 1 3 completed 1 success)" "$(draw 1 5 in_progress 2)"
+jq '.jobs[0].started_at = "not-a-timestamp"' "$FIXTURE/jobs-2.json" > "$work/invalid-jobs"
+mv -- "$work/invalid-jobs" "$FIXTURE/jobs-2.json"
+if take 1 5 qualified; then fail 'a malformed job timestamp established a carried-over collector'; fi
+[ ! -s "$GITHUB_ENV" ] || fail 'a malformed timestamp wrote an assignment'
+if product none; then fail 'a malformed jobs snapshot reused an old product'; fi
+[ ! -s "$GITHUB_OUTPUT" ] || fail 'a malformed jobs snapshot wrote a product'
+pass
+
+# A worst-budget plain run: four two-page collectors, their opening sample, three two-page product waiters, and
+# the verdict's closing sample. It passes exactly at 16, reports 480 at 30/hour, and rejects even one request more.
+rm -rf -- "$records"
+export BUSTER_VECTOR_CONFIGURATIONS=none GITHUB_RUN_ATTEMPT=1
+mkdir -p "$records/$p-1-assign-1-n1x3-n2x5-n3x9-n4x12" "$records/$p-1-assign-2" "$records/$p-1-assign-3" "$records/$p-1-assign-4"
+ledger "$p-1-rest-collect-1" assign 3
+for level in 2 3 4; do ledger "$p-1-rest-collect-$level" assign 2; done
+for pair in n1x3 n2x5 n3x9 n4x12; do
+    item=${pair%x*}
+    candidate=${pair#*x}
+    mkdir -p "$records/$p-1-draw-1-$candidate"
+    record 1 "$candidate" "AMD EPYC 9V45" qualified "$records/$p-1-draw-1-$candidate/record"
+    printf 'decision\ttook %s\n' "$item" >> "$records/$p-1-draw-1-$candidate/record"
+    evidence 1 "$item" 1 "$candidate"
+    ledger "$p-1-rest-draw-1-$candidate" take 0
+    [ "$item" = n1 ] || ledger "$p-1-rest-draw-1-$candidate" product 2
+done
+verdict || { cat "$work/log"; fail 'a complete plain run at its request ceiling'; }
+grep -Fq 'Counted **16 REST requests**' "$work/log" && grep -Fq 'Hard first-attempt ceiling: **16** (480 at 30 runs/hour).' "$work/log" || fail 'the complete run lost its counted budget or thirty-run bound'
+ledger "$p-1-rest-draw-1-5" product 3
+if verdict; then fail 'a plain run exceeding its request ceiling passed'; fi
+grep -q 'REST request ceiling exceeded: 17 > 16' "$work/log" || fail 'the aggregate request ceiling was not enforced'
 pass
 
 printf 'vector-draw fixture: %s checks passed\n' "$checks"

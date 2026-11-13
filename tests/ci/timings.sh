@@ -73,14 +73,16 @@ JSON
     *compare/0000000000000000000000000000000000000012...main)
         printf '{"message":"Server Error","status":"502"}\n'
         exit 1 ;;
+    # The candidates' jobs. Runner waits count the hosted jobs a runner took (71, 73, 81: 10, 285 and 2 s), not a
+    # skipped one (72, runner 0), one that never started (74), the 9700X's (75, self-hosted) or one without a runner (91).
     *runs/7/jobs\?per_page=100\&filter=latest)
         [[ "$2" == --paginate ]]
-        printf '%s\n' '{"jobs":[{"id":71,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:30:20Z"},{"id":72,"started_at":"2026-11-13T09:01:00Z","completed_at":"2026-11-13T09:01:00Z"}]}' \
-            '{"jobs":[{"id":73,"started_at":"2026-11-13T09:05:00Z","completed_at":"2026-11-13T09:15:00Z"},{"id":74,"started_at":null,"completed_at":"2026-11-13T09:15:00Z"}]}' ;;
+        printf '%s\n' '{"jobs":[{"id":71,"runner_id":1,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:30:20Z"},{"id":72,"runner_id":0,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:01:00Z","completed_at":"2026-11-13T09:01:00Z"}]}' \
+            '{"jobs":[{"id":73,"runner_id":2,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:15Z","started_at":"2026-11-13T09:05:00Z","completed_at":"2026-11-13T09:15:00Z"},{"id":74,"runner_id":3,"created_at":"2026-11-13T09:00:10Z","started_at":null,"completed_at":"2026-11-13T09:15:00Z"},{"id":75,"runner_id":9,"labels":["self-hosted","buster-9700x"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:20:00Z","completed_at":"2026-11-13T09:20:00Z"}]}' ;;
     *runs/8/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":81,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:20:20Z"}]}' ;;
+        printf '%s\n' '{"jobs":[{"id":81,"runner_id":4,"created_at":"2026-11-13T09:00:18Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:20:20Z"}]}' ;;
     *runs/9/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":91,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:00:50Z"}]}' ;;
+        printf '%s\n' '{"jobs":[{"id":91,"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:00:50Z"}]}' ;;
     *runs/10/jobs\?per_page=100\&filter=latest)
         printf '%s\n' '{"jobs":[]}' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
@@ -129,17 +131,19 @@ grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work
 grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
 grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"
 grep -Fq '| PR | host-occupation | 1 | 100.0 | 100 |' "$work/report/summary.md"
-# The merge queue's candidates, each by its fate, and the time spent on those that didn't merge.
-printf '7\tmerged\t2236\t2400\n8\tpassed\t1800\t1200\n9\tfailed\t240\t30\n10\tcancelled\t600\t0\n' > "$work/expected-candidates.tsv"
+# The merge queue's candidates, each by its fate, the time spent on those that didn't merge, and their hosted jobs'
+# waits for a runner: the longest, their sum and their count.
+printf '7\tmerged\t2236\t2400\t285\t295\t2\n8\tpassed\t1800\t1200\t2\t2\t1\n9\tfailed\t240\t30\t0\t0\t0\n10\tcancelled\t600\t0\t0\t0\t0\n' > "$work/expected-candidates.tsv"
 cmp "$work/expected-candidates.tsv" "$work/report/candidates.tsv" || { cat "$work/report/candidates.tsv" >&2; echo 'the candidates differ' >&2; exit 1; }
 grep -Fq '| merged | 1 | 40 |' "$work/report/summary.md"
 grep -Fq '| passed, not merged (invalidated) | 1 | 20 |' "$work/report/summary.md"
 grep -Fq '| all | 4 | 60 |' "$work/report/summary.md"
 grep -Fq "Candidates that didn't merge took 20 runner-minutes, 33.9% of the queue's" "$work/report/summary.md"
 grep -Fq 'median 37.3 min, p95 37.3 min (1 candidates)' "$work/report/summary.md"
+grep -Fq "each candidate's longest, median 143.5 s and p95 285 s (2 candidates); every job's, mean 99.0 s over 3 jobs." "$work/report/summary.md"
 "$work/timings" --queue < /dev/null > "$work/empty-queue.md"
 grep -Fq 'No completed candidate runs' "$work/empty-queue.md"
-if printf '7\tmerged\t1\t1\n7\tfailed\t1\t1\n' | "$work/timings" --queue > /dev/null 2>&1; then
+if printf '7\tmerged\t1\t1\t0\t0\t0\n7\tfailed\t1\t1\t0\t0\t0\n' | "$work/timings" --queue > /dev/null 2>&1; then
     echo 'a candidate counted twice was accepted' >&2
     exit 1
 fi

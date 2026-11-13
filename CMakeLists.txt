@@ -190,8 +190,10 @@ set(buster_develop FALSE)
 if("Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
     set(buster_develop TRUE)
 endif()
+# A sanitizer tree's Develop units compile whole: its parts would be instrumented apart, after inlining across parts was
+# lost, which Release's parts (after the whole module's pipeline) aren't.
 set(buster_develop_parts FALSE)
-if(buster_develop AND buster_parallel_codegen)
+if(buster_develop AND buster_parallel_codegen AND buster_sanitizer STREQUAL "none")
     set(buster_develop_parts TRUE)
 endif()
 message(STATUS "buster: Develop configuration: ${buster_develop}, in parts: ${buster_develop_parts}")

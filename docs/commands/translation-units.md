@@ -184,7 +184,11 @@ the census below measures, run in the compile). `--attested=MODE` picks:
   passes before `check_input_run`, which gives the skipped declarations' tokens
   no visit and ignores them (`check_input_skip`, as a lazily deferred body's),
   so that the walk passes them. The tokens stay, lexed and parsed, and keep
-  their indices.
+  their indices. The reader's intrinsics' pass leaves the skipped
+  declarations' operands out too (`CheckInputReader.skips`), and its bindings'
+  heads sit uncleared in its own fresh arena (`c_bindings_initialize_zeroed`,
+  `arena_untouched`), where a unit of a lane, whose intern table holds every
+  unit's names, cleared them all.
 - **`verify`:** the same passes, and nothing skipped: a hit whose reading here
   isn't silent, pure and listed (a contradiction: an input of a reading that
   the semantic hash doesn't cover) fails the unit with a fatal error naming

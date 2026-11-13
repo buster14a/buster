@@ -608,6 +608,11 @@ struct ParallelResult
     // The CPU time of its shell and of the processes under it that were waited for, in nanoseconds: wait4's user and
     // system times, once it has ended.
     uint64_t cpu;
+    // The peak resident memory, in KiB, of the largest of its shell and the processes under it that were waited for:
+    // wait4's ru_maxrss, once it has ended (#2031). It is one process's peak, not the sum of those that ran at once, and
+    // a process the runner killed after the shell ended isn't counted. It is at least the runner's own peak: the shell
+    // starts in the runner's memory (posix_spawn), whose peak its exec records.
+    uint64_t memory;
     // Why it couldn't start (an errno), or 0.
     int start_error;
     ParallelState state;
@@ -655,6 +660,12 @@ static uint64_t parallel_clock(void)
 static double parallel_seconds(uint64_t nanoseconds)
 {
     return (double)nanoseconds / (double)BUSTER_PARALLEL_NANOSECONDS;
+}
+
+// KiB as whole MiB, rounded up: a process that touched any memory reports at least 1.
+static uint64_t parallel_mebibytes(uint64_t kibibytes)
+{
+    return kibibytes / 1024 + (kibibytes % 1024 != 0);
 }
 
 // Appends bytes at the arena's end, where the part of the report being built grows. False when the arena is full.
@@ -731,7 +742,8 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
     }
     else
     {
-        snprintf(text, size, "%s in %.1f s, %.1f s of CPU", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu));
+        snprintf(text, size, "%s in %.1f s, %.1f s of CPU, %llu MiB peak", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu),
+                 (unsigned long long)parallel_mebibytes(result->memory));
     }
 }
 
@@ -941,8 +953,19 @@ static bool parallel_render(Arena* arena, const ParallelCommand* command, const 
     return built;
 }
 
+// Whether a command that ran kept clearly more CPUs busy than it holds (#2031): its CPU time over its time past 1.5 times
+// its CPUs, and past them by a second of CPU or more. Its processes then took CPUs the runner gave other commands, and
+// its heading needs a larger `[N CPUs]`, or the test fewer processes at once (test_process_cpus).
+static bool parallel_overcommitted(const ParallelResult* result)
+{
+    const uint64_t wall = result->end > result->start ? result->end - result->start : 0;
+    const uint64_t held = result->cpus * wall;
+    return result->state == PARALLEL_STATE_ENDED && result->start_error == 0 && wall != 0 && result->cpu * 2 > held * 3 && result->cpu - held >= BUSTER_PARALLEL_NANOSECONDS;
+}
+
 // The report's last part, built at the arena's end once every command has ended or won't start: the summary line, then a
-// line (or with --github an annotation) for each command that failed. Sets *full when the arena can't hold it.
+// line (or with --github an annotation) for each command that failed, then a line (or a warning) for each that kept more
+// CPUs busy than it holds. Sets *full when the arena can't hold it.
 static String8 parallel_render_summary(Arena* arena, const ParallelList* list, const ParallelOptions* options, const ParallelResult* results, const ParallelSummary* summary,
                                        uint64_t jobs, int signal_error, bool* full)
 {
@@ -975,6 +998,23 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
                                                     parallel_append_escaped(arena, outcome_text, false)
                                               : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
                                                     parallel_append(arena, outcome_text.pointer, outcome_text.length));
+            built = built && parallel_append(arena, "\n", 1);
+        }
+    }
+    for (uint64_t i = 0; i < list->count; i += 1)
+    {
+        if (parallel_overcommitted(&results[i]))
+        {
+            char busy[BUSTER_PARALLEL_OUTCOME_BYTES];
+            const int busy_length = snprintf(busy, sizeof(busy), "kept %.1f CPUs busy, more than the %llu it holds", (double)results[i].cpu / (double)(results[i].end - results[i].start),
+                                             (unsigned long long)results[i].cpus);
+            const String8 busy_text = { .pointer = busy, .length = busy_length > 0 ? (uint64_t)busy_length : 0 };
+            const String8 title = list->commands[i].title;
+            built = built && busy_length > 0 &&
+                    (options->github ? parallel_append(arena, "::warning title=", 16) && parallel_append_escaped(arena, title, true) && parallel_append(arena, "::", 2) &&
+                                           parallel_append_escaped(arena, busy_text, false)
+                                     : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
+                                           parallel_append(arena, busy_text.pointer, busy_text.length));
             built = built && parallel_append(arena, "\n", 1);
         }
     }
@@ -1070,6 +1110,7 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
             } while (waited < 0 && errno == EINTR);
             result->status = status;
             result->cpu = waited == result->pid ? parallel_cpu_time(&usage) : 0;
+            result->memory = waited == result->pid && usage.ru_maxrss > 0 ? (uint64_t)usage.ru_maxrss : 0;
             result->skipped = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_PARALLEL_SKIP_STATUS && !result->timed_out;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;

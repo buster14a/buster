@@ -2985,7 +2985,7 @@ static void changes_test_split(ChangesTest* test)
 // pull requests do; the snapshot's comprehensive run checks it, as the daily run did. The hosted rows are the row
 // workflow's jobs (`row`), which the test job calls for both host architectures: its shards check the oracle cache, and
 // they and the build of a shared compiler check out the triggering revision, in every checkout of this repository there
-// (a `ref` that doesn't follow a `repository`), such as the shards' one-file checkout of the vector draw's script (#2309).
+// (a `ref` that doesn't follow a `repository`), such as the shards' sparse checkout of the vector draw's script and runtime (#2309).
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow, Text row)
 {
@@ -3166,15 +3166,13 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
     }
 }
 
-// Every main push, including documentation alone, runs its own hosted rows (#1271): every row before the nightly mode,
-// the plain rows in it (#2057, until the merge queue carries the full suite; the nightly snapshot runs the sanitizer
-// rows and fuzzing). Keep its unfiltered trigger and per-run concurrency separate from a PR's replaceable queue. The
-// evidence glue tests pin scope and hosted=run for pushes; here the workflow must consume those decisions without
-// reducing the matrix or suppressing fuzzing for a full scope.
-// Every merge-queue candidate (#1430), documentation alone included, runs the full contract too: its trigger is
-// `checks_requested` for main with no path filter, its concurrency group its own run's (the queue builds several at
-// once), its selector the merge-group profile, and the required aggregate runs for it and reads its coverage step,
-// which checks the candidate's jobs one by one.
+// Every main revision is tested before it lands, by the merge queue (#1430), and a push to main runs nothing: the owner's
+// decision of 10 November, which replaces #1271's run of every push. So the workflow has no push trigger. Every
+// merge-queue candidate, documentation alone included, runs the full contract: its trigger is `checks_requested` for
+// main with no path filter, its concurrency group its own run's (the queue builds several at once), its selector the
+// merge-group profile with its auxiliary workflows' calls, and the required aggregate waits for them and reads its
+// coverage step, which checks the candidate's jobs one by one. The workflow must consume a full scope without reducing
+// the matrix or suppressing fuzzing.
 // This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
 static bool changes_main_policy(Text workflow)
 {
@@ -3183,7 +3181,7 @@ static bool changes_main_policy(Text workflow)
         uint32_t job;
         const char* line;
     } required[] = {
-        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
+        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
         { 5, "    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')" },
         { 5, "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then" },
@@ -3232,7 +3230,6 @@ static bool changes_main_policy(Text workflow)
     bool push = false;
     bool queue = false;
     uint32_t pushes = 0;
-    uint32_t branches = 0;
     uint32_t queues = 0;
     uint32_t queue_types = 0;
     uint32_t queue_branches = 0;
@@ -3263,13 +3260,6 @@ static bool changes_main_policy(Text workflow)
                 queue = text_equal_c(line, "  merge_group:");
                 queues += queue;
             }
-            else if (section == 1 && push)
-            {
-                // The main push has exactly its branch selector, no paths, paths-ignore or other filter.
-                const bool branch = text_equal_c(line, "    branches: [main]");
-                branches += branch;
-                valid = valid && branch;
-            }
             else if (section == 1 && queue)
             {
                 // A merge-queue candidate for main: the one event type, and no path or other filter.
@@ -3294,7 +3284,7 @@ static bool changes_main_policy(Text workflow)
     {
         valid = valid && seen[i];
     }
-    return valid && pushes == 1 && branches == 1 && queues == 1 && queue_types == 1 && queue_branches == 1;
+    return valid && pushes == 0 && queues == 1 && queue_types == 1 && queue_branches == 1;
 }
 
 // The hotfix entry (.github/workflows/hotfix.yml, #1430): a pull request labeled `hotfix` gets the required aggregate's
@@ -3394,7 +3384,7 @@ static void changes_test_hotfix_policy(ChangesTest* test, Text hotfix)
 
 static void changes_test_main_policy(ChangesTest* test, Text workflow)
 {
-    changes_expect(test, changes_main_policy(workflow), "main policy: unfiltered pushes, independent runs and full hosted coverage", (Text){ 0 });
+    changes_expect(test, changes_main_policy(workflow), "main policy: no push checks, unfiltered candidates, independent runs and full hosted coverage", (Text){ 0 });
     static const struct
     {
         const char* section;
@@ -3402,16 +3392,14 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         const char* after;
         const char* name;
     } mutants[] = {
-        { "on:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'\n      - '**.md'", "documentation path exclusion" },
-        { "on:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "source-only path inclusion" },
-        { "on:", "    branches: [main]", "    branches: [release]", "wrong push branch" },
-        { "on:", "  push:", "  pull_request_target:", "missing main push" },
+        { "on:", "  pull_request:\n", "  push:\n    branches: [main]\n  pull_request:\n", "a main push trigger restored: a second run of every merge" },
+        { "on:", "  pull_request:\n", "  push:\n  pull_request:\n", "an unfiltered push trigger" },
         { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'", "merge-queue documentation exclusion" },
         { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "merge-queue source-only inclusion" },
         { "  merge_group:", "    branches: [main]", "    branches: [release]", "merge queue of another branch" },
         { "  merge_group:", "    types: [checks_requested]", "    types: [destroyed]", "merge queue without its checks" },
         { "  merge_group:", "  merge_group:\n    types: [checks_requested]\n    branches: [main]\n", "", "missing merge-queue trigger" },
-        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
+        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared candidate pending slot" },
         { "concurrency:", " || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id))", "", "candidates share one pending slot" },
         { "  changes:", " || github.event_name == 'merge_group' || ", " || ", "a candidate skips the selector and its self-tests" },
         { "  changes:", "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then", "          if false; then", "a candidate decided by its change alone" },
@@ -3522,7 +3510,8 @@ static bool changes_row_policy(Text row)
         { 2, "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')" },
         { 2, "        run: bash tools/ci/hosted-product.sh build" },
         { 2, "        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'" },
-        { 2, "        run: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"" },
+        { 2, "        uses: ./.github/actions/vector-runtime" },
+        { 2, "          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"" },
         { 2, "          name: ${{ steps.product.outputs.name }}" },
         { 2, "          DIGEST: ${{ steps.product.outputs.digest }}" },
         { 2, "        run: bash tools/ci/hosted-product.sh install \"$RUNNER_TEMP/vector-product-download\" \"$DIGEST\"" },
@@ -3588,7 +3577,8 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
         { "  shards:", "          name: ${{ needs.compiler.outputs.artifact }}", "          name: ${{ needs.compiler.outputs.artifact }}\n          run-id: 1", "another run's product" },
         { "  shards:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: false", "native rows unbuilt" },
         { "  shards:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'", "every vector item builds its own" },
-        { "  shards:", "        run: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"", "        run: 'true'", "a vector item that doesn't wait for its product" },
+        { "  shards:", "          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"", "          script: 'true'", "a vector item that doesn't wait for its product" },
+        { "  shards:", "        uses: ./.github/actions/vector-runtime", "        uses: ./unrelated-action", "a vector product wait without the artifact runtime" },
         { "  shards:", "          DIGEST: ${{ steps.product.outputs.digest }}", "          DIGEST: ''", "an unchecked vector digest" },
         { "  shards:", "          name: ${{ steps.product.outputs.name }}", "          name: ${{ steps.product.outputs.name }}\n          run-id: 1", "another run's vector product" },
         { "  shards:", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}", "a vector product named without its SHA-256" },
@@ -3854,6 +3844,9 @@ static Text changes_feature_name(Text macro)
 // collector assigns (tools/ci/vector-draw.sh take), which one job publishes once (assign); the draws run the shards' own
 // steps (`*row-steps`) and each of the 4 draws has its collector; an item's configuration is checked after the take
 // set it; and the verdict waits for every draw and collector, even after a failure, and reads every attempt's records.
+// Polling steps run inside the runtime action (#2309), builders publish their terminal marker after the product step,
+// and every candidate and collector publishes its REST ledger even after a failure. Artifact polling never falls
+// back to the repository REST API.
 // This pins the repository's spelling, as the other policies do; tests/ci/vector-draw.sh tests the script.
 static bool changes_vector_policy(Text row, Text host_isa, Text settings)
 {
@@ -3904,9 +3897,19 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         "\n          case \" $BUSTER_VECTOR_CONFIGURATIONS \" in\n              *\" $BUSTER_SANITIZER \"*) ;;\n",
         "\n          test \"${BUSTER_VECTOR_ITEM:0:1}\" = \"${BUSTER_SANITIZER:0:1}\"\n          test \"${BUSTER_VECTOR_ITEM:1}\" = \"$BUSTER_SHARD\"\n",
         "\n          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}\n",
-        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
-        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
+        "\n      - name: Take the vector item the draw assigns, or end as a redraw\n        if: inputs.host_arch == 'vector'\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
+        "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
+        "\n      - name: Assign the draw's vector items to its qualifying candidates by rank\n        id: assign\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
+        "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
+        "\n      - name: Wait for the vector configuration's product\n        id: product\n        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'\n        uses: ./.github/actions/vector-runtime\n",
+        "\n          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"\n",
         "\n          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false\n",
+        "\n      - name: Record that the vector builder has finished publishing\n        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}\n",
+        "\n          name: ${{ steps.probe.outputs.prefix }}-builder-${{ env.BUSTER_SANITIZER }}-ended\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false\n",
+        "\n      - name: Record the vector candidate's REST requests\n        if: ${{ always() && inputs.host_arch == 'vector' }}\n",
+        "\n          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
+        "\n      - name: Record the vector collector's REST requests\n        if: always()\n",
+        "\n          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
         "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
         "\n          pattern: vector-O${{ inputs.optimization }}-*\n",
         "\n    steps: &row-steps\n",
@@ -3918,6 +3921,19 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
     {
         valid = valid && strstr(text, required[i]) != NULL;
     }
+    uint32_t runtime_checkouts = 0;
+    static const char runtime_checkout[] = "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            .github/actions/vector-runtime\n";
+    for (const char* checkout = strstr(text, runtime_checkout); checkout != NULL; checkout = strstr(checkout + 1, runtime_checkout))
+    {
+        runtime_checkouts += 1;
+    }
+    // The helper must remain available for the whole polling step, and no workflow may restore REST artifact polls.
+    valid = valid && runtime_checkouts == 2 && strstr(text, "/artifacts?") == NULL && strstr(text, "application/vnd.github.raw") == NULL;
+    valid = valid && strstr(text, "\n            rm -rf -- \"$GITHUB_WORKSPACE/.vector-draw-script\"") == NULL;
+    const char* builder_marker = strstr(text, "\n      - name: Record that the vector builder has finished publishing\n");
+    const char* product_upload = strstr(text, "\n      - name: Publish the product to the configuration's other items\n");
+    const char* kernels = strstr(text, "\n      - name: Confirm the vector kernels run on this CPU\n");
+    valid = valid && product_upload != NULL && builder_marker != NULL && kernels != NULL && product_upload < builder_marker && builder_marker < kernels;
     // Each draw runs the shards' steps, and each collector the first's; every vector record refuses to overwrite one.
     uint32_t draws = 0;
     for (const char* step = strstr(text, "\n    steps: *row-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *row-steps\n"))
@@ -3945,7 +3961,7 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         valid = overwrite != NULL && (next == NULL || overwrite < next);
         products += 1;
     }
-    return valid && draws == 4 && collectors == 3 && records == 3 && products == 1;
+    return valid && draws == 4 && collectors == 3 && records == 4 && products == 1;
 }
 
 static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_isa, Text settings)
@@ -3974,7 +3990,20 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 0, "          test \"${BUSTER_VECTOR_ITEM:1}\" = \"$BUSTER_SHARD\"\n", "", "an item's shard unchecked" },
         { 0, "      BUSTER_DRAW_NEXT: '0'\n    steps: *collect-steps\n", "      BUSTER_DRAW_NEXT: '0'\n    steps: []\n", "a last draw without its collector" },
         { 0, "-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}", "-yes", "a verdict published as qualified whatever the probe found" },
-        { 0, "          bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "          true ", "candidates that take an item without an assignment" },
+        { 0, "            bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "            true ", "candidates that take an item without an assignment" },
+        { 0, "        uses: ./.vector-draw-script/.github/actions/vector-runtime", "        uses: ./unrelated-action", "a candidate without runtime artifact polling" },
+        { 0, "        id: assign\n        uses: ./.vector-draw-script/.github/actions/vector-runtime", "        id: assign\n        uses: ./unrelated-action", "a collector without runtime artifact polling" },
+        { 0, "        uses: ./.github/actions/vector-runtime", "        uses: ./unrelated-action", "a product wait without runtime artifact polling" },
+        { 0, "            .github/actions/vector-runtime\n", "", "a sparse checkout without the artifact runtime" },
+        { 0, "            bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "            rm -rf -- \"$GITHUB_WORKSPACE/.vector-draw-script\"\n            bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "a polling step that removes its runtime helper" },
+        { 0, "            cat \"$RUNNER_TEMP/vector-assignment\"", "            gh api repos/owner/repo/actions/runs/1/artifacts?per_page=100\n            cat \"$RUNNER_TEMP/vector-assignment\"", "REST artifact polling restored in the collector" },
+        { 0, "        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}", "        if: env.BUSTER_VECTOR_BUILDER == '1'", "a builder failure without its terminal marker" },
+        { 0, "-builder-${{ env.BUSTER_SANITIZER }}-ended", "-builder-ended", "a terminal marker without its configuration" },
+        { 0, "      - name: Record the vector candidate's REST requests\n        if: ${{ always() && inputs.host_arch == 'vector' }}", "      - name: Record the vector candidate's REST requests\n        if: inputs.host_arch == 'vector'", "a failed candidate's REST requests unreported" },
+        { 0, "      - name: Record the vector collector's REST requests\n        if: always()", "      - name: Record the vector collector's REST requests\n        if: success()", "a failed collector's REST requests unreported" },
+        { 0, "-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}", "-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}", "candidate REST ledgers with colliding names" },
+        { 0, "-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}", "-rest-collect", "collector REST ledgers with colliding names" },
+        { 0, "-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false", "-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: true", "a collector that overwrites request evidence" },
         { 0, "          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false", "          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: true", "an assignment that overwrites another" },
         { 0, "-evidence-${{ env.BUSTER_VECTOR_ITEM }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false", "-evidence-${{ env.BUSTER_VECTOR_ITEM }}\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: true", "evidence that overwrites another" },
         { 0, "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: *row-steps\n", "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: []\n", "a draw without the shards' steps" },

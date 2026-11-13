@@ -310,7 +310,9 @@ jobs:
           ref: ${{ github.sha }}
           path: .vector-draw-script
           persist-credentials: false
-          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            .github/actions/vector-runtime
           sparse-checkout-cone-mode: false
 
       # The item the draw's collector assigned this candidate gives its configuration (BUSTER_SANITIZER) and its shard
@@ -319,14 +321,15 @@ jobs:
       # by the step above).
       - name: Take the vector item the draw assigns, or end as a redraw
         if: inputs.host_arch == 'vector'
+        uses: ./.vector-draw-script/.github/actions/vector-runtime
         env:
           GH_TOKEN: ${{ github.token }}
           VERDICT: ${{ steps.probe.outputs.verdict }}
-        run: |
-          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
-          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
-          bash "$RUNNER_TEMP/vector-draw.sh" take "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$VERDICT" "$RUNNER_TEMP/vector-draw/record"
-          cat "$RUNNER_TEMP/vector-draw/record"
+        with:
+          script: |
+            cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+            bash "$RUNNER_TEMP/vector-draw.sh" take "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$VERDICT" "$RUNNER_TEMP/vector-draw/record"
+            cat "$RUNNER_TEMP/vector-draw/record"
 
       # Every candidate's record, which the verdict reports: its CPU, the probe's verdict and its decision.
       - name: Record the draw
@@ -499,9 +502,11 @@ jobs:
       - name: Wait for the vector configuration's product
         id: product
         if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
+        uses: ./.github/actions/vector-runtime
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash tools/ci/vector-draw.sh product "$BUSTER_SANITIZER"
+        with:
+          script: bash tools/ci/vector-draw.sh product "$BUSTER_SANITIZER"
 
       - name: Download the vector configuration's product
         if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
@@ -553,6 +558,18 @@ jobs:
           overwrite: false
           if-no-files-found: error
           retention-days: 7
+
+      # The builder publishes this after its product step even when setup, the build or upload failed. Waiting items
+      # see the terminal marker through the artifact service, without polling the repository's jobs REST endpoint.
+      - name: Record that the vector builder has finished publishing
+        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.probe.outputs.prefix }}-builder-${{ env.BUSTER_SANITIZER }}-ended
+          path: ${{ runner.temp }}/vector-draw/record
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Confirm the vector kernels run on this CPU
         # The item's evidence that its executable runs the vector path here (#2033): the build's target selects it
@@ -819,6 +836,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Record the vector candidate's REST requests
+        if: ${{ always() && inputs.host_arch == 'vector' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}
+          path: ${{ runner.temp }}/vector-rest/*.tsv
+          overwrite: false
+          if-no-files-found: ignore
+          retention-days: 14
+
   # SQLite's whole Tcl test suite (#146): every script of its `full` permutation, through testfixture built by clang -O0,
   # Tier 0 and --tier1 from this row's shared compiler (test-sqlite-testfixture; docs/commands/c-testsuite.md). Every
   # row, pull requests' too, runs the inventory's pinned subset; this job runs on the nightly and dispatched runs alone,
@@ -906,7 +933,7 @@ jobs:
     if: ${{ !cancelled() && inputs.host_arch == 'vector' }}
     runs-on: ubuntu-26.04
     timeout-minutes: ${{ inputs.sanitizer == 'none' && 120 || 360 }}
-    # The candidates read the run's artifacts (their collector's assignment) and jobs; nothing writes but the artifacts.
+    # The runtime artifact service carries assignments and products. Bounded REST reads resolve rerun job identities.
     permissions:
       contents: read
       actions: read
@@ -925,7 +952,7 @@ jobs:
       BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
     steps: *row-steps
 
-  # Each collector starts with its draw and polls the run's artifacts (the candidates' verdicts) and jobs, until as many
+  # Each collector starts with its draw and polls the runtime artifacts (the candidates' verdicts), until as many
   # candidates qualified as items are missing, or every candidate published its verdict or ended (at most 25 minutes);
   # then it assigns, by rank, and publishes the assignment as an artifact whose name holds it, which the candidates
   # wait for. It never waits for an item's tests. Its outputs size the next draw: per item still missing,
@@ -957,18 +984,21 @@ jobs:
           ref: ${{ github.sha }}
           path: .vector-draw-script
           persist-credentials: false
-          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            .github/actions/vector-runtime
           sparse-checkout-cone-mode: false
 
       - name: Assign the draw's vector items to its qualifying candidates by rank
         id: assign
+        uses: ./.vector-draw-script/.github/actions/vector-runtime
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
-          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
-          bash "$RUNNER_TEMP/vector-draw.sh" assign "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATES" "$BUSTER_DRAW_NEXT"
-          cat "$RUNNER_TEMP/vector-assignment"
+        with:
+          script: |
+            cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+            bash "$RUNNER_TEMP/vector-draw.sh" assign "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATES" "$BUSTER_DRAW_NEXT"
+            cat "$RUNNER_TEMP/vector-assignment"
 
       # One upload, by the one job that decides: its name is the assignment.
       - name: Publish the assignment
@@ -978,6 +1008,16 @@ jobs:
           path: ${{ runner.temp }}/vector-assignment
           overwrite: false
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Record the vector collector's REST requests
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}
+          path: ${{ runner.temp }}/vector-rest/*.tsv
+          overwrite: false
+          if-no-files-found: ignore
           retention-days: 14
 
   draw-2:
@@ -1120,6 +1160,9 @@ jobs:
     if: ${{ !cancelled() && inputs.host_arch == 'vector' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     defaults:
       run:
         shell: bash

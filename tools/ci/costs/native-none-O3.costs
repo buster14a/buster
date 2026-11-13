@@ -124,6 +124,7 @@
 #: cpu 23 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 6 0.64 Intel(R) Xeon(R) 6973P-C
 #: cpu 17 0.91 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
 #: unmeasured Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: unmeasured Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 8.6 Check unity fixture ownership without rebuilding
@@ -174,7 +175,7 @@
 11.0 Test Tier 0's inlining of always_inline functions
 41.3 Check the repository's translation units with the checker
 69.3 Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
-11.5 Test differential harness accounting, subprocesses and failure preservation
+20.2 Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
 57.6 Test deferred function bodies against source order
 10.1 Test integer builtin actions against Clang (part 1 of 4)
 19.7 Test integer builtin actions against Clang (part 2 of 4)
@@ -265,5 +266,5 @@
 0.2 Test scoped name-resolution kernels
 5.5 Test the partial Zen 5 model and instruction harness
 0.6 Test Tier 1 integer truth round trips against native and instruction-shape oracles
-10.8 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
-10.8 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+10.1 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
+10.1 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes

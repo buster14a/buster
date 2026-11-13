@@ -2244,16 +2244,27 @@ static void check_configurations(void)
     char* bfd[] = { "sh", "-c", "command -v ld.bfd", 0 };
     if (run("/dev/null", 0, bfd) == 0)
     {
+        // The parts' joins keep the merge flags for a link that merges constants itself, every linker but lld at -O0
+        // (BusterCodegenMerge.cmake's MERGES, #2639): they run again where the switch changes that, and only there.
+        char graph[PATH_MAX];
+        snprintf(graph, sizeof(graph), "%s/CMakeFiles/impl-Release.ninja", tree);
+        Text graph_before = read_file(graph);
+        const bool merged_before = strstr(graph_before.data, "-DMERGES=1") != 0;
+        const bool joined = strstr(graph_before.data, "-DMERGES=") != 0;
+        free(graph_before.data);
         const char* const linker[] = { "BUSTER_LINKER=bfd", 0 };
         snapshot(&before);
         BUILD_ENV(linker, "build", "--config", "Release");
         ran_since(&before, names, sizeof(names));
-        if (strcmp(compiler_outputs(names), "compiler compiler.link ") != 0)
+        Text graph_after = read_file(graph);
+        const bool rejoined = joined && merged_before != (strstr(graph_after.data, "-DMERGES=1") != 0);
+        free(graph_after.data);
+        if (strcmp(compiler_outputs(names), rejoined ? "compiler compiler.link native.o " : "compiler compiler.link ") != 0)
         {
             fail("BUSTER_LINKER=bfd ran %s", names);
         }
         BUILD("build", "--config", "Release");
-        pass("BUSTER_LINKER relinks alone");
+        pass("BUSTER_LINKER relinks alone, and joins the parts again where it changes whether the link merges constants");
     }
     // A static link never by wild (#652): wild 0.10.0's static executables fault at their first TLS access, so wild by
     // any name, ld.wild through a symlink among them, links dynamically, and its units compile without
@@ -3804,6 +3815,104 @@ static void check_parallel_codegen(void)
     pass("parallel native jobs preserve private function/data/TLS and public/weak bindings, source ownership, caching, failures and -Werror");
 }
 
+// The line of `text` that holds `needle`, as a string of its own in `line`, or false when none does.
+static bool line_holding(const char* text, const char* needle, char* line, size_t size)
+{
+    const char* found = strstr(text, needle);
+    bool held = found != 0;
+    if (held)
+    {
+        const char* start = found;
+        while (start != text && start[-1] != '\n')
+        {
+            start -= 1;
+        }
+        const char* end = strchr(found, '\n');
+        const size_t length = end != 0 ? (size_t)(end - start) : strlen(start);
+        snprintf(line, size, "%.*s", (int)length, start);
+    }
+    return held;
+}
+
+// The parts of a sanitizer build's units (#2639), on the fixture's two units: AddressSanitizer's joined objects keep
+// their module constructor's comdat group, which llvm-objcopy clears and the join restores (tools/codegen/comdat.c),
+// so that the executable has one constructor for every unit, as single compiles give it; MemorySanitizer's keep their
+// constructor's retained section, which llvm.used gives it; and both executables run.
+static void check_parallel_codegen_sanitizers(void)
+{
+    char directory[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/codegen", work);
+    if (chdir(directory) != 0)
+    {
+        fail("can't enter the parallel-codegen fixture");
+    }
+    const char* const sanitizers[] = { "address", "memory" };
+    for (uint32_t i = 0; i < sizeof(sanitizers) / sizeof(sanitizers[0]); i += 1)
+    {
+        char tree[64];
+        char setting[128];
+        char module[PATH_MAX];
+        char executable[PATH_MAX];
+        char native[PATH_MAX];
+        snprintf(tree, sizeof(tree), "out-%s", sanitizers[i]);
+        snprintf(setting, sizeof(setting), "-DBUSTER_FIXTURE_SANITIZER=%s", sanitizers[i]);
+        snprintf(module, sizeof(module), "-DBUSTER_CODEGEN_MODULE_DIR=%s/cmake", root);
+        snprintf(executable, sizeof(executable), "%s/Release/codegen_fixture", tree);
+        snprintf(native, sizeof(native), "%s/Release/codegen/main_unit_checker/native.o", tree);
+        char* configure[] = { "cmake", "-S", "source", "-B", tree, "-G", "Ninja Multi-Config", "-DCMAKE_C_COMPILER=clang", module, setting, 0 };
+        char* build[] = { "cmake", "--build", tree, "--config", "Release", "--parallel", "1", 0 };
+        char* execute[] = { executable, 0 };
+        Text log = capture(configure);
+        free(log.data);
+        log = capture(build);
+        if (strstr(log.data, "Combining main_unit_checker's native parts") == 0)
+        {
+            fail("the %s fixture's units weren't generated in parts: %s", sanitizers[i], log.data);
+        }
+        free(log.data);
+        log = capture(execute);
+        free(log.data);
+        char line[512];
+        if (i == 0)
+        {
+            char* groups[] = { "readelf", "-gW", native, 0 };
+            Text text = capture(groups);
+            if (!line_holding(text.data, "[asan.module_ctor]", line, sizeof(line)) || strncmp(line, "COMDAT group section", 20) != 0)
+            {
+                fail("the joined AddressSanitizer object lost its constructor's comdat group: %s", text.data);
+            }
+            free(text.data);
+            char* symbols[] = { "nm", executable, 0 };
+            text = capture(symbols);
+            uint32_t constructors = 0;
+            for (const char* cursor = text.data; (cursor = strstr(cursor, " asan.module_ctor\n")) != 0; cursor += 1)
+            {
+                constructors += 1;
+            }
+            if (constructors != 1)
+            {
+                fail("the AddressSanitizer fixture has %u module constructors, not its units' one", constructors);
+            }
+            free(text.data);
+        }
+        else
+        {
+            char* sections[] = { "readelf", "-SW", native, 0 };
+            Text text = capture(sections);
+            if (!line_holding(text.data, ".text.msan.module_ctor", line, sizeof(line)) || strstr(line, "AXR") == 0)
+            {
+                fail("the joined MemorySanitizer object lost its constructor's retained section: %s", text.data);
+            }
+            free(text.data);
+        }
+    }
+    if (chdir(root) != 0)
+    {
+        fail("can't return to %s", root);
+    }
+    pass("sanitizer builds' parts keep AddressSanitizer's comdat constructor (one for every unit) and MemorySanitizer's retained one, and run");
+}
+
 static void check_parallel_codegen_compiler(void)
 {
     const char* const settings[] = {
@@ -3884,6 +3993,7 @@ int main(int argc, char** argv)
     {
         check_codegen_system_libraries();
         check_parallel_codegen();
+        check_parallel_codegen_sanitizers();
     }
     if (!ownership_only && !driver_only && !flags_only && !commands_only && !codegen_only && !develop_only)
     {

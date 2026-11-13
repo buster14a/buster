@@ -1458,6 +1458,57 @@ pointers' comparisons and differences, floating casts, unary `+` of a
 variable) and a call's per-call type queries; most of its cycles are its
 inputs.
 
+### T's loop: its column stores and its operands, and two levers that didn't pay
+
+T is instruction-bound: in the profile of its loop by retired instructions and by
+cycles, each line's shares match. At main `26f0bb0e` its own bookkeeping was a
+large part of them:
+- the node index, recomputed for each operand (`node_machine_node`, 6% of T's
+  instructions);
+- the operands' search (`node_machine_operand`, 6%);
+- the column stores, through `machine->columns`.
+
+Under `-fno-strict-aliasing` every store to a column could change the machine's
+fields, so each was loaded again after it. The change that merged takes two of
+these out ([the record](https://github.com/buster14a/buster-performance/tree/50a6e350e97b7cab786116fea110c2bd9e1de3f1/docs/measurements/node-machine-t-loop-2524-2026-11-13)):
+
+- **Each of T's functions takes the column base into a local first**, where it
+  stored five to nine columns through `machine->columns` in a row.
+- **T's loop finds a record's operands from the node it found**
+  (`node_machine_record_of`), where `node_machine_operand` computed the node
+  again for each.
+
+On the 9700X, against main `26f0bb0e` (CPU 2, under the lock, `--passes 11`,
+medians of runs taken in turn), in cycles and instructions a taken node:
+
+| | T | T, C and X | the three, two runs |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, main | 101.7, 369.2 | 196.7, 672.8 | 339.2 |
+| `sqlite3.c`, the operands from the node alone (v8a) | 100.3, 360.1 | 195.6, 663.7 | 337.3 |
+| `sqlite3.c`, the local column base alone (v8b) | 100.5, 358.3 | 193.1, 661.9 | 333.5 |
+| `sqlite3.c`, both (v11) | **99.4, 345.9** | **193.0, 649.6** | **331.4** |
+| Lua, main | 96.3, 464.4 | 171.1, 765.0 | 319.7 |
+| Lua, both (v11) | **92.3, 437.7** | **164.9, 738.3** | **310.1** |
+
+Two levers that looked as good in the profile didn't pay, and aren't in it:
+
+- **All of the loop's inputs in locals** (v6): the graph's columns, the type
+  words, the node, `first`, `root` and `count` across the loop. T ran 19
+  instructions a node fewer but 7.6 cycles more on `sqlite3.c`. Its
+  instructions without a source line, the spills' and their reloads, went from
+  7% of T's to 23%: the loop inlines most rules, and fifteen live pointers
+  overflowed the registers. #2580's record found the same of an earlier
+  version.
+- **A memo of the callee's type's answers** (v9), and of a direct callee's
+  returning twice. In the profile they were 4% of the loop's instructions and
+  6.8% of its cycles. The memo, 1,024 entries direct-mapped by the callee
+  record's type, filled 2,161 times for `sqlite3.c`'s 13,478 calls: at 4,096
+  entries it still filled 1,632, the unit's distinct callee types. T ran 1.6
+  cycles slower with it, and the two changes above measured the same with it
+  as without. Its twin under `--verify` counted 84 differences on the fixture
+  when either answer was corrupted on its fill: the check works, the memo just
+  doesn't pay.
+
 ## Expected gains
 
 On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):

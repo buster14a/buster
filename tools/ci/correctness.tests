@@ -333,7 +333,9 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --symbols-minimum 542 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
-== Test differential harness accounting, subprocesses and failure preservation
+== Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
+# Its eight cases run at once (tests/differential/lifecycle.c), mostly waiting out watchdogs: under the sanitizers they
+# kept 1.6 to 1.9 CPUs busy (#2031; plain rows 0.9), which `parallel` warns of past 1.5 times a heading's CPUs.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/differential/lifecycle.c -o build/test-differential-lifecycle &&
 ./build/test-differential-lifecycle "$BUSTER_COMPILER" "$(command -v clang)"

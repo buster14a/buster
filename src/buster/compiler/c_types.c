@@ -6343,31 +6343,35 @@ static bool type_print_can_prefix(const TypeTable* table, TypeId type)
 }
 
 // A sugar alias (TypeNames.alias_*) replaces a specifier level's whole spelling, as a typedef's name does in
-// clang's diagnostics. `type` compares exactly, qualifiers and all (#992). Returns its index, or NONE.
-static uint32_t type_print_alias(const TypeNames* names, TypeId type)
+// clang's diagnostics. Alignment wrappers do not print, so both sides compare without them, qualifiers kept (#2212).
+// Returns its index, or NONE.
+static uint32_t type_print_alias(const TypeTable* table, const TypeNames* names, TypeId type)
 {
     uint32_t result = UINT32_MAX;
+    const TypeId spelled = type_strip_alignment(table, type);
     for (uint32_t a = 0; names != 0 && a < names->alias_count; a += 1)
     {
-        result = names->alias_types[a] == type ? a : result;
+        result = type_strip_alignment(table, names->alias_types[a]) == spelled ? a : result;
     }
     return result;
 }
 
 // Whether an alias's type names a level under more qualifiers than its own (#1447): `volatile CI`'s
 // `const volatile int` of a const int's CI, which clang prints as the qualifier over the typedef's sugar.
-static bool type_print_alias_under(TypeId alias, TypeId type)
+static bool type_print_alias_under(const TypeTable* table, TypeId alias, TypeId type)
 {
+    alias = type_strip_alignment(table, alias);
+    type = type_strip_alignment(table, type);
     const uint32_t own = type_qualifiers(alias);
     return own != 0 && type_unqualified(alias) == type_unqualified(type) && (own & ~type_qualifiers(type)) == 0;
 }
 
-static uint32_t type_print_alias_qualified(const TypeNames* names, TypeId type)
+static uint32_t type_print_alias_qualified(const TypeTable* table, const TypeNames* names, TypeId type)
 {
     uint32_t result = UINT32_MAX;
     for (uint32_t a = 0; names != 0 && a < names->alias_count; a += 1)
     {
-        result = type_print_alias_under(names->alias_types[a], type) ? a : result;
+        result = type_print_alias_under(table, names->alias_types[a], type) ? a : result;
     }
     return result;
 }
@@ -6377,20 +6381,22 @@ static uint32_t type_print_alias_qualified(const TypeNames* names, TypeId type)
 static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32_t* whole)
 {
     const TypeNames* names = printer->names;
+    type = type_strip_alignment(printer->table, type);
     const TypeId unqualified = type_unqualified(type);
     uint32_t sugar = UINT32_MAX;
     *whole = UINT32_MAX;
     if (names != 0 && names->alias_order != 0)
     {
         const uint32_t candidate = printer->occurrence < names->alias_order_count ? names->alias_order[printer->occurrence] : UINT32_MAX;
-        *whole = candidate < names->alias_count && names->alias_types[candidate] == type ? candidate : UINT32_MAX;
-        sugar = candidate < names->alias_count && (names->alias_types[candidate] == type || names->alias_types[candidate] == unqualified) ? candidate : UINT32_MAX;
+        const TypeId alias = candidate < names->alias_count ? type_strip_alignment(printer->table, names->alias_types[candidate]) : 0;
+        *whole = candidate < names->alias_count && alias == type ? candidate : UINT32_MAX;
+        sugar = candidate < names->alias_count && (alias == type || alias == unqualified) ? candidate : UINT32_MAX;
     }
     else
     {
-        *whole = type_print_alias(names, type);
-        sugar = *whole != UINT32_MAX ? *whole : type_print_alias(names, unqualified);
-        sugar = sugar != UINT32_MAX ? sugar : type_print_alias_qualified(names, type);
+        *whole = type_print_alias(printer->table, names, type);
+        sugar = *whole != UINT32_MAX ? *whole : type_print_alias(printer->table, names, unqualified);
+        sugar = sugar != UINT32_MAX ? sugar : type_print_alias_qualified(printer->table, names, type);
     }
     return sugar;
 }
@@ -6432,8 +6438,8 @@ static bool type_print_aliased(const TypePrinter* printer, TypeId type, uint32_t
     }
     else
     {
-        result = type_print_alias(names, type) != UINT32_MAX || type_print_alias(names, type_unqualified(type)) != UINT32_MAX ||
-                 type_print_alias_qualified(names, type) != UINT32_MAX;
+        result = type_print_alias(printer->table, names, type) != UINT32_MAX || type_print_alias(printer->table, names, type_unqualified(type)) != UINT32_MAX ||
+                 type_print_alias_qualified(printer->table, names, type) != UINT32_MAX;
     }
     return result;
 }
@@ -6769,7 +6775,7 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             // under outside qualifiers (`const P`), clang prints them before it, as for an ordinary specifier (#992).
             // Without a covered set, the alias's own qualifiers are what it covers; those its use writes again print too.
             const TypeId alias_type = printer->names->alias_types[sugar];
-            const bool qualified_alias = whole == UINT32_MAX && type_print_alias_under(alias_type, type);
+            const bool qualified_alias = whole == UINT32_MAX && type_print_alias_under(table, alias_type, type);
             const uint32_t covered = printer->names->alias_covered != 0 ? printer->names->alias_covered[sugar] :
                                      qualified_alias ? type_qualifiers(alias_type) : 0;
             const uint32_t written = printer->names->alias_written != 0 ? printer->names->alias_written[sugar] & type_qualifiers(type) : 0;
