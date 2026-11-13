@@ -776,7 +776,6 @@ if "$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size --cl
 grep -q '^measure-tier1-programs: code-size compile failed:' "$errors"
 grep -q '^measure-tier1-programs: retained files in ' "$errors"
 rm -rf "$errors" "$directory"
-== Check Tier 1's corpus-size command with independent object oracles
 # #1116: original tiny sources stand in for SQLite and all 34 Lua units. Exact per-unit matching keeps their
 # identical function names distinct. Missing luac.c, a failed oracle and an invalid producer option must fail.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
@@ -784,7 +783,6 @@ mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
 test "${#host_flags[@]}" -gt 0
 clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_code_size.c -o build/test-driver-tier1-code-size
 ./build/test-driver-tier1-code-size "$BUSTER_COMPILER" clang
-== Gate Tier 1 function bytes on the frozen SQLite and Lua corpora [2 CPUs]
 # #1116 is a deterministic object-size bound, independent of the machine's timing. Reuse this row's compiler and
 # frozen SQLite, and Lua 5.4.8 from the run's verified offline input bundle; include luac.c, not only the interpreter.
 directory=$(mktemp -d)
