@@ -204,7 +204,8 @@ static const char check_driver_vla_pointer_size_source[] =
     "_Static_assert(_Alignof(int[n]) == 4 && _Alignof(int(*)[n]) == 8, \"fixed alignment\");\n"
     "unsigned long nested_p = sizeof(int(*)[sizeof(int[n])]);\n"
     "unsigned long nested_a = _Alignof(int[sizeof(int[n])]);\n"
-    "unsigned long nested_s = sizeof(sizeof(int[n]));\n";
+    "unsigned long nested_s = sizeof(sizeof(int[n]));\n"
+    "unsigned long nested_side = sizeof(sizeof(int[++n]));\n";
 
 static const char check_driver_vla_pointer_size_error_source[] =
     "int n;\n"
@@ -303,6 +304,16 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "a file-scope sizeof refuses only the runtime-sized array",
         .source = check_driver_vla_pointer_size_error_source,
         .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope evaluated nested variable array size remains nonconstant",
+        .source = "int n; unsigned long x=sizeof(int[sizeof(int[n])]);\n",
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope unevaluated nested size still checks its array bound type",
+        .source = "unsigned long x=sizeof(sizeof(int[1.5]));\n",
         .errors = 1,
     },
     {

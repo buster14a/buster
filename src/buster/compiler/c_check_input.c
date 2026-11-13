@@ -10215,7 +10215,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         parser->tree.roles[end] == PARSE_ROLE_CLOSE_SIZEOF && check_input_vla_runtime_size(reader->types, result))
     {
         const uint32_t query = parser->tree.parents[end];
-        if (query < parser->tokens.count && parser->tokens.names[query] == C_NAME_SIZEOF)
+        if (query < parser->tokens.count && parser->tokens.names[query] == C_NAME_SIZEOF && !check_input_warning_unevaluated(reader, query))
         {
             const uint32_t at = check_input_vla_initializer_element(reader, query);
             if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
@@ -15422,7 +15422,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         }
         if (check_input_vla_runtime_size(reader->types, requested))
         {
-            node = check_input_vla_size(reader, token, requested, reader->query_types[token] == 0 ? a : BUSTER_CHECK_NONE);
+            // A file-scope inner query can be retained only for its type (`sizeof(sizeof(int[n]))`, #2528).
+            // Its enclosing query discards the runtime value; no bound was captured for it at file scope.
+            const bool unevaluated = reader->function_body == BUSTER_CHECK_NONE && check_input_warning_unevaluated(reader, token);
+            node = unevaluated ? check_input_vla_unevaluated_size(reader, token, requested) :
+                                 check_input_vla_size(reader, token, requested, reader->query_types[token] == 0 ? a : BUSTER_CHECK_NONE);
             op = CHECK_OP_COUNT;
             supported = node != BUSTER_CHECK_NONE;
         }

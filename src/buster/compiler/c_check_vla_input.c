@@ -763,6 +763,30 @@ struct CheckVlaSizePart
     bool inline_bound;
 };
 
+// A runtime-size query retained only to type an enclosing unevaluated operand at file scope (#2528). Keep an unknown
+// size_t result, not an invented constant or a captured extent: SIZEOF_VLA still checks the complete queried type, and
+// the enclosing constant query discards these nodes before lowering. Runtime queries in bodies use captured bounds.
+static uint32_t check_input_vla_unevaluated_size(CheckInputReader* reader, uint32_t token, TypeId requested)
+{
+    CheckGraph* graph = &reader->output->graph;
+    const uint32_t operand = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (operand != BUSTER_CHECK_NONE)
+    {
+        const CheckValue size = {
+            .type = BUSTER_TYPE_ULONG,
+            .category = CHECK_RVALUE,
+        };
+        check_graph_set_leaf(graph, operand, &size);
+        result = check_input_add(reader, CHECK_OP_SIZEOF_VLA, token, operand, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (result != BUSTER_CHECK_NONE)
+        {
+            graph->types[result] = requested;
+        }
+    }
+    return result;
+}
+
 static uint32_t check_input_vla_size(CheckInputReader* reader, uint32_t token, TypeId requested, uint32_t operand)
 {
     CheckGraph* graph = &reader->output->graph;

@@ -254,8 +254,19 @@ static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, co
         {
             .name = "file sizeof and alignof leave nested runtime array queries unevaluated",
             .source = "int n; unsigned long p=sizeof(int(*)[sizeof(int[n])]); unsigned long a=_Alignof(int[sizeof(int[n])]);\n"
+                      "unsigned long s=sizeof(sizeof(int[n])); unsigned long side=sizeof(sizeof(int[++n]));\n"
                       "enum { P=sizeof(int(*)[sizeof(int[n])]), A=_Alignof(int[sizeof(int[n])]), S=sizeof(sizeof(int[n])) };\n"
                       "_Static_assert(P==8 && A==4 && S==8, \"nested unevaluated array size\");\n",
+        },
+        {
+            .name = "file evaluated nested runtime array query remains nonconstant",
+            .source = "int n; unsigned long x=sizeof(int[sizeof(int[n])]);\n",
+            .rejected = true,
+        },
+        {
+            .name = "file nested unevaluated query still checks array bound type",
+            .source = "unsigned long x=sizeof(sizeof(int[1.5]));\n",
+            .rejected = true,
         },
         {
             .name = "variable array sizeof bound",
