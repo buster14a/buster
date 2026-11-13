@@ -227,6 +227,48 @@ static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, co
             .source = "unsigned long f(int n) { return sizeof(int[n++]); }\n",
         },
         {
+            .name = "file sizeof pointer to variable array is constant",
+            .source = "int n; unsigned long c=sizeof(int(*)[n]); unsigned long a=sizeof(int(*)[(3,2)]);\n"
+                      "enum { P=sizeof(int(*)[n]), PP=sizeof(int(**)[n]), A=sizeof(int(*[3])[n]), M=sizeof(int(*)[n][n+1]) };\n"
+                      "_Static_assert(P==8 && PP==8 && A==24 && M==8, \"fixed pointer layout\");\n",
+        },
+        {
+            .name = "file sizeof variable array remains nonconstant",
+            .source = "int n; unsigned long c=sizeof(int[n]);\n",
+            .rejected = true,
+        },
+        {
+            .name = "file sizeof nested variable array remains nonconstant",
+            .source = "int n; unsigned long c=sizeof(int[3][n]);\n",
+            .rejected = true,
+        },
+        {
+            .name = "file sizeof array of pointers with variable outer bound remains nonconstant",
+            .source = "int n; unsigned long c=sizeof(int(*[n])[n]);\n",
+            .rejected = true,
+        },
+        {
+            .name = "file alignof variable array and pointer remains constant",
+            .source = "int n; enum { A=_Alignof(int[n]), P=_Alignof(int(*)[n]) }; _Static_assert(A==4 && P==8, \"fixed alignment\");\n",
+        },
+        {
+            .name = "file sizeof and alignof leave nested runtime array queries unevaluated",
+            .source = "int n; unsigned long p=sizeof(int(*)[sizeof(int[n])]); unsigned long a=_Alignof(int[sizeof(int[n])]);\n"
+                      "unsigned long s=sizeof(sizeof(int[n])); unsigned long side=sizeof(sizeof(int[++n]));\n"
+                      "enum { P=sizeof(int(*)[sizeof(int[n])]), A=_Alignof(int[sizeof(int[n])]), S=sizeof(sizeof(int[n])) };\n"
+                      "_Static_assert(P==8 && A==4 && S==8, \"nested unevaluated array size\");\n",
+        },
+        {
+            .name = "file evaluated nested runtime array query remains nonconstant",
+            .source = "int n; unsigned long x=sizeof(int[sizeof(int[n])]);\n",
+            .rejected = true,
+        },
+        {
+            .name = "file nested unevaluated query still checks array bound type",
+            .source = "unsigned long x=sizeof(sizeof(int[1.5]));\n",
+            .rejected = true,
+        },
+        {
             .name = "variable array sizeof bound",
             .source = "unsigned long f(int n) { int a[n]; char b[sizeof a]; return sizeof b; }\n",
         },

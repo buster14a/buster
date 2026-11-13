@@ -270,7 +270,17 @@ takes its entries.
   of builtin types by its row of the baked transition table
   (`node_machine_rows`), the lookups by direct rules that are their actions'
   own steps for the common case, and the rest by the action itself on the
-  machine's records. **C** and **X** are the node templates' rules
+  machine's records. The direct rules also take the integer constant folds of
+  builtin types of at most 64 bits (`node_machine_fold`, by the operator's row
+  and `check_action_fold_integer`'s steps where the fold faults nothing), the
+  casts between integers, pointers and void (`node_machine_cast`), a static
+  object's member and its array's subscripts (address constants), a pointer's
+  equality with a null pointer constant (`node_machine_null_compare`),
+  `sizeof` and `_Alignof` (`node_machine_query`), the comma
+  (`node_machine_comma`) and stores of a null pointer constant or of a pointer
+  `node_machine_pointer_assignable` takes. A plain char constant converts by
+  the unit's signedness (`node_machine_integer_sign`), not the bake's.
+  **C** and **X** are the node templates' rules
   (`c_check_program_templates.c`) read from the records, and
   `check_lower_logical`'s for `&&`, `||` and `?:`, whose test, branch and jump
   X writes as a segment after an operand's row. Their labels are numbered from
@@ -298,10 +308,10 @@ takes its entries.
   its rows, relative to the expression's first call.
 - **A call's per-unit answers** (`NodeMachine`, filled as T meets them and
   forgotten by `node_machine_forget`):
-  - `function_pointers`, a function type's pointer type by type index
-    (`node_machine_function_pointer`), `type_pointer` its twin: a callee's and
-    a function argument's conversion is one load once the type's first
-    designator has filled it.
+  - `pointers` and `const_pointers`, a type's pointer type by type index,
+    unqualified and const (`node_machine_pointer`), `type_pointer` their twin:
+    a callee's and a function argument's conversion, an array's decay and an
+    address are one load once the type's first has filled it.
   - `argument_memo`, 1,024 entries of 16 bytes, direct-mapped
     (`node_machine_argument_memo`): `node_machine_argument`'s answer (taken or
     refused, and the conversion) by the argument record's type, its standing

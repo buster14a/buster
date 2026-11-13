@@ -791,8 +791,10 @@ disptab(%rip)` before the dispatch's load, where clang -O2 keeps it in `r10`
 and computes it again only after calls. Three changes keep it in a register:
 
 - **One value.** IR lowering defines each direct symbol address a function
-  takes at least twice once, in the preheader (`ir_typed_plan_hoisted`, the
-  [IR guide](ir.md)'s preheader), as #1740 does for jump tables' bases.
+  takes at least twice once (`ir_typed_plan_hoisted`), as #1740 does for jump
+  tables' bases: before the outermost loop that reads it, or where every path
+  reads it (#2593's `ir_typed_plan_places`, the [IR guide](ir.md)'s
+  preheader). `disptab`'s definition is before the dispatch loop.
 - **Hot recipes.** In the preference, a recomputable value that crosses a
   call is *hot* where it is read on every iteration of the outermost loops it
   is live across (`tier1_emit_cfg_hot_recipes`, over `dominators.c`'s loops):
@@ -845,8 +847,11 @@ On speedtest1, memsys5's functions gain from the hoist (each keeps `mem5`'s
 address in a register over several reads) and a few lose: a hoisted address
 computed at the entry on a path that never reads it, as
 `yy_find_shift_action`'s two tables on its early return, or one that takes a
-callee-saved register its prologue then saves. Placing the one definition at
-its readers' nearest common dominator would remove both (#2593).
+callee-saved register its prologue then saves. #2593 places the one
+definition by its takes' dominators and loops instead (the [IR guide](ir.md)'s
+preheader has the rule and the others measured): speedtest1 runs 8.1 M fewer
+instructions than with every definition at the entry, and `luaV_execute` the
+same.
 
 After #2573's rip-relative symbols (main `9750b3f0`, against this change merged
 at `f8aeb145`), Lua's scripts run 5,954.3 M and 5,912.9 M instructions and

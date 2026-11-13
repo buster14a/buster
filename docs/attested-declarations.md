@@ -1,10 +1,10 @@
 # Attested declarations: a file-scope declaration is read once per command (#2531): design
 
 Status: step 0, the census, is built and measured
-([below](#step-0-the-census)); the rest is design. Its skip has been run in
-the compiler's own reader by a measurement patch, with the decisions made
-outside; the rest of its gains are estimates that its first two steps exist to
-confirm or refute. It is
+([below](#step-0-the-census)), and so are steps 1 and 2, the shadow and the
+skip in the compile ([below](#steps-1-and-2-the-skip-in-the-compile)): a
+command of several source files skips by default (`--attested=on`). Steps 3
+and 4 are design. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -266,7 +266,14 @@ labels and alias attributes. Each counts as spelled by a root, so a
 declaration of one is always read. The emulation has no such rule, and musl's
 and the generated units' objects didn't need one; step 0 lists the by-name
 lookups outside the reader's walk, each of which is in this set or a reason to
-widen it.
+widen it. Step 2 drops the lowering's runtime functions from the set (the
+census still counts what they reach): a runtime call takes a declaration's
+symbol only for an object the selection numbered
+(`check_lower_declared_runtime`, `check_program_needed_number`), and the
+selection numbers only the objects its selected code references, a reading's
+that spells the name or its builtin, which reaches the declaration. A runtime
+call of a name whose declaration nothing read takes the lowering's own symbol
+whether the declaration was skipped or not.
 
 ### Where it sits
 
@@ -331,7 +338,7 @@ reach doesn't run.
   already requires each unit's object of a command of several units to be the
   unit's alone at every lane count. A unit alone has no memo and skips
   nothing, so that test is the claim's own test, on every fixture it has.
-- **`--verify` reads what it would skip.** The passes decide; the reader reads
+- **`--verify` reads what it would skip** (`--attested=verify`). The passes decide; the reader reads
   every declaration; for each one that would have been skipped it fails on a
   diagnostic, an event for an unlisted name, or a change to any counter but
   the bindings' and the types'. Step 1 is this mode run on the corpora.
@@ -558,7 +565,8 @@ the census names:
   on musl and the census doesn't, and 224,854 of the glibc units' 239,753. Two
   narrower rules are step 1's to test: reach them only where the unit's
   lowering makes a runtime call, or only where a declaration changes the
-  call's symbol (an asm label, a visibility).
+  call's symbol (an asm label, a visibility). Step 2 found that no rule is
+  needed ("Steps 1 and 2" below).
 - **The passes in the compile.** The design expected 12 cycles a token from
   the roles. The lists are the costliest (11.0 on musl in the compile, 13.1 on
   the glibc units): they follow the parser's groups to classify each
@@ -577,9 +585,11 @@ the census names:
   `extern`s'. The lists give every name in a body the class "looks up", and
   "declares" to a callee's name (an identifier the parser marks as called)
   and, in a body that spells `extern`, to every name; no event fell outside.
-- **The events need the reader's environment published**, which `-c` doesn't
-  ask for; the census asks, and every object and diagnostic stays the same
-  bytes.
+- **The events need the reader's binding stream**, which `-c` doesn't keep
+  past the reader; the census published the reader's environment for them,
+  and every object and diagnostic stayed the same bytes. Since steps 1 and 2
+  the reader tests them as it ends (`check_attested_events`), for the census
+  too.
 - **Silence and purity, as the reader sees them.** Each of musl's 321 warnings
   falls in a function definition, placed by its output position; no
   declaration's reading reported anything. The impure in musl are 374
@@ -595,6 +605,77 @@ the reader's state by class; the census doesn't have it. Its evidence on that
 risk is the zero contradictions over 566,907 hits, and step 1's shadow checks
 each would-be skipped reading. The census runs one lane, without `-g` and
 without deferred bodies (it refuses those options); step 1 runs with them.
+
+## Steps 1 and 2: the skip in the compile
+
+`--attested` ([the guide](commands/translation-units.md#attested-declarations---attested-2531),
+`c_check_attested.c`) is steps 1 and 2: the census's passes run in the compile,
+before each unit's reader, on every units lane of a command of several source
+files, each lane with its own memo. `--attested=on`, the default, gives the
+reader the marks of the declarations attested and not reached, whose tokens
+its walk passes (`check_input_skip`, as the measurement patch did);
+`--attested=verify` reads them and fails a unit where a hit's reading isn't
+silent, pure and listed; `--attested=off` runs nothing. On the 9700X at the
+branch's code (buster#2620), CPU 2, `setarch -R`, against main's `df85213e`
+([the record](https://github.com/buster14a/buster-performance/tree/6f55383c38ca4657dd4ef21b27a5eea973dee8ba/docs/measurements/attested-skip-2531-2026-11-13)):
+
+| `-c` of the command, one lane | musl, 1,336 units | 512 units over glibc's headers |
+| --- | ---: | ---: |
+| file-scope declarations skipped; tokens outside definitions skipped | 259,860 of 297,004; 85.72% | 272,239 of 298,334; 91.35% |
+| objects and diagnostics against `--attested=off` and `--scalar` | the same bytes (321 warnings) | the same bytes |
+| `--attested=verify`: contradictions; unlisted events; units read again | 0; 0; 0 | 0; 0; 0 |
+| main, ms (M cycles of both modes), the median of 5 rounds | 1,003.9 (5,560.7) | 824.0 (4,567.3) |
+| `--attested=on` | 858.4 (4,754.2) | 558.6 (3,095.4) |
+| **times faster** (step 2's gate) | **1.170** (1.15) | **1.475** (1.4) |
+| user instructions, main and `on` | 11,522.7 M; 9,061.9 M | 11,181.0 M; 6,748.4 M |
+
+- **Step 1's shadow** found no failure: `--attested=verify` on musl's command
+  by one lane and by 8, with `-g` and with `-Wall -Wextra` (1,867 warnings,
+  85.11% would be skipped), and on the glibc units' by one lane and with `-g`:
+  every object and diagnostic `--attested=off`'s bytes, no hit contradicted
+  by its reading here and no event outside a list. A command of several source
+  files reads its units' bodies in source order (`--deferred-bodies` is one
+  source file's), so the gate's deferred bodies have nothing to run.
+- **Step 2's gate holds**, at the design's conservative estimates (1.17 and
+  1.45), under its expected 1.23 and 1.62. The difference is the passes: 5.0%
+  of musl's user cycles with the skip, about 36 cycles a file-scope token as
+  the census measured them (lists 1.5%, chain 1.0%, own hashes 0.7%, reach
+  0.65%, literals 0.56%, the units' ends' records 0.33%, the system levels
+  0.28%), where the design expected 12 from the parser's roles. `-c sqlite3.c`
+  takes 123.2 ms where main takes 124.2, and a small unit's process 1.3 ms as
+  main's, with main's instruction counts: a command of one unit runs nothing.
+  `--attested=off` has main's instruction counts too, and its 1.4% more
+  cycles on one lane are the executable's layout.
+- **Eight lanes:** each lane's first units learn, so musl's command skips
+  80.34% of the tokens outside definitions (17,264 hashes in the eight memos)
+  and the glibc units' 85.51%, every object the same bytes. By wall time,
+  musl's command takes 199.2 ms where main takes 216.8 (1.088 times) and the
+  glibc units' 138.1 where 179.1 (1.297): neither is slower.
+- **The runtime functions' names need no rule.** A runtime call takes a
+  declaration's symbol only for an object the selection numbered
+  (`check_lower_declared_runtime`, `check_program_needed_number`), and the
+  selection numbers only the objects its selected code references: a reading
+  that spells the name or its builtin, which reaches the declaration. So the
+  compile's reach drops the census's rule, and skips 85.72% of musl's tokens
+  outside definitions where the census's reach skipped 79.31% (91.35% of the
+  glibc units' where 87.00%), every object the same bytes. A first build
+  with the rule (and the reader's environment published for the events)
+  measured musl's command 1.145 times faster and the glibc units' 1.442, two
+  rounds each.
+- **What else the compile needed.** `-g` skips nothing: the unit's DWARF
+  describes every type its table holds ("Risks" below). A diagnostic of the
+  unit's end (`-Wunused-function`'s) is published past its last token, so it
+  is placed by its location; placed by its output position, a `-Wall` unit
+  learned nothing. A unit that skipped is read again with nothing skipped,
+  from its start (`check_units_compile`), after an error or any stage's
+  failure, the typo corrector, an unlisted event or a contradiction; none of
+  the corpora's units needed it. The binding events' test marks a
+  declaration's list by key as its events start: scanning the list at each
+  event took a large function body's square, and made the compiler's own 61
+  unity units 2 s slower.
+- **Not done:** the field-by-class test of the reader's state ("Risks"),
+  whose evidence is still the corpora's zero contradictions; the passes from
+  the parser's roles, whose cost is now the gap to the expected gains; step 3.
 
 ## Expected gains
 
@@ -669,8 +750,11 @@ Each ends the work with a record.
   corpus comparison is what finds it.
 - **`-g`.** A unit's DWARF must not describe a skipped declaration, as clang's
   describes no unused one; if `check_debug_type_reference`'s rule reaches
-  them some other way, `-g` units don't skip until it doesn't. Step 1 runs
-  with `-g`.
+  them some other way, `-g` units don't skip until it doesn't. Step 1 found it
+  does: `c_check_debug_values.c` describes every type the unit's table holds
+  (a header's unused `struct` among them, unlike clang), so the objects of
+  `test-check-units`' `-g` programs differed. `-g` skips nothing; `--attested=verify`
+  runs with it.
 - **Hash collisions.** 128 bits, keyed; a collision could only skip the
   checking of a declaration nothing names.
 - **Order of the lane's units.** A unit's output can't depend on the memo

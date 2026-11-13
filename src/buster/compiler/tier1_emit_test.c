@@ -1010,6 +1010,12 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                                 const bool found = span != 0 && tier1_emit_cfg_object(&function, &emitted, pattern->stack_object, &offset);
                                 int32_t total = 0;
                                 const X86Instruction* record = found && !__builtin_add_overflow(offset, pattern->displacement, &total) ? &emitted.code.records[first + span - 1] : 0;
+                                if (rule == TIER1_RULE_LOAD_OPERAND && record != 0 && (record->mode & BUSTER_X86_MODE_MEMORY) == 0)
+                                {
+                                    // A commutative operation whose destination is the address's index loads into it first, then
+                                    // takes its other operand (#2602).
+                                    record = &emitted.code.records[first];
+                                }
                                 if (pattern->compare_memory && record != 0)
                                 {
                                     record = 0;

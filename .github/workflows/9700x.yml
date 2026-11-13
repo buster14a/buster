@@ -2062,9 +2062,12 @@ jobs:
     # scheduled run (the nightly mode's) runs nothing; and a push in the
     # nightly mode defers its 9700X work to the window. None of the three has
     # this context, so none can show a 9700X qualification that didn't run.
+    # A pull request labeled `hotfix` skips it, which counts as passed, so that it can enter the merge queue without
+    # waiting for its own rows (hotfix.yml reports the context when the label is added); its candidate runs this job in
+    # full, since a merge_group event has no pull request labels.
     name: Integration qualification
     needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
-    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
+    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     # The coverage step reads this run's jobs; nothing here writes.

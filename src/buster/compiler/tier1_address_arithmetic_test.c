@@ -611,8 +611,133 @@ static void tier1_select_test_scaled_index(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+// #2602: an addition of a load, p[1] + x or x + p[1], at both widths, by both paths. Its memory form, at two, takes the
+// load over a load and a lea, also two: the load is covered, and the sum is one record in x's register, two in another
+// (x's copy, then the addition), and two in the base's (the load into it, then the addition: no scratch register). A
+// load that a second addition also reads stays one load. Each runs natively against the original IR's interpretation.
+static void tier1_select_test_load_addition(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+        for (uint32_t order = 0; order < 2; order += 1)
+        {
+            for (uint32_t shared = 0; shared < 2; shared += 1)
+            {
+                const uint32_t count = shared != 0 ? 9 : 7;
+                const IrSizes sizes =
+                {
+                    .instruction_count = count,
+                    .block_count = 1,
+                    .address_count = 1,
+                    .parameter_count = 3,
+                };
+                IrFunction function;
+                const IrError created = ir_create(&input, &sizes, &function);
+                tier1_select_test_expect(test, created == IR_OK, "create load addition fixture");
+                if (created == IR_OK)
+                {
+                    function.result_type = type;
+                    function.block_offsets[1] = count;
+                    function.parameter_types[0] = IR_PTR;
+                    function.parameter_types[1] = type;
+                    function.parameter_types[2] = type;
+                    function.addresses[0] = (IrAddress){ .scale = 1, .offset = 8 };
+                    tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+                    tier1_select_test_node(&function, 4, IR_LOAD, type, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    tier1_select_test_node(&function, 5, IR_ADD, type, order == 0 ? 4 : 1, order == 0 ? 1 : 4, BUSTER_IR_NONE);
+                    if (shared != 0)
+                    {
+                        tier1_select_test_node(&function, 6, IR_ADD, type, 4, 2, BUSTER_IR_NONE);
+                        tier1_select_test_node(&function, 7, IR_ADD, type, 5, 6, BUSTER_IR_NONE);
+                    }
+                    tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    // The sum's register: x's, another, or the base's.
+                    static const uint8_t sums[] = { X86_REGISTER_RSI, X86_REGISTER_RAX, X86_REGISTER_RDI };
+                    for (uint32_t s = 0; s < (shared != 0 ? 1u : BUSTER_ARRAY_LENGTH(sums)); s += 1)
+                    {
+                        const uint8_t registers[9] =
+                        {
+                            X86_REGISTER_RDI,
+                            X86_REGISTER_RSI,
+                            X86_REGISTER_RDX,
+                            X86_REGISTER_R8,
+                            X86_REGISTER_R9,
+                            shared != 0 ? X86_REGISTER_R10 : sums[s],
+                            shared != 0 ? X86_REGISTER_RCX : X86_REGISTER_RAX,
+                            X86_REGISTER_RAX,
+                            X86_REGISTER_RAX,
+                        };
+                        for (uint32_t path = 0; path < 2; path += 1)
+                        {
+                            Tier1SelectPlan plan;
+                            uint32_t node = BUSTER_IR_NONE;
+                            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
+                            tier1_select_test_expect(test, error == TIER1_SELECT_OK, "load addition selects on both paths");
+                            if (error == TIER1_SELECT_OK)
+                            {
+                                const bool folded = shared == 0 && plan.covered[3] != 0 && plan.covered[4] != 0 && plan.patterns[5].rule == TIER1_RULE_LOAD_OPERAND &&
+                                                    plan.patterns[5].intrinsic_cost == 2u + plan.patterns[5].sign_result && plan.patterns[5].values[0] == 1;
+                                const bool kept = shared != 0 && plan.covered[4] == 0 && plan.patterns[5].rule != TIER1_RULE_LOAD_OPERAND && plan.patterns[6].rule != TIER1_RULE_LOAD_OPERAND;
+                                tier1_select_test_expect(test, folded || kept, "an addition takes its single-use load as its memory operand, and a shared load stays computed");
+                                Tier1SelectCode code;
+                                const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+                                tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "load addition fixture emits");
+                                if (emitted == TIER1_SELECT_OK)
+                                {
+                                    uint32_t accesses = 0;
+                                    bool scratched = false;
+                                    for (uint32_t r = 0; r < code.count; r += 1)
+                                    {
+                                        const uint16_t form = code.records[r].form;
+                                        accesses += (code.records[r].mode & BUSTER_X86_MODE_MEMORY) != 0 && form != X86_FORM_LEA_R32_M && form != X86_FORM_LEA_R64_M;
+                                        scratched |= code.records[r].reg == BUSTER_TIER1_SELECT_SCRATCH || code.records[r].rm == BUSTER_TIER1_SELECT_SCRATCH;
+                                    }
+                                    const uint32_t records = code.node_first[6] - code.node_first[5];
+                                    const bool sized = shared != 0 || (records == (sums[s] == X86_REGISTER_RSI ? 1u : 2u) && !scratched);
+                                    tier1_select_test_expect(test, accesses == 1 && sized, "the sum is one record in x's register and two elsewhere, reading memory once");
+                                }
+                                if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                                {
+                                    for (uint32_t sample = 0; sample < 4; sample += 1)
+                                    {
+                                        uint64_t memory[3] =
+                                        {
+                                            UINT64_C(0x5a5a5a5a5a5a5a5a),
+                                            UINT64_C(0xfedcba9876543210) >> sample,
+                                            UINT64_C(0xa5a5a5a5a5a5a5a5),
+                                        };
+                                        const uint64_t x = UINT64_C(0x0123456789abcdef) << sample;
+                                        const uint64_t y = UINT64_MAX - sample;
+                                        const uint64_t mask = width == 4 ? UINT32_MAX : UINT64_MAX;
+                                        const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)memory, x, y) & mask;
+                                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)memory, x, y) & mask;
+                                        tier1_select_test_expect(test, actual == expected, "a load's addition executes what the original IR computes");
+                                    }
+                                }
+                            }
+                            arena_pop_to(&output, 0);
+                        }
+                    }
+                }
+                arena_pop_to(&input, 0);
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void tier1_select_test_address_arithmetic(Tier1SelectTest* test)
 {
+    tier1_select_test_load_addition(test);
     tier1_select_test_power_multiplication(test);
     tier1_select_test_signed_loads(test);
     tier1_select_test_added_address(test);

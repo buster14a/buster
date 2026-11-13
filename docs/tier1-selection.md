@@ -102,9 +102,11 @@ patterns are:
   the addition's zero-extended `a` as sign-extended and faulted in SQLite's
   `autoindex5.test`). Before #2574, it took `sqlite3StatusUp`'s five `lea`s
   of `sqlite3Stat` to two, one per block (speedtest1's 1.73 M to 0.97 M).
-  #2574's hoist now keeps one for both blocks, and what this sharing adds on
-  top is the index's extensions (speedtest1's `movslq`s, 60.6 M to 59.5 M,
-  buster-performance#473). The sharing stays within a block and leaves
+  #2574's hoist now keeps one for both blocks (#2593 defines it in the first,
+  which takes it), and what this sharing adds on top is the index's
+  extensions (speedtest1's `movslq`s, 60.6 M to 59.5 M,
+  buster-performance#473), and the takes that #2593's placement leaves their
+  own. The sharing stays within a block and leaves
   moving an address past its blocks to #2574's hoist: #2572's experiment,
   which hoisted it here, made `luaV_execute`'s `disptab` worse, where the
   loop's pressure evicted it. The walk takes either leaf one node past its bound: the typed stream
@@ -181,7 +183,12 @@ patterns are:
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
-  to the consumer (#141). It moves past the nodes between them that don't touch
+  to the consumer (#141). The consumer (`TIER1_RULE_LOAD_OPERAND`) is the
+  operation from memory, after a copy of its other operand where its destination
+  is another register. Where that destination is the address's base or index, a
+  commutative operation loads into it and then takes the other operand from its
+  register, and a subtraction first copies the address's register into the
+  scratch register: two records at most, three for a subtraction (#2602). It moves past the nodes between them that don't touch
   memory, call, fence or move rsp (arithmetic, constants, addresses) and past
   none that do: a store to any address, a call, any other load (#1059's audit:
   the typed stream doesn't carry a C access's volatility, so that a load the IR
@@ -790,9 +797,18 @@ The cover is the cheapest the grammar has for each tree, and the grammar has
 every candidate the generator makes for the operators it covers, so it is never
 costlier than munch's in the grammar's cost. That cost is each pattern's
 structural bound on its records, not the records the consumer writes: an
-addition of two loads costs 3 as `lea` of the two loads' registers and 4 as a
-load and an `add` from memory, whose records are 3 and 2 (`mov`, `mov`, `lea`
-against `mov`, `add`). Before #1395, only the vector path used the costed
+`add`, `and`, `or` or `xor` from memory costs 2, a `sub` 3 for its scratch
+copy, and an `imul` 3 with its immediate form's penalty. An addition of a load
+costs 2 both ways, as the load and a `lea` of two registers and as an `add` from
+memory. The grammar lists the memory form first so that it wins the tie (#2602):
+it writes one record where the sum takes the other operand's register, two
+elsewhere, and never more than the `lea`'s two, in one register fewer.
+Against #2605's main, speedtest1 and Lua run 0.12% fewer instructions, all of
+them `mov`s, with no spill changed; speedtest1's 0.5% more cycles at its
+driver-linked placement averages 0.16% fewer at four others ([the
+record](https://github.com/buster14a/buster-performance/tree/6f4962f1ce21b47c92ba3f52059170b58f25c867/docs/measurements/tier1-load-addition-2602-2026-11-13)). An
+addition of two loads likewise costs 3 both ways, whose records are 3 and 2 at most
+(`mov`, `mov`, `lea` against `mov`, `add`). Before #1395, only the vector path used the costed
 cover, and the scalar production path used maximal munch. The following
 historical measurements compare those different algorithms. At #1190's head,
 by `--tier1 --tier1-report`: on the frozen `sqlite3.c` with the

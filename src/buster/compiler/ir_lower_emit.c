@@ -150,13 +150,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, symbol, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
         ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
-    // The symbols' addresses the function takes at least twice (#2574, ir_typed_plan_hoisted), as the tables' are.
-    const uint32_t hoisted_first = (uint32_t)sink.sizes.instruction_count;
-    for (uint32_t k = 0; k < plan->hoisted_count; k += 1)
-    {
-        const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, plan->hoisted_symbols[k], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    }
+    // The symbols' addresses the function takes at least twice (#2574, ir_typed_plan_hoisted), each defined at the start
+    // of the block ir_typed_plan_places gives it (#2593): those in the preheader here, as the tables' are.
+    ir_typed_hoisted_starts(&sink, plan, 0);
     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 
     // The next jump table, whose jump (Tier0Function.table_jumps, in entry order) is a br_indirect of its own (#785).
@@ -187,6 +183,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                                          ir_typed_alignment(classes[d]));
             }
         }
+        // The hoisted addresses this block defines (#2593), which its takes and the blocks it dominates read.
+        ir_typed_hoisted_starts(&sink, plan, b + 1);
         bool terminated = false;
         for (uint32_t i = first; i < end; i += 1)
         {
@@ -260,7 +258,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 }
                 else if (hoisted != UINT32_MAX)
                 {
-                    stack[depth] = hoisted_first + 2 * hoisted + 1;
+                    stack[depth] = plan->hoisted_values[hoisted];
                 }
                 else
                 {

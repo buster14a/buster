@@ -3,13 +3,13 @@
 //
 // Choose the archive-capable route before compiling a C-only source command. DSO-only commands keep the direct
 // importer's version checks and runtime snapshot (#1470); this probe reads no source or archive member.
-static bool check_driver_library_archive(const char* path)
+static bool check_driver_library_archive(const char* path, bool named_archive)
 {
     const int file = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
     struct stat status;
     char header[sizeof(BUSTER_IMPORT_ARCHIVE_MAGIC) - 1];
     uint32_t used = 0;
-    const bool regular = file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode) && status.st_size > (off_t)sizeof(header);
+    const bool regular = file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode) && status.st_size > 0;
     while (regular && used < sizeof(header))
     {
         const ssize_t count = read(file, header + used, sizeof(header) - used);
@@ -26,10 +26,14 @@ static bool check_driver_library_archive(const char* path)
     {
         close(file);
     }
-    // Empty archives add nothing and already work on the direct path. Probe magic as well as the search's suffix:
+    // Empty archives add nothing and already work on the direct path. A selected .a can also be a GNU ld script
+    // naming archives (glibc's libm.a), which the foreign reader expands. Probe magic as well as the search's suffix:
     // -l:FILE can name an archive under any filename. A failed read stays with the ordinary importer's diagnostic.
-    return used == sizeof(header) && (memcmp(header, BUSTER_IMPORT_ARCHIVE_MAGIC, sizeof(header)) == 0 ||
-                                      memcmp(header, BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, sizeof(header)) == 0);
+    const bool read = regular && (used == sizeof(header) || used == (uint64_t)status.st_size);
+    const bool magic = used == sizeof(header) && memcmp(header, BUSTER_IMPORT_ARCHIVE_MAGIC, sizeof(header)) == 0;
+    const bool empty = magic && status.st_size == (off_t)sizeof(header);
+    return read && !empty && (named_archive || magic ||
+                             (used == sizeof(header) && memcmp(header, BUSTER_IMPORT_THIN_ARCHIVE_MAGIC, sizeof(header)) == 0));
 }
 
 static bool check_driver_named_archives(CheckDriverLibraries* libraries, RuntimeKind kind, Arena* arena, bool* mixed)
@@ -53,7 +57,7 @@ static bool check_driver_named_archives(CheckDriverLibraries* libraries, Runtime
             bool archive = false;
             const bool found = runtime_libraries_search(&runtime, name, exact, static_only, libraries->directories,
                                                         libraries->directory_count, path, &archive);
-            if (found && check_driver_library_archive(path))
+            if (found && check_driver_library_archive(path, archive))
             {
                 const uint64_t length = strlen(path);
                 char* copy = arena_push(arena, length + 1, 1);

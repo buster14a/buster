@@ -741,7 +741,10 @@ designator folds quietly, and under `-Wgnu-folding-constant` with `-Werror` or
 `-pedantic` reads "expression is not an integer constant expression; folding it
 to a constant is a GNU extension" at the expression's first token
 (`c_check_vla_fold_driver_test.c`). A block's automatic array keeps such a bound
-variable, as does a `sizeof`'s type name anywhere.
+variable, as does a `sizeof`'s type name anywhere. A pointer to such an array,
+or a fixed array of those pointers, still has a constant size and is accepted
+in a file-scope initializer (#2528); the completed queried type decides whether
+its size is runtime, after its bounds have been checked.
 A variable-length array or variably modified type where C allows none takes
 clang's error at the declarator's name (`check_input_vla_place`,
 `check_input_vla_declaration`):

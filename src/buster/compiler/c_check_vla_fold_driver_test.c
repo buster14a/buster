@@ -191,6 +191,28 @@ static const char check_driver_vla_unevaluated_source[] =
     "char *bad = (int(*)[n])0;\n"
     "int s5 = sizeof(int[n]);\n";
 
+// A variably modified type can still have a constant layout (#2528). The pointer ends the runtime-size walk; a fixed
+// array of such pointers stays constant too. The comma bound is still checked, so its ordinary warning is retained.
+static const char check_driver_vla_pointer_size_source[] =
+    "int n;\n"
+    "unsigned long c = sizeof(int(*)[n]);\n"
+    "unsigned long a = sizeof(int(*)[(3, 2)]);\n"
+    "unsigned long p = sizeof(int(*[3])[n]);\n"
+    "unsigned long m = sizeof(int(*)[n][n + 1]);\n"
+    "enum { P = sizeof(int(*)[++n]), A = sizeof(int(*[3])[n]) };\n"
+    "_Static_assert(P == 8 && A == 24, \"fixed pointer size\");\n"
+    "_Static_assert(_Alignof(int[n]) == 4 && _Alignof(int(*)[n]) == 8, \"fixed alignment\");\n"
+    "unsigned long nested_p = sizeof(int(*)[sizeof(int[n])]);\n"
+    "unsigned long nested_a = _Alignof(int[sizeof(int[n])]);\n"
+    "unsigned long nested_s = sizeof(sizeof(int[n]));\n"
+    "unsigned long nested_side = sizeof(sizeof(int[++n]));\n";
+
+static const char check_driver_vla_pointer_size_error_source[] =
+    "int n;\n"
+    "unsigned long c = sizeof(int(*)[n]);\n"
+    "unsigned long a = sizeof(int(*)[(3, 2)]);\n"
+    "unsigned long d = sizeof(int[n]);\n";
+
 // A cast to a variably modified type in a body (#2321, #1852): its type name's bounds are evaluated before its operand,
 // as clang's EmitVariablyModifiedType does, a sizeof's in an unevaluated operand not; no comma of its own warns, and
 // -Wunsequenced, whose visit reaches no type, doesn't read them.
@@ -272,6 +294,27 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "a file-scope cast's and _Alignof's variable type names",
         .source = check_driver_vla_unevaluated_source,
         .errors = 2,
+    },
+    {
+        .name = "a file-scope sizeof of pointers to variable arrays stays constant",
+        .source = check_driver_vla_pointer_size_source,
+        .warnings = 1,
+    },
+    {
+        .name = "a file-scope sizeof refuses only the runtime-sized array",
+        .source = check_driver_vla_pointer_size_error_source,
+        .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope evaluated nested variable array size remains nonconstant",
+        .source = "int n; unsigned long x=sizeof(int[sizeof(int[n])]);\n",
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope unevaluated nested size still checks its array bound type",
+        .source = "unsigned long x=sizeof(sizeof(int[1.5]));\n",
+        .errors = 1,
     },
     {
         .name = "a block's variable-length array with an initializer",

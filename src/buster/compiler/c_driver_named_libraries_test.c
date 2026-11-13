@@ -24,13 +24,17 @@ static void cc_mixed_named_libraries(CCCompatibilityTest* test)
                  cc_compat_write(test, "named-head.c", "extern int tail(void); int answer(void) { return tail() + 2; }\n") &&
                  cc_compat_write(test, "named-tail.c", "int tail(void) { return 40; }\n") &&
                  cc_compat_write(test, "named-extra.c", "int extra(void) { return 3; }\n") &&
+                 cc_compat_write(test, "libscript2548.a", "/* A static library can be a linker script, as glibc's libm.a is. */\nGROUP ( libchoice1470.a )\n") &&
+                 cc_compat_write(test, "libshort2548.a", "INPUT(a)") &&
                  cc_compat_write(test, "named-optional.c", "extern int puts(const char *); __attribute__((constructor)) static void loaded(void) { puts(\"optional loaded\"); } int optional(void) { return 0; }\n");
     cc_compat_expect(test, files, "write named-library source fixtures");
     const char* const objects[][12] = {
         { "-c", "named-static.c", "-o", "named-static.o", NULL },
+        { "-c", "named-static.c", "-o", "a", NULL },
         { "-c", "named-head.c", "-o", "named-head.o", NULL },
         { "-c", "named-tail.c", "-o", "named-tail.o", NULL },
         { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libchoice1470.so", "-o", "libchoice1470.so", NULL },
+        { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libscript2548.so", "-o", "libscript2548.so", NULL },
         { "-shared", "-fPIC", "helper.c", "-o", "libnoname1470.so", NULL },
         { "-shared", "-fPIC", "helper.c", "-Wl,-soname,libcontract1470.so", "-o", "libsoname1470.so", NULL },
         { "-shared", "-fPIC", "named-optional.c", "-Wl,-soname,liboptional1470.so", "-o", "liboptional1470.so", NULL },
@@ -71,6 +75,13 @@ static void cc_mixed_named_libraries(CCCompatibilityTest* test)
         { "named-main.c", "-L.", "-lchoice1470", "-Wl,-rpath,$ORIGIN", "-o", "program", NULL },
         { "named-main.c", "-DEXPECTED=17", "-static", "-L.", "-lchoice1470", "-o", "program", NULL },
         { "named-main.c", "-DEXPECTED=17", "-static-pie", "-L.", "-lchoice1470", "-o", "program", NULL },
+        // The static spelling selects a script even with a DSO of the same name, and wherever -static appears.
+        { "named-main.c", "-L.", "-lscript2548", "-Wl,-rpath,$ORIGIN", "-o", "program", NULL },
+        { "named-main.c", "-DEXPECTED=17", "-static", "-L.", "-lscript2548", "-o", "program", NULL },
+        { "named-main.c", "-DEXPECTED=17", "-L.", "-lscript2548", "-static", "-o", "program", NULL },
+        { "named-main.c", "-DEXPECTED=17", "-static-pie", "-L.", "-lscript2548", "-o", "program", NULL },
+        { "named-main.c", "-DEXPECTED=17", "-L.", "-l:libscript2548.a", "--scalar", "--lanes", "1", "-o", "program", NULL },
+        { "named-main.c", "-DEXPECTED=17", "-static", "-L.", "-lshort2548", "-o", "program", NULL },
         { "named-main.c", "-DEXPECTED=17", "-L.", "-l:libchoice1470.a", "-o", "program", NULL },
         { "main.c", "-L.", "-l:named-renamed.data", "-o", "program", NULL },
         { "named-main.c", "-L.", "-lchoice1470", "-lempty1470", "-Wl,-rpath,$ORIGIN", "-o", "program", NULL },

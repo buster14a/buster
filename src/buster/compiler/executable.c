@@ -66,7 +66,7 @@
 // entry. Every executable relaxes its CALL_GOT and LOAD_GOT fixups with the addend -4 to the image's symbols but
 // IFUNCs (executable_relaxes), as GNU ld and lld relax them in an executable, and their targets need no slot from
 // them; and the static runtime's and a dynamic PIE's general- and local-dynamic TLS accesses, which call
-// __tls_get_addr, which nothing in a static executable defines, and which a dynamic PIE's relaxation needs no stub of.
+// __tls_get_addr, whose consumed TLS calls need no slot or stub even when an input defines the function.
 // On the direct path the code generator binds before it selects instructions, so the program's code reaches its own
 // symbols directly: the relaxation takes the C runtime's loads and calls, and the generated programs'.
 //
@@ -119,7 +119,7 @@
 // multiple of its alignment), or for a weak symbol defined nowhere the image offset of address 0, or 0 if the symbol is
 // thread-local, as GNU ld resolves one; in a PIE, a dynamic symbol's is its stub's image offset, or address 0's; and
 // with the C runtime, an IFUNC's with a stub is its stub's image offset (an IFUNC is one with a resolver: a weak one
-// defined nowhere is address 0, as any other is), and a static executable's __tls_get_addr's 0, the relaxation
+// defined nowhere is address 0, as any other is), and an undefined static __tls_get_addr's 0, the relaxation
 // consuming its calls; and an absolute symbol's is its value less the base (one farther than int32 from the base is
 // refused). Every fixup's field is patched in place, in its atom's bytes.
 //
@@ -379,7 +379,7 @@ typedef enum ExecutableError
     // A symbol defined nowhere that isn't weak (ExecutableResult.symbol).
     EXECUTABLE_ERROR_UNDEFINED,
     // In a static executable, a symbol of a shared library; one the linker should define that it doesn't know; or with
-    // the C runtime, __tls_get_addr called other than by as many general- and local-dynamic TLS accesses as there are
+    // the C runtime, an undefined __tls_get_addr called other than by as many general- and local-dynamic TLS accesses as there are
     // calls (ExecutableResult.symbol).
     EXECUTABLE_ERROR_UNSUPPORTED,
     // The entry point isn't a symbol defined in a TEXT atom.
@@ -438,7 +438,7 @@ typedef enum ExecutableCause
     // EXECUTABLE_ERROR_ENTRY: the symbol isn't defined, or it is defined in an atom that isn't TEXT.
     EXECUTABLE_CAUSE_ENTRY_UNDEFINED,
     EXECUTABLE_CAUSE_ENTRY_NOT_TEXT,
-    // EXECUTABLE_ERROR_UNSUPPORTED: an unknown symbol version, debug information, a symbol table, __tls_get_addr
+    // EXECUTABLE_ERROR_UNSUPPORTED: an unknown symbol version, debug information, a symbol table, undefined __tls_get_addr
     // called outside a TLS access, a thread-local without its empty section, a string table over 4 GB, or a
     // __start_/__stop_-bound input section whose atoms one output section can't hold (ExecutableResult.symbol and
     // atom).
@@ -580,8 +580,8 @@ typedef struct ExecutableRuntime ExecutableRuntime;
 struct ExecutableRuntime
 {
     String8 note;
-    // The link's __tls_get_addr, which nothing in a static executable defines (bind.c leaves it undefined), or 0: each
-    // call of it must be a general- or local-dynamic TLS access's, which relaxes to local-exec without the call.
+    // The link's __tls_get_addr, or 0. General- and local-dynamic accesses relax to local-exec without their calls.
+    // If undefined (as bind.c leaves it), every reference must belong to an access; a definition keeps ordinary ones.
     SymbolId tls_get_addr;
 };
 

@@ -2420,6 +2420,151 @@ static void foreign_driver_test_plugin(ForeignTestTally* tally, const char* dire
     }
 }
 
+// A static input may define __tls_get_addr as an ordinary function. Its unwind/debug references, direct calls,
+// address and non-relaxable GOT slot must survive, while genuine GD/LD sequences still relax, even beside those
+// calls. The original freestanding TLS entry installs its own one-word TLS block and TCB, without a C runtime.
+static void foreign_driver_test_tls_definition(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, bool cross_check)
+{
+    static const ForeignDriverTestSource sources[] = {
+        {
+            .name = "fdriver_tls_definition",
+            .text = "void *__tls_get_addr(unsigned long *pair) { return pair; }\n",
+        },
+        {
+            .name = "fdriver_tls_call",
+            .text = ".text\n.globl _start\n.type _start,@function\n_start:\n"
+                    "call driver_tls_ordinary\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
+                    ".globl driver_tls_ordinary\n.type driver_tls_ordinary,@function\ndriver_tls_ordinary:\n"
+                    "sub $8,%rsp\nlea driver_tls_pair(%rip),%rdi\ncall __tls_get_addr@PLT\n"
+                    "lea driver_tls_pair(%rip),%rdi\ncmp %rdi,%rax\njne 1f\n"
+                    "xor %eax,%eax\nadd __tls_get_addr@GOTPCREL(%rip),%rax\n"
+                    "lea __tls_get_addr(%rip),%rcx\ncmp %rcx,%rax\njne 1f\n"
+                    "call *%rax\nlea driver_tls_pair(%rip),%rdi\ncmp %rdi,%rax\njne 1f\n"
+                    "mov $42,%eax\njmp 2f\n1: mov $1,%eax\n2: add $8,%rsp\nret\n.size driver_tls_ordinary,.-driver_tls_ordinary\n"
+                    ".data\n.balign 8\ndriver_tls_pair:\n.quad 17,19\n.section .note.GNU-stack,\"\",@progbits\n",
+        },
+        {
+            .name = "fdriver_tls_access",
+            .text = ".text\n.globl driver_tls_entry\n.type driver_tls_entry,@function\ndriver_tls_entry:\n"
+                    "call driver_tls_ordinary\ncmp $42,%eax\njne 1f\n"
+                    "lea driver_tls_tcb(%rip),%rsi\nmov %rsi,(%rsi)\nmov $0x1002,%edi\nmov $158,%eax\nsyscall\n"
+                    "test %eax,%eax\njne 1f\n"
+                    "data16 lea driver_tls_value@TLSGD(%rip),%rdi\n.value 0x6666\nrex64 call __tls_get_addr@PLT\n"
+                    "cmpq $41,(%rax)\njne 1f\n"
+                    "lea driver_tls_value@TLSLD(%rip),%rdi\ncall __tls_get_addr@PLT\n"
+                    "cmpq $41,driver_tls_value@DTPOFF(%rax)\njne 1f\n"
+                    "mov $42,%edi\njmp 2f\n1: mov $1,%edi\n2: mov $60,%eax\nsyscall\n.size driver_tls_entry,.-driver_tls_entry\n"
+                    ".section .tdata,\"awT\",@progbits\n.balign 8\n.type driver_tls_value,@tls_object\ndriver_tls_value:\n.quad 41\n.size driver_tls_value,8\n"
+                    ".data\n.balign 8\n.quad 41\ndriver_tls_tcb:\n.quad 0\n.section .note.GNU-stack,\"\",@progbits\n",
+        },
+    };
+    static const char* const linkers[] = {
+        "ld.bfd",
+        "ld.lld",
+    };
+    const uint64_t saved = arena->length;
+    for (uint32_t debug = 0; debug < 2; debug += 1)
+    {
+        ForeignTestPath objects[BUSTER_ARRAY_LENGTH(sources)];
+        bool ready = true;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(sources); f += 1)
+        {
+            ForeignTestPath source;
+            ForeignTestPath output;
+            ForeignTestPath errors;
+            snprintf(source, sizeof(source), "%s/%s.%s", directory, sources[f].name, f == 0 ? "c" : "S");
+            snprintf(objects[f], sizeof(objects[f]), "%s/%s_%u.o", directory, sources[f].name, debug);
+            snprintf(output, sizeof(output), "%s/%s_%u_compile.out", directory, sources[f].name, debug);
+            snprintf(errors, sizeof(errors), "%s/%s_%u_compile.err", directory, sources[f].name, debug);
+            char* arguments[] = {
+                (char*)"cc",
+                (char*)"-c",
+                (char*)"-fPIC",
+                (char*)"-fno-stack-protector",
+                (char*)(debug != 0 ? "-g" : "-g0"),
+                source,
+                (char*)"-o",
+                objects[f],
+                0,
+            };
+            const bool made = foreign_test_write(source, sources[f].text, strlen(sources[f].text)) && object_test_run(arguments, output, errors) == 0;
+            foreign_test_expect(tally, made, "compile defined TLS helper fixture", sources[f].name);
+            ready = ready && made;
+        }
+        for (uint32_t fixture = 0; ready && fixture < 3; fixture += 1)
+        {
+            char* inputs[3];
+            const uint32_t count = fixture == 2 ? 3 : 2;
+            inputs[0] = fixture == 0 ? files->objects[FOREIGN_DRIVER_TEST_START] : objects[1];
+            inputs[1] = objects[0];
+            inputs[2] = objects[2];
+            const char* entry = fixture == 2 ? "driver_tls_entry" : "_start";
+            String8 reference = { 0 };
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(foreign_test_lanes); l += 1)
+                {
+                    char name[96];
+                    char lanes[16];
+                    snprintf(name, sizeof(name), "tls_definition_%u_%u_%u_%u", debug, fixture, path, foreign_test_lanes[l]);
+                    snprintf(lanes, sizeof(lanes), "%u", foreign_test_lanes[l]);
+                    char* arguments[16];
+                    memcpy(arguments, inputs, count * sizeof(*arguments));
+                    uint32_t used = count;
+                    arguments[used++] = (char*)"-static";
+                    arguments[used++] = (char*)"-e";
+                    arguments[used++] = (char*)entry;
+                    arguments[used++] = (char*)"--lanes";
+                    arguments[used++] = lanes;
+                    if (path == 0)
+                    {
+                        arguments[used++] = (char*)"--scalar";
+                    }
+                    const String8 bytes = foreign_driver_test_invoke(tally, directory, name, "-o", arguments, used, true, 42, arena);
+                    foreign_driver_test_structure(tally, bytes, ET_EXEC, (String8){ 0 }, name);
+                    if (path == 0 && l == 0)
+                    {
+                        reference = bytes;
+                    }
+                    else
+                    {
+                        foreign_test_expect(tally, foreign_driver_test_same(reference, bytes), "defined TLS helper output agrees across paths and lanes", name);
+                    }
+                }
+            }
+            for (uint32_t linker = 0; cross_check && linker < BUSTER_ARRAY_LENGTH(linkers); linker += 1)
+            {
+                ForeignTestPath executable;
+                ForeignTestPath output;
+                ForeignTestPath errors;
+                snprintf(executable, sizeof(executable), "%s/fdriver_tls_oracle_%u_%u_%u", directory, debug, fixture, linker);
+                snprintf(output, sizeof(output), "%s/fdriver_tls_oracle_%u_%u_%u.out", directory, debug, fixture, linker);
+                snprintf(errors, sizeof(errors), "%s/fdriver_tls_oracle_%u_%u_%u.err", directory, debug, fixture, linker);
+                char* arguments[] = {
+                    (char*)linkers[linker],
+                    (char*)"-static",
+                    (char*)"-e",
+                    (char*)entry,
+                    (char*)"-o",
+                    executable,
+                    inputs[0],
+                    inputs[1],
+                    fixture == 2 ? inputs[2] : 0,
+                    0,
+                };
+                const bool linked = object_test_run(arguments, output, errors) == 0;
+                foreign_test_expect(tally, linked, "reference linker accepts defined TLS helper", linkers[linker]);
+                if (linked)
+                {
+                    foreign_test_expect(tally, foreign_driver_test_run(directory, executable, output, errors, arena) == 42,
+                                        "reference defined TLS helper and relaxed accesses return expected status", linkers[linker]);
+                }
+            }
+        }
+    }
+    arena_pop_to(arena, saved);
+}
+
 static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     const uint64_t saved = arena->length;
@@ -2445,6 +2590,7 @@ static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_
         foreign_driver_test_strings(&tally, directory, &files, arena);
         foreign_driver_test_dynamic(&tally, directory, &files, arena, system, runtime.loader_path);
         foreign_driver_test_plugin(&tally, directory, &files, arena);
+        foreign_driver_test_tls_definition(&tally, directory, &files, arena, cross_check);
         if (cross_check)
         {
             foreign_driver_test_oracles(&tally, directory, &files, arena, runtime.loader_path);

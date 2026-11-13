@@ -112,7 +112,10 @@ requirements. [Command index](README.md).
   the current directory as clang names it (`-o` refused), and the link merges
   the units' links (`check_units_merge`, on the units' lanes by the vector path:
   `check_units_merge_lanes`, #778) into one executable, with `-g` of their DWARF
-  units, one each (#779).
+  units, one each (#779). A lane's units skip the file-scope declarations its
+  earlier units read silently and purely and that their own code doesn't reach
+  (#2531, `--attested=on|verify|off`, on by default but with `-g` or
+  `--scalar`: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
@@ -338,6 +341,9 @@ keeps `-L` directory order and static runtime mode; named DSOs on an archive
 link keep their named-search identity and as-needed state. Exact `-l:FILE`
 DSO-only links retain the direct importer's existing refusal. No new runtime or
 writer mode is introduced. `-c` and syntax checking do not resolve libraries.
+Selected nonempty `.a` files also use the mixed path when they are GNU ld scripts
+that name archives, as glibc's `libm.a` does; `-static` and `-static-pie` select
+that file even when a shared library of the same name is available (#2548).
 
 Mixed commands compile C and assembly on the unit scheduler's lanes, retain
 their ELF objects in memory, and use the built-in foreign resolver and writer

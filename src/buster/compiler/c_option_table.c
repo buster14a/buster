@@ -37,6 +37,7 @@
 #define BUSTER_C_OPTIONS(ENTRY) \
     ENTRY(STANDARD_INPUT, "-") \
     ENTRY(END_OF_OPTIONS, "--") \
+    ENTRY(ATTESTED_EQ, "--attested=") \
     ENTRY(BUSTER_HEADERS, "--buster-headers") \
     ENTRY(CHECK_TRANSITIONS, "--check-transitions") \
     ENTRY(CLANG_FEATURES, "--clang-features") \

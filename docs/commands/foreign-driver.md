@@ -51,3 +51,8 @@ requirements. [Command index](README.md).
   run through `test-foreign --cross-check`, and `test-foreign-corpus`
   (`foreign_corpus_test.c`) compares it with lld and mold on a corpus
   ([Foreign corpus test](foreign-corpus.md#foreign-corpus-test)).
+  Static inputs may define `__tls_get_addr` as an ordinary function: its
+  calls, address, GOT slot and unwind/debug references are preserved while
+  general- and local-dynamic TLS accesses still relax. The driver tests cover
+  definition-only, ordinary-call and mixed TLS-access links, with and without
+  debug information, on both paths and all lane counts, against GNU ld and lld.

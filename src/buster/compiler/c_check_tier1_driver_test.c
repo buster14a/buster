@@ -5481,8 +5481,10 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
-// noinline one, which stays a call, beside them. By each path, with --verify's certificates, the build inlines (the
-// report's `inlined`), and runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4.
+// noinline one, which stays a call, beside them. #2541's helpers with control flow, whose blocks the general splice
+// places at their calls: two returns, a loop, a switch, a vector by value chosen by a branch, a local array in a loop,
+// and one that calls two of them. By each path, with --verify's certificates, the build inlines (the report's
+// `inlined`), and runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4.
 static const char check_test_tier1_inline_source[] =
     "#include <immintrin.h>\n"
     "#include <stdint.h>\n"
@@ -5490,6 +5492,12 @@ static const char check_test_tier1_inline_source[] =
     "typedef struct { long long a; int b; short c; } Triple;\n"
     "static inline __attribute__((always_inline)) Triple twist(Triple t, long long k) { Triple r = { t.a * 3 + k, t.b ^ (int)k, (short)(t.c + 1) }; return r; }\n"
     "static __attribute__((noinline)) int kept(int x) { return x * 7; }\n"
+    "static inline __attribute__((always_inline)) int clamp(int x, int lo, int hi) { if (x < lo) return lo; if (x > hi) return hi; return x; }\n"
+    "static inline __attribute__((always_inline)) unsigned spin(unsigned x, int n) { for (int i = 0; i < n; i += 1) x = x * 33u + (unsigned)i; return x; }\n"
+    "static inline __attribute__((always_inline)) int classify(int x) { switch (x & 3) { case 0: return 10; case 1: return x * 2; case 2: return -x; default: return x ^ 5; } }\n"
+    "static inline __attribute__((always_inline)) __m128i pick(__m128i a, __m128i b, int k) { if (k & 1) return _mm_add_epi32(a, b); return _mm_xor_si128(a, b); }\n"
+    "static inline __attribute__((always_inline)) long walk(const int* p, int n) { int w[4] = { 1, 2, 3, 4 }; long s = 0; for (int i = 0; i < n; i += 1) s += p[i] * w[i & 3]; return s; }\n"
+    "static inline __attribute__((always_inline)) int twice(int x) { return clamp(x, 0, 9) + classify(x); }\n"
     "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
     "{\n"
     "    __m512i x = _mm512_add_epi32(a, b);\n"
@@ -5514,6 +5522,21 @@ static const char check_test_tier1_inline_source[] =
     "    for (int i = 0; i < n; i += 1) t = twist(t, i);\n"
     "    return t.a + t.b + t.c + kept(n);\n"
     "}\n"
+    "__attribute__((noinline)) long long control(int n)\n"
+    "{\n"
+    "    long long r = 0;\n"
+    "    int data[8] = { 3, 1, 4, 1, 5, 9, 2, 6 };\n"
+    "    __m128i v = _mm_set1_epi32(n);\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        r += clamp(i * 7 - 20, -5, 30) + classify(i) + twice(i - 3);\n"
+    "        r ^= spin((unsigned)i, i & 7);\n"
+    "        v = pick(v, _mm_set1_epi32(i), i);\n"
+    "    }\n"
+    "    int lanes[4];\n"
+    "    _mm_storeu_si128((__m128i*)lanes, v);\n"
+    "    return r + walk(data, 8) + lanes[0] + lanes[3];\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    uint8_t buffer[640];\n"
@@ -5523,7 +5546,7 @@ static const char check_test_tier1_inline_source[] =
     "    __m512i c = _mm512_set1_epi8(9);\n"
     "    long long out[8];\n"
     "    _mm512_storeu_si512(out, mix(a, b, c));\n"
-    "    printf(\"%llx %llx %llu %lld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9));\n"
+    "    printf(\"%llx %llx %llu %lld %lld %lld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9), control(13), control(4));\n"
     "    return 0;\n"
     "}\n";
 
@@ -5572,8 +5595,11 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
         uint64_t internal = UINT64_MAX;
         const bool reported = built && check_test_tier1_field(text, "inlined", &inlined) && check_test_tier1_field(text, "internal_failures", &internal);
         free(text);
-        snprintf(message, sizeof(message), "--tier1 %s the wrappers' and the struct helper's calls, not the noinline one's (build %u)", inlining ? "inlines" : "keeps", build);
-        check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 10 : inlined == 0), message);
+        // 34: the straight-line wrappers' and the struct helper's calls are 26, which the straight-line splice alone took
+        // (main before #2541), and the helpers with control flow's are 8.
+        snprintf(message, sizeof(message), "--tier1 %s the wrappers', the struct helper's and the control flow helpers' calls, not the noinline one's (build %u)", inlining ? "inlines" : "keeps",
+                 build);
+        check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 34 : inlined == 0), message);
         char actual[256] = { 0 };
         snprintf(message, sizeof(message), "the inlining fixture by --tier1 runs as clang -O0's build does (build %u)", build);
         check_test_expect(test, built && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);

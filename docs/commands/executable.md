@@ -446,7 +446,7 @@ The checks:
   refuses them; and a `__start_`/`__stop_` registry (#1122), whose entries are
   separated by a plain atom of the same bucket and whose weak missing-section
   reference is 0, as a static executable and a static PIE;
-- refusals: assembly with a call of `__tls_get_addr` outside an access
+- refusals: assembly with a call of undefined `__tls_get_addr` outside an access
   (refused naming the symbol), a general-dynamic access without its prefixes
   (its fixup), a pointer to an absolute symbol farther than int32 from the
   image's base (the symbol) and a `lea` of one whose offset from the base

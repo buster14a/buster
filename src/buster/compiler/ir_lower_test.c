@@ -107,7 +107,11 @@ static bool ir_lower_test_frame(IrLowerTestFrame* frame, const IrFunction* funct
     if (ok)
     {
         memset(frame->values, 0, ((uint64_t)function->instruction_count + 1) * sizeof(uint64_t));
-        memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
+        // A call without arguments may pass none (a null pointer), which memcpy may not take even for no bytes.
+        if (count != 0)
+        {
+            memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
+        }
         for (uint32_t s = 0; s < function->slot_count && ok; s += 1)
         {
             // A variadic definition's anchors, as an all-integer call lays them out: the arguments' first six in the
@@ -3607,9 +3611,10 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
-// #2574: a direct symbol's address the function takes at least twice is one value, defined in the preheader, which every
-// entry that takes it reads; one taken once, and one reached through its GOT slot, stay where they are. Both lowering
-// paths give the same IR, and the function's result is the same: (s1 - s1) + (s2 - s1), the globals 8 bytes apart.
+// #2574: a direct symbol's address the function takes at least twice is one value, which every entry that takes it reads,
+// defined at the start of the straight line's one block (#2593: its takes' nearest common dominator, which takes it);
+// one taken once, and one reached through its GOT slot, stay where they are. Both lowering paths give the same IR, and
+// the function's result is the same: (s1 - s1) + (s2 - s1), the globals 8 bytes apart.
 static void ir_lower_test_hoisted_symbols(IrLowerTestTally* tally)
 {
     static const uint8_t kinds[] = {
@@ -3628,8 +3633,8 @@ static void ir_lower_test_hoisted_symbols(IrLowerTestTally* tally)
     static const uint8_t got[3] = { 0, BUSTER_TIER0_ACCESS_GOT, BUSTER_TIER0_ACCESS_DIRECT };
     const uint8_t* accesses[3] = { 0, direct, got };
     const char* names[3] = {
-        "a symbol taken three times is one preheader value; one taken once stays in its block",
-        "a direct symbol by its access column is one preheader value",
+        "a symbol taken three times is one value, defined in its block; one taken once stays its own",
+        "a direct symbol by its access column is one value, defined in its block",
         "a symbol reached through its GOT slot stays in its block",
     };
     Arena output = arena_reserve(1ull << 24);
@@ -3662,14 +3667,15 @@ static void ir_lower_test_hoisted_symbols(IrLowerTestTally* tally)
             {
                 if (function.op[i] == IR_SYMBOL_ADDR)
                 {
+                    // The first address the block computes is symbol 1's, at its start.
+                    first += addresses == 0 && function.a[i] == 1;
                     addresses += 1;
                     preheader += i < function.block_offsets[1];
-                    first += i < function.block_offsets[1] && function.a[i] == 1;
                     pairs &= i + 1 < function.instruction_count && function.op[i + 1] == IR_PTRTOINT && function.a[i + 1] == i;
                 }
             }
             const bool hoisted = variant != 2;
-            ir_lower_test_expect(tally, pairs && addresses == (hoisted ? 2u : 4u) && preheader == (hoisted ? 1u : 0u) && first == preheader, names[variant], 0, variant);
+            ir_lower_test_expect(tally, pairs && addresses == (hoisted ? 2u : 4u) && preheader == 0 && first == 1, names[variant], 0, variant);
             bool fault = false;
             const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 2, &data, globals, 0, 0, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == 8, "the hoisted symbols' function computes the same difference", 0, variant);
@@ -3681,6 +3687,219 @@ static void ir_lower_test_hoisted_symbols(IrLowerTestTally* tally)
     }
     arena_release(&output);
     arena_release(&twin_output);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
+// The symbol_addr instructions of `symbol` in `function`: how many, and in a bit per block (blocks below 32).
+static uint32_t ir_lower_test_symbol_blocks(const IrFunction* function, uint32_t symbol, uint32_t* count)
+{
+    uint32_t blocks = 0;
+    uint32_t block = 0;
+    *count = 0;
+    for (uint32_t i = 0; i < function->instruction_count; i += 1)
+    {
+        while (block + 1 < function->block_count && function->block_offsets[block + 1] <= i)
+        {
+            block += 1;
+        }
+        if (function->op[i] == IR_SYMBOL_ADDR && function->a[i] == symbol)
+        {
+            *count += 1;
+            blocks |= block < 32 ? 1u << block : 0;
+        }
+    }
+    return blocks;
+}
+
+// #2593: where a hoisted address is defined. f's blocks (preheader 0, then each source block's node, b + 1):
+//     1: if (p == 0) goto 8;          a path that takes nothing
+//     2: x = &s1; if (p != 1) goto 4;
+//     3: r = &s2 - &s1 + &s3 - x; goto 7;
+//     4: if (p != 2) goto 6;
+//     5: r = &s2 - x; goto 7;
+//     6: r = 5;
+//     7: return r + (&s3 - &s1);
+//     8: return 7;
+// s1's takes' nearest common dominator is 2, which takes it: one definition, at 2's start, not in 0 or 1. s2's is 2
+// too, but the path through 6 takes it nowhere: its two takes stay their own. s3's is 2, from which every path takes it:
+// one definition, at 2's start after s1's. g's (locals p and r):
+//     1: if (p != 0) goto 3;
+//     2: return 9;
+//     3: r = 0;
+//     4: r = r + (&s4 - &s4) + 1; if (p - 5 != 0) goto 6;      the loop's header
+//     5: &s5; return r + 100;
+//     6: p = p - 1; if (p != 0) goto 4;
+//     7: &s5; return r;
+// s4's takes are in the loop, whose header's immediate dominator, 3, defines it, outside the loop. s5's, on
+// two of its exits, have their nearest common dominator in the loop and none inside it: they stay their own. Both
+// lowering paths give the same IR, which the interpreter runs and promotion takes.
+static void ir_lower_test_hoisted_places(IrLowerTestTally* tally)
+{
+    static const uint8_t f_kinds[] = {
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_ADD, BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t f_classes[] = {
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t f_values[] = {
+        0, 34,
+        1, 1, 0, 1, 0, 17,
+        2, 1, 0, 3, 0, 1, 0, 2, 28,
+        0, 2, 0, 26,
+        2, 1, 0, 2, 28,
+        5, 2,
+        2, 3, 1, 0, 0, 0,
+        7, 0,
+    };
+    static const uint8_t g_kinds[] = {
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD,
+        BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_DISCARD, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_DISCARD, BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t g_classes[] = {
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t g_values[] = {
+        0, 4,
+        9, 0,
+        0, 1,
+        1, 4, 4, 0, 0, 1, 0, 1, 0, 5, 0, 24,
+        5, 0, 1, 100, 0, 0,
+        0, 1, 0, 0, 0, 6,
+        5, 0, 1, 0,
+    };
+    static const uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t local_flags[3] = { 0 };
+    const AbiLocation parameter = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI } };
+    _Static_assert(BUSTER_ARRAY_LENGTH(f_kinds) == BUSTER_ARRAY_LENGTH(f_classes) && BUSTER_ARRAY_LENGTH(f_kinds) == BUSTER_ARRAY_LENGTH(f_values), "f's columns");
+    _Static_assert(BUSTER_ARRAY_LENGTH(g_kinds) == BUSTER_ARRAY_LENGTH(g_classes) && BUSTER_ARRAY_LENGTH(g_kinds) == BUSTER_ARRAY_LENGTH(g_values), "g's columns");
+    const Tier0Function sources[2] = {
+        {
+            .kinds = f_kinds,
+            .classes = f_classes,
+            .values = f_values,
+            .count = BUSTER_ARRAY_LENGTH(f_kinds),
+            .local_classes = local_classes,
+            .local_flags = local_flags,
+            .local_count = 3,
+            .parameter_count = 1,
+            .parameters = &parameter,
+        },
+        {
+            .kinds = g_kinds,
+            .classes = g_classes,
+            .values = g_values,
+            .count = BUSTER_ARRAY_LENGTH(g_kinds),
+            .local_classes = local_classes,
+            .local_flags = local_flags,
+            .local_count = 2,
+            .parameter_count = 1,
+            .parameters = &parameter,
+        },
+    };
+    // f's results for p = 0 to 3, with s1, s2 and s3 at 0, 8 and 16; g's for p = 0, 3 and 7.
+    static const uint64_t f_expected[4] = { 7, 40, 24, 21 };
+    static const uint64_t g_arguments[3] = { 0, 3, 7 };
+    static const uint64_t g_expected[3] = { 9, 3, 103 };
+    Arena output = arena_reserve(1ull << 24);
+    Arena twin_output = arena_reserve(1ull << 24);
+    Arena promoted = arena_reserve(1ull << 24);
+    Arena twin_promoted = arena_reserve(1ull << 24);
+    Arena scratch = arena_reserve(1ull << 24);
+    Arena execution = arena_reserve(1ull << 24);
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    ir_lower_test_expect(tally, ready, "hoisted places' arenas", 0, 0);
+    // Symbol k's global is data.offsets[k - 1]'s.
+    Tier0TestData data = { 0 };
+    data.offsets[1] = 8;
+    data.offsets[2] = 16;
+    data.offsets[3] = 24;
+    data.offsets[4] = 32;
+    uint8_t globals[48] = { 0 };
+    for (uint32_t which = 0; ready && which < 2; which += 1)
+    {
+        const Tier0Function* source = &sources[which];
+        IrFunction function = { 0 };
+        ir_lower_test_expect(tally, tier0_validate(source).error == TIER0_OK && tier0_validate_scalar(source).error == TIER0_OK, "Tier 0 takes the hoisted places' functions", 0, which);
+        if (ir_lower_test_lower(tally, source, IR_I64, 6, &output, &twin_output, &scratch, &function, 0, which))
+        {
+            uint32_t counts[6] = { 0 };
+            uint32_t blocks[6] = { 0 };
+            for (uint32_t symbol = 1; symbol < 6; symbol += 1)
+            {
+                blocks[symbol] = ir_lower_test_symbol_blocks(&function, symbol, &counts[symbol]);
+            }
+            if (which == 0)
+            {
+                // Block 2 defines s1 and then s3, in their first takes' order.
+                uint32_t order = 0;
+                for (uint32_t i = function.block_offsets[2]; i < function.block_offsets[3]; i += 1)
+                {
+                    order = function.op[i] == IR_SYMBOL_ADDR ? order * 4 + function.a[i] : order;
+                }
+                ir_lower_test_expect(tally, counts[1] == 1 && blocks[1] == 1u << 2, "a symbol taken past an early return is defined in its takes' block, past the return", 0, 0);
+                ir_lower_test_expect(tally, counts[2] == 2 && blocks[2] == ((1u << 3) | (1u << 5)), "takes on two of three paths stay their own", 0, 0);
+                ir_lower_test_expect(tally, counts[3] == 1 && blocks[3] == 1u << 2 && order == 1 * 4 + 3, "a symbol every path takes is defined in its takes' common dominator", 0, 0);
+                for (uint64_t p = 0; p < 4; p += 1)
+                {
+                    bool fault = false;
+                    const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 3, &data, globals, &p, 1, &execution, &fault);
+                    ir_lower_test_expect(tally, !fault && actual == f_expected[p], "f's placed addresses compute its results", p, 0);
+                }
+            }
+            else
+            {
+                ir_lower_test_expect(tally, counts[4] == 1 && blocks[4] == 1u << 3, "a symbol taken in a loop is defined before it, in its header's dominator", 0, 1);
+                ir_lower_test_expect(tally, counts[5] == 2 && blocks[5] == ((1u << 5) | (1u << 7)), "takes on a loop's exits stay their own", 0, 1);
+                for (uint32_t k = 0; k < 3; k += 1)
+                {
+                    bool fault = false;
+                    const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 5, &data, globals, &g_arguments[k], 1, &execution, &fault);
+                    ir_lower_test_expect(tally, !fault && actual == g_expected[k], "g's placed addresses compute its results", g_arguments[k], 1);
+                }
+            }
+            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, which);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&promoted, 0);
+        arena_pop_to(&twin_promoted, 0);
+        arena_pop_to(&scratch, 0);
+        arena_pop_to(&execution, 0);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -4540,6 +4759,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_stack(&tally);
         ir_lower_test_indirect_jump(&tally);
         ir_lower_test_hoisted_symbols(&tally);
+        ir_lower_test_hoisted_places(&tally);
         ir_lower_test_depth_types(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =
