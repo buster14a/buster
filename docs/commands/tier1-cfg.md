@@ -21,8 +21,11 @@ requirements. [Command index](README.md).
   registers (#179: k1 to k7 for values, a class with k0 refused, k0 the class's
   scratch, every mask clobbered by a call). Edge moves read each live value's location at the predecessor's exit and
   the successor's entry from one forward sweep of that value's intervals (#1399), and emission resolves a position
-  from the first interval overlapping its block when that column fits. The verifier and the certificate keep the
-  binary search and check both results against it. `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
+  from the first interval overlapping its block when that column fits. Validation fills the position-to-block
+  column that allocation and emission then read (to 2^20 positions), and checks each use against its definition's
+  block start with one compare instead of a search per use and definition. The verifier and the certificate keep the
+  binary search and check both results against it; `test-tier1-cfg` compares the two validations over every
+  placement of a definition and two uses in a small CFG, and runs fixtures and random SSA over random CFGs of the
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
   slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
   around a loop that keeps one slot; `test-tier1-cfg-source` adapts every function `-c`
