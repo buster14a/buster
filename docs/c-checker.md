@@ -11242,7 +11242,11 @@ On a failed parse, the original-token view retains this state-free error at
 proven declaration, statement and record-member boundaries without reading the
 discarded parse tree or reconstructing packing state. It excludes expression,
 initializer and enum interiors, missing-semicolon lookaheads, and ambiguous
-boundaries. Only histories containing target errors enter the error merge.
+boundaries from that semantic error history. The same view retains state-free
+alignment syntax warnings wherever they occur, including when recovery skips a
+nearby annotation, and appends their specific messages and carets through the
+ordinary lexical warning events. Only histories with a nonzero `error_count`
+enter the driver's target-error merge.
 
 `#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
 `check_input_pack_align_warnings`) are clang's, whole output on both paths:

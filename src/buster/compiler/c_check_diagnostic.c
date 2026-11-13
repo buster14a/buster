@@ -849,9 +849,10 @@ static uint32_t check_diagnostic_parse_end(const Parser* parser)
     return end;
 }
 
-// A failed parse may erase the declaration containing an align annotation. Retain only its state-free target
-// error at proven item boundaries; do not derive packing state or inspect that unavailable tree. The delimiter
-// scan admits ordinary function/statement/record bodies and freezes inside expressions, enums and initializers.
+// A failed parse may erase the declaration containing an align annotation. Retain its state-free target error at
+// proven item boundaries and syntax warnings wherever they occur; do not derive packing state or inspect that
+// unavailable tree. The delimiter scan admits ordinary function/statement/record bodies and freezes inside
+// expressions, enums and initializers.
 // Ambiguous bodies remain unproven. Later item boundaries still matter after an earlier recoverable syntax error.
 static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* handled)
 {
@@ -865,6 +866,7 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
     uint32_t previous_end = 0;
     uint32_t previous_token = 0;
     bool valid = true;
+    bool errors = false;
     for (uint32_t p = 0; valid && p < pragmas; p += 1)
     {
         uint32_t source = 0;
@@ -875,7 +877,7 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
         {
             const CheckInputPackPragma record = check_input_pack_align_record(reader, p, source, end, token, &macros);
             valid = !reader->output->resource;
-            if (valid && record.handled == 1 && record.error)
+            if (valid && record.handled == 1 && (record.error || (record.warnings & CHECK_PACK_WARNING_SYNTAX) != 0))
             {
                 if (history == NULL)
                 {
@@ -890,13 +892,14 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
                 if (valid)
                 {
                     history->records[history->count++] = record;
+                    errors |= record.error;
                 }
             }
         }
     }
-    uint32_t* stack = valid && history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    uint32_t* stack = valid && errors ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
     uint8_t* blocks = stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count + 1) : NULL;
-    valid &= history == NULL || blocks != NULL;
+    valid &= !errors || blocks != NULL;
     uint32_t cursor = 0;
     uint32_t depth = 0;
     uint32_t other = 0;
@@ -908,6 +911,10 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
     for (uint32_t r = 0; valid && history != NULL && r < history->count; r += 1)
     {
         CheckInputPackPragma* record = history->records + r;
+        if (!record->error)
+        {
+            continue;
+        }
         while (balanced && cursor < record->token)
         {
             const uint8_t kind = parser->tokens.kinds[cursor];
@@ -981,9 +988,11 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
             low = before ? middle + 1 : low;
             high = before ? high : middle;
         }
-        for (uint32_t r = low; r < history->count && history->records[r].token == diagnostic->token && history->records[r].handled != 0; r += 1)
+        for (uint32_t r = low; r < history->count && history->records[r].token == diagnostic->token && history->records[r].handled == 1; r += 1)
         {
-            history->records[r].handled = 0;
+            // Recovery skips annotations, not the handler's lexical warnings. Mark the whole group as visited
+            // so duplicate parser diagnostics cannot rescan it; retained records regain handled=1 below.
+            history->records[r].handled = history->records[r].error ? 0 : 2;
         }
     }
     if (valid && history != NULL)
@@ -991,15 +1000,16 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
         uint32_t written = 0;
         for (uint32_t r = 0; r < history->count; r += 1)
         {
-            const CheckInputPackPragma record = history->records[r];
-            if (record.handled == 1)
+            CheckInputPackPragma record = history->records[r];
+            if (record.handled != 0)
             {
+                record.handled = 1;
                 history->records[written++] = record;
+                history->error_count += record.error;
                 handled[record.pragma] = 1;
             }
         }
         history->count = written;
-        history->error_count = written;
         reader->output->pack_pragmas = history;
     }
     else if (!valid)
@@ -1008,6 +1018,30 @@ static bool check_diagnostic_original_pack(CheckInputReader* reader, uint8_t* ha
         reader->output->resource = true;
     }
     arena_pop_to(reader->scratch, temporary);
+    return valid;
+}
+
+// Merge the retained syntax warnings after the generic pragma collector, which otherwise replaces the warning
+// view. The ordinary event preserves the align-specific message and caret; no include or packing state is read.
+static bool check_diagnostic_original_pack_warnings(CheckInputReader* reader)
+{
+    const CheckInputPackPragmas* history = reader->output->pack_pragmas;
+    const CheckWarningEvents before = reader->output->pragma_warnings;
+    CheckWarningBuffer buffer = { .arena = reader->arena, .events = (CheckWarningEvent*)before.events, .count = before.count, .capacity = before.count };
+    bool valid = true;
+    for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputPackPragma* record = history->records + i;
+        if ((record->warnings & CHECK_PACK_WARNING_SYNTAX) != 0)
+        {
+            valid = check_input_pack_event(&buffer, record, i, CHECK_WARNING_ID_IGNORED_PRAGMA, CHECK_PACK_MESSAGE_ALIGN, record->diagnostic_source, false, 0);
+        }
+    }
+    if (valid)
+    {
+        reader->output->pragma_warnings = check_warning_view(&buffer);
+    }
+    reader->output->resource |= !valid;
     return valid;
 }
 
@@ -1072,6 +1106,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
         valid = check_input_ignored_pragmas(&reader, handled);
         valid = valid && check_input_symbol_syntax_warnings(&reader);
         valid = valid && check_input_ms_warnings(&reader);
+        valid = valid && check_diagnostic_original_pack_warnings(&reader);
     }
     if (valid)
     {

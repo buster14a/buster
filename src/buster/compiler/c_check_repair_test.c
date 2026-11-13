@@ -133,7 +133,8 @@ static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parse
             output.capacity = limit;
             const bool valid = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
             check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && input.pack_pragmas == NULL &&
-                                   output.length == 33 && scratch.length == 19, "every original pragma output exhaustion rolls back the complete result");
+                                   input.pragma_warnings.events == NULL && input.pragma_warnings.count == 0 && output.length == 33 && scratch.length == 19,
+                              "every original pragma output exhaustion rolls back the complete result");
         }
         output.capacity = capacity;
         const uint64_t scratch_capacity = scratch.capacity;
@@ -145,7 +146,8 @@ static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parse
             recovered = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
             check_test_expect(test, scratch.length == 19 && (recovered ? !input.resource && input.fp_pragma_count != 0 &&
                                    (input.pack_pragmas != NULL ? input.pack_pragmas->error_count : 0) == pack_errors :
-                                   input.resource && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && input.pack_pragmas == NULL && output.length == 33),
+                                   input.resource && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && input.pack_pragmas == NULL &&
+                                   input.pragma_warnings.events == NULL && input.pragma_warnings.count == 0 && output.length == 33),
                               "every original pragma scratch exhaustion rolls back and sufficient storage recovers");
         }
         check_test_expect(test, recovered, "original pragma scan recovers after scratch capacity is restored");
@@ -165,22 +167,25 @@ static void check_test_repair_pack_pragmas(CheckTest* test)
     {
         const char* source;
         uint32_t errors;
+        uint8_t warning;
     } fixtures[] =
     {
-        { "#pragma options align=mac68k\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC FENV_ACCESS UNCERTAIN\nint bad=;\n", 1 },
-        { "int bad=;\n#pragma options align=mac68k\nint next;\n", 1 },
-        { "int bad=;\n#pragma align=mac68k\n", 1 },
-        { "int bad=;\n#pragma align=mac68k\n#pragma options align=mac68k\nint next;\n", 2 },
-        { "void f(void) {\n#pragma align=mac68k\nint bad=;\n}\n", 1 },
-        { "void f(void) { int bad=;\n#pragma align=mac68k\n}\n", 1 },
-        { "void f(void) { {\n#pragma align=mac68k\nint bad=;\n} }\n", 1 },
-        { "struct S {\n#pragma align=mac68k\nint bad=;\n};\n", 1 },
-        { "int bad=\n#pragma align=mac68k\n;\n", 0 },
-        { "int bad\n#pragma align=mac68k\nint next;\n", 0 },
-        { "int bad[]={\n#pragma align=mac68k\n1;};\n", 0 },
-        { "enum E {\n#pragma align=mac68k\nA}; int bad=;\n", 0 },
-        { "#pragma align=mac68k extra\nint bad=;\n", 0 },
-        { "#define mac68k packed\n#pragma align=mac68k\nint bad=;\n", 0 },
+        { "#pragma options align=mac68k\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC FENV_ACCESS UNCERTAIN\n#pragma options foo\nint bad=;\n", 1, CHECK_PACK_ALIGN_EXPECTED_ALIGN },
+        { "int bad=;\n#pragma options align=mac68k\nint next;\n", 1, 0 },
+        { "int bad=;\n#pragma align=mac68k\n", 1, 0 },
+        { "int bad=;\n#pragma align=mac68k\n#pragma options align=mac68k\nint next;\n", 2, 0 },
+        { "void f(void) {\n#pragma align=mac68k\nint bad=;\n}\n", 1, 0 },
+        { "void f(void) { int bad=;\n#pragma align=mac68k\n}\n", 1, 0 },
+        { "void f(void) { {\n#pragma align=mac68k\nint bad=;\n} }\n", 1, 0 },
+        { "struct S {\n#pragma align=mac68k\nint bad=;\n};\n", 1, 0 },
+        { "int bad=\n#pragma align=mac68k\n;\n", 0, 0 },
+        { "int bad\n#pragma align=mac68k\nint next;\n", 0, 0 },
+        { "int bad[]={\n#pragma align=mac68k\n1;};\n", 0, 0 },
+        { "enum E {\n#pragma align=mac68k\nA}; int bad=;\n", 0, 0 },
+        { "#pragma align=mac68k extra\nint bad=;\n", 0, CHECK_PACK_ALIGN_EXTRA },
+        { "#define mac68k packed\n#pragma align=mac68k\nint bad=;\n", 0, 0 },
+        { "int prior=;\n#pragma options align=mac68k\n#pragma options foo\nint value;\n", 1, CHECK_PACK_ALIGN_EXPECTED_ALIGN },
+        { "int bad\n#pragma options foo\n#pragma align=mac68k\nint next;\n", 0, CHECK_PACK_ALIGN_EXPECTED_ALIGN },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
@@ -208,20 +213,33 @@ static void check_test_repair_pack_pragmas(CheckTest* test)
                 CheckInput input;
                 const bool retained = check_diagnostic_original_pragmas(&input, &original, &pp, check_diagnostic_parse_end(&original), &output, &scratch);
                 const CheckInputPackPragmas* history = retained ? input.pack_pragmas : NULL;
+                const uint32_t warnings = fixtures[f].warning != CHECK_PACK_ALIGN_NONE;
                 bool correct = retained && !input.resource && input.pack_log2 == NULL && input.graph.count == 0 && scratch.length == 0 &&
-                               (history != NULL ? history->count : 0) == fixtures[f].errors &&
-                               (history != NULL ? history->error_count : 0) == fixtures[f].errors;
+                               (history != NULL ? history->count : 0) == fixtures[f].errors + warnings &&
+                               (history != NULL ? history->error_count : 0) == fixtures[f].errors && input.pragma_warnings.count == warnings;
                 for (uint32_t r = 0; correct && history != NULL && r < history->count; r += 1)
                 {
                     const CheckInputPackPragma* record = history->records + r;
-                    correct = record->handled == 1 && record->error && record->align && record->operation == CHECK_PACK_UNKNOWN &&
+                    correct = record->handled == 1 && record->align && record->operation == CHECK_PACK_UNKNOWN &&
                               !record->has_alignment && record->depth_before == 0 && record->depth_after == 0 &&
                               history->maximum_depth == 0 && history->unmatched_pushes == 0 && history->current == BUSTER_CHECK_NONE &&
-                              record->diagnostic_source == record->source_begin + 2 &&
+                              (record->error ? record->diagnostic_source == record->source_begin + 2 :
+                                               record->align_warning == fixtures[f].warning && (record->warnings & CHECK_PACK_WARNING_SYNTAX) != 0) &&
                               (r == 0 || history->records[r - 1].source_begin < record->source_begin);
                 }
+                if (correct && warnings != 0)
+                {
+                    const CheckWarningEvent* event = input.pragma_warnings.events;
+                    const CheckInputPackPragma* record = check_input_pack_warning(&input, event);
+                    const char* message = record != NULL ? check_input_pack_message(record, event, &scratch) : NULL;
+                    const char* expected = fixtures[f].warning == CHECK_PACK_ALIGN_EXTRA ? "extra tokens at end of '#pragma align' - ignored" :
+                                                                                         "expected 'align' following '#pragma options' - ignored";
+                    correct = record != NULL && event->id == CHECK_WARNING_ID_IGNORED_PRAGMA && event->source == record->diagnostic_source &&
+                              event->payload.token == record->source_begin && !check_input_pack_semantic(record, event) &&
+                              message != NULL && strcmp(message, expected) == 0;
+                }
                 char description[160];
-                snprintf(description, sizeof(description), "original align boundary fixture %u path %u retains exactly %u state-free errors", f, path, fixtures[f].errors);
+                snprintf(description, sizeof(description), "original align boundary fixture %u path %u retains %u errors and %u syntax warnings", f, path, fixtures[f].errors, warnings);
                 check_test_expect(test, correct, description);
                 if (f == 0 && path == 0)
                 {
