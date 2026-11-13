@@ -4622,7 +4622,8 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // 1 (75 and 39 before). #1840's later families decode rows that took no move (its shifts by an int: 39 rows left; its
     // masks' conversions and lane operations: 33; its permutes of two tables: 27; its bitwise functions, compresses and
     // AES rounds: 24; its masked loads and stores: 16; its one-lane moves: 13; its reductions: 9; its lanes' population
-    // counts, leading zero counts and conflicts: 7), so the bound counts the unit's 45 rows as of the conversions, as it
+    // counts, leading zero counts and conflicts: 7; its byte shuffles by an immediate: 6, AVX2's VEX rows alone), so the
+    // bound counts the unit's 45 rows as of the conversions, as it
     // counts the compares. The floor of 5 rows keeps the unit a machine rows' test as #1840 decodes more of them.
     const uint64_t compares = 11;
     const uint64_t rows = 45;
