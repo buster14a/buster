@@ -3496,7 +3496,10 @@ spellings alone would miss this change (#272).
   extension, `-pedantic-errors`, unless `-Wno-error=` demotes it; and the
   source's `#pragma clang diagnostic` for the group over all of that, which
   the preprocessor follows through push and pop at any depth
-  (`Preprocessor.warning_mappings`). Every other preprocessor warning does the
+  (`Preprocessor.warning_mappings`). The command line's part is read once a
+  unit, at the warning's first use (`pp_warning_command_read`,
+  `Preprocessor.warning_commands`, #2547), and a warning's text is formatted
+  only after its severity says it is given (`pp_diagnose_group`). Every other preprocessor warning does the
   same (#1790, #1970): each is a kind of `PPWarning` (`pp_warnings`) with its
   group's flag, the groups that hold it (`-Wunknown-pragmas` under `-Wpragmas`
   and `-Wall`, `-Wmultichar` under `-Wmost` and `-Wall`), whether it is an
@@ -3521,8 +3524,13 @@ spellings alone would miss this change (#272).
   #2222, `pp_reserved_macro_name`, `CheckMacroName`'s) at the name, before the
   directive's other warnings, but for a `#define` of a feature-test macro
   clang's `isFeatureTestMacro` lists (`_GNU_SOURCE`, `_POSIX_C_SOURCE`,
-  `__STDC_FORMAT_MACROS`, …) and for the predefines' and the command line's
-  definitions. Not given yet (#2222): `-Wgnu-line-marker`, whose place clang
+  `__STDC_FORMAT_MACROS`, …, `pp_feature_macros`) and for the predefines' and
+  the command line's definitions. Off by default, it costs a compile without it
+  one bit's test a directive (#2547, `Preprocessor.warnings_possible`): the
+  unit's first `#define` or `#undef` learns that no location can give it and
+  clears the bit, which each `#pragma clang diagnostic` push, pop or mapping
+  sets again, so the name, the table and the options are read only where it may
+  be given (`c_preprocessor_warning_possible_test.c`). Not given yet (#2222): `-Wgnu-line-marker`, whose place clang
   reads under the numbering before the marker, and `-Wunused-macros`. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
