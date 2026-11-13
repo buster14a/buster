@@ -7,7 +7,8 @@ compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
 
 **Status:** steps 1 to 4 below are implemented as the Develop configuration
 (`./build.sh --config Develop`; [the build guide's "Develop"](commands/build.md#develop),
-#2559). Step 5, Release in parts, is the owner's decision and isn't.
+#2559). Step 5, Release in parts, was measured against its gate and failed
+it, so Release stays whole ([Step 5, measured](#step-5-measured)).
 
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
@@ -49,9 +50,10 @@ has the raw runs, the scripts and the prototype. Part of
   lines, not variables. Release and Debug are untouched.
 - **Later steps, each a decision of its own:** Release itself in parts (at the
   limit where its speed measured +0.12% and +0.14%, inside the floor, a clean
-  build takes 77.5 s and an edit 35.8 s); a unit compiled by the compiler
-  itself (2 s, for a compile path 3.4 to 5.4 times slower); the units' sources
-  split so that front ends run in parallel too.
+  build takes 77.5 s and an edit 35.8 s; measured over every benchmark as
+  step 5, it failed: `benchmark-assembler` ran 9.6% slower); a unit compiled
+  by the compiler itself (2 s, for a compile path 3.4 to 5.4 times slower);
+  the units' sources split so that front ends run in parallel too.
 - **Found on the way:** CI's toolchain on the 9700X can't build #2058's parts
   (lever 7): a clean Release build with it compiles the units whole and takes
   97.1 s, where the same clang with the parts takes 68.9 s.
@@ -276,7 +278,8 @@ parts), against 83.1 s and 72.6 s.
 **Evidence.** As a configuration of its own, this lever changes nothing of
 Release: byte identity of Release's executable is its gate. For Release
 itself it is a code change, and the table is its A/B on two workloads; the
-9700X job's whole measure would decide it.
+9700X job's whole measure decided against it (step 5,
+[measured](#step-5-measured)).
 
 ### 2. Unoptimized tests in the units that still optimize them
 
@@ -676,6 +679,8 @@ expected edits of the first, third and fourth files are 10.1 s, 10.0 s and
    - Without this step Release's clean build stays bound by the checker's
      unit's chain: 83 s by the host's clang, 69 s by CI's once CI's toolchain
      can build the parts.
+   - *Measured:* outside the floor ([below](#step-5-measured)); Release stays
+     whole.
 
 Not steps of this design, and why: one unit self-built (lever 6) waits for
 the tiers' code, which is others' work; the sources' split (lever 4) is a
@@ -698,6 +703,53 @@ because a part's object depends on nothing but its bitcode and its command.
   step, not a later one.
 - **For step 5:** any gated benchmark outside its floor at the 300 limit.
   Then Release stays whole, and the design is Develop alone.
+
+### Step 5, measured
+
+On 2026-11-13, at main `e22f84ea`, Release was built in parts as step 5 says
+(Develop's splitter before the optimizer, bodies of up to 300 instructions
+read, single callers, by file, `-g` kept; without debug information the units
+compiled with line tables for the plan and the parts were written without
+them) and compared with the whole build as the 9700X job builds it
+([the record](https://github.com/buster14a/buster-performance/tree/29f92f071ec9bed1662d4619a435bea0e44a41ba/docs/measurements/release-in-parts-2559-2026-11-13)):
+
+- **The build gained what the design said:** a clean build 77.6 s against
+  86.4 s (567 s of CPU against 502 s), an edit of `c_check_input.c` 32.5 s
+  against 75.1 s (47 of the checker's 49 parts, DWARF 5's checksums), and
+  15.0 s against 62.0 s without debug information (one part). A rebuilt
+  executable was a clean build's, and the executable wrote the whole build's
+  bytes for all 69 outputs (`sqlite3.c` and the `main.c` units, `-c` at both
+  tiers and `-E`).
+- **The compiler didn't:** `benchmark-assembler` ran +9.57% user cycles over
+  four placements (+9.04% to +10.02%; the base against itself -0.70% to
+  +0.42%), with 10.5% more instructions, and of the 9700X job's 69 benchmarks
+  of the compiler's own code nine more executed 0.7% to 15% more
+  instructions (`benchmark-environments` +15%, `benchmark-lowering` +3.4%).
+  The two workloads above stayed within 0.4%.
+- **Why:** a body a part reads in its callers' parts gave the static
+  functions it calls a hidden alias in their own part, a use that stopped the
+  owner's inliner from inlining them as the last call to a static function,
+  as the whole unit does whatever their size (`asm_layout` and `asm_emit` into
+  `asm_assemble`); a part that read a table of strings didn't read the strings
+  it names, so `strlen` of each didn't fold (46 calls in `asm_instruction`
+  against the whole unit's 16); and benchmarks lost the kernels they measure
+  inlined, which are larger than the limit and in other files' parts.
+- **Five changes to the splitter** (no part reads a body that calls a static
+  function only its own part calls; static functions read by other parts go
+  to them as local copies, with no alias in their own part; a part that reads
+  a table reads the constants it names; benchmarks read the bodies they call)
+  brought every benchmark but two within 0.8% of the whole build's
+  instructions; `benchmark-ir-optimize-passes` (+3.7%) measured inside its
+  floor over the placements, and `benchmark-assembler` +4.55% (+4.08% to
+  +5.45%; floor -0.50% to +0.60%), still outside: `arena_reserve`,
+  `scratch_begin` and the register cache's vector helpers stay outlined where
+  the whole unit inlines them. The record
+  has the changes as patches; the tables' constants also bear on Develop,
+  whose parts read the same tables.
+
+So, by the rule above, Release stays whole and the design is Develop alone.
+A later attempt starts from the record's improved splitter and the
+assembler's remaining calls.
 
 ### Risks
 
