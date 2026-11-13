@@ -1064,7 +1064,7 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 {
     *phase = PP_DIAGNOSTIC_SEMANTIC;
     const uint32_t runtime = CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
-                             CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW;
+                             CHECK_WARNING_SHIFT_NEGATIVE_VALUE;
     uint32_t boundary = token;
     const Parser* publication_parser = parser;
     bool completed = false;
