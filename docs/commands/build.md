@@ -776,6 +776,30 @@ sanitizer tree's Develop units still compile whole (below). `BUSTER_DEBUG_INFO`
 changes no sanitizer build: its units have line tables either way, in the same
 tree.
 
+**Measured** on the 9700X, clean builds at `-O3` with the host's clang 23.1.1,
+whole against in parts ([the record](https://github.com/buster14a/buster-performance/tree/b6b0666ca131c5ab26cec4b085878d8fcd7e0b54/docs/measurements/sanitizer-build-parts-2639-2026-11-13)):
+
+| Shape | Build | Whole | In parts |
+| --- | --- | ---: | ---: |
+| 8 cores, 8 jobs | native MSan | 346.5 s | 188.7 s |
+| | native ASan | 282.7 s | 199.6 s |
+| | native TSan | 117.4 s | 81.5 s |
+| 2 cores of 2 threads, 4 jobs (a hosted runner's, as CI builds there) | x86-64 MSan | 314.8 s | 258.2 s |
+| | vector ASan | 365.3 s | 367.1 s |
+| the same, 2 jobs (`build.sh`'s default there) | x86-64 MSan | 312.7 s | 324.5 s |
+| 4 cores, 4 jobs | x86-64 MSan | 266.9 s | 186.5 s |
+
+The checker's unit took 345.7 s whole under MSan, 318 s of it compiled alone:
+the front end 6.8 s, the optimizer 86.5 s (the MSan pass 2.0 s) and code
+generation 224.6 s, which the parts divide; its bitcode compile, 130.5 s in the
+build, is now the critical path. The parts add 5% to 13% of user time, which a
+build bound by its work pays: 2 jobs on 2 cores, and the vector ASan build,
+whose benchmark units are 29% of its work. The executables are the whole
+builds' function for function, every function at one offset from where it was
+(the joined parts' merged constants move `.rodata`'s end by 50 to 66 KB), with
+the same instructions but for the padding between parts and, in the
+fixed-address ASan executable, the moved data's addresses.
+
 ## Develop
 
 The edit loop's configuration (#2559; [A faster stage 1 build](../stage1-build-design.md)
