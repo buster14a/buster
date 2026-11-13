@@ -9,8 +9,10 @@ on its own, and 223 with both, [below](#one-file-a-sweep): their expressions cos
 more a node; T's per-unit answers for calls then take 13 to 15 off the three,
 [below](#calls-cost-in-t-two-per-unit-answers)), and it now codes every operator
 the census takes (calls, `&&`, `||` and `?:` [below](#calls), the increments and
-the compound assignments [below](#increments-and-compound-assignments)). No
-compile takes it. Its gains are estimates that
+the compound assignments [below](#increments-and-compound-assignments)). T's
+direct rules now type nearly every node it sent to the action: a twentieth of
+`sqlite3.c`'s typed operators and a quarter of Lua's
+([below](#ts-rules-for-the-actions-nodes)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -1020,7 +1022,8 @@ instructions.
 The two costs of T's own that calls brought are now answered from per-unit state
 ([the record](https://github.com/buster14a/buster-performance/tree/1e57bdc259d8b9ddcb6b791440d719e7f722eed4/docs/measurements/node-machine-call-cost-2524-2026-11-12)):
 
-- **The callee's pointer type.** `NodeMachine.function_pointers` holds a
+- **The callee's pointer type.** `NodeMachine.function_pointers` (now
+  `pointers`, for every type: [below](#ts-rules-for-the-actions-nodes)) holds a
   function type's pointer type by type index, filled at the type's first
   designator by `type_pointer`, its twin. A callee's conversion, and a function
   argument's, is then one load.
@@ -1348,6 +1351,112 @@ byte. The rest would take a second byte, written where T writes a value. With
 it, C's row is one lookup on (code, context, standing, class), and X's row is
 C's choice at no extra cost. The record is the baseline that version has to
 beat.
+
+### T's rules for the action's nodes
+
+T typed 13,987 of `sqlite3.c`'s evaluated nodes and 9,370 of Lua's by the
+action, on whole values. They were a few shapes, counted on main `df85213e` by a
+diagnostic in T's action branch (#2619's record):
+
+| what went to the action | `sqlite3.c` | Lua 5.4.8 |
+| --- | ---: | ---: |
+| integer constant folds (`-1`, `A \| B`, `1 << 4`, `~0`) | 3,417 | 4,947 |
+| casts | 3,325 | 2,800 |
+| a static object's member (`.` of an address constant) | 2,144 | 213 |
+| stores (of a null pointer constant, of another pointee's pointer) | 1,276 | 417 |
+| a pointer and a null pointer constant (`p == 0`, `p == NULL`) | 1,266 | 187 |
+| `sizeof`, `_Alignof` | 928 | 373 |
+| `?:` | 641 | 376 |
+| a static array's subscripts | 471 | 61 |
+| the comma | 361 | 576 |
+| other | 524 | 370 |
+
+(The diagnostic counts a few nodes twice, which the shadow's own report
+doesn't.) Each now has a direct rule in T (`c_check_node_machine_type.c`), its
+action's own steps behind a guard, with the action as its twin under
+`--verify`:
+
+- **The folds** (`node_machine_fold`) take an operator's row for its
+  conversions and result type, and `check_action_fold_integer`'s steps for the
+  value, on rvalue integer constants of builtin types up to 64 bits. A fold
+  that faults stays the action's.
+- **The casts** (`node_machine_cast`), to void, an integer or a pointer, of an
+  integer or a pointer: on the columns where the operand has no constant, and
+  made whole for `check_action_conversion` where it has one.
+- **A member and a subscript of an address constant** keep it: the base's
+  offset plus the member's bytes, or the index's elements.
+- **A pointer's equality with a null pointer constant**
+  (`node_machine_null_compare`), **`sizeof` and `_Alignof`**
+  (`node_machine_query`, of a type name too), **the comma**
+  (`node_machine_comma`) and **`?:`** (`node_machine_conditional`, arms of
+  builtin arithmetic types or a void one).
+- **Stores** take a null pointer constant and a pointer
+  `node_machine_pointer_assignable` takes, converted whole.
+
+Two more changes came with them:
+
+- **`NodeMachine.pointers` and `const_pointers`** (`function_pointers`
+  before) hold any type's pointer type, unqualified and const. An array's decay
+  and an address are now one load, as a function designator's conversion was.
+  The const types' column comes after the machine's other arrays, which stay
+  where the function types' column left them.
+- **A call's value** goes onto the columns without being made whole.
+
+**A latent bug, found on the way.** The store rule converted a plain `char`
+constant by the bake's signedness, which knows nothing of `-funsigned-char`:
+`y = (char)200` gave −56 where the action gives 200. The corpora don't use the
+option, so their runs didn't show it. A char's signedness is now the unit's
+(`node_machine_integer_sign`), and the shadow's fixture runs once more with
+`-funsigned-char`.
+
+The action now types 716 of `sqlite3.c`'s nodes, 626 of Lua's and 887 of
+musl's. `--verify` shows no difference on the three, with `-g` too, nor on
+`main.c`.
+
+On the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/0dcf998f0cf53a7c54fd7e0c61e12ffd1fabcf66/docs/measurements/node-machine-action-rules-2524-2026-11-13)),
+against main `df85213e` (CPU 2, under the lock, `--passes 11`, medians of runs
+taken in turn), in cycles and instructions a taken node. `v1` is the folds,
+casts, members, null comparisons, `sizeof`, comma, subscripts and stores; `v3`
+adds `?:`, the pointer column and a call's value; the pull request's code is
+`v5`, below:
+
+| | T | T, C and X | the three, two runs (`--repeat 2`) |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, main | 107.2, 391.2 | 203.1, 694.8 | 351.6 |
+| `sqlite3.c`, `v1` | 102.0, 376.4 | 198.9, 680.1 | 346.3 |
+| `sqlite3.c`, `v3` | 99.7, 365.3 | 198.8, 668.9 | 347.1 |
+| `sqlite3.c`, `v5` | **102.0, 369.2** | **196.5, 672.8** | **340.8** |
+| Lua, main | 116.9, 555.1 | 191.4, 855.6 | 363.2 |
+| Lua, `v5` | **96.3, 464.4** | **170.1, 765.0** | **318.8** |
+
+- **The rules take 26 of T's instructions a node on `sqlite3.c` and 94 on
+  Lua.** A quarter of Lua's typed operators went to the action (its constant
+  shifts, `+`, `~` and casts), against a twentieth of `sqlite3.c`'s. All three
+  sweeps are 3.2% cheaper on `sqlite3.c` and 11.1% on Lua.
+- **X's cycles followed T's code, not its own.** At `v3` X ran 43.0 cycles a
+  node on `sqlite3.c` against main's 39.5, with the same 103.9 instructions.
+  The pointer column's size wasn't the cause: `v4`, which put the machine's
+  other arrays back where main had them, measured as `v3`. The new rules had
+  grown T past clang's threshold, and it had taken the member, truth and logic
+  rules out of T's loop (the member rule alone was 6% of the profile). `v5`
+  inlines them again, as main had them: T runs 4 instructions more than at
+  `v3`, X is back at 39.4 cycles, and the three sweeps cost the least of every
+  version. **A change to T should compare its executable's
+  `nm | grep node_machine_` with main's**, as #2577 found for C and X.
+- **What T has left is its inputs.** `node_machine_action` and the
+  `check_action_*` functions fall from 9.5% of the profile to 1.9%, and the
+  type table's interning from 1.2% to 0.5%. T's heaviest lines are the leaves'
+  records, the graph's op, context and operand columns, and the type words.
+  Step 2's parser tree replaces them.
+- **`-c sqlite3.c` is unchanged:** 123.6 ms against main's 123.9, with the
+  same instructions.
+
+Step 1's gate asks for 120 cycles a node for the three sweeps; this is 196.5.
+What remains of T's own work is the action's last nodes (`?:` of other arms,
+pointers' comparisons and differences, floating casts, unary `+` of a
+variable) and a call's per-call type queries; most of its cycles are its
+inputs.
 
 ## Expected gains
 
