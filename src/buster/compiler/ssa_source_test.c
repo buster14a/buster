@@ -34,9 +34,9 @@
 // an empty environment in this mode, including libc's getenv, as well as main's explicit envp.
 //
 // Given more than one CPU (test_process_cpus: the parallel runner's grant, or the CPUs the process may run on), the
-// files and generated programs run as parts, a child process each (test_process.c), one per CPU at once, each running
-// its program's forms in turn rather than at once, a part starting as soon as another ends; their lines come in the
-// items' order (ssa_source_items, #2658).
+// files and generated programs run as parts, a child process each (test_process.c), on the command's CPUs as tokens of
+// a pool (SsaSourcePool, as make's jobserver keeps them): a part holds one from its start to its end, and its program's
+// forms run at once on as many more as it can borrow. Their lines come in the items' order (ssa_source_items, #2658).
 //
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
 // with its functions, each path's phis and its runs, a line per failure, and the totals; the exit status is 1 on any
@@ -51,6 +51,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 // The forms a program runs in: its functions' IR with every local in memory, and promoted by each path.
@@ -129,10 +130,89 @@ struct SsaSourceLimits
     // The actual compiler and its original working directory, borrowed for the command's duration.
     const char* compiler;
     const char* directory;
-    // Each program's forms one after another rather than at once: in a part (ssa_source_items), whose command's parts
-    // already keep its CPUs busy, one each.
-    bool forms_in_turn;
+    // The command's CPUs as tokens (ssa_source_items), where its items run as parts: a part holds one, and its forms
+    // run at once only on as many as it can borrow besides. Null where the command runs in one process.
+    const struct SsaSourcePool* pool;
 };
+
+// A command's CPUs as tokens, a byte each in a pipe, as make's jobserver keeps them (#2658): `take` reads one without
+// waiting, `give` writes one back. Both ends close on exec, so the programs and compilers the parts start hold none.
+typedef struct SsaSourcePool SsaSourcePool;
+struct SsaSourcePool
+{
+    int take;
+    int give;
+};
+
+// The pool's pipe into `ends`: its ends closed on exec and its reading end not waiting. Whether it could be made.
+static bool ssa_source_pool_open(int* ends)
+{
+    bool made = pipe(ends) == 0;
+    made = made && fcntl(ends[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(ends[1], F_SETFD, FD_CLOEXEC) == 0;
+    const int flags = made ? fcntl(ends[0], F_GETFL) : -1;
+    made = made && flags >= 0 && fcntl(ends[0], F_SETFL, flags | O_NONBLOCK) == 0;
+    if (!made && ends[0] >= 0)
+    {
+        close(ends[0]);
+        close(ends[1]);
+        ends[0] = -1;
+        ends[1] = -1;
+    }
+    return made;
+}
+
+// Takes a token: whether one was free.
+static bool ssa_source_pool_take(const SsaSourcePool* pool)
+{
+    char token = 0;
+    return read(pool->take, &token, 1) == 1;
+}
+
+// Whether the child `child` has ended, without reaping it (ssa_source_finish_form waits for it).
+static bool ssa_source_child_ended(pid_t child)
+{
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    const int checked = child > 0 ? waitid(P_PID, (id_t)child, &info, WEXITED | WNOHANG | WNOWAIT) : -1;
+    return checked != 0 || info.si_pid == child;
+}
+
+// Waits for a token or for the child `child` (a running form's) to end, whichever comes first: whether it took a token.
+// It waits in poll, on the pool's pipe and the child's pidfd, or, where the kernel has no pidfd, for at most 20 ms at a
+// time between looks at the child.
+static bool ssa_source_pool_wait(const SsaSourcePool* pool, pid_t child)
+{
+#ifdef SYS_pidfd_open
+    const int pidfd = child > 0 ? (int)syscall(SYS_pidfd_open, child, 0) : -1;
+#else
+    const int pidfd = -1;
+#endif
+    bool taken = ssa_source_pool_take(pool);
+    bool ended = !taken && ssa_source_child_ended(child);
+    while (!taken && !ended)
+    {
+        struct pollfd watched[2] = {
+            { .fd = pool->take, .events = POLLIN },
+            { .fd = pidfd, .events = POLLIN },
+        };
+        const int woken = poll(watched, pidfd >= 0 ? 2 : 1, pidfd >= 0 ? -1 : 20);
+        taken = ssa_source_pool_take(pool);
+        ended = !taken && ((woken > 0 && pidfd >= 0 && (watched[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) || ssa_source_child_ended(child));
+    }
+    if (pidfd >= 0)
+    {
+        close(pidfd);
+    }
+    return taken;
+}
+
+// Gives a token back.
+static void ssa_source_pool_give(const SsaSourcePool* pool)
+{
+    const char token = '+';
+    const ssize_t written = write(pool->give, &token, 1);
+    (void)written;
+}
 
 // What a run of a form gave: its process, its wait status (-1 if it couldn't be waited for), its output (malloc's), and
 // whether its interpreter returned, with what, as its record says (else the program ended by itself: exit, a signal,
@@ -599,17 +679,30 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
     }
     SsaSourceRun runs[BUSTER_SSA_SOURCE_FORMS];
     memset(runs, 0, sizeof(runs));
+    // In a part, each running form holds a token: the first the part's own, each other one it borrows from the pool,
+    // or the token of the oldest running form, if that one ends before a token is free. Alone, every form at once.
+    bool borrowed[BUSTER_SSA_SOURCE_FORMS] = { false };
+    uint32_t oldest = 0;
     for (uint32_t form = 0; passed && form < form_count; form += 1)
     {
-        ssa_source_start_form(&runs[form], file, forms[form], entry, directories[form], limits);
-        if (limits->forms_in_turn)
+        const SsaSourcePool* pool = limits->pool;
+        borrowed[form] = pool != 0 && form != 0 && ssa_source_pool_wait(pool, runs[oldest].child);
+        if (pool != 0 && form != 0 && !borrowed[form])
         {
-            ssa_source_finish_form(&runs[form], directories[form]);
+            ssa_source_finish_form(&runs[oldest], directories[oldest]);
+            borrowed[form] = borrowed[oldest];
+            borrowed[oldest] = false;
+            oldest += 1;
         }
+        ssa_source_start_form(&runs[form], file, forms[form], entry, directories[form], limits);
     }
-    for (uint32_t form = 0; passed && !limits->forms_in_turn && form < form_count; form += 1)
+    for (uint32_t form = oldest; passed && form < form_count; form += 1)
     {
         ssa_source_finish_form(&runs[form], directories[form]);
+        if (borrowed[form])
+        {
+            ssa_source_pool_give(limits->pool);
+        }
     }
     *steps = runs[0].result.steps;
     steps[1] = runs[1].result.steps;
@@ -937,46 +1030,90 @@ static void ssa_source_add(SsaSourceTotals* totals, const SsaSourceTotals* part)
     totals->native_functions[1] += part->native_functions[1];
 }
 
-// How many parts may have started past the oldest one whose report is still to come, per CPU: what a slow item holds the
-// others' reports back by before it holds back their starts.
-#define BUSTER_SSA_SOURCE_WINDOW 8
+// A part's report, kept from when it ends until every part before it has reported: its counts, its standard output and
+// errors (open_memstream's), and whether it ran to its end and sent them.
+typedef struct SsaSourceReport SsaSourceReport;
+struct SsaSourceReport
+{
+    SsaSourceTotals totals;
+    char* output;
+    size_t output_length;
+    char* errors;
+    size_t errors_length;
+    bool ran;
+    bool ended;
+};
+
+// Collects a part that ended: its counts and output into `report`, its token back to `pool`.
+static void ssa_source_collect(TestProcess* process, SsaSourceReport* report, const SsaSourcePool* pool)
+{
+    FILE* output = open_memstream(&report->output, &report->output_length);
+    FILE* errors = open_memstream(&report->errors, &report->errors_length);
+    report->ran = output != 0 && errors != 0 && test_process_finish_to(process, &report->totals, sizeof(report->totals), output, errors);
+    report->ran = (output == 0 || fclose(output) == 0) && report->ran;
+    report->ran = (errors == 0 || fclose(errors) == 0) && report->ran;
+    report->ended = true;
+    ssa_source_pool_give(pool);
+}
 
 // Every item of `items`, into `totals`. With one CPU (test_process_cpus: the parallel runner's grant), in this process,
-// each program's forms at once, as the command ran before #2658. With more, each item is a part (test_process.c): a
-// child process of its own, at most one per CPU at once, which runs its program's forms in turn, so that the parts keep
-// the command's CPUs busy rather than an item's longest form and its serial preparation and native builds leaving
-// them idle (the c-testsuite comparison kept 0.70 of its 4 CPUs busy in every hosted sanitizer row). A part starts as
-// soon as any other ends, and the parts' lines come in the items' order, as one after another would print them. A part
-// that couldn't start or didn't send its counts fails its item.
+// each program's forms at once, as the command ran before #2658. With more, each item is a part (test_process.c): a child
+// process of its own, which holds one of the command's CPUs, a token of a pool of them, from its start to its end. Its
+// program's forms run at once on the tokens it can borrow besides, so that the items' serial preparation and native
+// builds, and each program's longest form, leave no CPU idle (the c-testsuite comparison, one file at a time, kept
+// 0.70 of its 4 CPUs busy in every hosted sanitizer row), and a long program's forms spread over the CPUs the others
+// leave at the end. A part is collected as soon as it ends, and the parts' lines come in the items' order, as one after
+// another would print them. A part that couldn't start or didn't send its counts fails its item.
 static void ssa_source_items(SsaSourceTotals* totals, const SsaSourceItems* items, SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* limits, bool keep)
 {
     const uint32_t count = items->file_count + items->generate;
     const uint32_t cpus = test_process_cpus();
     SsaGenerator* generator = malloc(sizeof(SsaGenerator));
     char* text = malloc(BUSTER_SSA_SOURCE_TEXT);
-    const bool parts = cpus > 1 && count > 1;
+    int ends[2] = { -1, -1 };
+    const bool parts = cpus > 1 && count > 1 && ssa_source_pool_open(ends);
     for (uint32_t item = 0; !parts && item < count; item += 1)
     {
         ssa_source_item(totals, items, item, arenas, work, limits, keep, generator, text);
     }
+    const SsaSourcePool pool = { .take = ends[0], .give = ends[1] };
     TestProcess* processes = parts ? calloc(count, sizeof(TestProcess)) : 0;
-    bool* ended = parts ? calloc(count, sizeof(bool)) : 0;
-    struct pollfd* polled = parts ? calloc(count, sizeof(struct pollfd)) : 0;
-    const bool ready = processes != 0 && ended != 0 && polled != 0;
+    SsaSourceReport* reports = parts ? calloc(count, sizeof(SsaSourceReport)) : 0;
+    struct pollfd* polled = parts ? calloc((size_t)count + 1, sizeof(struct pollfd)) : 0;
+    uint32_t* watched = parts ? calloc(count, sizeof(uint32_t)) : 0;
+    const bool ready = processes != 0 && reports != 0 && polled != 0 && watched != 0;
     if (parts && !ready)
     {
         totals->failed_files += count;
         printf("test-ssa-source: memory ran out for the %u items' parts\n", count);
     }
+    for (uint32_t token = 0; ready && token < cpus; token += 1)
+    {
+        ssa_source_pool_give(&pool);
+    }
     SsaSourceLimits part_limits = *limits;
-    part_limits.forms_in_turn = true;
-    const uint64_t window = (uint64_t)cpus * BUSTER_SSA_SOURCE_WINDOW;
+    part_limits.pool = &pool;
     uint32_t started = 0;
     uint32_t finished = 0;
     uint32_t running = 0;
     while (ready && finished < count)
     {
-        while (started < count && running < cpus && started - finished < window)
+        // A token lost to a part that ended without giving back what its forms borrowed: with no part running, the
+        // pool holds every token again.
+        bool taken = started < count && ssa_source_pool_take(&pool);
+        if (started < count && !taken && running == 0)
+        {
+            char token = 0;
+            while (read(pool.take, &token, 1) == 1)
+            {
+            }
+            for (uint32_t i = 0; i < cpus; i += 1)
+            {
+                ssa_source_pool_give(&pool);
+            }
+            taken = ssa_source_pool_take(&pool);
+        }
+        while (taken)
         {
             if (test_process_start(&processes[started]))
             {
@@ -984,48 +1121,69 @@ static void ssa_source_items(SsaSourceTotals* totals, const SsaSourceItems* item
                 ssa_source_item(&part, items, started, arenas, work, &part_limits, keep, generator, text);
                 test_process_exit(&processes[started], &part, sizeof(part));
             }
-            ended[started] = processes[started].pid <= 0;
-            running += ended[started] ? 0 : 1;
+            if (processes[started].pid > 0)
+            {
+                running += 1;
+            }
+            else
+            {
+                ssa_source_collect(&processes[started], &reports[started], &pool);
+            }
             started += 1;
+            taken = started < count && ssa_source_pool_take(&pool);
         }
-        // The oldest part still running: wait for any running part to send its counts or end (its pipe's end).
-        uint32_t watched = 0;
-        for (uint32_t i = finished; !ended[finished] && i < started; i += 1)
+        // Wait for a running part to send its counts or end (its pipe's end), or, with items left, for a token.
+        uint32_t polls = 0;
+        for (uint32_t i = finished; i < started; i += 1)
         {
-            if (!ended[i])
+            if (!reports[i].ended)
             {
-                polled[watched] = (struct pollfd){ .fd = processes[i].result, .events = POLLIN };
-                watched += 1;
+                polled[polls] = (struct pollfd){ .fd = processes[i].result, .events = POLLIN };
+                watched[polls] = i;
+                polls += 1;
             }
         }
-        const int woken = watched != 0 ? poll(polled, watched, -1) : 0;
-        uint32_t at = 0;
-        for (uint32_t i = finished; woken > 0 && i < started; i += 1)
+        const uint32_t parts_polled = polls;
+        if (started < count)
         {
-            if (!ended[i])
+            polled[polls] = (struct pollfd){ .fd = pool.take, .events = POLLIN };
+            polls += 1;
+        }
+        const int woken = polls != 0 ? poll(polled, polls, -1) : 0;
+        for (uint32_t p = 0; woken > 0 && p < parts_polled; p += 1)
+        {
+            if ((polled[p].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0)
             {
-                const bool done = (polled[at].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0;
-                ended[i] = done;
-                running -= done ? 1 : 0;
-                at += 1;
+                ssa_source_collect(&processes[watched[p]], &reports[watched[p]], &pool);
+                running -= 1;
             }
         }
-        while (finished < started && ended[finished])
+        while (finished < started && reports[finished].ended)
         {
-            SsaSourceTotals part = { 0 };
-            const bool ran = test_process_finish(&processes[finished], &part, sizeof(part));
-            ssa_source_add(totals, &part);
-            if (!ran)
+            SsaSourceReport* report = &reports[finished];
+            ssa_source_add(totals, &report->totals);
+            const bool printed = (report->output_length == 0 || fwrite(report->output, 1, report->output_length, stdout) == report->output_length) &&
+                                 (report->errors_length == 0 || fwrite(report->errors, 1, report->errors_length, stderr) == report->errors_length);
+            if (!report->ran || !printed)
             {
                 totals->failed_files += 1;
-                printf("test-ssa-source: item %u's part (%s) didn't run to its end or send its counts\n", finished,
+                printf("test-ssa-source: item %u's part (%s) didn't run to its end, send its counts or print its output\n", finished,
                        finished < items->file_count ? items->files[finished] : "a generated program");
             }
+            fflush(stdout);
+            free(report->output);
+            free(report->errors);
             finished += 1;
         }
     }
+    if (parts)
+    {
+        close(ends[0]);
+        close(ends[1]);
+    }
+    free(watched);
     free(polled);
-    free(ended);
+    free(reports);
     free(processes);
     free(text);
     free(generator);
@@ -1357,7 +1515,7 @@ static int run_ssa_source_tests(int count, char** arguments)
         .tier1 = tier1,
         .compiler = compiler,
         .directory = directory,
-        .forms_in_turn = false,
+        .pool = 0,
     };
     SsaSourceTotals totals = { 0 };
     const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work, &limits);
