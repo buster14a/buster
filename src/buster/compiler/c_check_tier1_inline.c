@@ -46,10 +46,14 @@
 
 // A candidate's summary (the file's comment): what Tier 1's passes made of its lowering with its calls expanded, the
 // function its callers copy and its own code goes on from, with its verified analysis, and the calls expanded in it.
+// The analysis's arena is `frozen`, a copy of its builder's analyses arena as it was once the summary was built:
+// ir_verified_current reads the arena's length, and the builder's own goes on growing as it builds more, on its lane,
+// while another lane's code reads the summary. Nothing writes the copy once the summary is published.
 typedef struct CheckTier1Summary CheckTier1Summary;
 struct CheckTier1Summary
 {
     CheckTier1Passes passes;
+    Arena frozen;
     uint32_t inlined;
 };
 
@@ -527,6 +531,11 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
         arena_pop_to(analyses, built ? analyses->length : analyses_mark);
     }
     inlining->summaries[b] = built ? summary : (CheckTier1Summary){ 0 };
+    if (built)
+    {
+        inlining->summaries[b].frozen = *analyses;
+        inlining->summaries[b].passes.analysis.arena = &inlining->summaries[b].frozen;
+    }
     arena_pop_to(&lane->steps[1], 0);
     arena_pop_to(&lane->steps[2], 0);
     arena_pop_to(&lane->steps[4], 0);
