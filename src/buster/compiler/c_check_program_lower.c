@@ -570,6 +570,12 @@ struct CheckLowerAbi
 // flag, which check_lower_finish numbers after the tables' (CheckProgramLowered.case_symbol_base).
 #define BUSTER_CHECK_LOWER_CASE_SYMBOL UINT32_C(0x40000000)
 
+// Keep the small sparse chain; large Tier 1 switches use median splits with at most four intervals at each leaf.
+// The admission threshold deliberately leaves the issue's competitive 100-case chain unchanged (#1371).
+#define BUSTER_CHECK_LOWER_TREE_MIN_CASES 128u
+#define BUSTER_CHECK_LOWER_TREE_LEAF_CASES 4u
+#define BUSTER_CHECK_LOWER_TREE_DEPTH 32u
+
 // One of a switch's cases while its jump table is decided: its first and last values as keys in unsigned order (a signed
 // class's sign bit flipped), and its label (a control entry's index).
 typedef struct CheckLowerCaseRange CheckLowerCaseRange;
@@ -578,6 +584,30 @@ struct CheckLowerCaseRange
     uint64_t lower;
     uint64_t upper;
     uint32_t label;
+    // The original case keeps the converted constant's type and bits, independently of the ordering keys.
+    uint32_t item;
+};
+
+// A sparse dispatch, prepared alongside jump tables and read by every lowering lane. The sorted intervals borrow
+// shared scratch, never expand ranges, and refer to the original case labels. `controls` includes empty CASEs too;
+// after the first CASE emits the tree, that many remaining controls (the other CASEs and fallback JUMP) are skipped.
+typedef struct CheckLowerSwitchTree CheckLowerSwitchTree;
+struct CheckLowerSwitchTree
+{
+    const CheckLowerCaseRange* cases;
+    uint32_t count;
+    uint32_t function;
+    uint32_t control;
+    uint32_t controls;
+    uint32_t fallback;
+};
+
+typedef struct CheckLowerSwitchTrees CheckLowerSwitchTrees;
+struct CheckLowerSwitchTrees
+{
+    CheckLowerSwitchTree* items;
+    uint32_t count;
+    uint32_t capacity;
 };
 
 // A classification vector holds at most 16 operator/type words. Payloads belong to reached fragments;
@@ -692,6 +722,8 @@ struct CheckLowerWriter
     CheckLowerTable* tables;
     uint32_t table_count;
     SymbolId provisional_tables;
+    const CheckLowerSwitchTrees* switch_trees;
+    uint32_t switch_skip;
     uint32_t* extent_locals;
     // Each variable-length array's identity plus one, by its bound's first token (0 for none), for its extent's local;
     // each block's local that holds the stack's position its arrays came after (CHECK_CONTROL_STACK_SAVE's), by its
@@ -15379,6 +15411,8 @@ static CheckLowerCaseRange* check_lower_sort_cases(CheckLowerCaseRange* cases, C
     return from;
 }
 
+#include "c_check_program_sparse_switch.c"
+
 // Whether the switch at control `index` of body `b`, of class `class`, dispatches through a jump table, as clang -O0 makes
 // one: LLVM's SwitchLowering::findJumpTables, which at -O0 takes a switch's whole range or nothing, makes one of four
 // clusters or more (runs of cases of consecutive values that go to one label) whose cases hold at least a tenth of the
@@ -15388,8 +15422,8 @@ static CheckLowerCaseRange* check_lower_sort_cases(CheckLowerCaseRange* cases, C
 // its entries and labels from `output` and its labels numbered after the tables' before it. `cases` and `sorted` are room
 // for the program's cases. Returns false only when `output` has no room. This is per switch, with the cases sorted: a
 // scalar pass over a few cases.
-static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capacity, const CheckProgram* program, uint32_t b, uint32_t index, uint8_t class,
-                                     CheckLowerCaseRange* cases_room, CheckLowerCaseRange* sorted_room, Arena* output)
+static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capacity, CheckLowerSwitchTrees* trees, const CheckProgram* program, uint32_t b,
+                                     uint32_t index, uint8_t class, CheckLowerCaseRange* cases_room, CheckLowerCaseRange* sorted_room, Arena* output, Arena* scratch)
 {
     const CheckProgramBody* body = program->bodies + b;
     const CheckControl* controls = program->controls + body->first;
@@ -15416,6 +15450,7 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
                 .lower = ((uint64_t)item->lower & mask) ^ sign,
                 .upper = ((uint64_t)item->upper & mask) ^ sign,
                 .label = item->target,
+                .item = controls[index + 1 + i].target,
             };
             cases += cases_room[cases].upper >= cases_room[cases].lower;
         }
@@ -15473,16 +15508,42 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
                 lowered->case_symbol_count += label_count;
             }
         }
+        else if (trees->count < trees->capacity && cases >= BUSTER_CHECK_LOWER_TREE_MIN_CASES)
+        {
+            // The dense planner's keys use the machine class's sign bit. A nonstandard _BitInt width keeps its
+            // existing chain; its semantic sign bit can differ from the computing class's. Wider values never enter
+            // this planner. The original case supplies every emitted constant, rather than a reconstructed key.
+            uint32_t width = 0;
+            bool signed_type = false;
+            const bool exact = check_action_integer_type(program->types, program->cases[sorted[0].item].type, &width, &signed_type) &&
+                               width == (narrow ? 32u : 64u) && signed_type == (sign != 0);
+            CheckLowerCaseRange* kept = exact ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, cases) : NULL;
+            valid = !exact || kept != NULL;
+            if (valid && exact)
+            {
+                memcpy(kept, sorted, (uint64_t)cases * sizeof(*kept));
+                trees->items[trees->count++] = (CheckLowerSwitchTree){
+                    .cases = kept,
+                    .count = cases,
+                    .function = b,
+                    .control = body->first + index,
+                    .controls = count,
+                    .fallback = controls[end].target,
+                };
+            }
+        }
     }
     return valid;
 }
 
 // Every switch's jump table or none (check_lower_switch_table), before any body is lowered, so that whatever lane lowers
 // a body, the tables and their labels are numbered in source order (#151), the tables in `lowered` from `output`, the
-// cases' room from `scratch`. Only a switch of four cases or more may have one, and the program lists those
+// cases' room from `scratch`. With `sparse_trees`, large switches without tables retain their sorted intervals there
+// too, for the Tier 1 dispatch. Only a switch of four cases or more may have a plan, and the program lists those
 // (CheckProgram.switches): the bodies' among them, the two in the controls' order (a selected program's bodies are some
 // of the checked program's, with its controls). Returns false when an arena has no room.
-static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
+static bool check_lower_switch_tables(CheckProgramLowered* lowered, CheckLowerSwitchTrees* trees, const CheckProgram* program, bool sparse_trees,
+                                      Arena* output, Arena* scratch)
 {
     // A table per switch of four cases or more, of each body: a target_clones copy's again (#2247, CheckProgram.body_options),
     // of at most a fifth of its controls (its SWITCH and four CASEs each).
@@ -15503,7 +15564,9 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
         lowered->tables = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, capacity);
         CheckLowerCaseRange* cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
         CheckLowerCaseRange* sorted = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
-        valid = lowered->tables != 0 && cases != 0 && sorted != 0;
+        trees->capacity = sparse_trees ? capacity : 0;
+        trees->items = sparse_trees ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerSwitchTree, capacity) : NULL;
+        valid = lowered->tables != 0 && cases != 0 && sorted != 0 && (!sparse_trees || trees->items != NULL);
         uint32_t s = 0;
         for (uint32_t b = 0; valid && b < program->body_count; b += 1)
         {
@@ -15521,7 +15584,7 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckP
             {
                 const CheckControl control = program->controls[program->switches[s]];
                 const uint8_t class = check_lower_type_class(program->types, check_stream_type(program->stream, control.node));
-                valid = check_lower_switch_table(lowered, capacity, program, b, program->switches[s] - body->first, class, cases, sorted, output);
+                valid = check_lower_switch_table(lowered, capacity, trees, program, b, program->switches[s] - body->first, class, cases, sorted, output, scratch);
             }
         }
     }
@@ -16499,10 +16562,12 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
     const CheckControl control = program->controls[writer->body->first + index];
-    // An exit's tail that its destination's dispatch doesn't go to (#1370, check_lower_exit) writes nothing, and no
-    // branch goes to it.
-    const bool skipped = writer->chain_skip != 0;
-    writer->chain_skip -= skipped;
+    // An exit's unused tail (#1370), or the CASE/JUMP controls whose complete tree was emitted at the first CASE
+    // (#1371), writes nothing and has no incoming branch. Merely number its label: placing it would resurrect an
+    // empty tracked stack after the dispatch, losing a statement expression's pending operands.
+    const bool skipped = writer->chain_skip != 0 || writer->switch_skip != 0;
+    writer->chain_skip -= writer->chain_skip != 0;
+    writer->switch_skip -= writer->switch_skip != 0;
     if (skipped)
     {
         writer->labels[index] = writer->count;
@@ -16631,7 +16696,18 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_CASE)
     {
         const CheckProgramCase* item = program->cases + control.target;
-        if (writer->table_current == BUSTER_CHECK_NONE || item->owner != writer->table_switch)
+        // Resolve by the dispatch's original boundary, after the selector's tasks drained. A nested switch in a
+        // selector's statement expression can change the writer's current table, but not this immutable identity.
+        const bool first_case = index != 0 && program->controls[writer->body->first + index - 1].kind == CHECK_CONTROL_SWITCH;
+        const CheckLowerSwitchTree* tree = first_case ? check_lower_switch_tree_of(writer->switch_trees, (uint32_t)(writer->body - program->bodies),
+                                                                                writer->body->first + index - 1) : NULL;
+        if (tree != NULL)
+        {
+            check_lower_switch_tree(writer, tree, item->owner);
+            writer->switch_skip = tree->controls;
+            writer->table_current = BUSTER_CHECK_NONE;
+        }
+        else if (writer->table_current == BUSTER_CHECK_NONE || item->owner != writer->table_switch)
         {
             check_lower_case(writer, item);
         }
@@ -16802,6 +16878,7 @@ struct CheckLowerShared
 {
     const CheckProgram* program;
     CheckProgramLowered* lowered;
+    CheckLowerSwitchTrees switch_trees;
     // Every type's classification, made before the bodies: a body's struct or union result decides its returns
     // (check_lower_by_value), and a variadic definition's named registers its va_start.
     AbiTable table;
@@ -17260,7 +17337,7 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
 // caller.
-static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
+static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources, bool sparse_trees,
                                 Arena* output, Arena* scratch)
 {
     (void)scalar;
@@ -17452,7 +17529,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         shared->label_symbol_capacity += object != 0 && object - 1 < count && program->parser->tree.roles[object - 1] == PARSE_ROLE_LABEL;
     }
     // Every switch's jump table, decided before the bodies; the label symbols' room holds the tables' labels too.
-    valid = valid && check_lower_switch_tables(lowered, program, output, scratch);
+    valid = valid && check_lower_switch_tables(lowered, &shared->switch_trees, program, sparse_trees, output, scratch);
     valid = valid && (uint64_t)shared->provisional_tables + lowered->table_count < UINT32_MAX;
     const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + lowered->case_symbol_count : 0;
     lowered->label_symbols = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, label_room) : 0;
@@ -17733,6 +17810,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .tables = shared->lowered->tables,
         .table_count = shared->lowered->table_count,
         .provisional_tables = shared->provisional_tables,
+        .switch_trees = &shared->switch_trees,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
     // Give the following columns the same offset modulo 4 KB relative to the task stack as 32-byte
@@ -17968,6 +18046,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // Its cleanups' chains (#1370): an entry label past each fall's store, which the exits jump to.
         writer->chain_slot = BUSTER_CHECK_NONE;
         writer->chain_skip = 0;
+        writer->switch_skip = 0;
         for (uint32_t r = body.cleanup_first; body.chains && r < body.cleanup_first + body.cleanup_count; r += 1)
         {
             writer->chain_labels[r] = (program->chains[r].flags & BUSTER_CHECK_CHAIN_FALL_STORE) != 0 ? check_lower_label(writer) : BUSTER_CHECK_NONE;
@@ -18910,7 +18989,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     CheckLowerAbi abi;
     CheckProgramLowered status;
     CheckLowerPart part = { .first = 0, .end = program->body_count };
-    bool valid = check_lower_prepare(&shared, lowered, program, BUSTER_SCALAR_PATH(scalar), sources, output, scratch);
+    bool valid = check_lower_prepare(&shared, lowered, program, BUSTER_SCALAR_PATH(scalar), sources, false, output, scratch);
     // #1048's node templates where the caller asks for them on any path (check_program_lower_templates).
     shared.templates = shared.templates || ((templates & BUSTER_CHECK_LOWER_TEMPLATES) != 0 && shared.templates_allowed);
     shared.template_check = (templates & BUSTER_CHECK_LOWER_TEMPLATES_CHECKED) != 0;

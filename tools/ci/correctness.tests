@@ -900,6 +900,10 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
 ./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"
+# #1371: sparse signed/unsigned cases, ranges, side effects and control flow, strictly at Tier 1 on both host paths.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_sparse_switch.c -o build/test-driver-tier1-sparse-switch
+./build/test-driver-tier1-sparse-switch "$BUSTER_COMPILER" "$(command -v clang)"
 == Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 # #2573: every width's loads, stores, comparisons with an immediate after the displacement field, operations, floating
 # accesses, a sequentially consistent store and a loop, by both host paths without fallback, linked by the system linker

@@ -2608,7 +2608,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                     const uint64_t scratch_mark = scratch.length;
                     CheckLowerShared shared = { 0 };
                     CheckProgramLowered prepared = { 0 };
-                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
+                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, false, &output, &scratch);
                     if (program.body_count == 0)
                     {
                         check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,

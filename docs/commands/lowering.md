@@ -83,6 +83,49 @@ pressure; the small loop's three-record check does not establish the same shape
 in SQLite or Lua. Whole-corpus instruction counts and runtime acceptance still
 require the 9700X measurements. General LICM remains disabled.
 
+## Sparse-switch search trees (#1371)
+
+Tier 1's emission asks `check_lower_prepare` to retain a balanced dispatch plan
+for a sparse switch with at least 128 nonempty case intervals. Dense jump tables
+keep their existing admission rule and take priority. Smaller sparse switches,
+Tier 0, and selectors outside the exact signed/unsigned 32- and 64-bit classes
+keep the existing comparisons. The threshold preserves the issue's competitive
+100-case chain; it is a conservative policy boundary, not a measured crossover
+for every workload. Current-revision runtime and compile-time qualification on
+the 9700X is still required before making a speedup claim.
+
+The checked controls already retain the selector, converted case bounds and
+original labels. Table preparation sorts those intervals once and, when a tree
+is selected, retains an immutable slice in shared scratch for the lowering
+lanes. Its records retain the original case index separately from the signed
+ordering key. GNU ranges stay intervals, empty ranges are omitted, and wider or
+nonstandard-width `_BitInt` selectors retain their existing lowering.
+
+`c_check_program_sparse_switch.c` emits the tree at the first case, after the
+selector has been evaluated once into its local. Each split compares against
+the median interval's lower bound; leaves check at most four intervals using
+the ordinary case rules, then branch to the original default or switch exit.
+An explicit stack of 32 frames bounds traversal for a `uint32_t` interval count.
+Planning remains O(K log K) for K intervals, with O(K) storage and emitted code;
+each dispatch has O(log K) comparisons. The new ordinary branches enter IR and
+SSA through their existing construction, without a new opcode or indirect
+target metadata. Case bodies, fallthrough, cleanup exits and source labels
+retain their order and identity.
+
+The consumed dispatch controls are numbered without placing new reachable
+labels. This preserves a statement expression's pending stack values after
+the tree's terminating edges. Looking up the plan by its original control
+boundary also survives a nested switch inside the selector expression.
+
+`test-checker` checks plan selection and dispatch against an independent linear
+interval oracle. The standalone `tests/driver/tier1_sparse_switch.c` fixture,
+run in the existing Tier 1 pattern correctness group, compiles both host paths
+with `--tier1-strict --verify`, checks identical objects, and executes them
+against a Clang-built oracle. It covers signed/unsigned boundaries, exhaustive
+16-bit inputs, shuffled cases, ranges and holes, volatile selector side effects,
+nested statement expressions, fallthrough, goto and cleanup. A native CFG walk
+requires a bounded comparison path, so a correct linear chain fails the test.
+
 ## Node templates (#1048)
 
 `./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N]
