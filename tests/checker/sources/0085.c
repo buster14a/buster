@@ -1,0 +1,16 @@
+enum { N = 5 };
+struct S { int a : 3 __attribute__((aligned(4))), b : 2; char c; };
+struct T { char x; unsigned long y : 1 + 2 __attribute__((packed)); char z; };
+struct U { char x; int y : N __attribute__((aligned(16))) __attribute__((unused)); char z : (N - 1) __attribute__(()); };
+struct V { char x; long : 0 __attribute__((aligned(8))); char y; };
+struct O { char a; int b; };
+struct W { char x; unsigned a : _Generic(0, int: 3, default: 1) __attribute__((packed));
+           unsigned b : _Generic(0L, int: 1, long: 2) + 3 __attribute__((aligned(8))); char y; };
+struct X { char x; unsigned a : sizeof(short) * 2 __attribute__((aligned(4))), b : (int)2.5 + N __attribute__((packed));
+           unsigned c : __builtin_offsetof(struct O, b) ? 6 : 1 __attribute__(()); unsigned d : __builtin_choose_expr(1, 7, 1.0) __attribute__((aligned(2))); };
+_Static_assert(sizeof(struct S) == 4 && _Alignof(struct S) == 4, "S");
+_Static_assert(sizeof(struct T) == 3 && _Alignof(struct T) == 1, "T");
+_Static_assert(sizeof(struct U) == 32 && _Alignof(struct U) == 16, "U");
+_Static_assert(sizeof(struct V) == 9 && _Alignof(struct V) == 1, "V");
+_Static_assert(sizeof(struct W) == 16 && _Alignof(struct W) == 8, "W");
+_Static_assert(sizeof(struct X) == 12 && _Alignof(struct X) == 4, "X");

@@ -1,0 +1,10 @@
+int a;
+_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;
+_Static_assert(_Generic(0xffffffffffffffffffffffffffffffffwb, _BitInt(129): 1, default: 0) && _Generic(340282366920938463463374607431768211456uwb, unsigned _BitInt(129): 1, default: 0), "t");
+_Static_assert((_BitInt(200))1 << 150 > 0 && ((unsigned _BitInt(300))1 << 299) >> 297 == 4 && ((_BitInt(256))1 << 255 >> 1) < 0, "f");
+_Static_assert(340282366920938463463374607431768211457wb % 1000 == 457 && (int)(340282366920938463463374607431768211457wb >> 128) == 1, "d");
+int c[(_BitInt(200))3];
+enum { E = (int)((_BitInt(300))-7 * ((_BitInt(300))1 << 200) / ((_BitInt(300))1 << 199)) };
+_Static_assert(E == -14, "e");
+unsigned _BitInt(300) g = ~(unsigned _BitInt(300))0 / 3;
+_BitInt(1000) h = -((_BitInt(1000))1 << 900);

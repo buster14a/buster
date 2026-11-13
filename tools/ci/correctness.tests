@@ -27,7 +27,7 @@ fi
 # Captures the translation units' LLVM IR in the build's tree (its call-graph-ir target) and fails on any cycle not in
 # the allowlist; the check runs BUSTER_COMPILER.
 "$BUSTER_COMPILER" test-call-graph
-./build.sh check-call-graph
+./build.sh check-call-graph --config Release
 == Test the calling convention [8 CPUs]
 # --cross-check also links random signatures between our side, encoded and written as objects, and C that
 # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both
@@ -299,7 +299,7 @@ test "${#host_flags[@]}" -gt 0
 # its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
 flags_file=$(mktemp)
 sources_file=$(mktemp)
-BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags > "$flags_file"
+BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags --config Release > "$flags_file"
 ./build.sh print-sources > "$sources_file"
 mapfile -d '' -t flags < "$flags_file"
 mapfile -d '' -t sources < "$sources_file"
@@ -417,7 +417,7 @@ musl="$corpus/libc/musl"
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
-  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags --config Release)
 test "${#flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 else
@@ -449,7 +449,7 @@ musl="$corpus/libc/musl"
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
-  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags --config Release)
 test "${#flags[@]}" -gt 0
 objects=$(mktemp -d)
 "$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c

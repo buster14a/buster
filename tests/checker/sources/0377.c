@@ -1,0 +1,11 @@
+_Static_assert((char)-1 == 255, "conversion");
+_Static_assert((char)200 > 100, "comparison");
+_Static_assert((int)(char)0x80 == 128, "widening");
+_Static_assert((char)256 == 0, "truncation");
+_Static_assert(-(char)1 == -1, "promotion");
+_Static_assert((char)-1 / 3 == 85, "division");
+_Static_assert(((char)0x80 >> 1) == 64, "shift");
+_Static_assert(_Generic((char)0, char: 1, unsigned char: 2, signed char: 3) == 1, "distinct");
+typedef char C2 __attribute__((mode(HI)));
+_Static_assert((C2)-1 > 0, "mode");
+_Static_assert(__CHAR_UNSIGNED__ == 1, "macro");

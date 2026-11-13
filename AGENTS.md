@@ -198,8 +198,9 @@ readable single-line statements, declarations and function headers, and one
 aggregate field or initializer entry per line. Do not import buster-legacy's
 portability or infrastructure to match its style.
 
-Keep private test and benchmark fixtures in their owning unity unit; follow
-the [build ownership rules](docs/commands/build.md#unity-test-dependencies).
+Keep private test and benchmark fixtures in their owning unity unit, and
+regression programs under `tests/` as runtime data; follow the [build
+ownership rules](docs/commands/build.md#unity-test-dependencies).
 
 ## Data-parallel first
 
@@ -299,27 +300,25 @@ computers:
 
 ## Build
 
-Use `./build.sh` (Clang, CMake 3.25+, Ninja): Release (`-O3`) by default,
-`--config Develop` (`-O3` in parts, no benchmarks) or `--config Debug`
-(`-O0 -g`), incrementally in `build/cmake/VARIANT`, published as
-`build/compiler`. Develop where edits dominate, Release for every timing,
-Debug for a debugger. Respect the lock and `cores` rules above.
-`BUSTER_DEBUG_INFO=0` omits Release's `-g`. Read [build
-details](docs/commands/build.md) before changing translation units, flags,
-baked tables or code-placement experiments. `build/` is disposable; never
-commit generated binaries or captures.
+Use `./build.sh` (CI's toolchain): Develop (parts at `-O3`) by default;
+`--config Release` for **every timing and benchmark**; `--config Debug` for a
+debugger; incremental in `build/cmake/VARIANT`, published as
+`build/compiler`, under the lock and `cores` rules. `BUSTER_DEBUG_INFO=0`
+omits Release's `-g`. Read [build details](docs/commands/build.md) before
+changing translation units, flags, baked tables or code-placement experiments.
+`build/` is disposable; never commit generated binaries or captures.
 
 ## Current repository and exact smoke commands
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
 
 ```sh
-./build.sh
+./build.sh --config Release
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler parse -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror src/buster/compiler/main.c
 ./build/compiler test-call-graph
-./build.sh check-call-graph
+./build.sh check-call-graph --config Release
 ./build/compiler test-profile
 ./build/compiler test-parallel
 ./build/compiler test-lexer

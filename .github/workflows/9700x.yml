@@ -796,13 +796,9 @@ jobs:
 
       - name: Check out pinned branch-sizing measurement harnesses
         if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: buster14a/buster-performance
-          ref: a00d16e47b6f1090b8a0424ab0dd8cb4e6016713 # Initial byte-identical measurement import; see buster-performance/MIGRATION.md.
-          path: build/performance-evidence
-          sparse-checkout: docs/measurements/x86-lengths-2026-10-23
-          persist-credentials: false
+        # buster-performance's initial byte-identical measurement import (see its MIGRATION.md), from the private
+        # cache's mirror rather than GitHub on every run (tools/ci/fetch-performance.sh, #2629).
+        run: bash tools/ci/fetch-performance.sh a00d16e47b6f1090b8a0424ab0dd8cb4e6016713 docs/measurements/x86-lengths-2026-10-23 build/performance-evidence
 
       - name: Benchmark branch sizing
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',branch-sizing,') || needs.changes.outputs.branch_sizing == 'true'
@@ -1753,13 +1749,9 @@ jobs:
 
       - name: Check out the pinned Lua scripts of Tier 1's program measurement
         if: needs.changes.outputs.tier1_programs != 'false'
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: buster14a/buster-performance
-          ref: 818cfbbc0be238da287c16d8e2a91fd7275cf228 # Reviewed main, with the cc3387f record's five original scripts.
-          path: build/tier1-programs-evidence
-          sparse-checkout: docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua
-          persist-credentials: false
+        # buster-performance's reviewed main with the cc3387f record's five original scripts, from the private cache's
+        # mirror rather than GitHub on every run (tools/ci/fetch-performance.sh, #2629).
+        run: bash tools/ci/fetch-performance.sh 818cfbbc0be238da287c16d8e2a91fd7275cf228 docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua build/tier1-programs-evidence
 
       - name: Time speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc
         # #138 and #1189: the programs Tier 1 is measured by against clang -O2, each built by this compiler's Tier 0 and
@@ -1832,12 +1824,13 @@ jobs:
           unset CPATH C_INCLUDE_PATH
           sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
-          # SQLite 3.53.2's test/speedtest1.c (#136's), by its hash, as measure-tier1-programs' step takes it.
+          # SQLite 3.53.2's test/speedtest1.c (#136's), by its hash, from the private cache as measure-tier1-programs'
+          # step takes it (#2629).
           inputs="$RUNNER_TEMP/helpers-programs"
           mkdir -p "$inputs"
-          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
-            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
-          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" | sha256sum --check
+          bash tools/ci/cached-download.sh \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c \
+            b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c"
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler measure-helpers --runs 11 --compiles 5 --sqlite "$sqlite" --speedtest "$inputs" --directory /tmp
 

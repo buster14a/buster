@@ -1,0 +1,2 @@
+typedef constexpr int
+    T;

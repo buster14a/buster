@@ -3030,7 +3030,7 @@ It fails rather than report part of the attribution:
 
 - **The reference.** tcc 0.9.28rc 2026-01-17 (`/usr/bin/tcc`, sha256
   `49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082`).
-- **The compiler.** Built by the job with `BUSTER_DEBUG_INFO=0 ./build.sh`
+- **The compiler.** Built by the job with `BUSTER_DEBUG_INFO=0 ./build.sh --config Release`
   (clang 23, `-O3 -march=native`).
 
 **What it leaves out.**

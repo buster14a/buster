@@ -15,6 +15,10 @@ requirements. [Command index](README.md).
   `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
   lexer and the encoder were measured and profiled on the 9700X, with these
   tools: read it before tuning a stage.
+- **Measure Release.** `./build.sh` builds Develop, the edit loop's
+  configuration ([the build guide](build.md#configurations)); every tree that
+  `ab` or `time-runs` compares, and every executable `perf` profiles, is built
+  with `./build.sh --config Release` (`shifts` builds Release by default).
 
 ## Comparing generated Tier 1 code over layouts (#1450)
 
