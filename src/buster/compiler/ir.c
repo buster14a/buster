@@ -3037,6 +3037,44 @@ static IrCheck ir_check_join(const IrFunction* f, const IrCfg* cfg, Arena* scrat
     return check;
 }
 
+// Tree-view bounds are independent of phi/switch metadata. A caller that retained a structurally verified CFG
+// can check its newly constructed tree without traversing those unchanged side tables a second time.
+static IrCheck ir_check_dominance_view(const IrFunction* f, const IrDominance* dominance)
+{
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    if (dominance != 0 && (dominance->block_count != f->block_count || (f->block_count != 0 && (dominance->enter == 0 || dominance->leave == 0))))
+    {
+        check.error = IR_ERROR_DOMINANCE;
+    }
+    for (uint32_t b = 0; check.error == IR_OK && dominance != 0 && b < f->block_count; b += 1)
+    {
+        if (dominance->enter[b] >= dominance->leave[b] && (dominance->enter[b] != 0 || dominance->leave[b] != 0))
+        {
+            check = ir_check(IR_ERROR_DOMINANCE, BUSTER_IR_NONE, b);
+        }
+    }
+    return check;
+}
+
+// Complete the SSA proof of the exact revision that passed a structural graph check. Shape, rows, phi edges,
+// switch cases and the CFG must be unchanged and live. This is not an entry point for unverified or mutated IR.
+static __attribute__((unused)) IrCheck ir_verify_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
+{
+    (void)vector;
+
+    IrCheck check = ir_check_dominance_view(f, dominance);
+    if (check.error == IR_OK)
+    {
+        check = ir_check_dominance(f, cfg, dominance, BUSTER_VECTOR_PATH(vector));
+    }
+    if (check.error == IR_OK)
+    {
+        check.instruction = BUSTER_IR_NONE;
+        check.dominance_checked = dominance != 0;
+    }
+    return check;
+}
+
 static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance, bool vector)
 {
     (void)vector;
@@ -3052,16 +3090,11 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     {
         memset(seen, 0xff, (uint64_t)f->block_count * 4);
     }
-    if (dominance != 0 && (dominance->block_count != f->block_count || (f->block_count != 0 && (dominance->enter == 0 || dominance->leave == 0))))
+    // Preserve the public verifier's descriptor-error precedence even when allocating phi scratch failed.
+    if (check.error == IR_OK || (dominance != 0 && (dominance->block_count != f->block_count ||
+        (f->block_count != 0 && (dominance->enter == 0 || dominance->leave == 0)))))
     {
-        check.error = IR_ERROR_DOMINANCE;
-    }
-    for (uint32_t b = 0; check.error == IR_OK && dominance != 0 && b < f->block_count; b += 1)
-    {
-        if (dominance->enter[b] >= dominance->leave[b] && (dominance->enter[b] != 0 || dominance->leave[b] != 0))
-        {
-            check = ir_check(IR_ERROR_DOMINANCE, BUSTER_IR_NONE, b);
-        }
+        check = ir_check_dominance_view(f, dominance);
     }
     // The phis and switches, which the vector path finds 64 operations at a time.
     const uint32_t step = BUSTER_VECTOR_PATH(vector) ? 64 : 1;
@@ -3098,6 +3131,45 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     return check;
 }
 
+// Full structural verification with its CFG retained for the next consumer of the same immutable revision.
+// The arenas are distinct: scratch is restored on every path; a failed check restores arena and leaves result
+// untouched. No proof or graph survives mutation, even when the function's pointers and counts stay equal.
+static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena* arena, Arena* scratch, bool vector, IrCfg* result)
+{
+    (void)vector;
+
+    const uint64_t mark = arena->length;
+    const uint64_t temporary = scratch->length;
+    IrCfg cfg = { 0 };
+    IrCheck check = ir_check(arena == scratch ? IR_ERROR_METADATA : IR_OK, BUSTER_IR_NONE, 0);
+    if (check.error == IR_OK)
+    {
+        check = ir_check_shape(f);
+    }
+    if (check.error == IR_OK)
+    {
+        check = ir_check_rows(f, BUSTER_VECTOR_PATH(vector));
+    }
+    if (check.error == IR_OK)
+    {
+        check.error = ir_cfg_validated(f, arena, scratch, &cfg);
+    }
+    if (check.error == IR_OK)
+    {
+        check = ir_check_graph(f, &cfg, scratch, 0, BUSTER_VECTOR_PATH(vector));
+    }
+    if (check.error == IR_OK)
+    {
+        *result = cfg;
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+    }
+    arena_pop_to(scratch, temporary);
+    return check;
+}
+
 static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
 {
     (void)vector;
@@ -3113,24 +3185,6 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFun
     {
         check.error = ir_cfg_validated(f, scratch, scratch, &cfg);
     }
-    if (check.error == IR_OK)
-    {
-        check = ir_check_graph(f, &cfg, scratch, dominance, BUSTER_VECTOR_PATH(vector));
-    }
-    arena_pop_to(scratch, mark);
-    return check;
-}
-
-static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance);
-
-// ir_verify_path's steps past the shape and rows (#1379): the validated CFG and the graph against `dominance`, for a
-// function whose shape and rows a verification on the same path has already passed and which hasn't changed since. Both
-// checks read the function alone, so its result is the whole verification's.
-static __attribute__((unused)) IrCheck ir_verify_graph(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
-{
-    const uint64_t mark = scratch->length;
-    IrCfg cfg = { 0 };
-    IrCheck check = ir_check(ir_cfg_validated(f, scratch, scratch, &cfg), BUSTER_IR_NONE, 0);
     if (check.error == IR_OK)
     {
         check = ir_check_graph(f, &cfg, scratch, dominance, BUSTER_VECTOR_PATH(vector));

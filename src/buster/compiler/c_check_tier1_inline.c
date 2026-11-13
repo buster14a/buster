@@ -125,7 +125,8 @@ static bool check_tier1_inline_prepare(CheckTier1Lane* lane, const CheckTier1Inl
         IrFunction promoted = { 0 };
         if (check.error == IR_OK)
         {
-            check = scalar ? ssa_ir_promote_scalar(&lowered, &lane->steps[2], scratch, &promoted) : ssa_ir_promote(&lowered, &lane->steps[2], scratch, &promoted);
+            // Lowering just verified these exact columns; no mutation or arena retirement precedes promotion.
+            check = ssa_ir_promote_verified_input(&lowered, !scalar, &lane->steps[2], scratch, &promoted);
         }
         IrOptimizeResult optimized = { 0 };
         if (check.error == IR_OK)
