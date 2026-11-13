@@ -17,16 +17,48 @@ environment already sets `BUSTER_TAILNET_DISPOSABLE=1` to join the tailnet
   `add_repo` made beside the checkout (`/home/user/llm-memory`) is linked to
   `~/llm-memory`; otherwise the hook clones the repository itself, which works
   only where the session already has it attached (Claude Code) or the
-  container's credentials reach it (Codex). `add_repo` checks its clone out on
-  the session's branch, and sync pushes the branch it is on, so the hook moves
-  the clone onto `main` when the branch holds nothing `main` lacks, and says so
-  when it can't.
+  container's credentials reach it (Codex). In Claude Code it then puts the
+  clone on this checkout's `claude/…` session branch, the only branch the
+  session may push to: GitHub's copy of it if an earlier container pushed one,
+  else `main`. It sets `git config llm-memory.branch` to that branch and
+  deepens a shallow clone, since the index orders notes by when Git first saw
+  them. A clone with commits `main` lacks keeps them on the session branch.
 - **Stop (`stop`):** runs `llm-memory sync` in the background after every turn,
-  logging to `~/.local/state/llm-memory/cloud-sync.log`. Sync commits, rebases
-  onto GitHub and pushes; its lock makes overlapping runs no-ops, and a failed
-  push waits for the next turn's. A Claude Code commit names the session.
-  Neither cloud copies `~/.codex/memories` into `codex/`: a container's host
-  name is new every time, so each session would add a folder of its own.
+  logging to `~/.local/state/llm-memory/cloud-sync.log`. Its lock makes
+  overlapping runs no-ops, and a failed push waits for the next turn's. A
+  Claude Code commit names the session. Neither cloud copies
+  `~/.codex/memories` into `codex/`: a container's host name is new every time,
+  so each session would add a folder of its own.
+
+## Saving memories and the index
+
+A memory is one note file with `name`/`description`/`metadata.type`
+frontmatter. `MEMORY.md`, the index Claude Code loads, is generated from the
+notes by `llm-memory index` (run by `sync` and `link`) and isn't tracked in
+Git, so two sessions that each save a memory touch different files and their
+pull requests never conflict. A line an agent adds or changes in `MEMORY.md`
+moves into the frontmatter of the note it links first (`metadata.index`) at the
+next sync. The index lists standing rules (`feedback`, `user`) first, then the
+newest notes. Claude Code loads only its first 200 lines or 25 KB, so a cut
+line marks where that ends; the older notes follow it, and agents grep the
+folder for them. `~/llm-memory/AGENTS.md` has the full rules.
+
+## Syncing from a cloud session
+
+With `llm-memory.branch` set, sync never commits to local `main`, so it can't
+diverge from GitHub's. Each run:
+
+1. commits the session's changes on its branch;
+2. keeps the commits GitHub's copy of the branch holds;
+3. rebases onto GitHub's `main`;
+4. force-pushes the branch with a lease;
+5. opens a pull request into `main`, unless one is already open, through the
+   proxy's credentials for `api.github.com`.
+
+Later turns update the same pull request. Once it merges, the next sync starts
+the branch again from `main`. Don't hand-copy notes into a pull request of
+your own; save, then sync. If the hook says it couldn't move the clone, check
+out the session branch in `~/llm-memory` and set the config it names.
 
 ## Sessions that start beside the checkout
 
@@ -52,7 +84,8 @@ CLAUDE_PROJECT_DIR=$PWD buster/.claude/hooks/parent-folder.sh start
 ```
 
 The Stop hook doesn't run there either, so sync after saving a memory, as
-AGENTS.md asks of other agents: `~/llm-memory/bin/llm-memory sync`.
+AGENTS.md asks of other agents: `~/llm-memory/bin/llm-memory sync`. It pushes
+to the session branch the start hook set.
 
 ## When the repository isn't attached
 
