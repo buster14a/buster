@@ -70,6 +70,13 @@ SCRATCH=scratch/$HOST
 UARCH=$ROOT/uarch
 export LC_ALL=C LC_NUMERIC=C SOURCE_DATE_EPOCH=1792454400
 unset CPATH C_INCLUDE_PATH
+# Every build, of this checkout and of the commits it compares, with CI's toolchain first on PATH (#2628;
+# docs/commands/build.md, "The toolchain"): an older commit's build.sh takes PATH's clang where a newer one's takes CI's,
+# and two compilers would confound the comparison.
+if [[ -f $repository/tools/ci/session-toolchain.sh ]]; then
+    toolchain=$(bash "$repository/tools/ci/session-toolchain.sh" stage) || { echo "run.sh: can't stage CI's toolchain" >&2; exit 2; }
+    PATH=$toolchain:$PATH
+fi
 mkdir -p "$OUT" "$SCRATCH"
 if [[ ! -x $UARCH || $here/uarch.c -nt $UARCH ]]; then
     clang -std=c17 -O2 -Wall -Wextra -Werror -o "$UARCH" "$here/uarch.c" -lm || exit 2
