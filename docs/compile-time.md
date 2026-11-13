@@ -2046,10 +2046,31 @@ keeps the scripts, the receipts and the profiles.
   pages, so every process took the huge-page advice and a split mapping, +0.6% for a single-file process. It now
   starts at 8 KB and doubles.
 
-**What's left.** A unit whose names the table has never seen still pays for looking each of them up. `-c sqlite3.c`
-has 10.8 K: the filter's key loads from the spellings, and the false positives' binary searches. The set-up takes
-384 samples of 20 compiles against main's 399, which is about 3.8 M cycles a compile, the same as before. A sharper
-filter or an exact table is the next step there.
+**A cold unit (#2654).** A unit whose names the table had never seen still paid for looking each of them up:
+`-c sqlite3.c` has 10.8 K, each through the filter's key loads and, for a candidate, a binary search of about twelve
+libc `memcmp` calls. Its set-up took 384 samples of 20 compiles against main's 399, about 3.8 M cycles a compile.
+
+- **The fill.** Before the operand pass, the set-up gives every id the table has not yet looked up its code, in id
+  order: 16 ids at once on the vector path, with the scalar test as its twin.
+- **The exact table.** The fill's candidates go to an exact table of the catalogue, baked into the executable, with
+  one compare where the binary search made twelve.
+- **The operand pass.** It then meets only known codes, and reads each operand's code by a scalar loop. 16-lane
+  gathers ran mostly empty, since operands are about a fifth of the tokens: they took 252 and 159 samples where the
+  loop takes 216 and 105.
+
+Measured on the 9700X, main `447192ef` against `3a1001e0`, each build from fresh copies ([the
+record](https://github.com/buster14a/buster-performance/tree/6916592a6af93c3d43de22a9fd449fb360cfc1cd/docs/measurements/intrinsic-fill-2654-2026-11-13)):
+
+| workload | wall time | user cycles | the set-up's samples |
+| --- | ---: | ---: | ---: |
+| `-c sqlite3.c` | 124.00 → 123.48 ms, −0.42% (−0.52% to −0.21% over copies) | −0.24% | 384 → 207 (−46%) |
+| musl's 1,336 units, one command | 726.66 → 723.98 ms, −0.37% (−0.46% to −0.21%) | −0.38% | 148 → 115 (−22%) |
+| c-testsuite's 220 units, one command | 58.38 → 58.31 ms, −0.11% (−0.41% to +0.30%) | −0.01% | |
+| three c-testsuite units, one process each | within the copies' spread | | |
+
+The objects and diagnostics are the same bytes as main's, on the vector path and with `--scalar`. What the set-up
+still costs is mostly its walk over the unit's token columns, which this pass reads apart from the counts' walk over
+the same columns.
 
 ## What remains of check-input (#1671)
 
