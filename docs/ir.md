@@ -1000,10 +1000,20 @@ only where an edge goes back in block order). The definition goes to the start
 of its reachable takes' nearest common dominator, P, and then:
 
 - where P is inside a loop, to its outermost loop's header's immediate
-  dominator, outside it, if some take is inside that loop, as loop-invariant
-  code motion hoists it: `luaV_execute` defines `disptab` before its dispatch
-  loop. Where none is (`yy_find_shift_action`'s `yy_action`, read on two of
-  the loop's exits alone), the takes stay their own;
+  dominator, outside it, as loop-invariant code motion hoists it, if some take
+  is inside that loop and the value can keep a register there (#2618,
+  `ir_typed_loop_resident`): every iteration of the loop takes it, and so does
+  every iteration of a loop of its nest that holds a take and has an iteration
+  that calls nothing. `luaV_execute` defines `disptab` before its dispatch
+  loop, whose handlers that call nothing each end in its take. Otherwise the
+  takes stay their own: where no take is inside the loop
+  (`yy_find_shift_action`'s `yy_action`, read on two of the loop's exits
+  alone), where some iteration doesn't take it (`sqlite3StrICmp`'s
+  `sqlite3UpperToLower`, read where two characters differ, mostly as the loop
+  ends), and where every iteration calls (`sqlite3_str_vappendf`'s `fmtinfo`,
+  read through a format loop that appends each piece), over which Tier 1
+  would keep the value in a callee-saved register the loop's own values need,
+  or recompute it after each call;
 - otherwise at P, where some take is inside a loop or where every path from P
   takes it before leaving the function (`sqlite3GetToken`'s `aiClass`, read by
   its switch). A path that takes it nowhere (`powerOfTen`'s `aBase`,
@@ -1052,15 +1062,47 @@ six layouts (0.9934, 0.9863 to 1.0006) with 0.27% fewer instructions at
 every one. The placement costs `sqlite3.c`'s `--tier1 -c` 0.14% more
 instructions, in the same time and cycles: by callgrind on a baseline build,
 7.6 M of 15,078 M, of which the dominators' analysis is 4.0 M and the CFG's
-construction and the walks 2.9 M. What the hoist still costs is the allocator's: a definition before a
-loop that reads it on few iterations takes a callee-saved register over the
-loop, or adds to its pressure (`sqlite3_str_vappendf`, 1.07 M more than
-without the hoist; `hexFunc`, `sqlite3FindFunction`). `test-ir-lowering`
-checks both lowering paths, the verifiers, the interpreter's results and
-promotion for a symbol taken three times, one taken once and one through its
-GOT slot, and each of the rules above: a definition past an early return, two
-takes of three paths left their own, a definition every path from a branch
-takes, one before a loop and two takes on a loop's exits left their own.
+construction and the walks 2.9 M.
+
+#2618's test of the loops, two walks of each loop's body from its header (one
+stopped by the takes, one by the calls, `ir_typed_loop_every` and
+`ir_typed_loop_quiet`), from a budget of sixteen visits per edge past which a
+definition stays lifted, leaves the takes their own in the losers that #2593
+left. By callgrind at main `26f0bb0e`, with the allocator's change of #2618
+before it ([the allocation guide](tier1-allocation.md)'s "Recipes give way to
+hinted values"), speedtest1 runs 2,993.97 M instructions instead of 2,996.70 M
+(main 2,997.70 M, no hoist 3,001.58 M), and `luaV_execute` the same:
+`sqlite3_str_vappendf` −1.08 M against main, `sqlite3GenerateColumnNames`
+−0.27 M, `patternCompare` −0.26 M, `sqlite3StrICmp` −0.23 M, `sqlite3Atoi64`
+−0.09 M, each now as without the hoist, and `jsonTranslateTextToBlob`
+−1.06 M. The rules measured on the way, as speedtest1's instructions against
+this one's:
+
+| Rule | speedtest1 | `luaV_execute` |
+| --- | ---: | ---: |
+| every iteration of the outermost loop alone (no calls' test) | +0.64 M | 0 |
+| the calls' test on the outermost loop alone, not its nest | +0.03 M | +36.2 M |
+| the definition at P, not the takes their own, where the test fails | +3.48 M | 0 |
+| outside loops, one definition only where every path from P takes it | +0.17 M | 0 |
+| outside loops, the loops' test where not every path from P takes it | +3.45 M | 0 |
+
+Without the "some take is in a loop" rule outside loops, `jsonTranslateBlobToText`
+gains 0.89 M and `sqlite3GetToken` loses 1.22 M: its identifier loops, which
+call nothing, read `sqlite3CtypeMap` on every character, and the two can't be
+told apart from their loops alone. What the hoist still costs is the
+allocator's, at most 0.89 M a function: `jsonTranslateBlobToText`'s
+`sqlite3CtypeMap`, defined at a switch every call runs and read in a few
+cases' loops, takes a callee-saved register its prologue saves; `speedtest1_run`'s
+hot `g` is recomputed after each call where its accesses would have folded
+rip-relative (+0.27 M); `sqlite3FindFunction` +0.12 M, `hexFunc` +0.07 M.
+`test-ir-lowering` checks both lowering paths, the verifiers, the interpreter's
+results and promotion for a symbol taken three times, one taken once and one
+through its GOT slot, and each of the rules above: a definition past an early
+return, two takes of three paths left their own, a definition every path from
+a branch takes, one before a loop and two takes on a loop's exits left their
+own; and (#2618) takes left their own in a loop whose every iteration calls and
+in one where a single iteration takes the symbol, and one definition before a
+nest whose call-free inner loop takes it on every iteration.
 Backedges to source entry zero skip that initialization. The typed stream's U64
 pointer representation becomes explicit `inttoptr` / `ptrtoint` at memory and
 address operations; ordinary U64 arithmetic remains integer arithmetic. Integer

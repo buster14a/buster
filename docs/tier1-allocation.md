@@ -256,7 +256,11 @@ required, keeps an unclaimed free register if it can be rematerialized, but
 never evicts another value or takes a continuing value's claimed register,
 even through a physical-register hint. This preserves hoisted definitions
 through low-pressure blocks, including a jump table's once-per-entry base
-(#1217), while leaving them cheap eviction victims under pressure. If its
+(#1217), while leaving them cheap eviction victims under pressure. Nor does a
+recipe keep a register from a value without one that starts, or reloads at a
+required use, where its value hint names that register: where no use requires
+the recipe there, it leaves the register as an eviction does, recomputed at its
+next required use ("Recipes give way to hinted values" below). If its
 value was last in its slot and has no recipe, it stays there. A CFG's edges
 move a value without a register where a successor wants it in one. The
 intervals starting at one position claim the registers they are hinted to,
@@ -792,9 +796,9 @@ and computes it again only after calls. Three changes keep it in a register:
 
 - **One value.** IR lowering defines each direct symbol address a function
   takes at least twice once (`ir_typed_plan_hoisted`), as #1740 does for jump
-  tables' bases: before the outermost loop that reads it, or where every path
-  reads it (#2593's `ir_typed_plan_places`, the [IR guide](ir.md)'s
-  preheader). `disptab`'s definition is before the dispatch loop.
+  tables' bases: before the outermost loop that reads it where it can keep a
+  register there (#2618), or where every path reads it (#2593's
+  `ir_typed_plan_places`, the [IR guide](ir.md)'s preheader). `disptab`'s definition is before the dispatch loop.
 - **Hot recipes.** In the preference, a recomputable value that crosses a
   call is *hot* where it is read on every iteration of the outermost loops it
   is live across (`tier1_emit_cfg_hot_recipes`, over `dominators.c`'s loops):
@@ -960,6 +964,54 @@ An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value
 is stays the allocation's, which `tier1_cfg_verify` checks unchanged. The cost is a scan of each node's uses and transitions while some
 load is owed, scalar work bounded by the node's own uses.
+
+### Recipes give way to hinted values (#2618)
+
+A block's ranges take the registers their values' hints name: a loop's values
+keep theirs from block to block, and the edges move nothing for them. A
+recomputable value, a constant or a frame object's or symbol's address, often
+holds such a register when a range starts: it took the register while it was
+free, in a block where the hinted value wasn't live, and nothing evicts a value
+from a free register's competitor. The range then took another register, and
+the edges into its block and out of it moved the value there and back. Now a
+value without a recipe whose hint names a register a recipe holds, and no use
+requires the recipe there, takes it, unless another range starting at that
+position claimed it: the recipe leaves it as an eviction does, a
+REMATERIALIZE fragment from that position, and takes a register again at its
+next required use (`tier1_allocation_yields`). Each start or reload still makes
+at most two transitions, its own and its victim's, so the output's bound stands.
+
+By callgrind at main `26f0bb0e` (#1189's `gap.c`, #1217's inputs), Lua's
+`luaV_execute` runs 2,365.8 M instructions instead of 2,415.0 M, 45.6 M fewer
+moves and 3.6 M fewer frame addresses' `lea`s, and speedtest1 1.0 M fewer
+(`sqlite3VdbeRecordUnpack` 0.8 M). Letting the values claim such registers among
+a position's starts as well changed no executable. `tier1_allocate_hints_test.c`
+has the rule's two traces on all three entry points: a recipe that leaves its
+register to the value its hint names, and one a use requires, which keeps it.
+
+#2618 also measured giving way in other ways, which lost:
+
+| Variant | speedtest1 | `luaV_execute` |
+| --- | ---: | ---: |
+| this rule | −1.0 M | −49.2 M |
+| a required recipe's victim by its next use, not the lowest register | 0 | |
+| symbol addresses crossing a call allowed `r8` to `r10` too, calls evicting them, as hot ones | +32.1 M | |
+| the same, in `r8` to `r10` alone | +30.6 M | |
+| every recipe crossing a call so | +44.5 M | +274 M |
+| a recipe crossing a call allowed the caller-saved registers where no callee-saved one is free | +159 M | |
+| callee-saved registers only on the intervals that cross a call | +109 M | |
+| an unrequired recipe kept out of callee-saved registers no range has held yet | 0 | |
+
+In `sqlite3VdbeExec`, the symbol addresses that cross calls were recomputed
+after each opcode's calls in the caller-saved registers (+32.6 M `lea`s), its
+frame objects' addresses too where those were allowed them (+92.3 M), and with
+callee-saved registers only where an interval crosses a call its symbol
+addresses moved between the two sets at its blocks' edges (+77.2 M `lea`s,
++26.0 M moves). A recipe's definition is a required use, so the last variant
+reached none of them: `jsonTranslateBlobToText`'s `sqlite3CtypeMap` still takes
+a fresh callee-saved register at its switch, read only in cases' loops that
+rarely run, and its prologue saves one more register on every call (0.89 M more
+than without the hoist).
 
 ## Rematerialization
 
