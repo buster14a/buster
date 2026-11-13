@@ -28,16 +28,22 @@ jobs:
           for source in tests/checker-warning-probes/*.c; do
               echo "SOURCE $source"
               cat "$source"
-              for mode in default wall nobuiltin freestanding gnu23; do
+              for mode in default wall nobuiltin freestanding gnu23 before noreturnoff; do
                   options=(-std=gnu17 -fsyntax-only -fno-caret-diagnostics -fno-color-diagnostics)
                   case "$mode" in
                       wall) options+=(-Wall);;
                       nobuiltin) options+=(-fno-builtin);;
                       freestanding) options+=(-ffreestanding);;
                       gnu23) options+=(-std=gnu23);;
+                      before) options+=(-DBEFORE=1);;
+                      noreturnoff) options+=(-Wno-return-type);;
                   esac
                   echo "PROBE $source $mode"
                   timeout -k 5 30 clang "${options[@]}" "$source" 2>&1
                   echo "STATUS $?"
               done
           done
+      - name: Build candidate compiler
+        run: BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 ./build.sh --config Develop --jobs 4
+      - name: Check return-call diagnostics
+        run: timeout -k 10 600 ./build/compiler test-checker-driver --common-warnings-only --executable ./build/compiler

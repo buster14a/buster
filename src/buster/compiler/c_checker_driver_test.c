@@ -8238,6 +8238,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_expression_warnings_driver_test.c"
+#include "c_check_call_warnings_driver_test.c"
 #include "c_check_redefinition_driver_test.c"
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
@@ -8435,6 +8437,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool asm_definitions_only = false;
     // --call-counts-only: the call argument count section alone (#1860).
     bool call_counts_only = false;
+    // --common-warnings-only: default expression, call and return-flow diagnostics (#1393, #1394).
+    bool common_warnings_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -8474,6 +8478,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             call_counts_only = true;
         }
+        else if (strcmp(argv[i], "--common-warnings-only") == 0)
+        {
+            common_warnings_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -8505,7 +8513,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)common_warnings_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8997,6 +9005,12 @@ static int run_checker_driver_tests(int argc, char** argv)
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
     check_test_expect(&test, temporary, "driver test directory is available");
+    if (temporary && common_warnings_only)
+    {
+        check_test_driver_return_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_expression_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_call_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     if (temporary && sign_compare_only)
     {
         check_test_driver_sign_compare(&test, clang, executable, directory);
@@ -9185,6 +9199,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy)
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+            check_test_driver_expression_warnings(&test, clang, executable, directory);
+            check_test_driver_call_warnings(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

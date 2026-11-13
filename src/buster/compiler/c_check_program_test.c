@@ -1973,8 +1973,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
             // node's must be what the scalar path, which visits each, gives it.
             const uint64_t facts_mark = scratch.length;
-            const uint8_t* exact = check_program_return_facts(&program, &scratch, NULL, true);
-            const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
+            const uint8_t* exact = check_program_return_facts(&program, &pp.options, &scratch, NULL, true);
+            const uint8_t* sparse = check_program_return_facts(&program, &pp.options, &scratch, NULL, false);
             snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the scalar path's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
             arena_pop_to(&scratch, facts_mark);
@@ -3106,8 +3106,8 @@ static void check_test_program_return_marks(CheckTest* test)
     }
     if (ready)
     {
-        // An attested query runtime plan may evaluate its argument. That alone does not attest the source-warning
-        // CFG contract: its guaranteed terminating child must leave the query itself conservative.
+        // constant_p's source CFG visits its argument independently of the query's runtime plan. The object-size
+        // queries don't visit that operand, even where their checked runtime receipt retains it.
         CheckOp ops[] = { CHECK_OP_BUILTIN_MISC, CHECK_OP_BUILTIN_QUERY };
         uint32_t absent[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t members[] = { CBUILTIN_TRAP, CBUILTIN_CONSTANT_P };
@@ -3132,10 +3132,15 @@ static void check_test_program_return_marks(CheckTest* test)
         CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .stream = &stream };
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL, path == 0);
+            const uint8_t* query_facts = check_program_return_facts(&program, NULL, &scratch, NULL, path == 0);
             check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
-                                   query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
-                              "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+                                   query_facts[1] == BUSTER_CHECK_RETURN_STOPS,
+                              "constant_p keeps the source CFG's terminating operand independently of its runtime plan");
+            members[1] = CBUILTIN_OBJECT_SIZE;
+            const uint8_t* object_facts = check_program_return_facts(&program, NULL, &scratch, NULL, path == 0);
+            check_test_expect(test, object_facts != NULL && object_facts[0] == BUSTER_CHECK_RETURN_STOPS && object_facts[1] == 0,
+                              "object_size excludes its operand from the source warning CFG");
+            members[1] = CBUILTIN_CONSTANT_P;
         }
     }
     if (ready)
@@ -3153,7 +3158,7 @@ static void check_test_program_return_marks(CheckTest* test)
         const CheckStream stream = { .dense_values = values };
         const CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input,
                                        .stream = &stream, .object_count = 2 };
-        check_test_expect(test, check_program_return_call(&program, 1, NULL, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
+        check_test_expect(test, check_program_return_call(&program, 1, NULL) == BUSTER_CHECK_RETURN_UNKNOWN,
                           "a call without optional source declaration bindings remains conservative");
     }
 

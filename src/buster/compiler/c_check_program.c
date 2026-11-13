@@ -228,6 +228,9 @@ struct CheckProgramOptions
     const CheckDataPrepared* prepared_data;
     // Borrowed for main recognition and compatibility checks before adding target-runtime call symbols.
     const InternTable* identifiers;
+    // Source library policy, borrowed while checking: return warnings must distinguish a library's implicit noreturn
+    // contract from the same name under -fno-builtin or -ffreestanding. Null keeps reader-independent calls conservative.
+    const PPOptions* pp_options;
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
     bool scalar;
@@ -4899,9 +4902,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     };
     // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
     // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
-    const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
-                                    check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
-    valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
+    const bool return_warnings = options.return_warnings || options.noreturn_warnings;
+    const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && return_warnings && node_count != 0 ?
+                                    check_program_return_facts(program, options.pp_options, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
+    valid = valid && (!return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {

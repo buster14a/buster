@@ -910,7 +910,9 @@ static bool check_common_runtime_id(uint32_t id)
                         id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_DIVISION_BY_ZERO ||
                         id == CHECK_WARNING_ID_ARRAY_BOUNDS || id == CHECK_WARNING_ID_SIGN_COMPARE || id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE ||
                         id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || id == CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE ||
-                        id == CHECK_WARNING_ID_NULL_DEREFERENCE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE;
+                        id == CHECK_WARNING_ID_NULL_DEREFERENCE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
+                        id == CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE || id == CHECK_WARNING_ID_STRING_COMPARE ||
+                        id == CHECK_WARNING_ID_NONNULL || id == CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS;
     return result;
 }
 
@@ -11756,6 +11758,9 @@ static void check_common_type_safety(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+#include "c_check_expression_warnings.c"
+#include "c_check_call_warnings.c"
+
 // `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
 // without one.
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -11796,6 +11801,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     // At one assignment, clang's -Wself-assign is given as Sema builds it, before the condition that reads it gives
     // -Wparentheses.
     check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
+    check_common_expression_warnings(parser, pp, input, stream, types, program, &facts, scratch);
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_chained_comparisons(parser, pp, input, scratch);
     check_common_shift_op_parentheses(parser, pp, input, scratch);
@@ -11811,6 +11817,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
     }
     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
+    check_common_call_warnings(parser, pp, input, stream, types, &spell, program, facts.evaluated, scratch);
     check_common_type_safety(parser, pp, input, stream, types, &spell, scratch);
     arena_pop_to(scratch, mark);
     check_common_contexts = (CheckCommonContexts){ 0 };

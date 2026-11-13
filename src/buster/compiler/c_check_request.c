@@ -496,6 +496,7 @@ static bool check_request_parse(PPOptions* parsed, CheckRequestRefusal* refusal,
 static CheckProgramOptions check_request_program_options(const Preprocessor* pp, CheckProgramOptions unit)
 {
     unit.identifiers = pp->table;
+    unit.pp_options = &pp->options;
     unit.target = pp->options.target;
     unit.predefines = &pp->options.predefines;
     unit.frame_pointer = predefines_frame_pointer(&pp->options.predefines);

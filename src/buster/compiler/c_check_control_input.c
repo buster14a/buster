@@ -3065,10 +3065,8 @@ static bool check_input_fallthrough_noreturn_type(const CheckInputAttributes* at
 // that typedef's name in turn (`typedef void (*N)(void) __attribute__((noreturn)); N p;`), or through a typeof of a name
 // its specifiers spell (#1844): of a function its GNU attribute marks (`__typeof__(die) *p`, `__typeof__(&die) p`; C11's
 // _Noreturn is its declaration's, not its type's), or of an object or a typedef, whose own walk goes on; a bounded walk.
-static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration)
+static bool check_input_fallthrough_noreturn_object(const CheckInput* input, const Parser* parser, uint32_t declaration)
 {
-    const CheckInput* input = reader->output;
-    const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     bool noreturn = false;
     uint32_t at = declaration;
@@ -3082,7 +3080,7 @@ static bool check_input_fallthrough_noreturn_object(const CheckInputReader* read
         const uint32_t name = close < count && keyword + 3 == close ? keyword + 2 :
                               close < count && keyword + 4 == close && parser->tokens.kinds[keyword + 2] == PARSE_KIND_AMP ? keyword + 3 : count;
         const uint32_t named = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[name] : 0;
-        const bool function = named != 0 && named < count && reader->declaration_kinds[named] == C_BINDING_FUNCTION;
+        const bool function = named != 0 && named < count && input->declaration_kinds[named] == C_BINDING_FUNCTION;
         noreturn = noreturn || (function && check_input_fallthrough_noreturn_type(check_input_attributes_at(input, named)));
         next = next != 0 ? next : named != 0 && named < count && !function ? named : 0;
         at = next;
@@ -3116,8 +3114,8 @@ static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t 
     const bool cast = callee < count && parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST;
     const uint32_t cast_type = cast ? check_input_token_type_spelling(reader->output, parser, callee, true) : 0;
     bool noreturn = declared || builtin || check_input_fallthrough_trap(reader, callee) ||
-                    (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration)) ||
-                    (cast_type != 0 && check_input_fallthrough_noreturn_object(reader, cast_type));
+                    (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader->output, parser, declaration)) ||
+                    (cast_type != 0 && check_input_fallthrough_noreturn_object(reader->output, parser, cast_type));
     if (!noreturn && callee < count && declaration >= count && reader->pp != NULL)
     {
         uint8_t buffer[32];
