@@ -2103,6 +2103,9 @@ struct CheckInputReader
     // check_attested_skips), which the walk passes and the unit-wide passes that size or prepare what the walk reads leave
     // out; null where nothing is skipped.
     const uint64_t* skips;
+    // Each token's system level as attested declarations' passes mapped it before the reader (check_attested_token_levels),
+    // which the system tokens take instead of mapping the preprocessor's levels again; null without them.
+    const uint8_t* token_levels;
     // A bit a token, (count + 64) / 64 words: whether one of the sparse columns the expressions' walk tests first has an
     // entry for it (check_input_expression_sparse), kept by every write of those columns (check_input_sparse_mark). The
     // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
@@ -15985,12 +15988,34 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     const uint64_t mark = reader->scratch->length;
     // With three bytes past the last token, which the transitions' gathers of four bytes at it read.
     uint8_t* tokens = (system && pp->output.locations != NULL) || relaxed ? arena_push_array(arena, (uint64_t)count + 4, sizeof(uint8_t), 64) : NULL;
+    // The tokens' levels that attested declarations' passes mapped (CheckInputReader.token_levels), the preprocessor's for
+    // every token: each one's mark from its byte, 64 at a time.
+    const uint8_t* const mapped = tokens != NULL && system && pp->output.locations != NULL ? reader->token_levels : NULL;
     // With three bytes past the entry after them all, which the vector path's gathers of four bytes at it read.
-    uint8_t* levels = tokens != NULL && system && pp->output.locations != NULL ? arena_push_array(reader->scratch, (uint64_t)pp->output.count + 4, sizeof(uint8_t), 64) : NULL;
-    reader->output->resource |= (((system && pp->output.locations != NULL) || relaxed) && tokens == NULL) || (system && pp->output.locations != NULL && levels == NULL);
-    if (tokens != NULL && levels == NULL)
+    uint8_t* levels = tokens != NULL && system && pp->output.locations != NULL && mapped == NULL ?
+                      arena_push_array(reader->scratch, (uint64_t)pp->output.count + 4, sizeof(uint8_t), 64) : NULL;
+    reader->output->resource |= (((system && pp->output.locations != NULL) || relaxed) && tokens == NULL) ||
+                                (system && pp->output.locations != NULL && mapped == NULL && levels == NULL);
+    if (tokens != NULL && levels == NULL && mapped == NULL)
     {
         memset(tokens, 0, (uint64_t)count + 4);
+    }
+    if (mapped != NULL)
+    {
+        // The vector path 64 tokens at a time; the loop after it, the scalar path, its twin, takes the last ones.
+        uint32_t token = 0;
+        for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && count - token >= 64; token += 64)
+        {
+            const __m512i level = _mm512_loadu_si512(mapped + token);
+            const __mmask64 marked = _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
+                                     _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_EXTERN_C_FILE));
+            _mm512_storeu_si512(tokens + token, _mm512_maskz_set1_epi8(marked, 1));
+        }
+        for (; token < count; token += 1)
+        {
+            tokens[token] = mapped[token] == BUSTER_PP_SYSTEM_FILE || mapped[token] == BUSTER_PP_EXTERN_C_FILE;
+        }
+        memset(tokens + count, 0, 4);
     }
     if (levels != NULL)
     {
@@ -16012,7 +16037,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         check_input_system_token_map(tokens, sources, count, levels, limit, parser->options.scalar);
         memset(tokens + count, 0, 4);
     }
-    if (tokens != NULL && (levels != NULL || relaxed))
+    if (tokens != NULL && (levels != NULL || mapped != NULL || relaxed))
     {
         if (relaxed)
         {
@@ -16583,6 +16608,7 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
 // each reading's binding events against its declaration's list, made as the reader ends, while it has them.
 typedef struct CheckAttested CheckAttested;
 static const uint64_t* check_attested_skips(const CheckAttested* attested);
+static const uint8_t* check_attested_token_levels(const CheckAttested* attested);
 static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count);
 
 // The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
@@ -16729,6 +16755,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .syntax = syntax,
         .visits = visits,
         .skips = attested != NULL ? check_attested_skips(attested) : NULL,
+        .token_levels = attested != NULL ? check_attested_token_levels(attested) : NULL,
     };
     for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
     {
