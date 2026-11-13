@@ -761,7 +761,12 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   main), passed but invalidated, failed, or cancelled. For each it gives the
   candidates and the runner-minutes (the sum of the jobs' own times), the
   share spent on candidates that didn't merge (failures and rebuild waste),
-  and the merged candidates' median and p95 wall time.
+  and the merged candidates' median and p95 wall time. Queue delay is apart
+  from the run (#2031): each hosted job's wait for a runner, from its creation
+  to its start, of the jobs a runner took (not skipped ones, nor the 9700X's,
+  which waits for its own machine, not the hosted pool). The report gives the median and
+  p95 of each candidate's longest wait and the mean of every job's. It doesn't
+  see the time an entry waits in the queue before its candidate's run starts.
 - **Nightly credit.** The drill (12–13 November, #1430) showed that main is
   fast-forwarded to the exact commit the queue tested, with the same SHA and
   tree. So that run is the state's own:

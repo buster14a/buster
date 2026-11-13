@@ -608,6 +608,10 @@ struct ParallelResult
     // The CPU time of its shell and of the processes under it that were waited for, in nanoseconds: wait4's user and
     // system times, once it has ended.
     uint64_t cpu;
+    // The peak resident memory, in KiB, of the largest of its shell and the processes under it that were waited for:
+    // wait4's ru_maxrss, once it has ended (#2031). It is one process's peak, not the sum of those that ran at once, and
+    // a process the runner killed after the shell ended isn't counted.
+    uint64_t memory;
     // Why it couldn't start (an errno), or 0.
     int start_error;
     ParallelState state;
@@ -655,6 +659,12 @@ static uint64_t parallel_clock(void)
 static double parallel_seconds(uint64_t nanoseconds)
 {
     return (double)nanoseconds / (double)BUSTER_PARALLEL_NANOSECONDS;
+}
+
+// KiB as whole MiB, rounded up: a process that touched any memory reports at least 1.
+static uint64_t parallel_mebibytes(uint64_t kibibytes)
+{
+    return kibibytes / 1024 + (kibibytes % 1024 != 0);
 }
 
 // Appends bytes at the arena's end, where the part of the report being built grows. False when the arena is full.
@@ -731,7 +741,8 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
     }
     else
     {
-        snprintf(text, size, "%s in %.1f s, %.1f s of CPU", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu));
+        snprintf(text, size, "%s in %.1f s, %.1f s of CPU, %llu MiB peak", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu),
+                 (unsigned long long)parallel_mebibytes(result->memory));
     }
 }
 
@@ -1070,6 +1081,7 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
             } while (waited < 0 && errno == EINTR);
             result->status = status;
             result->cpu = waited == result->pid ? parallel_cpu_time(&usage) : 0;
+            result->memory = waited == result->pid && usage.ru_maxrss > 0 ? (uint64_t)usage.ru_maxrss : 0;
             result->skipped = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_PARALLEL_SKIP_STATUS && !result->timed_out;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;

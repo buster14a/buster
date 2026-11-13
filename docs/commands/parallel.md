@@ -67,8 +67,12 @@ run on, 8 on the 9700X, whose 15 CPUs online would put two tests on a core's SMT
 siblings, which slow each other down, as do the lanes' spinning waits (the job's
 tests took 21.3 to 22.4 s with 8 jobs, and 22.9 to 23.3 s with 15, test-lanes
 2.3 to 2.9 s of them rather than 0.2). The report gives each one's heading, with
-its outcome, its time and its CPU time (`wait4`'s, of its shell and of the
-processes under it that were waited for: over its time, the CPUs it kept busy),
+its outcome, its time, its CPU time (`wait4`'s, of its shell and of the
+processes under it that were waited for: over its time, the CPUs it kept busy)
+and its peak memory (#2031: `passed in 12.3 s, 40.1 s of CPU, 812 MiB peak`,
+`wait4`'s `ru_maxrss` in MiB rounded up: the largest of its shell and of the
+processes under it that were waited for, one process's peak rather than the sum
+of those that ran at once, without what the runner kills after the shell ends),
 then its output, in the list's order as soon as it and every command before it
 have ended; with `--github`, between `::group::` and `::endgroup::`, and an
 `::error::` annotation for each that failed. Then come a summary line, with the
@@ -196,7 +200,7 @@ taskset -c 0-7 ./build/compiler parallel --jobs 8 --timeout 600 < tools/ci/corre
 ```
 
 `./build/compiler test-parallel` (about 7 s) checks it, each report exactly
-as expected with its times and CPU times written as `*`:
+as expected with its times, CPU times and peak memory written as `*`:
 
 - lists: headings, scripts, blank lines and comments before the first heading,
   a heading without its space, a last line without a newline, `==` inside a
@@ -229,6 +233,10 @@ as expected with its times and CPU times written as `*`:
   environment has another value; and the CPU time of a shell's loop and of a
   process it waits for counts, a sleep's comes to next to none, and the
   summary's is their sum;
+- memory (#2031): the 32 MiB a shell holds and the 32 MiB a process it waits
+  for holds each count in their command's peak, a shell that holds nothing
+  comes to under 16 MiB, and each command's heading gives its own peak in MiB
+  rounded up;
 - output: 1 MB from one command, past a pipe's 64 KB;
 - processes: a command past its timeout killed with the process it started,
   what a command leaves running killed when its shell ends, and a shell that
