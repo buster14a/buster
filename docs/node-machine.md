@@ -12,7 +12,10 @@ the census takes (calls, `&&`, `||` and `?:` [below](#calls), the increments and
 the compound assignments [below](#increments-and-compound-assignments)). T's
 direct rules now type nearly every node it sent to the action: a twentieth of
 `sqlite3.c`'s typed operators and a quarter of Lua's
-([below](#ts-rules-for-the-actions-nodes)). No compile takes it. Its gains are estimates that
+([below](#ts-rules-for-the-actions-nodes)). The sweeps are bound by fetching
+their code; with T's rare paths out of its loop's line, the three cost 181
+cycles a taken node on `sqlite3.c`
+([below](#the-sweeps-front-end-ts-rare-paths-out-of-line)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -1509,6 +1512,90 @@ Two levers that looked as good in the profile didn't pay, and aren't in it:
   as without. Its twin under `--verify` counted 84 differences on the fixture
   when either answer was corrupted on its fill: the check works, the memo just
   doesn't pay.
+
+### The sweeps' front end: T's rare paths out of line
+
+The sweeps are bound by fetching their code, not by their instructions. A
+local patch to `node_shadow_time` times one sweep set alone (T; T and C; all
+three), and `perf stat` counted each set's 40 passes less a run of none, per
+taken node, at main `b7a95eed` on the 9700X, three times. The five events
+share the core's counters by turns, so a figure moves by up to a tenth between
+runs; these are the medians:
+
+| `sqlite3.c` | cycles | instructions | dispatch slots the front end left empty | L1i misses | mispredicted branches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| T | 100.5 | 324.7 | 29% | 7.2 | 0.8 |
+| C | 53.4 | 191.9 | 52% | 5.9 | 0.4 |
+| X | 37.4 | 105.3 | 59% | 5.1 | 0.4 |
+| all three | 190.4 | 621.5 | 41% | 18.4 | 1.6 |
+
+Lua's sets look the same: 21%, 53% and 56% of their slots empty, and 20.5
+misses a node. Over a whole run of 40 passes at `e412d48e`, `perf stat`'s
+pipeline metrics put 40% of the dispatch slots on the front end (22% waiting
+on its latency, 18% on its bandwidth), 10% on mispredicted branches and 19% on
+the back end; 35% retire. Half of T's instruction-cache misses fell on 12 of
+the 141 64-byte lines of its code that missed, those of its loop's common
+path: its leaves, its node's op and context, its operands and the type words.
+The loop had its rare paths
+inlined among them: the action, the twin's comparison, a leaf's whole value
+and the refusals.
+
+**The bound.** A build with profile-guided optimization trained on the shadow
+of `sqlite3.c` alone (`BUSTER_PGO=1`) took the three sweeps from 190.4 to 170.8
+cycles a node on `sqlite3.c`, and from 161.6 to 135.4 on Lua, which it wasn't
+trained on (one run each). It cut the instruction-cache misses from 18.4 to
+7.5 a node by inlining every sweep into `node_shadow_sweep` and laying the hot
+blocks out together. That is a bound, not the change: it lays the whole
+compiler out by one input's profile.
+
+**The change.** T's rare paths are out of line and marked cold, and its tests
+for them are expected false, so that the loop's common blocks lie together:
+- the nodes T's rules leave to the action (`node_machine_type_action`), 716 of
+  `sqlite3.c`'s 258,466 taken nodes;
+- `--verify`'s twin of a node a row or a rule typed
+  (`node_machine_same_as_action`);
+- a leaf with a payload row, an overload set or another category, made whole
+  first (`node_machine_leaf_whole`);
+- T's refusals, which reach none of `sqlite3.c`'s expressions, one of Lua's
+  and 39 of musl's 23,036.
+
+C's label numbering, which runs for one taken expression in 15 to 19 (2,824 of
+`sqlite3.c`'s 51,289), is kept out of line too (`node_machine_number_labels`). `nm` shows nothing else moved:
+`node_machine_type` goes from 13,880 bytes to 11,410 and
+`node_machine_contexts` from 8,631 to 7,484. The other functions are the same.
+
+On the 9700X, against main `b7a95eed` (CPU 2, under the lock, `--passes 11`,
+medians of six runs each taken in turn), in cycles and instructions a taken
+node ([the record](https://github.com/buster14a/buster-performance/tree/c5d45b327d90f5187af4e74df00dc227f26e57b4/docs/measurements/node-machine-front-end-2524-2026-11-13)):
+
+| | T | T, C and X | the three, two runs |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, main | 100.5, 345.9 | 194.6, 649.6 | 340.3 |
+| `sqlite3.c`, the change | **87.6, 344.1** | **180.9, 647.7** | **313.9** |
+| Lua, main | 93.7, 437.7 | 168.6, 738.3 | 318.6 |
+| Lua, the change | **80.9, 436.7** | **154.1, 737.2** | **292.6** |
+
+- **T is 13 cycles a node faster on the same instructions**, 13% on both
+  inputs, and the three sweeps 7.0% on `sqlite3.c` and 8.6% on Lua. In the
+  counts above (two runs), T's misses fall from 7.2 a node to 6.3, and its
+  empty slots from 232 to 213.
+- **The placement doesn't make it.** With the checker unit's code shifted by 0,
+  1,024, 2,112 and 3,136 bytes (`./build.sh shifts`), T ran 88.3 to 88.8
+  cycles on `sqlite3.c` with the change against 98.9 to 100.4 without, and 80.5
+  to 81.8 on Lua against 91.7 to 92.8.
+- **C and X are unchanged.** Half and three fifths of their slots are still
+  empty. The profile's layout took C from 53 to 47 cycles a node on
+  `sqlite3.c`, but keeping its label numbering out of line didn't. Both choose
+  each record's case by branches on its facts, and those cases are what they
+  fetch: fewer, denser cases, or the row on a key of a few bytes that
+  [the baked tables](#the-baked-tables-measured) describe, are the levers left
+  to try.
+- **The comparison:** `--verify` on `sqlite3.c`, Lua and musl, with and
+  without `-g`, has no difference, and main's counts. `-c sqlite3.c` doesn't
+  run the shadow and is unchanged: 124.6 ms against main's 124.8, with the
+  same instructions.
+
+The three now cost 180.9 cycles a node on `sqlite3.c`, against the gate's 120.
 
 ## Expected gains
 
