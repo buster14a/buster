@@ -243,6 +243,18 @@ jobs:
           bash tests/ci/vector-draw.sh
           bash tests/ci/rerun.sh
 
+      # Merge-queue drill (#1430), never on main: entry C's own candidate fails here, after the fixtures (about 3.5
+      # minutes in), and a candidate behind it, which holds C but whose head is its own merge, doesn't: by then that
+      # candidate's run has started, and the drill sees what GitHub does with it when C's failure invalidates it.
+      - name: Fail merge-queue drill entry C's own candidate
+        if: github.event_name == 'merge_group'
+        shell: bash
+        run: |
+          subject=$(git log -1 --format=%s)
+          case "$subject" in
+              "Merge pull request #2598 "*) echo '::error::merge-queue drill: entry C fails in its own candidate'; exit 1 ;;
+          esac
+
       - name: Decide reuse and hardware admission
         id: decide
         shell: bash
@@ -1888,18 +1900,6 @@ jobs:
               git ls-files -- docs/measurements
               exit 1
           fi
-
-      # Merge-queue drill (#1430), never on main: entry C's own candidate fails here, and a candidate behind it, which
-      # holds C too but whose head is its own merge, doesn't, so that the drill sees what GitHub does with a running
-      # candidate that a failure ahead invalidates.
-      - name: Fail merge-queue drill entry C's own candidate
-        if: ${{ !cancelled() && github.event_name == 'merge_group' }}
-        shell: bash
-        run: |
-          subject=$(git log -1 --format=%s)
-          case "$subject" in
-              "Merge pull request #2598 "*) echo '::error::merge-queue drill: entry C fails in its own candidate'; exit 1 ;;
-          esac
 
       # The guide budget, in the required contexts, so that no separate required check is needed.
       - name: Keep automatically loaded instructions bounded
