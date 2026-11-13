@@ -1998,6 +1998,13 @@ static void check_attested_lane_close(CheckAttested* attested)
     }
 }
 
+// A lane's state in a command that leaves its lanes' memory to the exit: its arenas stay mapped until then, unreleased,
+// as the lane's own are, and the state itself, the heap's, is freed.
+static void check_attested_lane_leave(CheckAttested* attested)
+{
+    free(attested);
+}
+
 // A unit's start on the lane (null where it has no state): nothing skipped yet, and whether it is a reading again, which
 // skips nothing.
 static void check_attested_begin(CheckAttested* attested, bool again)
