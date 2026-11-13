@@ -42,12 +42,11 @@ around the search rather than the search. Each unit:
 
 The intern table now keeps each id's answer (`InternTable.intrinsic_rows`, a
 16-bit code: not looked up, no row, or the row plus 2). It lives in its own
-fresh reservation (`intern_intrinsic_rows`), with 32 codes of zero padding for
-the gathers' 32-bit reads:
+fresh reservation (`intern_intrinsic_rows`):
 
 - **Its first size is 8 KB**, which a small unit's names fit. It doubles when
   the table outgrows it, copying the codes.
-- **Up to 32,736 ids it stays in base pages**, the arena's first 64 KB
+- **Up to 32,768 ids it stays in base pages**, the arena's first 64 KB
   (sqlite3.c and its headers intern 22,800). There a reservation takes no
   huge-page advice and splits no mapping.
 - **`intern_reset` and `intern_release` drop it.**
@@ -77,9 +76,13 @@ The units of a command that share a table look each spelling up once.
   counts the distinct rows (a bit per row) and the call-shaped operands of rows
   together, which size the tables as before.
   - **The vector path** takes the 64-token mask's operands without testing
-    each again, and gathers their names' codes 16 at once
-    (`check_input_intrinsic_unresolved`). Only a row's go on, to an out-of-line
-    handler (`check_input_intrinsic_take`).
+    each again, and reads each one's code (`check_input_intrinsic_unresolved`).
+    Only a row's go on, to an out-of-line handler (`check_input_intrinsic_take`).
+  - **Why the codes' reads stay scalar.** Operands are about a fifth of the
+    tokens, so 16-lane gathers of the codes ran mostly empty. On the 9700X, the
+    set-up's functions took 252 samples of 20 compiles of `sqlite3.c` and 159
+    of 3 runs of musl's 1,336-unit command with gathers, against 216 and 105
+    with this loop.
   - **The scalar path**, its twin, tests each token. Both give every name its
     exact code and the same counts.
 - **Storage.** Only a unit with a row's name allocates: the tables, and the

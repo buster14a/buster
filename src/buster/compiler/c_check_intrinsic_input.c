@@ -279,21 +279,16 @@ static void check_input_intrinsic_cache(uint32_t* cache, const uint16_t* rows, u
 }
 
 // Of the operands `selected` of the 64 tokens from `first`, those whose name's code isn't a miss's, which most operands'
-// is: the vector path gathers 16 names' codes at once from the memo (whose room past its last id takes the 32-bit read of
-// the last one's).
+// is: a load of each one's code, branch-free. It stays scalar by measurement (#2654): operands are about a fifth of the
+// tokens, so 16-lane gathers of the codes ran mostly empty, and on the 9700X the set-up's functions took 252 samples
+// of 20 compiles of sqlite3.c and 159 of 3 of musl's 1,336-unit command with them, against 216 and 105 with this loop.
 static uint64_t check_input_intrinsic_unresolved(const Parser* parser, const uint16_t* rows, uint32_t first, uint64_t selected)
 {
     uint64_t result = 0;
-    for (uint32_t part = 0; part < 64; part += 16)
+    for (uint64_t bits = selected; bits != 0; bits &= bits - 1)
     {
-        const __mmask16 lanes = (__mmask16)(selected >> part);
-        if (lanes != 0)
-        {
-            const __m512i names = _mm512_maskz_loadu_epi32(lanes, parser->tokens.names + first + part);
-            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, names, rows, 2);
-            const __m512i codes = _mm512_and_si512(words, _mm512_set1_epi32(0xffff));
-            result |= (uint64_t)_mm512_mask_cmpneq_epi32_mask(lanes, codes, _mm512_set1_epi32((int32_t)BUSTER_CHECK_INTRINSIC_MISS)) << part;
-        }
+        const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+        result |= (uint64_t)(rows[parser->tokens.names[first + lane]] != BUSTER_CHECK_INTRINSIC_MISS) << lane;
     }
     return result;
 }
@@ -317,7 +312,7 @@ static __attribute__((noinline)) void check_input_intrinsic_take(CheckInputIntri
 // The tables for the unit's intrinsics. The memo first gets the codes of the table's ids it hasn't (check_input_intrinsic_fill,
 // in id order, once for the table's every unit); then one pass over the unit's operands (check_input_intrinsic_operands)
 // counts the distinct rows they name and their call-shaped operands. The vector path finds the operands 64 tokens at once,
-// without the scalar test of each, and their codes 16 at once (check_input_intrinsic_unresolved); only a row's go on
+// without the scalar test of each, and reads their codes (check_input_intrinsic_unresolved); only a row's go on
 // (check_input_intrinsic_take). The scalar path, its twin, tests each token. Both give each name its exact code and the
 // same counts. Only a unit with a row's name takes storage: then the name cache, from the memo, in scratch, and the tables.
 static bool check_input_intrinsic_initialize(CheckInputReader* reader)
