@@ -9,9 +9,20 @@
 // is a leaf whose blocks are one straight line (one block, or #1282's chain, each block's br to the next dropped); its
 // operations, faulting accesses and volatile flags are copied in their original order. Parameters become the already
 // evaluated actual arguments; the final return becomes COPY or disappears for void. A previously rewritten acyclic
-// function may become a leaf, allowing nested expansion.
-// Caller blocks and predecessor identities do not change. Every variable side-table slice is rebuilt per occurrence,
-// because valid source slices can overlap with different roles. This first scope does not splice callee CFGs or phis.
+// function may become a leaf, allowing nested expansion. Such an expansion leaves the caller's blocks and predecessor
+// identities as they were. Every variable side-table slice is rebuilt per occurrence, because valid source slices can
+// overlap with different roles.
+//
+// #2541's general splice (IrInlineOptions.control_flow) takes a callee of any other control flow: blocks, phis, branches,
+// switches, several returns or none, and calls of its own of any kind, but labels, a variadic frame and the dynamic
+// stack's operations. The call's block ends there in a br to the callee's entry, the callee's blocks follow it with their
+// values, blocks and side-table rows rebased and each ret a br to a new continuation block, which begins with the result (a
+// phi of the returned values, a COPY of the one, or an undef) and goes on with the rest of the caller's block. A caller
+// block's branches in go to its first part and its edges out leave its last, which its successors' phis name. The
+// callee's slots without lifetime markers, and the aggregate arguments' copies, are bracketed by a start in the head and an
+// end in the continuation, after the result's copy. Its calls keep their ABI records, appended to the caller's. The callee's
+// operand columns are rebased 16 nodes a vector by kind tables looked up by opcode, with a scalar twin a node at a time
+// (ir_inline_splice_vector, ir_inline_splice_scalar); both write the same columns.
 //
 // #1282 takes SIMD functions, the x86 intrinsic wrappers': a callee's vectors, masks and machine rows are copied with it
 // (its vector constants and rows appended to the caller's, IR_VCONST's index and IrCall.row rebased, a row call staying a
@@ -67,6 +78,9 @@ struct IrInlineOptions
     uint8_t vector_copies;
     bool enabled;
     bool scalar;
+    // Whether a callee of any control flow is a candidate (#2541): its blocks spliced at the call (ir_inline_expand_general)
+    // rather than one straight line of them cloned in place. Off by default, where such a body is IR_INLINE_BODY.
+    bool control_flow;
 };
 
 typedef enum IrInlineDecision
@@ -110,12 +124,60 @@ struct IrInlineResult
     uint64_t scratch_bytes;
 };
 
+// A callee's shape as a candidate, computed once its body is final (ir_inline_shape). `size` is what an expansion clones of
+// it: a straight line's nodes but its parameters and br's, plus its result's COPY; a general body's (#2541) nodes but its
+// parameters, the br into it, its result's node and its unmarked slots' lifetime markers, a start and an end each.
 typedef struct IrInlineBody IrInlineBody;
 struct IrInlineBody
 {
     uint32_t size;
     uint32_t cost;
     bool supported;
+    // A body of any control flow (IrInlineOptions.control_flow), spliced with its blocks (ir_inline_expand_general).
+    bool general;
+    uint32_t returns;
+    uint32_t parameters;
+    // The PARAM nodes that begin its first block, which the vector splice maps by a permute (ir_inline_splice_vector).
+    uint32_t prefix;
+    // Its slots without lifetime markers of their own, which an expansion brackets (`marked`, a byte a slot, says which).
+    uint32_t unmarked;
+    const uint8_t* marked;
+    // The words its rebuilt slices take: phis', switches', calls' arguments and ternary intrinsics' (extra), calls' fixed
+    // types and its calls' descriptors.
+    uint32_t extra;
+    uint32_t types;
+    uint32_t descriptors;
+};
+
+// What a general expansion (#2541) puts where, past its start: the head (its aggregate arguments' copies, lifetime starts and
+// the br into the callee), the callee's body, its result's node at `result` (BUSTER_IR_NONE without one) and the rest.
+typedef struct IrInlineLayout IrInlineLayout;
+struct IrInlineLayout
+{
+    uint64_t head;
+    uint64_t body;
+    uint64_t result;
+    uint64_t total;
+};
+
+// The splice's operand kinds by opcode (#2541), one table a column (a, b, c), from the IR's operand tables: a value, a
+// value where it isn't BUSTER_IR_NONE, a block, or a row of a side table, each rebased by its own base; and the rest kept.
+#define BUSTER_IR_INLINE_KEEP 0u
+#define BUSTER_IR_INLINE_VALUE 1u
+#define BUSTER_IR_INLINE_OPTIONAL 2u
+#define BUSTER_IR_INLINE_BLOCK 3u
+#define BUSTER_IR_INLINE_CONSTANT 4u
+#define BUSTER_IR_INLINE_VECTOR 5u
+#define BUSTER_IR_INLINE_SLOT 6u
+#define BUSTER_IR_INLINE_ADDRESS 7u
+// The operations whose operands the splice rebuilds after their columns: slices of extra and calls' descriptors.
+#define BUSTER_IR_INLINE_REBUILT 1u
+
+typedef struct IrInlineKinds IrInlineKinds;
+struct IrInlineKinds
+{
+    uint8_t columns[3][BUSTER_IR_OP_TABLE];
+    uint8_t rebuilt[BUSTER_IR_OP_TABLE];
 };
 
 // What one expansion adds to its caller past the callee's cloned body (#1282): the aggregate copies' instructions,
@@ -488,7 +550,7 @@ static IrError ir_inline_components(const IrInlineUnit* unit, Arena* scratch, Ir
 
 // Whether `op` may be cloned into a caller in its order (#1282 adds the SIMD operations, slots' addresses and lifetimes,
 // fences, intrinsics and atomic read/modify/writes): not a terminator before the return, a phi, a call (but a row call,
-// which ir_inline_body checks) or the dynamic stack's operations.
+// which ir_inline_shape checks) or the dynamic stack's operations.
 static bool ir_inline_cloned(uint32_t op)
 {
     return op != IR_CALL_INDIRECT && op != IR_PHI && op != IR_BR && op != IR_CBR && op != IR_SWITCH && op != IR_RET && op != IR_UNREACHABLE && op != IR_ALLOCA &&
@@ -509,7 +571,106 @@ static bool ir_inline_chain(const IrFunction* function)
     return chain;
 }
 
-static IrInlineBody ir_inline_body(const IrFunction* function)
+// Whether `op` may be in a general body (#2541): what a straight line clones, an indirect call, a phi and every terminator
+// but an indirect branch (its labels would be defined twice); not the dynamic stack's operations, whose frame is the callee's.
+static bool ir_inline_general_op(uint32_t op)
+{
+    return ir_inline_cloned(op) || op == IR_CALL_INDIRECT || op == IR_PHI || op == IR_BR || op == IR_CBR || op == IR_SWITCH || op == IR_RET || op == IR_UNREACHABLE;
+}
+
+// Whether a general body's expansion has a result node: a phi, a COPY or an undef of its value; of an aggregate result's
+// address (a ptr) but where the callee returns once, whose returned address the copy reads itself.
+static bool ir_inline_result_node(const IrFunction* callee, uint32_t returns)
+{
+    return callee->result_size != 0 ? returns != 1 : callee->result_type != IR_VOID;
+}
+
+// The general shape of `function` (#2541) into *body, where it is one: blocks, phis, branches, switches, returns (several or
+// none) and calls of its own of any kind. Its lifetime marks go in `scratch` and stay for the unit; false where it has no
+// room for them.
+static bool ir_inline_general(const IrFunction* function, Arena* scratch, IrInlineBody* body)
+{
+    bool general = function->block_count != 0 && function->instruction_count != 0;
+    uint64_t extra = 0;
+    uint64_t types = 0;
+    uint32_t descriptors = 0;
+    uint32_t returns = 0;
+    uint32_t parameters = 0;
+    uint32_t prefix = 0;
+    for (uint32_t node = 0; general && node < function->instruction_count; node += 1)
+    {
+        const uint32_t op = function->op[node];
+        general = ir_inline_general_op(op);
+        parameters += op == IR_PARAM;
+        prefix += op == IR_PARAM && prefix == node;
+        returns += op == IR_RET;
+        if (op == IR_CALL || op == IR_CALL_INDIRECT)
+        {
+            const IrCall descriptor = function->calls[function->b[node]];
+            extra += descriptor.argument_count;
+            types += descriptor.parameter_count;
+            descriptors += 1;
+        }
+        else if (op == IR_PHI)
+        {
+            extra += (uint64_t)function->b[node] * 2;
+        }
+        else if (op == IR_SWITCH)
+        {
+            extra += (uint64_t)function->c[node] * 2 + 1;
+        }
+        else if (ir_ternary_instruction(function, node))
+        {
+            extra += 1;
+        }
+    }
+    bool ok = true;
+    uint8_t* marked = general && function->slot_count != 0 ? ir_allocate(scratch, function->slot_count, 1, &ok) : 0;
+    uint32_t unmarked = 0;
+    if (marked != 0)
+    {
+        memset(marked, 0, function->slot_count);
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        {
+            if (function->op[node] == IR_LIFETIME)
+            {
+                marked[function->a[node]] = 1;
+            }
+        }
+        for (uint32_t slot = 0; slot < function->slot_count; slot += 1)
+        {
+            unmarked += marked[slot] == 0;
+        }
+    }
+    const bool result = ir_inline_result_node(function, returns);
+    extra += result && returns >= 2 ? (uint64_t)returns * 2 : 0;
+    // The br into it, its nodes but its parameters (a ret becomes a br), its result's node, and a start and an end of each
+    // unmarked slot's lifetime.
+    const uint64_t size = 1 + (uint64_t)function->instruction_count - parameters + result + (uint64_t)unmarked * 2;
+    if (ok && general && size < BUSTER_IR_INLINE_MAX_ITEMS && extra < BUSTER_IR_INLINE_MAX_ITEMS && types < BUSTER_IR_INLINE_MAX_ITEMS)
+    {
+        const uint64_t cost = size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->asm_body_count + function->slot_count;
+        *body = (IrInlineBody){
+            .size = (uint32_t)size,
+            .cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1,
+            .supported = true,
+            .general = true,
+            .returns = returns,
+            .parameters = parameters,
+            .prefix = prefix,
+            .unmarked = unmarked,
+            .marked = marked,
+            .extra = (uint32_t)extra,
+            .types = (uint32_t)types,
+            .descriptors = descriptors,
+        };
+    }
+    return ok;
+}
+
+// `function`'s shape as a candidate (IrInlineBody), once its body is final: one straight line of blocks (#1282), or with
+// `control_flow` any other body the general splice takes (#2541). False where scratch has no room for its marks.
+static bool ir_inline_shape(const IrFunction* function, bool control_flow, Arena* scratch, IrInlineBody* shape)
 {
     // Labels would be defined twice. A variadic definition's incoming frame is its own, and an aggregate result through a
     // hidden pointer (#131's MEMORY) has the convention's parameters rather than the callee's.
@@ -518,11 +679,12 @@ static IrInlineBody ir_inline_body(const IrFunction* function)
     {
         slots = slots && (function->slots[slot].flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0;
     }
+    const bool admitted = function->label_count == 0 && !function->variadic && slots && (function->parameter_passed == 0 || function->result_abi.kind != BUSTER_ABI_RESULT_MEMORY);
     IrInlineBody body = {
         .cost = UINT32_MAX,
-        .supported = ir_inline_chain(function) && function->label_count == 0 && !function->variadic && slots &&
-                     (function->parameter_passed == 0 || function->result_abi.kind != BUSTER_ABI_RESULT_MEMORY),
+        .supported = ir_inline_chain(function) && admitted,
     };
+    bool ok = true;
     if (body.supported)
     {
         // A value's result is a COPY; an aggregate's bytes are copied instead (ir_inline_copies).
@@ -537,7 +699,14 @@ static IrInlineBody ir_inline_body(const IrFunction* function)
         const uint64_t cost = (uint64_t)body.size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->asm_body_count + function->slot_count;
         body.cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1;
     }
-    return body;
+    // A body that isn't one straight line, or one whose calls aren't all row and body calls, is the general splice's.
+    if (!body.supported && control_flow && admitted)
+    {
+        body = (IrInlineBody){ .cost = UINT32_MAX };
+        ok = ir_inline_general(function, scratch, &body);
+    }
+    *shape = body;
+    return ok;
 }
 
 // The vector type that copies an aggregate of `size` bytes whole (#1282): one a vector register holds whole (its first
@@ -602,8 +771,10 @@ static bool ir_inline_abi_match(const IrFunction* caller, uint32_t node, const I
 }
 
 // What inlining the call at `node` of `caller` adds past `callee`'s cloned body (#1282): each aggregate argument's slot,
-// its address and its copy, and the aggregate result's copy into the call's destination where it has one.
-static IrInlineCopies ir_inline_copies(const IrFunction* caller, uint32_t node, const IrFunction* callee, uint8_t allowed)
+// its address and its copy, and the aggregate result's copy into the call's destination where it has one. A general
+// expansion (#2541) brackets each argument's slot with lifetime markers too, and copies no result where the callee never
+// returns.
+static IrInlineCopies ir_inline_copies(const IrFunction* caller, uint32_t node, const IrFunction* callee, const IrInlineBody* shape, uint8_t allowed)
 {
     IrInlineCopies copies = { 0 };
     const IrCall call = caller->calls[caller->b[node]];
@@ -616,12 +787,12 @@ static IrInlineCopies ir_inline_copies(const IrFunction* caller, uint32_t node, 
             if (given.size != 0)
             {
                 const IrInlineCopies copy = ir_inline_copy_size(given.size, ir_inline_argument_whole(given.location, given.size, allowed));
-                copies.instructions += copy.instructions + 1;
+                copies.instructions += copy.instructions + 1 + (shape->general ? 2 : 0);
                 copies.addresses += copy.addresses;
                 copies.slots += 1;
             }
         }
-        if (callee->result_size != 0 && caller->c[node] != BUSTER_IR_NONE)
+        if (callee->result_size != 0 && caller->c[node] != BUSTER_IR_NONE && (!shape->general || shape->returns != 0))
         {
             const IrInlineCopies copy = ir_inline_copy_size(callee->result_size, ir_inline_result_whole(callee->result_abi, callee->result_size, allowed));
             copies.instructions += copy.instructions;
@@ -656,7 +827,33 @@ static void ir_inline_threshold(const uint32_t* costs, uint32_t count, uint32_t 
     }
 }
 
-static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrInlineOptions options, Arena* scratch, IrInlineResult* result, uint64_t* charged)
+// The side-table rows an expansion of `callee` appends to its caller past its copies' (#2541): a general body's rebuilt
+// slices, descriptors, blocks and ABI records; a straight line's tables as they are.
+typedef struct IrInlineRows IrInlineRows;
+struct IrInlineRows
+{
+    uint64_t descriptors;
+    uint64_t extra;
+    uint64_t types;
+    uint64_t blocks;
+    uint64_t abi_calls;
+    uint64_t passed;
+};
+
+static IrInlineRows ir_inline_rows(const IrFunction* callee, const IrInlineBody* shape)
+{
+    const IrInlineRows rows = {
+        .descriptors = shape->general ? shape->descriptors : callee->call_count,
+        .extra = shape->general ? shape->extra : callee->extra_count,
+        .types = shape->general ? shape->types : callee->call_type_count,
+        .blocks = shape->general ? (uint64_t)callee->block_count + 1 : 0,
+        .abi_calls = shape->general ? callee->abi_call_count : 0,
+        .passed = shape->general ? callee->passed_count : 0,
+    };
+    return rows;
+}
+
+static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrInlineOptions options, const IrInlineBody* shapes, Arena* scratch, IrInlineResult* result, uint64_t* charged)
 {
     const uint32_t first = result->call_offsets[function];
     const uint32_t end = result->call_offsets[function + 1];
@@ -705,8 +902,8 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         else
         {
             const IrFunction* body_function = &result->functions[callee];
-            const IrInlineBody body = ir_inline_body(body_function);
-            const IrInlineCopies copies = body.supported ? ir_inline_copies(&unit->functions[function], node, body_function, options.vector_copies) : (IrInlineCopies){ 0 };
+            const IrInlineBody body = shapes[callee];
+            const IrInlineCopies copies = body.supported ? ir_inline_copies(&unit->functions[function], node, body_function, &body, options.vector_copies) : (IrInlineCopies){ 0 };
             const uint64_t size = (uint64_t)body.size + copies.instructions;
             const uint64_t cost = (uint64_t)body.cost + copies.instructions + copies.addresses + copies.slots;
             decision = body.supported && size < BUSTER_IR_INLINE_MAX_ITEMS ? IR_INLINE_SELECTED : IR_INLINE_BODY;
@@ -734,6 +931,9 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         uint64_t descriptors = caller->call_count;
         uint64_t extras = caller->extra_count;
         uint64_t types = caller->call_type_count;
+        uint64_t blocks = caller->block_count;
+        uint64_t abi_calls = caller->abi_call_count;
+        uint64_t passed = caller->passed_count;
         for (uint32_t call = first; call < end; call += 1)
         {
             if (result->decisions[call] == IR_INLINE_SELECTED)
@@ -741,7 +941,9 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                 const uint32_t size = result->expanded_sizes[call];
                 const uint32_t extra = size > 1 ? size - 1 : 0;
                 const IrFunction* callee = &result->functions[result->callees[call]];
-                const IrInlineCopies copies = ir_inline_copies(caller, result->call_nodes[call], callee, options.vector_copies);
+                const IrInlineBody* shape = &shapes[result->callees[call]];
+                const IrInlineCopies copies = ir_inline_copies(caller, result->call_nodes[call], callee, shape, options.vector_copies);
+                const IrInlineRows added = ir_inline_rows(callee, shape);
                 if (!fits[call - first])
                 {
                     result->decisions[call] = IR_INLINE_COST;
@@ -750,8 +952,9 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                          *charged + extra > options.maximum_unit_instructions || constants + callee->constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
                          addresses + callee->address_count + copies.addresses > BUSTER_IR_INLINE_MAX_ITEMS || slots + callee->slot_count + copies.slots > BUSTER_IR_INLINE_MAX_ITEMS ||
                          vectors + callee->vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS || rows + callee->row_count > BUSTER_IR_INLINE_MAX_ITEMS ||
-                         bodies + callee->asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || descriptors + callee->call_count > BUSTER_IR_INLINE_MAX_ITEMS || extras + callee->extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
-                         types + callee->call_type_count > BUSTER_IR_INLINE_MAX_ITEMS)
+                         bodies + callee->asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || descriptors + added.descriptors > BUSTER_IR_INLINE_MAX_ITEMS || extras + added.extra > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         types + added.types > BUSTER_IR_INLINE_MAX_ITEMS || blocks + added.blocks > BUSTER_IR_INLINE_MAX_ITEMS || abi_calls + added.abi_calls > BUSTER_IR_INLINE_MAX_ITEMS ||
+                         passed + added.passed > BUSTER_IR_INLINE_MAX_ITEMS)
                 {
                     result->decisions[call] = IR_INLINE_GROWTH;
                 }
@@ -765,9 +968,12 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
                     vectors += callee->vector_constant_count;
                     rows += callee->row_count;
                     bodies += callee->asm_body_count;
-                    descriptors += callee->call_count;
-                    extras += callee->extra_count;
-                    types += callee->call_type_count;
+                    descriptors += added.descriptors;
+                    extras += added.extra;
+                    types += added.types;
+                    blocks += added.blocks;
+                    abi_calls += added.abi_calls;
+                    passed += added.passed;
                     result->inlined_calls += 1;
                 }
             }
@@ -787,6 +993,9 @@ struct IrInlineBases
     uint32_t vectors;
     uint32_t rows;
     uint32_t bodies;
+    // A general expansion's (#2541): its callee's ABI records' and their arguments' first rows in the caller's tables.
+    uint32_t abi_calls;
+    uint32_t passed;
 };
 
 typedef struct IrInlineCursor IrInlineCursor;
@@ -843,7 +1052,8 @@ static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* d
 }
 
 // A call's fresh descriptor, argument slice and fixed-type slice at the cursor, its machine row's index rebased by `rows`
-// (a row call of an expansion, #1282), its ABI records' index the caller's (only the caller's own calls have them).
+// (a row call of an expansion, #1282), and its ABI records' index by `abi_calls` (a general expansion's call, #2541; a
+// caller's own and a straight line's calls keep theirs).
 static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, IrInlineBases bases, IrInlineCursor* cursor)
 {
     IrCall descriptor = source->calls[source->b[old]];
@@ -859,6 +1069,7 @@ static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunct
     descriptor.type_first = cursor->types;
     descriptor.row += descriptor.row != 0 ? bases.rows : 0;
     descriptor.body += descriptor.body != 0 ? bases.bodies : 0;
+    descriptor.abi += descriptor.abi != 0 ? bases.abi_calls : 0;
     cursor->extra += descriptor.argument_count;
     cursor->types += descriptor.parameter_count;
     destination->calls[cursor->descriptors] = descriptor;
@@ -984,15 +1195,356 @@ static void ir_inline_expand(const IrFunction* source, uint32_t node, const IrFu
     }
 }
 
-static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result)
+// The layout of the general expansion (#2541) of the call at `node` of `caller` (IrInlineLayout): the head holds each
+// aggregate argument's lifetime start, slot address and copy, each unmarked callee slot's start and the br into the callee;
+// the continuation its result's node, the aggregate result's copy, and the copies' and the unmarked slots' lifetime ends.
+static IrInlineLayout ir_inline_layout(const IrFunction* caller, uint32_t node, const IrFunction* callee, const IrInlineBody* shape, uint8_t allowed)
+{
+    const IrCall call = caller->calls[caller->b[node]];
+    uint64_t head = (uint64_t)shape->unmarked + 1;
+    uint64_t ends = shape->unmarked;
+    if (call.abi != 0)
+    {
+        const IrAbiCall* records = &caller->abi_calls[call.abi - 1];
+        for (uint32_t p = 0; p < call.argument_count; p += 1)
+        {
+            const IrPassed given = caller->passed[records->passed + p];
+            if (given.size != 0)
+            {
+                head += ir_inline_copy_size(given.size, ir_inline_argument_whole(given.location, given.size, allowed)).instructions + 2;
+                ends += 1;
+            }
+        }
+    }
+    const bool result = ir_inline_result_node(callee, shape->returns);
+    const bool copied = callee->result_size != 0 && caller->c[node] != BUSTER_IR_NONE && shape->returns != 0;
+    const uint64_t copy = copied ? ir_inline_copy_size(callee->result_size, ir_inline_result_whole(callee->result_abi, callee->result_size, allowed)).instructions : 0;
+    const uint64_t body = (uint64_t)callee->instruction_count - shape->parameters;
+    const IrInlineLayout layout = {
+        .head = head,
+        .body = body,
+        .result = result ? head + body : BUSTER_IR_NONE,
+        .total = head + body + result + copy + ends,
+    };
+    return layout;
+}
+
+// The splice's operand kinds (IrInlineKinds) from the IR's own operand tables, which ir_value_mask reads too: a value, or an
+// optional one, where the operation's operand is; and the rows and blocks that the scalar splice rebases by operation
+// (ir_inline_node, ir_inline_splice_scalar).
+static void ir_inline_kinds(IrInlineKinds* kinds)
+{
+    memset(kinds, 0, sizeof(*kinds));
+    for (uint32_t op = 0; op < BUSTER_IR_OP_TABLE; op += 1)
+    {
+        for (uint32_t column = 0; column < 3; column += 1)
+        {
+            const uint32_t bit = 1u << column;
+            kinds->columns[column][op] = (uint8_t)((ir_operand_table[op] & bit) != 0 ? BUSTER_IR_INLINE_VALUE : (ir_optional_table[op] & bit) != 0 ? BUSTER_IR_INLINE_OPTIONAL : BUSTER_IR_INLINE_KEEP);
+        }
+        kinds->rebuilt[op] = op == IR_PHI || op == IR_SWITCH || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_RET || op == IR_INTRINSIC ? BUSTER_IR_INLINE_REBUILT : 0;
+    }
+    kinds->columns[0][IR_CONST] = BUSTER_IR_INLINE_CONSTANT;
+    kinds->columns[0][IR_VCONST] = BUSTER_IR_INLINE_VECTOR;
+    kinds->columns[0][IR_STACK_ADDR] = BUSTER_IR_INLINE_SLOT;
+    kinds->columns[0][IR_LIFETIME] = BUSTER_IR_INLINE_SLOT;
+    kinds->columns[0][IR_BR] = BUSTER_IR_INLINE_BLOCK;
+    kinds->columns[1][IR_CBR] = BUSTER_IR_INLINE_BLOCK;
+    kinds->columns[2][IR_CBR] = BUSTER_IR_INLINE_BLOCK;
+    kinds->columns[2][IR_ADDRESS] = BUSTER_IR_INLINE_ADDRESS;
+}
+
+// A general expansion's returns (#2541): the continuation they branch to, the result phi's slice in extra (BUSTER_IR_NONE
+// where the result is no phi), how many were written and the last returned value.
+typedef struct IrInlineReturns IrInlineReturns;
+struct IrInlineReturns
+{
+    uint32_t continuation;
+    uint32_t slice;
+    uint32_t written;
+    uint32_t single;
+};
+
+// The operands of a general expansion's node `inner` (of callee block `block`) at `at` that its columns don't give (#2541),
+// in node order, by both splices: a phi's slice and a switch's, their blocks rebased; a call's fresh descriptor; a ternary
+// intrinsic's third operand; and a ret, which becomes a br to the continuation and gives the result its value and block.
+static void ir_inline_rebuild(const IrFunction* callee, uint32_t inner, uint32_t block, IrFunction* rewritten, uint32_t at, const uint32_t* inner_values, IrInlineBases bases,
+                              uint32_t block_base, IrInlineCursor* cursor, IrInlineReturns* returns)
+{
+    const uint32_t op = callee->op[inner];
+    if (op == IR_RET)
+    {
+        const uint32_t value = callee->a[inner] != BUSTER_IR_NONE ? inner_values[callee->a[inner]] : BUSTER_IR_NONE;
+        if (returns->slice != BUSTER_IR_NONE)
+        {
+            rewritten->extra[returns->slice + returns->written * 2] = block_base + block;
+            rewritten->extra[returns->slice + returns->written * 2 + 1] = value;
+        }
+        returns->written += 1;
+        returns->single = value;
+        rewritten->op[at] = IR_BR;
+        rewritten->type[at] = IR_VOID;
+        rewritten->flags[at] = 0;
+        rewritten->alignment_log2[at] = 0;
+        rewritten->a[at] = returns->continuation;
+        rewritten->b[at] = BUSTER_IR_NONE;
+        rewritten->c[at] = BUSTER_IR_NONE;
+    }
+    else if (op == IR_PHI)
+    {
+        rewritten->a[at] = cursor->extra;
+        for (uint32_t p = 0; p < callee->b[inner]; p += 1)
+        {
+            rewritten->extra[cursor->extra++] = callee->extra[callee->a[inner] + p * 2] + block_base;
+            rewritten->extra[cursor->extra++] = inner_values[callee->extra[callee->a[inner] + p * 2 + 1]];
+        }
+    }
+    else if (op == IR_SWITCH)
+    {
+        rewritten->b[at] = cursor->extra;
+        rewritten->extra[cursor->extra++] = callee->extra[callee->b[inner]] + block_base;
+        for (uint32_t k = 0; k < callee->c[inner]; k += 1)
+        {
+            rewritten->extra[cursor->extra++] = callee->extra[callee->b[inner] + 1 + k * 2] + bases.constants;
+            rewritten->extra[cursor->extra++] = callee->extra[callee->b[inner] + 2 + k * 2] + block_base;
+        }
+    }
+    else if (op == IR_CALL || op == IR_CALL_INDIRECT)
+    {
+        ir_inline_descriptor(callee, inner, rewritten, at, inner_values, bases, cursor);
+    }
+    else if (ir_ternary_instruction(callee, inner))
+    {
+        ir_inline_third(callee, inner, rewritten, at, inner_values, cursor);
+    }
+}
+
+// The callee's blocks at the cursor (#2541), the scalar twin: a node at a time through ir_inline_node, which maps its
+// values through `inner_values` and rebases its rows by operation, then its blocks by `block_base`, then its rebuilt
+// operands (ir_inline_rebuild).
+static void ir_inline_splice_scalar(const IrFunction* callee, IrFunction* rewritten, const uint32_t* inner_values, IrInlineBases bases, uint32_t block_base, IrInlineCursor* cursor, IrInlineReturns* returns)
+{
+    for (uint32_t block = 0; block < callee->block_count; block += 1)
+    {
+        rewritten->block_offsets[block_base + block] = cursor->node;
+        for (uint32_t inner = callee->block_offsets[block]; inner < callee->block_offsets[block + 1]; inner += 1)
+        {
+            const uint32_t op = callee->op[inner];
+            if (op != IR_PARAM)
+            {
+                const uint32_t at = cursor->node++;
+                if (op != IR_RET)
+                {
+                    ir_inline_node(callee, inner, rewritten, at, inner_values, bases);
+                }
+                if (op == IR_BR)
+                {
+                    rewritten->a[at] += block_base;
+                }
+                else if (op == IR_CBR)
+                {
+                    rewritten->b[at] += block_base;
+                    rewritten->c[at] += block_base;
+                }
+                ir_inline_rebuild(callee, inner, block, rewritten, at, inner_values, bases, block_base, cursor, returns);
+            }
+        }
+    }
+}
+
+// The callee's blocks at the cursor (#2541), the vector path, for a callee whose parameters begin it (IrInlineBody.prefix),
+// at most 16: its nodes past them are one run of the caller's, so its four byte columns are copied 16 nodes a vector, and
+// each operand column's lanes get their kinds by one table lookup of their opcodes (IrInlineKinds): a value past the
+// parameters moves by the run's shift, a parameter becomes its argument by a permute of their row, and a block or a row
+// of a side table gets its kind's base by a permute of the bases' row. The nodes whose operands are rebuilt then go
+// through ir_inline_rebuild in node order, as the scalar twin's do.
+static void ir_inline_splice_vector(const IrFunction* callee, const IrInlineBody* shape, const IrInlineKinds* kinds, IrFunction* rewritten, const uint32_t* inner_values, IrInlineBases bases,
+                                    uint32_t block_base, IrInlineCursor* cursor, IrInlineReturns* returns)
+{
+    const uint32_t parameters = shape->parameters;
+    const uint32_t count = callee->instruction_count;
+    const uint32_t start = cursor->node;
+    const uint32_t shift = start - parameters;
+    for (uint32_t block = 0; block < callee->block_count; block += 1)
+    {
+        rewritten->block_offsets[block_base + block] = block == 0 ? start : callee->block_offsets[block] + shift;
+    }
+    const __m512i arguments = _mm512_maskz_loadu_epi32((__mmask16)((1u << parameters) - 1), inner_values);
+    const uint32_t row[16] = {
+        [BUSTER_IR_INLINE_BLOCK] = block_base,
+        [BUSTER_IR_INLINE_CONSTANT] = bases.constants,
+        [BUSTER_IR_INLINE_VECTOR] = bases.vectors,
+        [BUSTER_IR_INLINE_SLOT] = bases.slots,
+        [BUSTER_IR_INLINE_ADDRESS] = bases.addresses,
+    };
+    const __m512i base_row = _mm512_loadu_si512(row);
+    const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_IR_NONE);
+    const __m512i first_value = _mm512_set1_epi32((int32_t)parameters);
+    const __m512i run = _mm512_set1_epi32((int32_t)shift);
+    const uint32_t* inputs[3] = {
+        callee->a,
+        callee->b,
+        callee->c,
+    };
+    uint32_t* outputs[3] = {
+        rewritten->a,
+        rewritten->b,
+        rewritten->c,
+    };
+    uint32_t block = 0;
+    for (uint32_t first = parameters; first < count; first += 16)
+    {
+        const uint32_t remaining = count - first;
+        const __mmask16 mask = remaining >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
+        const uint32_t at = first + shift;
+        const __m128i op = _mm_maskz_loadu_epi8(mask, callee->op + first);
+        _mm_mask_storeu_epi8(rewritten->op + at, mask, op);
+        _mm_mask_storeu_epi8(rewritten->type + at, mask, _mm_maskz_loadu_epi8(mask, callee->type + first));
+        _mm_mask_storeu_epi8(rewritten->flags + at, mask, _mm_maskz_loadu_epi8(mask, callee->flags + first));
+        _mm_mask_storeu_epi8(rewritten->alignment_log2 + at, mask, _mm_maskz_loadu_epi8(mask, callee->alignment_log2 + first));
+        for (uint32_t column = 0; column < 3; column += 1)
+        {
+            const __m512i kind = ir_lookup_bytes(kinds->columns[column], op);
+            const __m512i operand = _mm512_maskz_loadu_epi32(mask, inputs[column] + first);
+            const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
+            const __mmask16 value = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional;
+            const __mmask16 parameter = value & _mm512_cmplt_epu32_mask(operand, first_value);
+            __m512i rebased = _mm512_add_epi32(operand, _mm512_permutexvar_epi32(kind, base_row));
+            rebased = _mm512_mask_add_epi32(rebased, value, operand, run);
+            rebased = _mm512_mask_permutexvar_epi32(rebased, parameter, operand, arguments);
+            _mm512_mask_storeu_epi32(outputs[column] + at, mask, rebased);
+        }
+        const __m512i rebuilt_kinds = ir_lookup_bytes(kinds->rebuilt, op);
+        uint32_t rebuilt = (uint32_t)(mask & _mm512_test_epi32_mask(rebuilt_kinds, rebuilt_kinds));
+        while (rebuilt != 0)
+        {
+            const uint32_t inner = first + (uint32_t)__builtin_ctz(rebuilt);
+            while (inner >= callee->block_offsets[block + 1])
+            {
+                block += 1;
+            }
+            ir_inline_rebuild(callee, inner, block, rewritten, inner + shift, inner_values, bases, block_base, cursor, returns);
+            rebuilt &= rebuilt - 1;
+        }
+    }
+    cursor->node = start + count - parameters;
+}
+
+// The general expansion (#2541) of the call at `node` of `source` (IrInlineBody.general) into `rewritten` at the cursor,
+// whose block *block is the next to begin: the head (each aggregate argument's copy into a fresh slot, its lifetime
+// started, as #1282's; each unmarked callee slot's lifetime started; a br to the callee's entry, which ends the caller's
+// block there), the callee's blocks with its values, blocks and rows rebased and each ret a br to the continuation, and
+// the continuation, which begins with the result (a phi of the returned values, a COPY of the one, an undef where the callee
+// never returns; an aggregate's address, whose bytes are then copied into the call's destination) and ends the lifetimes
+// it started. The caller's block goes on in it.
+static void ir_inline_expand_general(const IrFunction* source, uint32_t node, const IrFunction* callee, const IrInlineBody* shape, const IrInlineKinds* kinds, const uint32_t* values,
+                                     uint32_t* inner_values, uint32_t* parameters, IrFunction* rewritten, IrInlineBases bases, uint8_t allowed, bool scalar, IrInlineCursor* cursor,
+                                     uint32_t* block)
+{
+    const IrCall descriptor = source->calls[source->b[node]];
+    const IrAbiCall* records = descriptor.abi != 0 ? &source->abi_calls[descriptor.abi - 1] : 0;
+    if (callee->slot_count != 0)
+    {
+        memcpy(rewritten->slots + bases.slots, callee->slots, (uint64_t)callee->slot_count * sizeof(IrSlot));
+    }
+    const uint32_t copies = cursor->slots;
+    for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
+    {
+        const uint32_t argument = values[source->extra[descriptor.argument_first + p]];
+        const IrPassed given = records != 0 ? source->passed[records->passed + p] : (IrPassed){ 0 };
+        parameters[p] = argument;
+        if (given.size != 0)
+        {
+            const IrType whole = ir_inline_argument_whole(given.location, given.size, allowed);
+            const uint32_t slot = cursor->slots++;
+            rewritten->slots[slot] = (IrSlot){
+                .size = given.size,
+                .alignment = whole != IR_VOID ? (uint32_t)given.size : 8,
+                .type = IR_VOID,
+                .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN,
+            };
+            ir_inline_emit(rewritten, cursor, IR_LIFETIME, IR_VOID, slot, 0, BUSTER_IR_NONE);
+            const uint32_t address = ir_inline_emit(rewritten, cursor, IR_STACK_ADDR, IR_PTR, slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_inline_emit_copy(rewritten, cursor, argument, address, given.size, whole);
+            parameters[p] = address;
+        }
+    }
+    const uint32_t copies_end = cursor->slots;
+    for (uint32_t slot = 0; slot < callee->slot_count; slot += 1)
+    {
+        if (shape->marked[slot] == 0)
+        {
+            ir_inline_emit(rewritten, cursor, IR_LIFETIME, IR_VOID, bases.slots + slot, 0, BUSTER_IR_NONE);
+        }
+    }
+    const uint32_t block_base = *block;
+    IrInlineReturns returns = {
+        .continuation = block_base + callee->block_count,
+        .slice = BUSTER_IR_NONE,
+        .single = BUSTER_IR_NONE,
+    };
+    ir_inline_emit(rewritten, cursor, IR_BR, IR_VOID, block_base, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    // Every value's place first, as the caller's: a phi may name a later value.
+    uint32_t next = cursor->node;
+    for (uint32_t inner = 0; inner < callee->instruction_count; inner += 1)
+    {
+        inner_values[inner] = callee->op[inner] == IR_PARAM ? parameters[callee->a[inner]] : next++;
+    }
+    const bool result = ir_inline_result_node(callee, shape->returns);
+    if (result && shape->returns >= 2)
+    {
+        returns.slice = cursor->extra;
+        cursor->extra += shape->returns * 2;
+    }
+    if (!BUSTER_SCALAR_PATH(scalar) && shape->prefix == shape->parameters && shape->parameters <= 16)
+    {
+        ir_inline_splice_vector(callee, shape, kinds, rewritten, inner_values, bases, block_base, cursor, &returns);
+    }
+    else
+    {
+        ir_inline_splice_scalar(callee, rewritten, inner_values, bases, block_base, cursor, &returns);
+    }
+    rewritten->block_offsets[returns.continuation] = cursor->node;
+    *block = returns.continuation + 1;
+    const uint32_t type = callee->result_type;
+    uint32_t returned = returns.single;
+    if (result)
+    {
+        returned = shape->returns >= 2 ? ir_inline_emit(rewritten, cursor, IR_PHI, type, returns.slice, shape->returns, BUSTER_IR_NONE) :
+                   shape->returns == 1 ? ir_inline_emit(rewritten, cursor, IR_COPY, type, returns.single, BUSTER_IR_NONE, BUSTER_IR_NONE) :
+                                         ir_inline_emit(rewritten, cursor, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    if (callee->result_size != 0 && source->c[node] != BUSTER_IR_NONE && shape->returns != 0)
+    {
+        const IrType whole = ir_inline_result_whole(callee->result_abi, callee->result_size, allowed);
+        ir_inline_emit_copy(rewritten, cursor, returned, values[source->c[node]], callee->result_size, whole);
+    }
+    for (uint32_t slot = copies; slot < copies_end; slot += 1)
+    {
+        ir_inline_emit(rewritten, cursor, IR_LIFETIME, IR_VOID, slot, 1, BUSTER_IR_NONE);
+    }
+    for (uint32_t slot = 0; slot < callee->slot_count; slot += 1)
+    {
+        if (shape->marked[slot] == 0)
+        {
+            ir_inline_emit(rewritten, cursor, IR_LIFETIME, IR_VOID, bases.slots + slot, 1, BUSTER_IR_NONE);
+        }
+    }
+}
+
+static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineOptions options, const IrInlineBody* shapes, const IrInlineKinds* kinds,
+                                 IrInlineResult* result)
 {
     const IrFunction* source = &unit->functions[function];
     bool ok = true;
     uint32_t* values = ir_allocate(scratch, source->instruction_count, 4, &ok);
+    // Each caller block's first and last blocks in the output: a general expansion (#2541) splits the block of its call,
+    // whose branches in go to its first part and whose edges out leave its last. Without one they're the same, its own.
+    uint32_t* block_first = ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok);
+    uint32_t* block_last = ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok);
     uint32_t maximum_callee = 0;
     uint32_t maximum_parameters = 0;
     IrSizes sizes = {
-        .block_count = source->block_count,
         .constant_count = source->constant_count,
         .slot_count = source->slot_count,
         .address_count = source->address_count,
@@ -1005,68 +1557,92 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         .asm_body_count = source->asm_body_count,
     };
     uint32_t call = result->call_offsets[function];
-    for (uint32_t node = 0; ok && node < source->instruction_count; node += 1)
+    for (uint32_t block = 0; ok && block < source->block_count; block += 1)
     {
-        const uint32_t op = source->op[node];
-        const bool site = ir_inline_site(source, node);
-        const bool selected = site && result->decisions[call] == IR_INLINE_SELECTED;
-        if (selected)
+        block_first[block] = (uint32_t)sizes.block_count;
+        sizes.block_count += 1;
+        for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
         {
-            const IrFunction* callee = &result->functions[result->callees[call]];
-            const IrInlineCopies copies = ir_inline_copies(source, node, callee, options.vector_copies);
-            sizes.instruction_count += result->expanded_sizes[call];
-            values[node] = source->type[node] == IR_VOID ? BUSTER_IR_NONE : (uint32_t)sizes.instruction_count - 1;
-            sizes.constant_count += callee->constant_count;
-            sizes.address_count += callee->address_count + copies.addresses;
-            sizes.slot_count += callee->slot_count + copies.slots;
-            sizes.vector_constant_count += callee->vector_constant_count;
-            sizes.row_count += callee->row_count;
-            sizes.asm_body_count += callee->asm_body_count;
-            // Its row calls (#1282), the only calls of an expanded body.
-            sizes.call_count += callee->call_count;
-            sizes.extra_count += callee->extra_count;
-            sizes.call_type_count += callee->call_type_count;
-            maximum_callee = callee->instruction_count > maximum_callee ? callee->instruction_count : maximum_callee;
-            maximum_parameters = callee->parameter_count > maximum_parameters ? callee->parameter_count : maximum_parameters;
+            const uint32_t op = source->op[node];
+            const bool site = ir_inline_site(source, node);
+            const bool selected = site && result->decisions[call] == IR_INLINE_SELECTED;
+            if (selected)
+            {
+                const IrFunction* callee = &result->functions[result->callees[call]];
+                const IrInlineBody* shape = &shapes[result->callees[call]];
+                const IrInlineCopies copies = ir_inline_copies(source, node, callee, shape, options.vector_copies);
+                const IrInlineRows rows = ir_inline_rows(callee, shape);
+                if (shape->general)
+                {
+                    const IrInlineLayout layout = ir_inline_layout(source, node, callee, shape, options.vector_copies);
+                    values[node] = source->type[node] == IR_VOID || layout.result == BUSTER_IR_NONE ? BUSTER_IR_NONE : (uint32_t)(sizes.instruction_count + layout.result);
+                    sizes.instruction_count += result->expanded_sizes[call];
+                }
+                else
+                {
+                    sizes.instruction_count += result->expanded_sizes[call];
+                    values[node] = source->type[node] == IR_VOID ? BUSTER_IR_NONE : (uint32_t)sizes.instruction_count - 1;
+                }
+                sizes.block_count += rows.blocks;
+                sizes.constant_count += callee->constant_count;
+                sizes.address_count += callee->address_count + copies.addresses;
+                sizes.slot_count += callee->slot_count + copies.slots;
+                sizes.vector_constant_count += callee->vector_constant_count;
+                sizes.row_count += callee->row_count;
+                sizes.asm_body_count += callee->asm_body_count;
+                // A straight line's row calls (#1282), the only calls it has; a general body's calls of any kind (#2541).
+                sizes.call_count += rows.descriptors;
+                sizes.extra_count += rows.extra;
+                sizes.call_type_count += rows.types;
+                sizes.abi_call_count += rows.abi_calls;
+                sizes.passed_count += rows.passed;
+                maximum_callee = callee->instruction_count > maximum_callee ? callee->instruction_count : maximum_callee;
+                maximum_parameters = callee->parameter_count > maximum_parameters ? callee->parameter_count : maximum_parameters;
+            }
+            else
+            {
+                values[node] = (uint32_t)sizes.instruction_count++;
+                if (op == IR_CALL || op == IR_CALL_INDIRECT)
+                {
+                    const IrCall descriptor = source->calls[source->b[node]];
+                    sizes.call_count += 1;
+                    sizes.extra_count += descriptor.argument_count;
+                    sizes.call_type_count += descriptor.parameter_count;
+                }
+                else if (op == IR_PHI)
+                {
+                    sizes.extra_count += (uint64_t)source->b[node] * 2;
+                }
+                else if (op == IR_SWITCH)
+                {
+                    sizes.extra_count += (uint64_t)source->c[node] * 2 + 1;
+                }
+                else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
+                {
+                    sizes.extra_count += source->c[node];
+                }
+                else if (ir_ternary_instruction(source, node))
+                {
+                    sizes.extra_count += 1;
+                }
+            }
+            call += site;
         }
-        else
-        {
-            values[node] = (uint32_t)sizes.instruction_count++;
-            if (op == IR_CALL || op == IR_CALL_INDIRECT)
-            {
-                const IrCall descriptor = source->calls[source->b[node]];
-                sizes.call_count += 1;
-                sizes.extra_count += descriptor.argument_count;
-                sizes.call_type_count += descriptor.parameter_count;
-            }
-            else if (op == IR_PHI)
-            {
-                sizes.extra_count += (uint64_t)source->b[node] * 2;
-            }
-            else if (op == IR_SWITCH)
-            {
-                sizes.extra_count += (uint64_t)source->c[node] * 2 + 1;
-            }
-            else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
-            {
-                sizes.extra_count += source->c[node];
-            }
-            else if (ir_ternary_instruction(source, node))
-            {
-                sizes.extra_count += 1;
-            }
-        }
-        call += site;
+        block_last[block] = (uint32_t)sizes.block_count - 1;
     }
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     if (sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.slot_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
-        sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS)
+        sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.block_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+        sizes.abi_call_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.passed_count > BUSTER_IR_INLINE_MAX_ITEMS)
     {
         error = IR_ERROR_LIMIT;
     }
     uint32_t* inner_values = error == IR_OK ? ir_allocate(scratch, maximum_callee, 4, &ok) : 0;
     uint32_t* parameters = error == IR_OK ? ir_allocate(scratch, maximum_parameters, 4, &ok) : 0;
+    // The debug regions' blocks (IrDebugRegion.block): a block's own where it isn't split, and none where it is, whose
+    // regions no longer have one block.
+    uint32_t* debug_blocks = error == IR_OK && source->debug != NULL ? ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok) : 0;
     if (!ok)
     {
         error = IR_ERROR_MEMORY;
@@ -1082,9 +1658,13 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     }
     if (error == IR_OK)
     {
+        for (uint32_t block = 0; debug_blocks != 0 && block < source->block_count; block += 1)
+        {
+            debug_blocks[block] = block_first[block] == block_last[block] ? block_first[block] : BUSTER_IR_NONE;
+        }
         // Only the caller's identities survive this interface. Cloned callee slots and instructions remain unknown
         // until inline-instance identities are represented; they cannot inherit the caller's token or local number.
-        ir_debug_remap(source, &rewritten, values, NULL, NULL);
+        ir_debug_remap(source, &rewritten, values, NULL, debug_blocks);
         rewritten.result_type = source->result_type;
         rewritten.symbol_count = source->symbol_count;
         if (source->constant_count != 0)
@@ -1115,11 +1695,11 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         {
             memcpy(rewritten.parameter_types, source->parameter_types, source->parameter_count);
         }
-        // The caller's blocks don't change, so its labels keep theirs; its ABI records and incoming frame stay as they
-        // were, each call it keeps with its index into them.
-        if (source->label_count != 0)
+        // Its labels keep their blocks, at their first parts where a general expansion splits them; its ABI records and
+        // incoming frame stay as they were, each call it keeps with its index into them.
+        for (uint32_t label = 0; label < source->label_count; label += 1)
         {
-            memcpy(rewritten.labels, source->labels, (uint64_t)source->label_count * 4);
+            rewritten.labels[label] = source->labels[label] < source->block_count ? block_first[source->labels[label]] : source->labels[label];
         }
         if (source->abi_call_count != 0)
         {
@@ -1139,15 +1719,18 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             .vectors = source->vector_constant_count,
             .rows = source->row_count,
             .bodies = source->asm_body_count,
+            .abi_calls = source->abi_call_count,
+            .passed = source->passed_count,
         };
         IrInlineCursor cursor = {
             .addresses = source->address_count,
             .slots = source->slot_count,
         };
         call = result->call_offsets[function];
+        uint32_t new_block = 0;
         for (uint32_t block = 0; block < source->block_count; block += 1)
         {
-            rewritten.block_offsets[block] = cursor.node;
+            rewritten.block_offsets[new_block++] = cursor.node;
             for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
             {
                 const uint32_t op = source->op[node];
@@ -1155,6 +1738,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 if (site && result->decisions[call] == IR_INLINE_SELECTED)
                 {
                     const IrFunction* callee = &result->functions[result->callees[call]];
+                    const IrInlineBody* shape = &shapes[result->callees[call]];
                     if (callee->constant_count != 0)
                     {
                         memcpy(rewritten.constants + bases.constants, callee->constants, (uint64_t)callee->constant_count * sizeof(IrConstant));
@@ -1180,7 +1764,32 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     bases.slots = cursor.slots;
                     cursor.addresses += callee->address_count;
                     cursor.slots += callee->slot_count;
-                    ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, bases, options.vector_copies, &cursor);
+                    if (shape->general)
+                    {
+                        // A general body's calls keep their ABI records (#2541): its records follow the caller's, each
+                        // one's arguments' rows rebased to where its passed rows follow the caller's.
+                        for (uint32_t k = 0; k < callee->abi_call_count; k += 1)
+                        {
+                            IrAbiCall records = callee->abi_calls[k];
+                            records.passed += bases.passed;
+                            rewritten.abi_calls[bases.abi_calls + k] = records;
+                        }
+                        if (callee->passed_count != 0)
+                        {
+                            memcpy(rewritten.passed + bases.passed, callee->passed, (uint64_t)callee->passed_count * sizeof(IrPassed));
+                        }
+                        ir_inline_expand_general(source, node, callee, shape, kinds, values, inner_values, parameters, &rewritten, bases, options.vector_copies, options.scalar, &cursor,
+                                                 &new_block);
+                        bases.abi_calls += callee->abi_call_count;
+                        bases.passed += callee->passed_count;
+                    }
+                    else
+                    {
+                        // A straight line's calls are row and body calls, which have no ABI records.
+                        IrInlineBases line = bases;
+                        line.abi_calls = 0;
+                        ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, line, options.vector_copies, &cursor);
+                    }
                     bases.constants += callee->constant_count;
                     bases.vectors += callee->vector_constant_count;
                     bases.rows += callee->row_count;
@@ -1196,23 +1805,37 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     }
                     else if (op == IR_PHI)
                     {
+                        // An edge leaves its predecessor's last part.
                         rewritten.a[cursor.node] = cursor.extra;
                         for (uint32_t p = 0; p < source->b[node]; p += 1)
                         {
-                            rewritten.extra[cursor.extra++] = source->extra[source->a[node] + p * 2];
+                            rewritten.extra[cursor.extra++] = block_last[source->extra[source->a[node] + p * 2]];
                             rewritten.extra[cursor.extra++] = values[source->extra[source->a[node] + p * 2 + 1]];
                         }
                     }
                     else if (op == IR_SWITCH)
                     {
+                        // A branch goes to its target's first part; the cases' constants are the caller's, the first rows.
                         rewritten.b[cursor.node] = cursor.extra;
-                        const uint32_t count = source->c[node] * 2 + 1;
-                        memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)count * 4);
-                        cursor.extra += count;
+                        rewritten.extra[cursor.extra++] = block_first[source->extra[source->b[node]]];
+                        for (uint32_t k = 0; k < source->c[node]; k += 1)
+                        {
+                            rewritten.extra[cursor.extra++] = source->extra[source->b[node] + 1 + k * 2];
+                            rewritten.extra[cursor.extra++] = block_first[source->extra[source->b[node] + 2 + k * 2]];
+                        }
+                    }
+                    else if (op == IR_BR)
+                    {
+                        rewritten.a[cursor.node] = block_first[source->a[node]];
+                    }
+                    else if (op == IR_CBR)
+                    {
+                        rewritten.b[cursor.node] = block_first[source->b[node]];
+                        rewritten.c[cursor.node] = block_first[source->c[node]];
                     }
                     else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
                     {
-                        // Its labels' list (#785), the caller's label indices, as its blocks are.
+                        // Its labels' list (#785), the caller's label indices, which keep their blocks.
                         rewritten.b[cursor.node] = cursor.extra;
                         memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
                         cursor.extra += source->c[node];
@@ -1244,6 +1867,10 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
     uint32_t failed_function = BUSTER_IR_NONE;
     IrInlineResult inlined = { 0 };
     uint32_t* order = 0;
+    // Each function's shape as a candidate, once its body is final (callees before callers), and the splice's tables.
+    IrInlineBody* shapes = 0;
+    IrInlineKinds kinds;
+    ir_inline_kinds(&kinds);
     if (check.error == IR_OK)
     {
         check = ir_inline_inputs(unit, output, scratch, options, &inlined, &failed_function);
@@ -1252,22 +1879,29 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
     {
         check.error = ir_inline_components(unit, scratch, &inlined, &order);
     }
+    if (check.error == IR_OK)
+    {
+        bool ok = true;
+        shapes = ir_allocate(scratch, inlined.function_count, sizeof(IrInlineBody), &ok);
+        check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+    }
     uint64_t charged = inlined.input_instructions;
     for (uint32_t position = 0; check.error == IR_OK && position < inlined.function_count; position += 1)
     {
         failed_function = order[position];
         const uint64_t function_mark = scratch->length;
-        check.error = ir_inline_choose(unit, failed_function, options, scratch, &inlined, &charged);
+        check.error = ir_inline_choose(unit, failed_function, options, shapes, scratch, &inlined, &charged);
         if (check.error == IR_OK)
         {
-            check.error = ir_inline_rewrite(unit, failed_function, output, scratch, options, &inlined);
+            check.error = ir_inline_rewrite(unit, failed_function, output, scratch, options, shapes, &kinds, &inlined);
         }
         if (check.error == IR_OK)
         {
             const uint64_t verification_mark = scratch->length;
             IrOptimizeWork verification = { 0 };
-            // The caller CFG is unchanged, including valid unreachable regions; check the same reachable SSA
-            // contract as the input, rather than deleting regions or inventing dominance for dead blocks.
+            // The caller's CFG keeps its valid unreachable regions (a general expansion's continuation is one where its
+            // callee never returns); check the same reachable SSA contract as the input, rather than deleting regions or
+            // inventing dominance for dead blocks.
             check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
             const uint64_t bytes = scratch->length - scratch_mark;
             inlined.scratch_bytes = bytes > inlined.scratch_bytes ? bytes : inlined.scratch_bytes;
@@ -1276,6 +1910,11 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         const uint64_t peak = scratch->length - scratch_mark;
         inlined.scratch_bytes = peak > inlined.scratch_bytes ? peak : inlined.scratch_bytes;
         arena_pop_to(scratch, function_mark);
+        // Its shape as its callers' candidate, from its final body; a general one's marks stay in scratch for the unit.
+        if (check.error == IR_OK && !ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
+        {
+            check.error = IR_ERROR_MEMORY;
+        }
     }
     if (arguments)
     {

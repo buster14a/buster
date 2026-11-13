@@ -4,14 +4,16 @@
 inlining slice of [#139](https://github.com/buster14a/buster/issues/139).
 It consumes the shared [`IrFunction`](ir.md) representation, SSA's or the
 lowering's memory form. The C driver's `--tier1` runs it on each body's
-always_inline callees (#1282, [the Tier 1 guide](tier1.md)'s "Inlining");
-inlining by size thresholds in the C driver, and its corpus and performance
-acceptance, remain pending.
+always_inline callees, whatever their control flow (#1282 and #2541, [the Tier 1
+guide](tier1.md)'s "Inlining"); inlining by size thresholds in the C driver, and
+its corpus and performance acceptance, remain pending.
 
 The first scope expanded single-block leaf bodies with no stack objects; #1282
 takes a straight chain of blocks, stack objects, SIMD values and machine rows,
 and calls whose by-value aggregates' ABI records are the callee's own ("SIMD
-callees and by-value vectors", below). It
+callees and by-value vectors", below). #2541's general splice, behind
+`IrInlineOptions.control_flow`, takes a callee of any other control flow
+("Callees with control flow", below). It
 preserves arbitrary valid caller control flow, including loop phis and switch
 tables. A callee is rewritten before its callers, so a small acyclic function
 that originally called another small function can become an eligible leaf.
@@ -95,8 +97,9 @@ terminators. A typed return adds a `COPY`; a void
 return disappears. Each `IR_PARAM` maps directly to the already evaluated
 actual argument. All other
 operations, including faulting arithmetic, memory accesses and volatile
-annotations, remain in their original order. This scope does not splice
-callee CFGs, clone stack-object lifetimes or expand recursive/variadic calls.
+annotations, remain in their original order. Any other body is the general
+splice's where `control_flow` is set and `IR_INLINE_BODY` where it isn't.
+Neither expands recursive or variadic calls.
 
 Each eligible call receives separate `uint32_t` cost and expansion-size
 columns. Its structural cost is the number of cloned instructions, including
@@ -166,18 +169,20 @@ an aggregate's bytes otherwise than the interpreted call.
 
 The rewrite computes every original value's destination before emitting
 instructions. Thus a loop phi can refer to a later backedge definition after
-an earlier call expands. Caller block IDs and predecessor identities remain
-unchanged; contiguous block offsets reflect the new instruction counts.
+an earlier call expands. A straight line's expansions leave the caller's block
+IDs and predecessor identities unchanged; contiguous block offsets reflect the
+new instruction counts. A general expansion splits its call's block, and every
+later block's ID moves by the blocks it adds (below).
 
 The four byte columns and three operand columns retain their shared IR
 meanings. Constant/address rows from each expanded body are appended with
 rebased indices. Existing caller slots and signature rows are copied, and so
-are its labels (its blocks don't change), its ABI records and its incoming
+are its labels (each at its block's first part), its ABI records and its incoming
 frame. Every remaining call occurrence receives a fresh descriptor, argument
 slice and fixed-type slice, with its index into the ABI records, and an
 aggregate result's destination (operand `c`) remapped like any value. Phi
-slices remap value IDs while preserving predecessor IDs. Switch slices
-preserve caller constant IDs and target block IDs.
+slices remap value IDs and name each predecessor's last part. Switch slices
+preserve caller constant IDs and go to each target's first part.
 Rebuilding each occurrence matters because valid source `extra` slices can
 overlap while serving different roles.
 
@@ -210,15 +215,73 @@ currently scalar. Only the cost-threshold sweep has a separate vector path.
 Target measurements and further work on column rebasing are required before
 claiming the complete data-parallel or throughput acceptance of #139.
 
+## Callees with control flow (#2541)
+
+With `IrInlineOptions.control_flow` (off by default; `--tier1` sets it for its
+always_inline callees), a callee that isn't one straight line is a candidate
+whatever its control flow: blocks, phis, `br`, `cbr`, `switch`, several
+returns or none, `unreachable`, and calls of its own, direct, indirect, row,
+body or with ABI records. It is refused (`IR_INLINE_BODY`) with labels, as a
+variadic definition, or with the dynamic stack's operations (`alloca`,
+`stack_save`, `stack_restore`), whose frame is its own. Each function's shape as
+a candidate (`IrInlineBody`: straight line or general, its returns, its
+parameters and whether they begin it, its unmarked slots and its rebuilt slices'
+sizes) is computed once, from its final body, before its callers are processed.
+
+The expansion of a call (`ir_inline_expand_general`) is laid out in three parts:
+
+- **The head**, in the call's block: each aggregate argument's copy into a
+  fresh slot (#1282's), each callee slot without lifetime markers of its own
+  started (`IR_LIFETIME ... start`), then a `br` to the callee's entry, which
+  ends the caller's block there.
+- **The callee's blocks**, in their order: its nodes but its parameters, which
+  become the arguments; values rebased to their new places, blocks to the
+  expansion's, constant, vector, address, slot, row and asm-body rows to where
+  they were appended, its calls with fresh descriptors and its ABI records
+  appended to the caller's (each one's arguments' rows rebased). Each `ret`
+  becomes a `br` to the continuation.
+- **The continuation**, a new block: the result first (a phi of the returned
+  values where the callee returns in two places or more, a `COPY` of the one,
+  an `undef` where it never returns; for an aggregate returned in registers,
+  of the returned addresses, whose bytes are then copied into the call's
+  destination), then the lifetime ends of the slots the head started, after
+  that copy, since a callee returns its own object's address; then the rest of
+  the caller's block.
+
+A caller block that holds K general expansions becomes K + 1 parts and the
+callees' blocks: branches and switch targets into it go to its first part,
+labels name its first part, and its successors' phis name its last part as
+their predecessor. A debug region of a split block has no single block any
+more and becomes unavailable; regions of other blocks follow their new IDs.
+
+The callee's operand columns have two twins. The scalar one
+(`ir_inline_splice_scalar`) rewrites a node at a time through
+`ir_inline_node`, which rebases rows by operation. The vector one
+(`ir_inline_splice_vector`), taken where the callee's parameters are the first
+nodes of its body and number 16 or fewer, copies the four byte columns 16 nodes
+a vector, looks each operand column's kinds up by opcode (`ir_lookup_bytes`
+over tables built from the IR's own operand tables: a value, an optional value,
+a block, or a constant, vector, slot or address row), moves values past the
+parameters by the run's shift, makes parameters their arguments by a permute,
+and adds each other kind's base by a permute of the bases' row. Both then
+rebuild phis', switches' and calls' slices and the returns in node order
+(`ir_inline_rebuild`), so the two write the same columns, which
+`test-ir-inline` compares on every unit.
+
+The interpreter's tests cover it ("Validation", below), and the Tier 1 driver's
+`test-checker-driver` fixture builds always_inline helpers with two returns, a
+loop, a switch, a vector by value chosen by a branch, a local array in a loop
+and nested calls, by each path, with `--verify`.
+
 ## Validation and remaining acceptance
 
 `run_ir_optimize_inline_tests(argc, argv)` takes arguments after the command
 name and currently accepts none. `./build/compiler test-ir-inline` runs it,
 and the 9700X job's test step runs that command with the other optimizer tests.
 
-Local optimized runs pass **92,932 checks**, including **6,160 independent
-interpreter executions** before and after rewriting (59,741 checks, with
-ASan/UBSan too, before the side-table growth case below).
+Local optimized runs pass **106,873 checks**, including **14,256 independent
+interpreter executions** (94,759 and 6,432 before #2541's fixtures; 59,741
+checks, with ASan/UBSan too, before the side-table growth case below).
 The interpreter executes calls using an explicit frame stack, and a call with
 ABI records by its records: an aggregate argument's bytes (which its callees
 only read), and an aggregate result's bytes, which a stub writes where `c`
@@ -243,6 +306,22 @@ exact thresholds, growth budgets (32,769 calls whose constant rows would
 pass 2²⁰ among them), malformed metadata and many arena-failure
 capacities exercise explicit decisions and transactional rollback. Scalar
 and vector outputs must match in every retained body and audit column.
+
+#2541's fixtures (`ir_optimize_inline_cfg_test.c`) generate units from text
+templates with random constants, at `i32` and `i64`: nine callees (a diamond,
+two returns, a loop whose header's phis name its latch's values, a switch whose
+targets each return, calls of an external function and of a straight-line
+leaf, slots with and without lifetime markers, an unreachable path, parameters
+that don't begin the body, and stores to memory through an address row) into
+six callers (from the entry, from a loop's latch, twice from a phi's block,
+before a branch whose successor's phi names the call's block, beside a guarded
+call of a callee that never returns, and from a switch's targets). Each unit is
+inlined without `control_flow` (every such call `IR_INLINE_BODY`) and with it
+(every call expanded but the external one's), and runs on the shared IR
+interpreter before inlining, after it, and after SROA and promotion of the
+caller, 24 argument pairs each, with memory compared. A by-value callee whose
+two returns give the addresses of two objects of its own runs the same way with
+vector and integer copies.
 
 ## Reach in `--tier1`
 
