@@ -290,8 +290,8 @@ computers:
   usual.
 - Any other agent reads `~/llm-memory/projects/buster-fast/MEMORY.md` before
   starting and saves what later sessions need there, in the same format:
-  one fact per file, indexed in `MEMORY.md`. `~/llm-memory/AGENTS.md` has the
-  rules, and Codex's automatic memories are copied to `~/llm-memory/codex/`.
+  one fact per file; `MEMORY.md` is generated from them. `~/llm-memory/AGENTS.md`
+  has the rules, and Codex's automatic memories are copied to `~/llm-memory/codex/`.
 - Don't save what this repository records, and never save secrets.
 - After saving, run `~/llm-memory/bin/llm-memory sync` to share it.
 - A hook sets it up in the cloud ([guide](docs/commands/llm-memory.md)).
