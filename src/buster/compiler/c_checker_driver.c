@@ -2497,7 +2497,7 @@ static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckI
             const uint32_t first = graph->operand0[node];
             const TypeId type = first < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, first))) : 0;
             const uint8_t kind = type != 0 ? type_kind(types, type) : BUSTER_TYPE_KIND_NONE;
-            next = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? first : graph->operand1[node];
+            next = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? first : graph->operand1[node];
         }
         node = next;
     }

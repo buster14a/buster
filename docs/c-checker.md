@@ -10959,6 +10959,10 @@ enables, which this checker doesn't all give.
   (`check_input_typedef_sugar`, resolved by `check_input_sugar_declaration`).
   A typedef with fewer qualifiers than its level names it under the others
   (`volatile CI`'s `'volatile CI[2]' (aka 'const volatile int[2]')`).
+  An aligned typedef keeps its name after the printer strips its layout
+  wrapper. A function typedef keeps its name through decay and pointer
+  arithmetic: `f + 1` of `F f` (`typedef int F(void)`) is
+  `'F *' (aka 'int (*)(void)')` (#2212).
   A `-Wformat` argument prints its type as the lvalue conversion leaves it
   (`check_common_format_value`): without its top-level qualifiers (`const I x`
   is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared
