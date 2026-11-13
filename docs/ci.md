@@ -852,7 +852,8 @@ on 2026-11-10). It works like this:
   - `blocked-hosted` when a hosted job failed;
   - `interrupted` otherwise.
 - **Accounting.** `ci-timings.yml`'s daily report (`timings.sh`,
-  `timings --queue`) covers the latest 100 completed candidate runs. It
+  `timings --queue`) covers the latest 100 completed candidate runs of
+  main's queue (another branch's, such as the drill's, never lands on main). It
   splits each one by what became of its candidate: merged (its commit is on
   main), passed but invalidated, failed, or cancelled. For each it gives the
   candidates and the runner-minutes (the sum of the jobs' own times), the
