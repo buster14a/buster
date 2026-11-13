@@ -251,6 +251,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "unknown_type z;\nint c = undecl_n;\nint y = 1 + (void)0;\n",
         "unknown_type z = \"x\";\nint y = 1 + (void)0;\n",
         "void f(void) { unknown_type z = \"x\"; }\nint y = 1 + (void)0;\n",
+        "unknown_type a = \"x\", b = \"y\";\nint y = 1 + (void)0;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its

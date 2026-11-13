@@ -2709,6 +2709,9 @@ struct Parser
     // A checked diagnostic prefix may include one complete declaration with already diagnosed parameter types.
     // Only its parameter specifiers may recover as int; ordinary parses and emission never enable this.
     bool recovered_parameter_types;
+    // Private diagnostic-view specifiers recovered from already diagnosed unknown non-parameter types. Their
+    // declarations remain invalid, so initializer conversions and later uses cannot treat the stand-in int as real.
+    const uint8_t* recovered_types;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.
     ParseMessage fatal;

@@ -427,6 +427,23 @@ static void check_test_prefix_parameter_types(CheckTest* test)
                                           parser.tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser.tokens.names[token] != C_NAME_INT &&
                                           prefix.parser.tokens.kinds[token] == PARSE_KIND_TYPE && prefix.parser.tokens.names[token] == C_NAME_INT,
                                       "unknown parameter type substitution belongs only to the private diagnostic prefix");
+                    if (!cases[c].parameter && status == CHECK_PREFIX_READY)
+                    {
+                        check_test_expect(test, prefix.parser.recovered_types != NULL && prefix.parser.recovered_types[token] != 0,
+                                          "an unknown object type retains its invalid-declaration provenance");
+                        const uint64_t used = output.length;
+                        const uint64_t capacity = output.capacity;
+                        for (uint64_t limit = 0; limit < used; limit += 13)
+                        {
+                            output.length = 0;
+                            output.capacity = limit;
+                            CheckPrefix exhausted;
+                            check_test_expect(test, check_prefix_make(&exhausted, &parser, &output, &scratch) == CHECK_PREFIX_RESOURCE &&
+                                                  output.length == 0 && scratch.length == 0 && exhausted.parser.tokens.count == 0,
+                                              "an exhausted unknown-type prefix restores its arenas and publishes no view");
+                        }
+                        output.capacity = capacity;
+                    }
                 }
             }
             parse_release(&parser);

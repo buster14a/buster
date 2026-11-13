@@ -288,7 +288,8 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
             // An unknown type has already been diagnosed by the original parser. Its exact specifier
             // token becomes int only in this private checking view, as clang's recovery does; no other
             // unknown identifier, source location or original diagnostic is changed.
-            for (uint32_t d = 0; d < parser->diagnostic_count; d += 1)
+            uint8_t* recovered_types = NULL;
+            for (uint32_t d = 0; prefix->status == CHECK_PREFIX_READY && d < parser->diagnostic_count; d += 1)
             {
                 const ParseDiagnostic* diagnostic = parser->diagnostics + d;
                 const uint32_t token = diagnostic->token;
@@ -297,8 +298,18 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
                 {
                     view->tokens.kinds[token] = PARSE_KIND_TYPE;
                     view->tokens.names[token] = C_NAME_INT;
+                    if (!diagnostic->parameter_type)
+                    {
+                        recovered_types = recovered_types != NULL ? recovered_types : check_prefix_column(output, end, sizeof(uint8_t));
+                        prefix->status = recovered_types != NULL ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+                        if (recovered_types != NULL)
+                        {
+                            recovered_types[token] = 1;
+                        }
+                    }
                 }
             }
+            view->recovered_types = recovered_types;
             // Pragma positions are monotone. A pragma exactly at end belongs to the excluded declaration.
             while (view->tokens.pragma_count < parser->tokens.pragma_count && parser->tokens.pragma_positions[view->tokens.pragma_count] < end)
             {
@@ -306,7 +317,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
             }
             view->tokens.pragma_positions = parser->tokens.pragma_positions;
             view->tokens.pragma_sources = parser->tokens.pragma_sources;
-            prefix->status = check_prefix_order(view, scratch);
+            prefix->status = prefix->status == CHECK_PREFIX_READY ? check_prefix_order(view, scratch) : prefix->status;
         }
     }
     arena_pop_to(scratch, scratch_mark);

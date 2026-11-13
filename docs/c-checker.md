@@ -5410,7 +5410,10 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   (`check_driver_rejected_common`, #2509), including function bodies and
   aggregate initializers. A diagnosed unknown type whose specifier and
   declaration tree survive is recovered as `int` in the private view; it
-  does not cut off the declarations after it. An actual structural error
+  does not cut off the declarations after it. Its declaration remains invalid:
+  the existing invalid-declaration path skips initializer conversions and
+  quiets its invalid uses, with that status carried across comma declarators.
+  An actual structural error
   still cuts the view, and the original error always rejects the unit.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
