@@ -244,6 +244,7 @@ jobs:
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
           bash tests/ci/vector-draw.sh
+          node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
 
       - name: Decide reuse and hardware admission
