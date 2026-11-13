@@ -1112,13 +1112,18 @@ still 20 times faster to compile than clang -O2's.
 
 ### Objects that depend on the compiler's host
 
-`--tier1 -c sqlite3.c` writes one object at 1 and at 8 lanes, and another by
-the scalar host path (`--scalar`): `.text` is 1,037,736 bytes by the vector
-path and 1,037,688 by the scalar one (Lua's `lvm.c`: 30,812 and 30,788).
-Tier 0's object is the same by every path. This is #1395, open: the vector
-cover and its scalar twin pick different instructions for some multiplies. A
-default tier whose output depends on whether the build machine has AVX-512 is
-not reproducible across machines.
+When this was written, `--tier1 -c sqlite3.c` wrote one object at 1 and at 8
+lanes, and another by the scalar host path (`--scalar`): `.text` was 1,037,736
+bytes by the vector path and 1,037,688 by the scalar one (Lua's `lvm.c`: 30,812
+and 30,788), while Tier 0's object was the same by every path. That was #1395:
+the vector cover and its scalar twin picked different instructions for some
+multiplies. #1715 gave both paths the same costed cover; the frame colorer's
+scalar twin then still gave spilled values other slots (#2606), and now
+computes the vector colorer's colors exactly. Both paths now write the same
+bytes for `sqlite3.c`, Lua's 34 units and c-testsuite's 220 tests (the vector
+path's objects unchanged), and `test-ssa-source --tier1` requires the same
+executable from both. A default tier whose output depended on whether the build
+machine has AVX-512 wouldn't be reproducible across machines.
 
 ### What `--verify` covers
 

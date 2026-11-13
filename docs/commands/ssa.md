@@ -38,7 +38,8 @@ requirements. [Command index](README.md).
   undefined phi operands).
   `--tier1` also compiles each executable source through the driver's strict
   Tier 1 path, by the default and scalar host paths, then compares both native
-  programs' status and output with the interpreted forms. Compilation must
+  programs' status and output with the interpreted forms, and requires the two
+  executables to be the same bytes (#1395, #2606). Compilation must
   succeed with every emitted function compiled by Tier 1; a refusal or Tier 0
   fallback fails. Native builds and executions follow the interpreter children
   sequentially, so the command keeps the same CPU grant.
