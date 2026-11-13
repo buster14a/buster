@@ -580,9 +580,10 @@ REST requests**, regardless of how many artifact polls or candidates run:
 | Candidate assignment waits and artifact/product listings | 0 |
 | **Total** | **16** |
 
-Thirty such PR attempts per hour use at most **480** of the repository token's
-1,000 hourly REST requests, leaving 520 for other workflows. This is the
-vector row's bound, not a promise about unrelated workflows' consumption.
+Thirty such PR attempts per hour use at most **480** requests. Against the
+conservative 1,000-request hourly budget in #2309, that leaves 520 for other
+workflows; a token with a larger live limit has more room. This is the vector
+row's bound, not a promise about unrelated workflows' consumption.
 The daily/full pool's twelve product consumers raise its first-attempt bound
 to 34. Job lists larger than their allowance remain unknown; they do not
 extend the budget or permit a partial list to establish that a job is absent.
