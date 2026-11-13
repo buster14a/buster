@@ -362,8 +362,8 @@ static void check_test_prefix_lost_body(CheckTest* test)
 }
 
 // A diagnosed missing parameter type preserves its complete declaration's tree and the later declarations' (#1447: each
-// later parameter's typo is searched), but never admits an unknown type outside a parameter, or a declaration whose
-// syntax recovery erased nodes.
+// later parameter's typo is searched). An unknown object type also preserves its structurally complete declaration
+// (#2509); a declaration whose syntax recovery erased nodes remains excluded.
 static void check_test_prefix_parameter_types(CheckTest* test)
 {
     static const struct
@@ -371,14 +371,16 @@ static void check_test_prefix_parameter_types(CheckTest* test)
         const char* source;
         bool retain;
         bool c23;
+        bool parameter;
     } cases[] = {
-        { "void f(const p);\nint later;\n", true },
-        { "void f(const p, int q);\nint later;\n", true },
+        { "void f(const p);\nint later;\n", true, false, true },
+        { "void f(const p, int q);\nint later;\n", true, false, true },
         { "void f(const p +);\nint later;\n", false },
         { "const p;\nint later;\n", false },
-        { "void f(Unknown p);\nint later;\n", true },
-        { "void f(const p);\nint later;\n", true, true },
-        { "Unknown p;\nint later;\n", false },
+        { "void f(Unknown p);\nint later;\n", true, false, true },
+        { "void f(const p);\nint later;\n", true, true, true },
+        { "Unknown p;\nint later;\n", true },
+        { "Unknown p +;\nint later;\n", false },
         { "void f(Unknown p +);\nint later;\n", false },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
@@ -413,10 +415,10 @@ static void check_test_prefix_parameter_types(CheckTest* test)
                 const CheckPrefixStatus status = check_prefix_make(&prefix, &parser, &output, &scratch);
                 check_test_expect(test, !parsed && errors != 0 && !parser.recovered_parameter_types && parser.errors == errors &&
                                       status == (cases[c].retain ? CHECK_PREFIX_READY : CHECK_PREFIX_EMPTY) && prefix.end == end &&
-                                      prefix.parser.recovered_parameter_types == cases[c].retain && scratch.length == 0,
+                                      prefix.parser.recovered_parameter_types == (cases[c].retain && cases[c].parameter) && scratch.length == 0,
                                   "parameter recovery retains its declaration and the later ones and preserves rejection");
                 check_test_expect(test, !cases[c].retain || (end != 0 && end == parser.tokens.count && parser.diagnostic_count == 1 &&
-                                                            parser.diagnostics[0].parameter_type),
+                                                            parser.diagnostics[0].parameter_type == cases[c].parameter),
                                   "parameter recovery is explicitly diagnosed and includes the later declaration");
                 if (cases[c].retain && parser.diagnostic_count != 0 && parser.diagnostics[0].message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME)
                 {
@@ -573,9 +575,9 @@ static __attribute__((noinline)) void check_test_prefixes(CheckTest* test, const
             1,
         },
         {
-            "nonrecovering unknown type diagnostic cuts at declaration boundary",
+            "unknown type in a malformed declaration cuts at declaration boundary",
             "int first(void) { return absent; }\n",
-            "UnknownType later;\n",
+            "UnknownType later = ;\n",
             1,
         },
         {

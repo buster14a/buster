@@ -10766,9 +10766,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     prefix_only = true;
                     ready = true;
                 }
-                else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                else if (check_prefix_type_view(&prefix, recovered, arena, scratch))
                 {
-                    // A parameter's unknown type first: every declaration before the first other error.
+                    // A recoverable type error first: every declaration before the first structural error.
                     checking = &prefix.parser;
                     prefix_only = true;
                     ready = true;
@@ -10910,7 +10910,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         resumed.parser.whole_view = true;
                         checking = recovered;
                     }
-                    else if (check_prefix_parameter_view(&prefix, recovered, arena, scratch))
+                    else if (check_prefix_type_view(&prefix, recovered, arena, scratch))
                     {
                         checking = &prefix.parser;
                     }
@@ -11364,7 +11364,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
                     // parser, where a prefix's or a repair's is a view of its own).
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing) &&
+                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing || checking->prefix_view) &&
                          (pp->errors != 0 || publication_errors || input.recovered_valid || repairing) && !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
@@ -11475,13 +11475,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         check_common_view = (CheckCommonView){ 0 };
                     }
-                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered || repairing) && !pp->fatal &&
+                    else if (!driver_fatal && ready && (!prefix_only || checking == recovered || repairing || checking->prefix_view) && !pp->fatal &&
                              !pp->diagnostic_collection_failed && !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
                     {
                         // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
                         // graph's and its other errors' tokens, and its program's. A parse a resume read whole (#147) is
-                        // one too: its checking is the recovered parser, where a prefix's or a repair's is a view of its own.
-                        // A repair's is read too, at its complete original statements alone (CheckCommonView, #2431).
+                        // one too: its checking is the recovered parser. A prefix's complete declarations get these
+                        // readings too (#2509); a repair's keeps its complete original statements alone (CheckCommonView, #2431).
                         // Under -w too (#2162): its rounds' readings find the errors past a reader's error that ended its walk,
                         // which clang gives, where -w's policy leaves out every warning they publish.
                         const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;
