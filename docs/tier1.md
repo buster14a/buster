@@ -406,7 +406,10 @@ SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
 selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`; their variable permutes, byte
 shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
 `shuffle_lanes` (#1840, its "Permutes"), each one EVEX instruction of
-`BUSTER_TIER1_VECTOR_PERMUTE`.
+`BUSTER_TIER1_VECTOR_PERMUTE`. Their byte shuffles by an immediate (`vpshufd`,
+`vpshuflw`, `vpshufhw`, `vpslldq` and `vpsrldq`) are its `shuffle` by a constant
+(#1840, its "Byte shuffles by an immediate"), which the same rule selects back
+as the immediate form the constant's indices are, and as `vpshufb` otherwise.
 Their integer lanes' extensions and truncations, `__builtin_convertvector`'s and
 the `vpmov*` builtins', are its `extend` and `truncate` (#1840, its
 "Conversions"), each one EVEX instruction of `BUSTER_TIER1_VECTOR_CONVERT`.

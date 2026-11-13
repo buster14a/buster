@@ -355,8 +355,9 @@ static void ir_simd_shuffle_immediate_indices(uint32_t kind, uint32_t immediate,
 // Which byte shuffle by an immediate (#1840) a vpshufb by the constant `bytes` of `width` bytes (16, 32 or 64) is, as
 // vpshufb reads an index (its zeroing bit and low 4 bits): every 16-byte lane's indices the same, and those of the first
 // kind, in BUSTER_IR_SHUFFLE_IMMEDIATE's order, at the immediate the first lane's indices name for it; false for any
-// other indices. vpshufd moves doublewords in 1 cycle against vpshufb's 2 on Zen 5 and loads no constant. This runs once
-// for a shuffle node whose indices are a constant, a few per function, on 64 bytes at most; it stays scalar.
+// other indices. The immediate form loads no constant, and on Zen 5 vpshufd and the words' shuffles run 4 per cycle
+// against vpshufb's 2, at the same 2 cycles' latency. This runs once for a shuffle node whose indices are a constant, a few
+// per function, on 64 bytes at most; it stays scalar.
 static bool ir_simd_shuffle_immediate_match(const uint8_t* bytes, uint32_t width, uint32_t* kind, uint32_t* immediate)
 {
     uint8_t lane[BUSTER_IR_SHUFFLE_LANE_BYTES];
