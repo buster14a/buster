@@ -1931,11 +1931,21 @@ its atomic type and the opening brace in `CHECK_INIT_ATOMIC_BRACES` (#2441,
 item 5). The driver prints "illegal initializer type 'T'" there, preserving
 typedef spelling. A compound literal with this error does not produce another
 error from the enclosing initializer that uses it; independent later
-initializers are still diagnosed. An earlier statement of a GNU statement
-expression does not invalidate that expression's separate final value. The
-semantic-recovery fixtures compare full
+initializers are still diagnosed. A GNU statement expression whose sole
+statement is the rejected literal, through parentheses, is an exception:
+Clang drops the invalid statement and gives its empty body a void value. The
+diagnostic scan records that separate value in `CheckInitFailure.recovered_type`
+and the driver uses the ordinary initialization-conversion wording, preserving
+the target's spelling. Its completion is the enclosing initializer's end, so
+this error follows the literal's own error despite its earlier caret location.
+The checked graph and initializer plans remain unchanged and rejected. A
+preceding usable statement makes a rejected final statement invalidate the
+whole statement expression instead; this exception does not apply then. An
+earlier rejected statement does not invalidate an expression's separate valid
+final value. The semantic-recovery fixtures compare full
 diagnostics with Clang for scalars, records, unions, typedefs, member and array
-initializers on both paths and with deferred bodies. Atomic-brace errors during
+initializers, empty-body recovery and a preceding-statement control on both
+paths and with deferred bodies. Atomic-brace errors during
 unknown-array-bound inference still use its generic declaration diagnostic.
 
 The source initializer adapter matches the selected language's warning policy

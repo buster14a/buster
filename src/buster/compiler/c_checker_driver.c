@@ -3592,21 +3592,23 @@ static String8 check_driver_library_designator(const Parser* parser, Preprocesso
 // sugar) as clang words it (#147,
 // Sema::DiagnoseAssignmentResult): its kind's words (check_driver_conversion_kind), its `action`'s (0 initializing, 1
 // assigning, 2 returning, 3 passing, each putting the target or the source first as clang's does), the fix-it's
-// (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
+// (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. A nonzero `recovered`
+// supplies a diagnostic-only value's type instead of reading `source`; it never changes the checked graph. NULL where a
+// type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
+                                                 CheckWarningSpelling* spell, uint32_t source, TypeId recovered, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
                                                  uint32_t target_declaration, uint32_t target_node, uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
-    if (source < stream->count && target != 0)
+    if ((recovered != 0 || source < stream->count) && target != 0)
     {
-        const TypeId value = check_stream_type(stream, source);
+        const TypeId value = recovered != 0 ? recovered : check_stream_type(stream, source);
         // An integer's __size_t sugar as clang's usual arithmetic conversions keep it (#1447 item 10): `n + sizeof(int)` of
         // an `unsigned long n` has none, which the pointer arithmetic's walk would find in the sizeof.
-        const uint32_t walked = check_driver_pointer_spelling(parser, input, stream, types, source);
+        const uint32_t walked = recovered == 0 ? check_driver_pointer_spelling(parser, input, stream, types, source) : 0;
         const uint8_t value_kind = type_kind(types, type_unqualified(type_strip_aligned(types, value)));
         const bool integer = value_kind == BUSTER_TYPE_KIND_INTEGER;
-        const bool sized = integer && check_driver_size_sugar(parser, pp, input, stream, types, source);
+        const bool sized = recovered == 0 && integer && check_driver_size_sugar(parser, pp, input, stream, types, source);
         const uint32_t source_spelling = sized ? BUSTER_CHECK_NONE : integer && walked == BUSTER_CHECK_NONE ? 0 : walked;
         // Each as its declaration's sugar writes it, where it has some (#1447), and with its declaration's own address space
         // macros (#1447 item 2, check_driver_space_scope).
@@ -3620,18 +3622,19 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const String8 to = counted_to.length != 0 ? counted_to : placed_to.length != 0 ? placed_to :
                            check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
         check_driver_space_restore(spell, &scope);
-        const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
-        const uint32_t source_declaration = check_driver_operand_declaration(input, stream, source);
+        const uint32_t source_sugar = recovered == 0 ? check_driver_operand_sugar(input, stream, source) : 0;
+        const uint32_t source_declaration = recovered == 0 ? check_driver_operand_declaration(input, stream, source) : BUSTER_CHECK_NONE;
         check_driver_space_scope(parser, pp, input, types, spell, source_declaration, &scope, scratch);
         // A library builtin's designator by its prototype (#1447 item 10).
-        const String8 designator = check_driver_library_designator(parser, pp, input, stream, types, source, value, scratch);
+        const String8 designator = recovered == 0 ? check_driver_library_designator(parser, pp, input, stream, types, source, value, scratch) : (String8){ 0 };
         const String8 placed_from = designator.length == 0 && source_sugar == 0 ?
                                     check_driver_placed_type(parser, pp, input, types, spell, scratch, value, source_declaration) : (String8){ 0 };
-        const String8 counted_from = check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, source, value);
+        const String8 counted_from = recovered == 0 ? check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, source, value) : (String8){ 0 };
         const String8 from = counted_from.length != 0 ? counted_from : designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
                              check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         check_driver_space_restore(spell, &scope);
-        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, check_driver_conversion_source(types, stream, source));
+        const TypeId converted = recovered != 0 ? recovered : check_driver_conversion_source(types, stream, source);
+        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, converted);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
             "incompatible integer to pointer conversion ",
@@ -3648,7 +3651,7 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
             { "returning %.*s from a function with result type %.*s", "returning %.*s from a function with incompatible result type %.*s" },
             { "passing %.*s to parameter of type %.*s", "passing %.*s to parameter of incompatible type %.*s" },
         };
-        const char* hint = check_driver_conversion_hint(types, stream, source, value, target);
+        const char* hint = recovered == 0 ? check_driver_conversion_hint(types, stream, source, value, target) : "";
         // clang's actions put the target first where they initialize or assign, the source first where they return or pass.
         const String8 first = action < 2 ? to : from;
         const String8 second = action < 2 ? from : to;
@@ -3667,14 +3670,14 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
 // or an array's "array initializer must be an initializer list". NULL where it is none of those (the generic "invalid
 // initializer" stays).
 static const char* check_driver_initializer_conversion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                                       const TypeTable* types, TypeId target, uint32_t source, uint32_t declaration, uint64_t offset,
+                                                       const TypeTable* types, TypeId target, uint32_t source, TypeId recovered, uint32_t declaration, uint64_t offset,
                                                        uint32_t token, uint32_t* located, Arena* scratch)
 {
     CheckWarningSpelling spell = { 0 };
     const bool declared = declaration < input->token_count;
     const bool whole = declared && token < parser->tokens.count && check_sparse_get(input->initializer_begins, declaration) == token &&
                        parser->tokens.kinds[token] != PARSE_KIND_L_BRACE;
-    if (source == BUSTER_CHECK_NONE && whole && input->token_nodes != NULL)
+    if (source == BUSTER_CHECK_NONE && recovered == 0 && whole && input->token_nodes != NULL)
     {
         // The whole initializer's value: its last token's outermost node, as check_init_node takes it.
         const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
@@ -3703,8 +3706,8 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const TypeId element = array ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : 0;
     const bool narrow = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
-    const char* result = source >= stream->count ? NULL :
-                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
+    const char* result = recovered == 0 && source >= stream->count ? NULL :
+                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, recovered, spelled, spelling,
                                                                 whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0,
                                                                 scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
@@ -3831,7 +3834,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         }
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
-    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar,
+    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, 0, target, target_spelling, target_sugar,
                                                                  target_declaration, target_node, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
@@ -3977,7 +3980,7 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                                                           check_driver_default_error_severity(pp, input, at, parser->tokens.sources[at], id) : CHECK_WARNING_IGNORE;
                     uint32_t located = at;
                     const char* message = severity != CHECK_WARNING_IGNORE ?
-                                          check_driver_initializer_conversion(parser, pp, input, stream, types, part->conversion.type, part->node, declaration,
+                                          check_driver_initializer_conversion(parser, pp, input, stream, types, part->conversion.type, part->node, 0, declaration,
                                                                               part->bit_offset / 8, at, &located, scratch) : NULL;
                     if (message != NULL && located < count)
                     {
@@ -4049,7 +4052,7 @@ static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* 
                              check_driver_parameter_source(parser, input, declaration, index) : BUSTER_CHECK_NONE;
         parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, declaration, index) : BUSTER_CHECK_NONE;
         const bool placed = parameter < input->token_count;
-        const char* words = target != 0 ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target,
+        const char* words = target != 0 ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, 0, target,
                                                                          placed ? check_driver_parameter_spelling(parser, input, parameter) : 0, 0,
                                                                          placed ? parameter : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 3, scratch) : NULL;
         // The first line's call: the rest as written, then the record's line's format and type name.
@@ -4118,7 +4121,7 @@ static const char* check_driver_builtin_conversion(const Parser* parser, Preproc
         const CheckConversion conversion = stream->argument_conversions[offset + operand];
         const uint32_t source = graph->argument_nodes[offset + operand];
         const char* words = conversion.flags == BUSTER_CHECK_CONVERT_FAILED && conversion.type != 0 ?
-                            check_driver_conversion_words(parser, pp, input, stream, types, spell, source, conversion.type, 0, 0, BUSTER_CHECK_NONE,
+                            check_driver_conversion_words(parser, pp, input, stream, types, spell, source, 0, conversion.type, 0, 0, BUSTER_CHECK_NONE,
                                                           BUSTER_CHECK_NONE, 3, scratch) : NULL;
         if (words != NULL)
         {
@@ -11195,6 +11198,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             earlier.status = initializers.status;
                             earlier.failed_type = initializers.failed_type;
+                            earlier.recovered_type = 0;
                             earlier.failed_source = initializers.failed_source;
                             earlier.failed_offset = initializers.failed_offset;
                             earlier.failed_declaration = initializers.failed_declaration;
@@ -11221,6 +11225,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const CheckInitFailure failure = other != NULL ? *other : (CheckInitFailure){
                                 .status = earlier.status,
                                 .failed_type = earlier.failed_type,
+                                .recovered_type = earlier.recovered_type,
                                 .failed_source = earlier.failed_source,
                                 .failed_offset = earlier.failed_offset,
                                 .failed_declaration = earlier.failed_declaration,
@@ -11236,7 +11241,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 uint32_t place = failure.token;
                                 const char* conversion = failure.status == CHECK_INIT_INVALID ?
                                     check_driver_initializer_conversion(checking, checking_pp, &input, &stream, &types, failure.failed_type, failure.failed_source - 1,
-                                                                        failure.failed_declaration, failure.failed_offset, failure.token, &place, output_arena) : NULL;
+                                                                        failure.recovered_type, failure.failed_declaration, failure.failed_offset, failure.token, &place, output_arena) : NULL;
                                 const bool designator = failure.status == CHECK_INIT_MEMBER || failure.status == CHECK_INIT_ARRAY_DESIGNATOR ||
                                                         failure.status == CHECK_INIT_FIELD_DESIGNATOR || failure.status == CHECK_INIT_NON_AGGREGATE_DESIGNATOR;
                                 // A designated list of a non-aggregate is clang's at the declarator where it is the whole initializer (#2202),

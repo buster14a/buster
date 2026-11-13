@@ -38,6 +38,16 @@ LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
 facts. Clang is an external diagnostic oracle; no upstream implementation or
 test fixture is imported.
 
+The atomic compound-literal diagnostics and the narrow GNU statement-expression
+empty-body recovery in `c_check_initializer_input.c`, `c_checker_driver.c` and
+their semantic-driver regressions (#2441 item 5) are original project material
+under the default terms. LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s `clang/lib/Parse/ParseStmt.cpp`,
+`clang/lib/Sema/SemaExpr.cpp`, `SemaStmt.cpp` and `SemaInit.cpp` were consulted
+for the rejected-expression-statement, empty-body value and outer initialization
+diagnostic behavior. Clang is an external diagnostic oracle; no upstream
+implementation or test fixture is imported.
+
 The command-line warning vocabulary, unknown-option diagnostic policy and
 original CLI regressions in `c_preprocessor_warning_options.c`,
 `c_driver_warning_options_test.c` and their integration (#1467) are original

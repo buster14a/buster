@@ -270,6 +270,8 @@ struct CheckInitFailure
 {
     CheckInitStatus status;
     TypeId failed_type;
+    // A diagnostic-only recovered value's type, or zero to use failed_source's real checked value.
+    TypeId recovered_type;
     uint32_t failed_source;
     // Its subobject's offset in bits (CheckInitializer.failed_offset).
     uint64_t failed_offset;
@@ -287,6 +289,7 @@ struct CheckInitDiagnostic
     uint32_t failure_count;
     CheckInitStatus status;
     TypeId failed_type;
+    TypeId recovered_type;
     // A failed conversion's source node plus one and its declaration (CheckInitializer.failed_source, #147).
     uint32_t failed_source;
     // Its subobject's offset in bits (CheckInitializer.failed_offset).
@@ -345,6 +348,36 @@ static bool check_init_source_poisons(const Parser* parser, uint32_t begin, uint
         at = enclosed ? open : at;
     }
     return poisons;
+}
+
+// Clang omits an invalid expression statement. A GNU statement expression whose only statement is a rejected
+// atomic literal then has an empty body and a void value. With any earlier statement, its invalid last statement
+// instead invalidates the whole expression. Prove only the single-literal body here, through transparent parentheses;
+// the original graph and its initializer plans keep their actual failure state (#2441).
+static bool check_init_empty_atomic_statement(const CheckInput* input, const Parser* parser, uint32_t begin, uint32_t end, uint32_t literal)
+{
+    uint32_t first = begin;
+    uint32_t last = end;
+    while (first + 1 < last && parser->tree.roles[first] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first] == last - 1 &&
+           parser->tokens.kinds[first + 1] != PARSE_KIND_L_BRACE)
+    {
+        first += 1;
+        last -= 1;
+    }
+    const uint32_t selected = input->expression_regions != NULL && first < last ? input->expression_regions[first] : 0;
+    const CheckInputRegion* region = selected != 0 && selected <= input->region_count && input->regions != NULL ? input->regions + selected - 1 : NULL;
+    bool empty = region != NULL && region->opening == first && region->closing + 1 == last &&
+                 region->final_statement < region->block && region->final_statement + 1 == region->block;
+    first = empty ? region->opening + 2 : last;
+    last = empty ? region->final_statement : last;
+    while (first + 1 < last && parser->tree.roles[first] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first] == last - 1 &&
+           parser->tokens.kinds[first + 1] != PARSE_KIND_L_BRACE)
+    {
+        first += 1;
+        last -= 1;
+    }
+    empty = empty && first == literal && check_sparse_get(input->initializer_ends, literal) == last;
+    return empty;
 }
 
 static void check_init_listless_drop(CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types, Arena* scratch)
@@ -568,26 +601,55 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         const uint32_t initialize = check_sparse_get(input->initializer_nodes, declaration);
         const bool placed = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
         bool eligible = placed && (initialize >= stream->count || complete[initialize]);
+        bool empty_atomic = false;
         for (uint32_t token = begin; eligible && token < end; token += 1)
         {
             const uint32_t node = input->token_nodes[token];
             eligible = node == BUSTER_CHECK_NONE || (node < stream->count && complete[node]);
             // An atomic compound literal has no value: its own initializer reports the illegal atomic type at `{`
-            // (#2441). Do not also diagnose the initializer that uses it. The literal's declaration is at `(`, outside
-            // its own initializer span, so that span remains eligible and independent later declarations still run.
+            // (#2441). Do not also diagnose the initializer that uses it, except for a separate void value left by an
+            // otherwise-empty statement expression below. The literal's declaration is at `(`, outside its own
+            // initializer span, so that span remains eligible and independent later declarations still run.
             const bool compound = eligible && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != 0;
             const TypeId literal = compound ? input->declared_types[token] : 0;
             const uint32_t body = compound ? check_sparse_get(input->initializer_begins, token) : BUSTER_CHECK_NONE;
             const bool atomic_literal = body < end && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
                                         type_is_valid(types, literal) && type_kind(types, type_strip_aligned(types, literal)) == BUSTER_TYPE_KIND_ATOMIC &&
                                         check_init_source_poisons(parser, begin, token);
+            empty_atomic = atomic_literal && check_init_empty_atomic_statement(input, parser, begin, end, token);
             eligible &= !atomic_literal;
+        }
+        if (empty_atomic)
+        {
+            // The literal keeps its own atomic-brace error. Its otherwise-empty statement expression is a separate
+            // void value, which cannot initialize the enclosing object. Retain that fact solely for diagnostics.
+            const CheckInitFailure failure = {
+                .status = CHECK_INIT_INVALID,
+                .failed_type = input->declared_types[declaration],
+                .recovered_type = BUSTER_TYPE_VOID,
+                .failed_declaration = declaration,
+                .token = begin,
+                .completion = end,
+            };
+            failures[result->failure_count++] = failure;
+            if (begin < result->token)
+            {
+                result->status = failure.status;
+                result->failed_type = failure.failed_type;
+                result->recovered_type = failure.recovered_type;
+                result->failed_source = 0;
+                result->failed_offset = 0;
+                result->failed_declaration = declaration;
+                result->token = begin;
+                result->completion = end;
+            }
         }
         if (placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 && begin < result->token &&
             check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
         {
             result->status = CHECK_INIT_NON_CONSTANT;
+            result->recovered_type = 0;
             result->token = begin;
             result->completion = end;
         }
@@ -620,6 +682,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             {
                 result->status = plan.status;
                 result->failed_type = plan.failed_type;
+                result->recovered_type = 0;
                 result->failed_source = plan.failed_source;
                 result->failed_offset = plan.failed_offset;
                 result->failed_declaration = declaration;
@@ -662,6 +725,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     }
     result->failures = kept;
     result->failure_count = valid ? result->failure_count : 0;
+    result->recovered_type = valid ? result->recovered_type : 0;
     if (scratch != 0)
     {
         arena_pop_to(scratch, temporary);

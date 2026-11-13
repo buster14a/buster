@@ -228,7 +228,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "_Atomic int bad_array[1] = {(_Atomic int){5}};\nstruct T bad_record = {{6}};\n"
         "int *after = 1.5;\n",
         // An earlier discarded statement-expression statement does not poison its final value: the final int still
-        // gives the record's independent conversion error. A literal that is the last statement does poison it.
+        // gives the record's independent conversion error. A sole rejected literal leaves an empty void-valued body.
         "struct S { int x; };\n"
         "void f(void) { struct S s = ({ (void)(_Atomic int){1}; 3; }); (void)s; }\n"
         "void g(void) { _Atomic struct S s = ({ (_Atomic struct S){2}; }); (void)s; }\n",
@@ -236,6 +236,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "typedef int I;\ntypedef I II;\ntypedef _Atomic(II) A;\ntypedef A AA;\n"
         "typedef struct S { int x; } S;\ntypedef S SS;\ntypedef _Atomic(SS) AS;\n"
         "AA a = (AA){1};\nAS s = {2};\nint after = 1 + (void)0;\n",
+        // The empty-body recovery passes through parentheses and applies to scalar literals too. A preceding usable
+        // statement instead makes the whole statement expression invalid, so only its literal's error remains.
+        "struct S { int x; };\n"
+        "void parenthesized(void) { _Atomic struct S s = (({ ((_Atomic struct S){1}); })); (void)s; }\n"
+        "void scalar(void) { _Atomic int s = ({ (_Atomic int){2}; }); (void)s; }\n"
+        "void preceding(void) { _Atomic struct S s = ({ (void)0; (_Atomic struct S){3}; }); (void)s; }\n"
+        "int after = 1 + (void)0;\n",
         // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
         // from the type attributes' session).
         "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",
