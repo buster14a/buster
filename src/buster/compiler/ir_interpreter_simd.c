@@ -64,6 +64,7 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_FROUND: operation = IR_SIMD_FROUND; break;
         case BUSTER_IR_INTRINSIC_CVTT: operation = IR_SIMD_CVTT; break;
         case BUSTER_IR_INTRINSIC_BITSHUFFLE: operation = IR_SIMD_BITSHUFFLE; break;
+        case BUSTER_IR_INTRINSIC_QUADWORD_OP: operation = IR_SIMD_QUADWORD_OP; break;
         default: break;
     }
     return operation;

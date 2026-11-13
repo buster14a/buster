@@ -344,7 +344,14 @@ typedef enum IrOp
 // one type, the result the mask of its bytes' lanes (m16, m32 or m64): bit i the bit of a's quadword i / 8 that b's byte
 // i's low 6 bits name (vpshufbitqmb, _mm512_bitshuffle_epi64_mask; its writemask is an AND of the result).
 #define BUSTER_IR_INTRINSIC_BITSHUFFLE 38u
-#define BUSTER_IR_INTRINSIC_COUNT 39u
+// An operation of each quadword's bytes of two vectors of the result's type (#1840), binary: its flags the operation
+// (BUSTER_IR_QUADWORD_*): 0, each byte of the result the 8 bits of b's quadword from the bit a's byte's low 6 bits name,
+// wrapping around it (vpmultishiftqb, _mm512_multishift_epi64_epi8); 1, each quadword the sum of the absolute
+// differences of a's and b's 8 unsigned bytes in it (vpsadbw, _mm512_sad_epu8).
+#define BUSTER_IR_INTRINSIC_QUADWORD_OP 39u
+#define BUSTER_IR_INTRINSIC_COUNT 40u
+#define BUSTER_IR_QUADWORD_MULTISHIFT 0u
+#define BUSTER_IR_QUADWORD_SAD 1u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -906,6 +913,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "fround",
     "cvtt",
     "bitshuffle",
+    "quadword_op",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2197,8 +2205,9 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         valid = ir_vector_type(type) && ta == type && f->type[b] == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < ir_type_bits[type] / (8u << size);
                     }
                 }
-                else if (c == BUSTER_IR_INTRINSIC_AES)
+                else if (c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
                 {
+                    // An AES round's flags its round, a quadword operation's its operation: 0 or 1 each.
                     if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
                     {
                         check = ir_check(IR_ERROR_OPERAND, i, 1);
@@ -3658,7 +3667,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
                                 c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
                                 c == BUSTER_IR_INTRINSIC_REDUCE || c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
-                                c == BUSTER_IR_INTRINSIC_CVTT)
+                                c == BUSTER_IR_INTRINSIC_CVTT || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

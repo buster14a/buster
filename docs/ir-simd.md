@@ -1800,6 +1800,53 @@ The tests:
   Tier 1 natively. Both paths' code has the form's 8 records and no `kand`.
   With the fold left out, the 8 `kand`s fail it.
 
+## Quadword operations (#1840)
+
+One more binary `intrinsic` kind, `quadword_op` (`BUSTER_IR_INTRINSIC_QUADWORD_OP`),
+computes each quadword of the result from the bytes of a and b in it:
+
+```text
+%3 = intrinsic.v4i32 %1, %2 quadword_op 0
+```
+
+- **Operands:** a and b are of the result's type, any width.
+- **Flags:** the operation (`BUSTER_IR_QUADWORD_*`):
+  - **0, multishift:** byte j of each quadword is the 8 bits of b's quadword
+    from the bit a's byte j's low 6 bits name, wrapping around the quadword
+    (`vpmultishiftqb`, VBMI);
+  - **1, sum of absolute differences:** each quadword is the sum of
+    |a's byte − b's byte| over its 8 unsigned bytes (`vpsadbw`).
+- **Model and passes:** `IR_SIMD_QUADWORD_OP`. SCCP folds two constant vectors
+  by the model, and GVN and LICM take it as pure and total.
+
+**Decoder** (`ir_simd_typed_quadword_op`): the builtins'
+`__builtin_ia32_vpmultishiftqb128` to 512 and `__builtin_ia32_psadbw128` to 512
+are one record of `ir_simd_quadword_op_forms`' form at the result's width:
+`VECTOR(0)` in vvvv and `VECTOR(1)` in rm into `VECTOR(0)`. The target needs BW
+(and VBMI for the multishifts), AVX512F and VL below 64 bytes.
+
+**Tier 1** (`BUSTER_TIER1_VECTOR_QUADWORD_OP`) selects the same form back.
+
+**Zen 5:** the 6 forms had no row. They are to be measured on the 9700X.
+
+Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
+families above: `main_unit_backend.c` 105 → 96. No `vpmultishiftqb` or
+`vpsadbw` row is left.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `quadword_op` exactly of two vectors of
+  the result's type at flags 0 and 1, at every width. The model is checked
+  against both instructions' definitions, written out bit by bit, on random
+  vectors.
+- **`test-ir-parse`:** `tests/ir/quadword-op.ir` round-trips.
+- **`test-ir-simd`:** the 6 rules' rows decode at exactly their features, each
+  refused without each and under 6 changes.
+- **`test-tier1-masks`:** the 6 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against the definitions. The
+  multishifts' target adds VBMI to x86-64-v4's. A host that runs Tier 1's code
+  natively without it leaves them to `test-ir-simd`.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

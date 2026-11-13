@@ -686,9 +686,9 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }
-    else if (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_AES)
+    else if (op == IR_INTRINSIC && (f->c[i] == BUSTER_IR_INTRINSIC_AES || f->c[i] == BUSTER_IR_INTRINSIC_QUADWORD_OP))
     {
-        // An AES round (#1840), folded by the model once both operands are constant.
+        // An AES round or a quadword operation (#1840), folded by the model once both operands are constant.
         const uint8_t left = work->states[a];
         const uint8_t right = work->states[b];
         result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
@@ -697,7 +697,12 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             const IrSimdValue operands[2] = { ir_optimize_simd_value(work, a), ir_optimize_simd_value(work, b) };
             const IrSimdValue* pointers[3] = { &operands[0], &operands[1], 0 };
             const IrSimdShape shape = ir_simd_shape(f->type[i]);
-            const IrSimdAction action = { .operation = IR_SIMD_AES, .result = shape, .operands = { shape, shape, IR_SIMD_NONE }, .index = f->flags[i] };
+            const IrSimdAction action = {
+                .operation = f->c[i] == BUSTER_IR_INTRINSIC_AES ? IR_SIMD_AES : IR_SIMD_QUADWORD_OP,
+                .result = shape,
+                .operands = { shape, shape, IR_SIMD_NONE },
+                .index = f->flags[i],
+            };
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }

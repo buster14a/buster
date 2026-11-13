@@ -440,6 +440,9 @@ The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES
 The bit shuffles into a mask are its `bitshuffle` (#1840, its "Bit shuffles into
 a mask"), `BUSTER_TIER1_VECTOR_BITSHUFFLE`: `vpshufbitqmb`, under the writemask
 where a mask's AND takes it.
+The multishifts and sums of absolute differences are its `quadword_op` (#1840,
+its "Quadword operations"), `BUSTER_TIER1_VECTOR_QUADWORD_OP`:
+`vpmultishiftqb` or `vpsadbw`.
 
 ### Inlining (#1282)
 

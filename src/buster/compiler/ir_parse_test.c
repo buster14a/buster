@@ -714,6 +714,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/lane-unary.ir",
                 "tests/ir/carriers.ir",
                 "tests/ir/bitshuffle.ir",
+                "tests/ir/quadword-op.ir",
                 "tests/ir/fround.ir",
             };
             for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)

@@ -357,6 +357,9 @@ typedef enum Tier1SelectRule
 // the destination's opmask register, under values[2]'s as its writemask where it is a mask's AND (#1847's compare's
 // way), at the vectors' width.
 #define BUSTER_TIER1_VECTOR_BITSHUFFLE 29
+// A quadword operation (#1840): `immediate` the IR's flags, its operation; ir_simd_quadword_op_forms' form of values[0]
+// (vvvv) and values[1] (rm) into the destination.
+#define BUSTER_TIER1_VECTOR_QUADWORD_OP 30
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -2528,6 +2531,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .immediate = complement ? 0x55 : 0,
             };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP)
+        {
+            const uint16_t form = ir_simd_quadword_op_forms[holes->immediate & 1][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const X86Instruction record = { .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
             tier1_select_append(&result, record);
         }
         else if (kind == BUSTER_TIER1_VECTOR_BITSHUFFLE)
@@ -5119,7 +5128,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
                                                                            c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
-                                                                           c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
+                                                                           c == BUSTER_IR_INTRINSIC_QUADWORD_OP)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -5275,6 +5285,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_FROUND;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
+        {
+            // A quadword operation (#1840): its operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_QUADWORD_OP;
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;

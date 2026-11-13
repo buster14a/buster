@@ -307,6 +307,13 @@ static const uint16_t ir_simd_fround_forms[4][2] = {
     { X86_FORM_VDIVPS_Z_Z_Z_ER, X86_FORM_VDIVPD_Z_Z_Z_ER },
 };
 
+// The quadword operations (#1840, BUSTER_IR_INTRINSIC_QUADWORD_OP), by the operation (BUSTER_IR_QUADWORD_*) and the width,
+// a's register in vvvv, b's in rm and the destination in reg: VBMI's vpmultishiftqb, BW's EVEX vpsadbw.
+static const uint16_t ir_simd_quadword_op_forms[2][3] = {
+    { X86_FORM_VPMULTISHIFTQB_X_X_XM128, X86_FORM_VPMULTISHIFTQB_Y_Y_YM256, X86_FORM_VPMULTISHIFTQB_Z_Z_ZM512 },
+    { X86_FORM_VPSADBW_X_X_XM128_EVEX, X86_FORM_VPSADBW_Y_Y_YM256_EVEX, X86_FORM_VPSADBW_Z_Z_ZM512 },
+};
+
 // The byte shuffles by an immediate (#1840): vpshufd's doublewords, vpshuflw's low and vpshufhw's high words and vpslldq's
 // and vpsrldq's byte shifts move the same bytes within every 16-byte lane, so each is the IR's shuffle (vpshufb) of its
 // vector by a constant, their indices (ir_simd_shuffle_immediate_indices). Their EVEX forms by the kind and the width,

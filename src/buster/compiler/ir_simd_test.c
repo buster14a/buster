@@ -1274,6 +1274,91 @@ static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's reductions are C's");
 }
 
+// The quadword operations (#1840): both verifiers admit quadword_op exactly of two vectors of the result's type at flags 0
+// and 1, refusing another width's b and other flags; and the model gives vpmultishiftqb's and vpsadbw's quadwords, as
+// their definitions written out here, on random vectors.
+static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0xa54ff53a3c6ef372);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType vector = (IrType)(IR_V4I32 + width);
+                const bool admitted = other == 0 && flags <= 1;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "quadword operation verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 4;
+                ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, other == 0 ? vector : (IrType)(IR_V4I32 + (width + 1) % 3), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_INTRINSIC, vector, 0, 1, BUSTER_IR_INTRINSIC_QUADWORD_OP);
+                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[2] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a quadword operation is admitted exactly at its operations, of its type");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * 2, "quadword operations are admitted at every width and operation");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 2 * 8; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t operation = (trial / 3) % 2;
+        const uint32_t bytes = 16u << width;
+        IrSimdValue a = {0};
+        IrSimdValue b = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+            b.words[w] = ir_test_random(&state);
+        }
+        const uint8_t* left = (const uint8_t*)a.words;
+        const uint8_t* right = (const uint8_t*)b.words;
+        IrSimdValue wanted = {0};
+        uint8_t* out = (uint8_t*)wanted.words;
+        for (uint32_t q = 0; q < bytes / 8; q += 1)
+        {
+            uint64_t data = 0;
+            memcpy(&data, right + 8 * q, 8);
+            uint64_t sum = 0;
+            for (uint32_t j = 0; j < 8; j += 1)
+            {
+                // vpmultishiftqb: byte j is the 8 bits of b's quadword from bit a's byte j's low 6 bits, modulo 64.
+                uint32_t byte = 0;
+                for (uint32_t bit = 0; bit < 8; bit += 1)
+                {
+                    byte |= (uint32_t)((data >> ((left[8 * q + j] + bit) % 64)) & 1) << bit;
+                }
+                out[8 * q + j] = (uint8_t)byte;
+                sum += left[8 * q + j] > right[8 * q + j] ? (uint64_t)(left[8 * q + j] - right[8 * q + j]) : (uint64_t)(right[8 * q + j] - left[8 * q + j]);
+            }
+            if (operation == 1)
+            {
+                memcpy(out + 8 * q, &sum, 8);
+            }
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &a, &b, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_QUADWORD_OP, .result = shape, .operands = { shape, shape, IR_SIMD_NONE }, .index = (uint8_t)operation };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && memcmp(value.words, wanted.words, bytes) == 0;
+    }
+    ir_test_expect(test, exact, "the model's quadword operations give vpmultishiftqb's and vpsadbw's quadwords");
+}
+
 // The bit shuffles into a mask (#1840): both verifiers admit bitshuffle exactly of two vectors of one type into the mask
 // of their bytes (m16, m32 or m64) with flags 0, refusing another vector's operand, another mask and flags; and the
 // model gives each byte's bit of its quadword, as vpshufbitqmb's definition, written out here, on random vectors.
@@ -1958,6 +2043,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_reductions(test, output, scratch);
     ir_test_lane_unaries(test, output, scratch);
     ir_test_bitshuffles(test, output, scratch);
+    ir_test_quadword_ops(test, output, scratch);
     ir_test_frounds(test, output, scratch);
     ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);

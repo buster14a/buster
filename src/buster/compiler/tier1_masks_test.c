@@ -184,6 +184,10 @@ struct Tier1MasksTest
     // IR's bitshuffle under the writemask.
     uint32_t bitshuffle_attempts;
     uint32_t bitshuffle_rows;
+    // The quadword operations (#1840, tier1_masks_test_quadword_ops): those tried, and those through every stage as the
+    // IR's quadword_op.
+    uint32_t quadword_attempts;
+    uint32_t quadword_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -7254,6 +7258,125 @@ static void tier1_masks_test_conversions(Tier1MasksTest* test)
     free(program);
 }
 
+// The quadword operations through the IR to Tier 1 (#1840): each vpmultishiftqb and psadbw builtin's row at each width as
+// the program's only row in 4 statements of the input buffer's vectors k and k + 1 into the output's vector k.
+// tier1_masks_test_typed_pipeline takes each through the IR as its quadword_op, which the interpreter runs at every stage,
+// and Tier 1 natively, against the instructions' definitions written out here. vpmultishiftqb is VBMI's, past
+// x86-64-v4: its output target has it too, and a host that runs Tier 1's code natively must have it, or it is left to
+// test-ir-simd's decoding.
+static void tier1_masks_test_quadword_ops(Tier1MasksTest* test)
+{
+    const uint64_t v4 = test->v4_features;
+    uint8_t* const v4_forms = test->v4;
+    const uint64_t vbmi = BUSTER_X86_FEATURE(AVX512VBMI);
+    const X86Target target = { .features = v4 | vbmi };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    uint8_t* vbmi_forms = malloc(X86_FORM_COUNT);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && vbmi_forms != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the quadword operations' memory");
+    if (ready)
+    {
+        x86_target_forms(&target, vbmi_forms);
+    }
+    const bool multishifts = !test->native || (x86_target_native().features & vbmi) != 0;
+    uint64_t state = test->random ^ UINT64_C(0x1f83d9ab5be0cd19);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool multishift = strncmp(rule->name, "__builtin_ia32_vpmultishiftqb", sizeof("__builtin_ia32_vpmultishiftqb") - 1) == 0;
+        const bool sad = strncmp(rule->name, "__builtin_ia32_psadbw", sizeof("__builtin_ia32_psadbw") - 1) == 0;
+        if ((!multishift && !sad) || (multishift && !multishifts))
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->quadword_attempts += 1;
+        test->v4_features = v4 | vbmi;
+        test->v4 = vbmi_forms;
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL;
+        const uint32_t bytes = rule->bytes;
+        bool ok = tier1_masks_test_expect(test, made && row.operand_count == 2 && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's quadword operation's row");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * bytes / 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + 1) * bytes / 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the quadword operation's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const uint8_t* a = (const uint8_t*)in + k * bytes % 256;
+                const uint8_t* b = (const uint8_t*)in + (k + 1) * bytes % 256;
+                uint8_t* out = wanted + k * bytes;
+                for (uint32_t q = 0; q < bytes / 8; q += 1)
+                {
+                    uint64_t data = 0;
+                    memcpy(&data, b + 8 * q, 8);
+                    uint64_t sum = 0;
+                    for (uint32_t j = 0; j < 8; j += 1)
+                    {
+                        // vpmultishiftqb: the 8 bits of b's quadword from bit a's byte's low 6 bits, modulo 64; vpsadbw: the
+                        // sum of |a's byte - b's byte| over the quadword.
+                        uint32_t byte = 0;
+                        for (uint32_t bit = 0; bit < 8; bit += 1)
+                        {
+                            byte |= (uint32_t)((data >> ((a[8 * q + j] + bit) % 64)) & 1) << bit;
+                        }
+                        out[8 * q + j] = (uint8_t)byte;
+                        sum += a[8 * q + j] > b[8 * q + j] ? (uint64_t)(a[8 * q + j] - b[8 * q + j]) : (uint64_t)(b[8 * q + j] - a[8 * q + j]);
+                    }
+                    if (sad)
+                    {
+                        memcpy(out + 8 * q, &sum, 8);
+                    }
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a quadword operation is the IR's, not a machine row");
+        test->quadword_rows += ok;
+        test->v4_features = v4;
+        test->v4 = v4_forms;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the quadword operations return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(vbmi_forms);
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The bit shuffles into a mask through the IR to Tier 1 (#1840): each vpshufbitqmb builtin's row (16, 32 and 64 bytes, its
 // masks in the mask class by check_x86_lower_masks), as the program's only row in 8 statements: the input's vectors at
 // 16k and 16k + 64 under the input word k in the odd statements and every lane in the even ones, its mask stored into
@@ -7768,6 +7891,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_conversions(&test);
             tier1_masks_test_carriers(&test);
             tier1_masks_test_bitshuffles(&test);
+            tier1_masks_test_quadword_ops(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
             tier1_masks_test_lane_ops(&test);
@@ -7795,7 +7919,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
-                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows),
+                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -7813,6 +7937,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // 3 widths and the two shuffles of lanes at 2, at 8 immediates.
             tier1_masks_test_expect(&test, test.permute_attempts == 6 + 3 + 6 * 8 + 4 * 8 && test.permute_rows == test.permute_attempts,
                                     "every front-end permute goes through the IR and Tier 1 as the IR's permute");
+            // The quadword operations (#1840): vpsadbw at 3 widths, and vpmultishiftqb at 3 on a host that runs it.
+            tier1_masks_test_expect(&test, test.quadword_attempts == 3u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI)) != 0 ? 3u : 0u) &&
+                                               test.quadword_rows == test.quadword_attempts,
+                                    "every multishift and sum of absolute differences goes through the IR and Tier 1 as the IR's quadword_op");
             // The bit shuffles into a mask (#1840): vpshufbitqmb at 3 widths, on a host that runs them.
             tier1_masks_test_expect(&test, test.bitshuffle_attempts == (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512BITALG)) != 0 ? 3u : 0u) &&
                                                test.bitshuffle_rows == test.bitshuffle_attempts,
@@ -7889,6 +8017,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
                "shuffle_lanes\n",
                test.permute_rows);
+        printf("test-tier1-masks: the quadword operations: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its quadword_op\n",
+               test.quadword_rows);
         printf("test-tier1-masks: the bit shuffles into a mask: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its bitshuffle\n",
                test.bitshuffle_rows);
         printf("test-tier1-masks: the SSE carriers: %u casts and extensions through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its lane_extract "

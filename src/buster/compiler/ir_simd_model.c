@@ -120,6 +120,10 @@ typedef enum IrSimdOperation
     // A bit shuffle of a's quadwords by b's byte indices into the mask of their bytes (#1840, ir.c's
     // BUSTER_IR_INTRINSIC_BITSHUFFLE): bit i the bit of a's quadword i / 8 that b's byte i's low 6 bits name, in words[0].
     IR_SIMD_BITSHUFFLE,
+    // An operation of each quadword's bytes of a and b (#1840, ir.c's BUSTER_IR_INTRINSIC_QUADWORD_OP), the action's `index`
+    // the IR's flags: vpmultishiftqb's bytes of b's quadword from the bits a's bytes name, or vpsadbw's sums of absolute
+    // differences.
+    IR_SIMD_QUADWORD_OP,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -268,7 +272,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
                           action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
                           action->operation == IR_SIMD_REDUCE || action->operation == IR_SIMD_LANE_UNARY || action->operation == IR_SIMD_FROUND ||
-                          action->operation == IR_SIMD_CVTT || action->operation == IR_SIMD_BITSHUFFLE);
+                          action->operation == IR_SIMD_CVTT || action->operation == IR_SIMD_BITSHUFFLE || action->operation == IR_SIMD_QUADWORD_OP);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -325,6 +329,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                         ((action->index >> 2) == 0 || (action->index & 3) >= 2);
                 break;
             case IR_SIMD_CVTT: valid = valid && type == IR_SIMD_NONE && a == IR_SIMD_V4I32 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3; break;
+            case IR_SIMD_QUADWORD_OP: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 1; break;
             case IR_SIMD_BITSHUFFLE:
                 valid = valid && ir_simd_vector(a) && b == a && c == IR_SIMD_NONE && type == ir_simd_lane_mask(a, IR_SIMD_LANE_I8) && action->index == 0;
                 break;
@@ -868,6 +873,27 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                 }
             }
             ir_simd_lane_write(&staged, lane_bits, lane, value);
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_QUADWORD_OP)
+    {
+        // Each quadword: its 8 bytes from b's quadword, rotated right by a's byte's low 6 bits; or the sum of the absolute
+        // differences of a's and b's bytes in it.
+        const uint32_t quadwords = ir_simd_bits(action->result) / 64;
+        for (uint32_t q = 0; q < quadwords; q += 1)
+        {
+            const uint64_t data = values[1]->words[q];
+            uint64_t value = 0;
+            for (uint32_t j = 0; j < 8; j += 1)
+            {
+                const uint32_t left = (uint32_t)ir_simd_lane_read(values[0], 8, 8 * q + j);
+                const uint32_t right = (uint32_t)ir_simd_lane_read(values[1], 8, 8 * q + j);
+                const uint32_t shift = left & 63;
+                const uint64_t rotated = shift == 0 ? data : (data >> shift) | (data << (64 - shift));
+                // Flags 0, ir.c's BUSTER_IR_QUADWORD_MULTISHIFT; 1 its _SAD.
+                value = action->index == 0 ? value | (rotated & 0xff) << (8 * j) : value + (left > right ? left - right : right - left);
+            }
+            staged.words[q] = value;
         }
     }
     else if (valid && action->operation == IR_SIMD_BITSHUFFLE)
