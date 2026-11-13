@@ -7,8 +7,13 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
-  shared dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
-  predecessor-reading scalar twin and redundant-phi SCC cleanup. `test-ssa`
+  budgeted dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
+  predecessor-reading scalar twin and redundant-phi SCC cleanup. Large functions
+  use `ssa_bounded.c`'s reusable local workspace and actual retained phi extents;
+  `ssa_verify.c` independently checks symbolic equations with bounded block rows.
+  `test-ssa` forces both bounded kernels on its fixtures and checks large sparse
+  CFGs under fixed scratch capacities, including a blocks-times-locals product
+  exceeding `u32`. It
   checks both against an all-in-memory path interpreter and the SSA verifier;
   `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
   CFGs, including analysis and allocation. `docs/ssa.md` records the view's
