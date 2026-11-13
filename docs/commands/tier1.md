@@ -306,7 +306,11 @@ both the scalar and bottom-up paths. It checks every power-of-two multiply
 in 32 and 64 bits (both operand orders and separate/coalesced destinations),
 signed byte/word/dword loads at sign boundaries and a protected page end,
 memory-order and shared-load counterexamples, and full-width pointer-integer
-addition folded into a memory operand. `test-x86-target-selection` also
+addition folded into a memory operand. An addition of a load, in both operand
+orders and both widths, takes the load as its memory operand, and one with its
+sum in the base's register loads into it rather than through the scratch
+register; a load another addition also reads stays one load (#2602).
+`test-tier1-emit`'s symbol fixtures do the same with a rip-relative symbol. `test-x86-target-selection` also
 reaches these fixtures through the existing memory-plan tests.
 
 The index walk also folds same-block, single-use I64 shifts and power-of-two
