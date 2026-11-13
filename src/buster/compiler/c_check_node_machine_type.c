@@ -605,22 +605,22 @@ static bool node_machine_plain_kind(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
 }
 
-// The pointer type to type `type`, type_pointer's: the unit's column's (NodeMachine.pointers), one load once the type's
-// first array, function or address has filled it. A type of qualifiers but none or const alone, or one past the column,
-// asks type_pointer each time.
+// The pointer type to type `type`, type_pointer's: the unit's columns' (NodeMachine.pointers and const_pointers), one load
+// once the type's first array, function or address has filled it. A type of qualifiers but none or const alone, or one
+// past the columns, asks type_pointer each time.
 static TypeId node_machine_pointer(NodeMachine* machine, TypeId type)
 {
     const uint32_t index = type_index(type);
     const uint32_t qualifiers = type_qualifiers(type);
     const bool column = index < machine->type_count && (qualifiers == 0 || qualifiers == BUSTER_TYPE_CONST);
-    const uint32_t slot = 2 * index + qualifiers;
-    TypeId pointer = column ? machine->pointers[slot] : 0;
+    TypeId* pointers = qualifiers == 0 ? machine->pointers : machine->const_pointers;
+    TypeId pointer = column ? pointers[index] : 0;
     if (pointer == 0)
     {
         pointer = type_pointer(machine->types, type);
         if (column)
         {
-            machine->pointers[slot] = pointer;
+            pointers[index] = pointer;
         }
     }
     return pointer;
