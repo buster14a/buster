@@ -2572,17 +2572,6 @@ static bool main_source_first(const char* argument)
     return !name;
 }
 
-// The stack's pages below main_driver's frame that a compile's frames reach, populated in one call (arena_populate,
-// #1444): an empty file's -fsyntax-only wrote 27 pages of it, 108 KB, a one-line -c 37. They are within the 128 KB
-// that the kernel maps below a new process's arguments, so the call needs no growth of the stack's mapping first.
-#define BUSTER_MAIN_STACK_POPULATE_BYTES (120ull << 10)
-
-static __attribute__((noinline)) void main_stack_populate(void)
-{
-    const uintptr_t frame = (uintptr_t)__builtin_frame_address(0) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
-    arena_populate((void*)(frame - BUSTER_MAIN_STACK_POPULATE_BYTES), BUSTER_MAIN_STACK_POPULATE_BYTES);
-}
-
 static int main_driver(int argc, char** argv)
 {
     // A source command's .bss in base pages (arena_static_base_pages) before the process touches any of it (#1444): with
@@ -2596,7 +2585,6 @@ static int main_driver(int argc, char** argv)
     if (source || compiles)
     {
         arena_static_base_pages();
-        main_stack_populate();
     }
     // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
     arena_page_policy(getenv("BUSTER_HUGE_PAGES"));

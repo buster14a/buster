@@ -678,12 +678,7 @@ static bool intern_lay_out(InternTable* table, Arena* arena, uint64_t buckets)
     bool result = memory != 0 && spans != 0;
     if (result)
     {
-        // Fresh mappings read as zero, so every slot is empty already. A lookup reads its bucket before an insertion
-        // writes it, so each page's first touch was a read, which maps the zero page, and its first write a second
-        // fault: 29 of an empty file's faults were 15 pages of the first buckets, which an empty file's predefined names
-        // touch nearly all of, and a table that grows places every spelling again (#1444). So the buckets' pages are
-        // made present and writable at once, in one call (arena_populate).
-        arena_populate(memory, buckets * BUSTER_INTERN_BUCKET_BYTES);
+        // Fresh mappings read as zero, so every slot is empty already.
         table->buckets = memory;
         table->bucket_mask = buckets - 1;
         table->spans = spans;
