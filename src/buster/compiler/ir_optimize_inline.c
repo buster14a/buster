@@ -65,6 +65,11 @@ struct IrInlineUnit
     const uint8_t* flags;
     uint32_t count;
     uint32_t symbol_count;
+    // Each function's cost limit as a callee (#2541's classes), or null for IrInlineOptions.maximum_cost for all.
+    const uint32_t* limits;
+    // 1 + the index of the only function rewritten, or 0 for all (#2541's summaries): the others are callees as they
+    // are, finished bodies the caller copies, neither verified again nor rewritten.
+    uint32_t only;
 };
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -81,6 +86,10 @@ struct IrInlineOptions
     // Whether a callee of any control flow is a candidate (#2541): its blocks spliced at the call (ir_inline_expand_general)
     // rather than one straight line of them cloned in place. Off by default, where such a body is IR_INLINE_BODY.
     bool control_flow;
+    // Whether the unit's functions are verified IR (a lowering's or an optimizer's output) and the caller verifies the result
+    // before anything reads it (#2541's driver: SROA or promotion): neither is verified here, which would make each
+    // expansion's function be verified four times over.
+    bool trusted;
 };
 
 typedef enum IrInlineDecision
@@ -340,7 +349,11 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
     {
         check.error = IR_ERROR_LIMIT;
     }
-    else if ((unit->count != 0 && (!unit->functions || !unit->symbols || !unit->flags)) || (unit->count != 0 && unit->symbol_count < 2))
+    else if ((unit->count != 0 && (!unit->functions || !unit->symbols || !unit->flags)) || (unit->count != 0 && unit->symbol_count < 2) || unit->only > unit->count)
+    {
+        check.error = IR_ERROR_STRUCTURE;
+    }
+    else if (unit->limits != 0 && ir_inline_tail_conflict(unit->limits, (uint64_t)unit->count * 4, output, scratch))
     {
         check.error = IR_ERROR_STRUCTURE;
     }
@@ -383,7 +396,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         {
             check.error = IR_ERROR_METADATA;
         }
-        else
+        else if (!options.trusted && (unit->only == 0 || unit->only - 1 == f))
         {
             const uint64_t mark = scratch->length;
             IrOptimizeWork work = { 0 };
@@ -853,12 +866,40 @@ static IrInlineRows ir_inline_rows(const IrFunction* callee, const IrInlineBody*
     return rows;
 }
 
+// The cost sweep against a limit per call (IrInlineUnit.limits): the same masked 16-lane compare as ir_inline_threshold's,
+// of two columns, with its scalar twin.
+static void ir_inline_threshold_limits(const uint32_t* costs, const uint32_t* maxima, uint32_t count, bool scalar, uint8_t* selected)
+{
+    (void)scalar;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            selected[i] = costs[i] <= maxima[i];
+        }
+    }
+    else
+    {
+        for (uint32_t first = 0; first < count; first += 16)
+        {
+            const uint32_t remaining = count - first;
+            const uint32_t n = remaining < 16 ? remaining : 16;
+            const __mmask16 mask = n == 16 ? UINT16_MAX : (uint16_t)((1u << n) - 1);
+            const __m512i values = _mm512_maskz_loadu_epi32(mask, costs + first);
+            const __m512i limits = _mm512_maskz_loadu_epi32(mask, maxima + first);
+            const __mmask16 fits = mask & _mm512_cmple_epu32_mask(values, limits);
+            _mm_mask_storeu_epi8(selected + first, mask, _mm_maskz_set1_epi8(fits, 1));
+        }
+    }
+}
+
 static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrInlineOptions options, const IrInlineBody* shapes, Arena* scratch, IrInlineResult* result, uint64_t* charged)
 {
     const uint32_t first = result->call_offsets[function];
     const uint32_t end = result->call_offsets[function + 1];
     bool ok = true;
     uint8_t* fits = ir_allocate(scratch, end - first, 1, &ok);
+    uint32_t* maxima = unit->limits != 0 ? ir_allocate(scratch, end - first, 4, &ok) : 0;
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     for (uint32_t call = first; ok && call < end; call += 1)
     {
@@ -914,7 +955,16 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
     }
     if (ok)
     {
-        if (first != end)
+        if (first != end && maxima != 0)
+        {
+            // A call's limit is its callee's; one without a callee has no cost to compare (UINT32_MAX fails every limit).
+            for (uint32_t call = first; call < end; call += 1)
+            {
+                maxima[call - first] = result->callees[call] != BUSTER_IR_NONE ? unit->limits[result->callees[call]] : 0;
+            }
+            ir_inline_threshold_limits(result->costs + first, maxima, end - first, BUSTER_SCALAR_PATH(options.scalar), fits);
+        }
+        else if (first != end)
         {
             ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, BUSTER_SCALAR_PATH(options.scalar), fits);
         }
@@ -1532,6 +1582,118 @@ static void ir_inline_expand_general(const IrFunction* source, uint32_t node, co
     }
 }
 
+// The caller's nodes [first, end) of one block, between its expanded calls, copied to the cursor (#2541's design, "The
+// splice's columns"): each operand column rebased by its kind from the IR's operand tables (IrInlineKinds), a value to
+// its new place (`values`), a branch's block to its target's first part (`block_first`) and any other row kept, the
+// caller's own; then each rebuilt node's slice, in node order: a call's descriptor, a phi's edges (each from its
+// predecessor's last part, `block_last`), a switch's targets, an indirect branch's labels, a ternary intrinsic's third
+// operand. The columns 16 nodes a vector, by a table lookup of the kinds and two masked gathers, or by the scalar twin,
+// ir_inline_node's loop; the slices by both alike.
+static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_t end, const IrInlineKinds* kinds, const uint32_t* values, const uint32_t* block_first,
+                               const uint32_t* block_last, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
+{
+    (void)scalar;
+    (void)kinds;
+    const uint32_t at = cursor->node;
+    if (!BUSTER_SCALAR_PATH(scalar))
+    {
+        const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_IR_NONE);
+        const uint32_t* inputs[3] = {
+            source->a,
+            source->b,
+            source->c,
+        };
+        uint32_t* outputs[3] = {
+            rewritten->a,
+            rewritten->b,
+            rewritten->c,
+        };
+        for (uint32_t i = first; i < end; i += 16)
+        {
+            const uint32_t remaining = end - i;
+            const __mmask16 mask = remaining >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
+            const uint32_t to = at + (i - first);
+            const __m128i op = _mm_maskz_loadu_epi8(mask, source->op + i);
+            _mm_mask_storeu_epi8(rewritten->op + to, mask, op);
+            _mm_mask_storeu_epi8(rewritten->type + to, mask, _mm_maskz_loadu_epi8(mask, source->type + i));
+            _mm_mask_storeu_epi8(rewritten->flags + to, mask, _mm_maskz_loadu_epi8(mask, source->flags + i));
+            _mm_mask_storeu_epi8(rewritten->alignment_log2 + to, mask, _mm_maskz_loadu_epi8(mask, source->alignment_log2 + i));
+            for (uint32_t column = 0; column < 3; column += 1)
+            {
+                const __m512i kind = ir_lookup_bytes(kinds->columns[column], op);
+                const __m512i operand = _mm512_maskz_loadu_epi32(mask, inputs[column] + i);
+                const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
+                const __mmask16 value = mask & (_mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional);
+                const __mmask16 target = mask & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_BLOCK));
+                __m512i rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
+                rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
+                _mm512_mask_storeu_epi32(outputs[column] + to, mask, rebased);
+            }
+        }
+    }
+    else
+    {
+        const IrInlineBases own = { 0 };
+        for (uint32_t i = first; i < end; i += 1)
+        {
+            const uint32_t to = at + (i - first);
+            ir_inline_node(source, i, rewritten, to, values, own);
+            if (source->op[i] == IR_BR)
+            {
+                rewritten->a[to] = block_first[source->a[i]];
+            }
+            else if (source->op[i] == IR_CBR)
+            {
+                rewritten->b[to] = block_first[source->b[i]];
+                rewritten->c[to] = block_first[source->c[i]];
+            }
+        }
+    }
+    const IrInlineBases own = { 0 };
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        const uint32_t op = source->op[i];
+        const uint32_t to = at + (i - first);
+        if (op == IR_CALL || op == IR_CALL_INDIRECT)
+        {
+            ir_inline_descriptor(source, i, rewritten, to, values, own, cursor);
+        }
+        else if (op == IR_PHI)
+        {
+            // An edge leaves its predecessor's last part.
+            rewritten->a[to] = cursor->extra;
+            for (uint32_t p = 0; p < source->b[i]; p += 1)
+            {
+                rewritten->extra[cursor->extra++] = block_last[source->extra[source->a[i] + p * 2]];
+                rewritten->extra[cursor->extra++] = values[source->extra[source->a[i] + p * 2 + 1]];
+            }
+        }
+        else if (op == IR_SWITCH)
+        {
+            // A branch goes to its target's first part; the cases' constants are the caller's, the first rows.
+            rewritten->b[to] = cursor->extra;
+            rewritten->extra[cursor->extra++] = block_first[source->extra[source->b[i]]];
+            for (uint32_t k = 0; k < source->c[i]; k += 1)
+            {
+                rewritten->extra[cursor->extra++] = source->extra[source->b[i] + 1 + k * 2];
+                rewritten->extra[cursor->extra++] = block_first[source->extra[source->b[i] + 2 + k * 2]];
+            }
+        }
+        else if (op == IR_BR_INDIRECT && source->b[i] != BUSTER_IR_NONE)
+        {
+            // Its labels' list (#785), the caller's label indices, which keep their blocks.
+            rewritten->b[to] = cursor->extra;
+            memcpy(rewritten->extra + cursor->extra, source->extra + source->b[i], (uint64_t)source->c[i] * 4);
+            cursor->extra += source->c[i];
+        }
+        else if (ir_ternary_instruction(source, i))
+        {
+            ir_inline_third(source, i, rewritten, to, values, cursor);
+        }
+    }
+    cursor->node = at + (end - first);
+}
+
 static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineOptions options, const IrInlineBody* shapes, const IrInlineKinds* kinds,
                                  IrInlineResult* result)
 {
@@ -1733,7 +1895,6 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             rewritten.block_offsets[new_block++] = cursor.node;
             for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
             {
-                const uint32_t op = source->op[node];
                 const bool site = ir_inline_site(source, node);
                 if (site && result->decisions[call] == IR_INLINE_SELECTED)
                 {
@@ -1797,54 +1958,17 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 }
                 else
                 {
-                    const IrInlineBases own = { 0 };
-                    ir_inline_node(source, node, &rewritten, cursor.node, values, own);
-                    if (op == IR_CALL || op == IR_CALL_INDIRECT)
+                    // The caller's nodes up to its block's next expanded call, a run copied whole (ir_inline_copy_run).
+                    uint32_t last = node + 1;
+                    uint32_t sites = site;
+                    while (last < source->block_offsets[block + 1] && !(ir_inline_site(source, last) && result->decisions[call + sites] == IR_INLINE_SELECTED))
                     {
-                        ir_inline_descriptor(source, node, &rewritten, cursor.node, values, own, &cursor);
+                        sites += ir_inline_site(source, last);
+                        last += 1;
                     }
-                    else if (op == IR_PHI)
-                    {
-                        // An edge leaves its predecessor's last part.
-                        rewritten.a[cursor.node] = cursor.extra;
-                        for (uint32_t p = 0; p < source->b[node]; p += 1)
-                        {
-                            rewritten.extra[cursor.extra++] = block_last[source->extra[source->a[node] + p * 2]];
-                            rewritten.extra[cursor.extra++] = values[source->extra[source->a[node] + p * 2 + 1]];
-                        }
-                    }
-                    else if (op == IR_SWITCH)
-                    {
-                        // A branch goes to its target's first part; the cases' constants are the caller's, the first rows.
-                        rewritten.b[cursor.node] = cursor.extra;
-                        rewritten.extra[cursor.extra++] = block_first[source->extra[source->b[node]]];
-                        for (uint32_t k = 0; k < source->c[node]; k += 1)
-                        {
-                            rewritten.extra[cursor.extra++] = source->extra[source->b[node] + 1 + k * 2];
-                            rewritten.extra[cursor.extra++] = block_first[source->extra[source->b[node] + 2 + k * 2]];
-                        }
-                    }
-                    else if (op == IR_BR)
-                    {
-                        rewritten.a[cursor.node] = block_first[source->a[node]];
-                    }
-                    else if (op == IR_CBR)
-                    {
-                        rewritten.b[cursor.node] = block_first[source->b[node]];
-                        rewritten.c[cursor.node] = block_first[source->c[node]];
-                    }
-                    else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
-                    {
-                        // Its labels' list (#785), the caller's label indices, which keep their blocks.
-                        rewritten.b[cursor.node] = cursor.extra;
-                        memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
-                        cursor.extra += source->c[node];
-                    }
-                    else if (ir_ternary_instruction(source, node))
-                    {
-                        ir_inline_third(source, node, &rewritten, cursor.node, values, &cursor);
-                    }
-                    cursor.node += 1;
+                    ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, &rewritten, options.scalar, &cursor);
+                    node = last - 1;
+                    call += sites - site;
                 }
                 call += site;
             }
@@ -1890,12 +2014,26 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
     {
         failed_function = order[position];
         const uint64_t function_mark = scratch->length;
-        check.error = ir_inline_choose(unit, failed_function, options, shapes, scratch, &inlined, &charged);
-        if (check.error == IR_OK)
+        // A function other than the only one rewritten (IrInlineUnit.only) is a finished callee: taken as it is, its calls
+        // kept.
+        const bool rewritten = unit->only == 0 || unit->only - 1 == failed_function;
+        for (uint32_t call = inlined.call_offsets[failed_function]; !rewritten && call < inlined.call_offsets[failed_function + 1]; call += 1)
+        {
+            inlined.costs[call] = UINT32_MAX;
+            inlined.expanded_sizes[call] = 0;
+            inlined.decisions[call] = IR_INLINE_DISABLED;
+        }
+        if (!rewritten)
+        {
+            inlined.functions[failed_function] = unit->functions[failed_function];
+            inlined.output_instructions += unit->functions[failed_function].instruction_count;
+        }
+        check.error = rewritten ? ir_inline_choose(unit, failed_function, options, shapes, scratch, &inlined, &charged) : IR_OK;
+        if (check.error == IR_OK && rewritten)
         {
             check.error = ir_inline_rewrite(unit, failed_function, output, scratch, options, shapes, &kinds, &inlined);
         }
-        if (check.error == IR_OK)
+        if (check.error == IR_OK && rewritten && !options.trusted)
         {
             const uint64_t verification_mark = scratch->length;
             IrOptimizeWork verification = { 0 };

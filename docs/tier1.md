@@ -435,51 +435,84 @@ the mask into the destination, which takes the passthrough first.
 The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES`:
 `vaesenc` or `vaesenclast`, EVEX, or VEX where the target has no VL.
 
-### Inlining (#1282)
+### Inlining (#1282, #2541)
 
 Between the lowering and SSA promotion, `--tier1` expands a body's calls of the
-unit's always_inline functions of internal linkage, the x86 intrinsics'
-wrappers above all (`c_check_tier1_inline.c`), and splits the aggregates' slots
-of a body with vectors or with expansions into fields that promotion makes
-values. The checker records each function's always_inline and noinline
-attributes (`CheckProgram.object_inline`); a function with both, or neither, is
-no callee. The emission then lowers every part before any part's code
-(`CheckEmitRun.tier1_inline`: the lanes meet between the halves, a growing
-team's code waits for every lowering, a board's share runs two epochs), so that
-a body's lane reads any callee's typed stream. Each lane prepares a callee once
-an emission, in a cache arena of its own: lowered at its own target, promoted
-and optimized, which leaves a wrapper a preheader and its body, one straight
-line, and a helper with control flow its blocks. A callee whose target has a
-feature its caller's lacks stays a call.
+unit's candidates (`c_check_tier1_inline.c`): its functions of internal linkage,
+but naked ones and those that call a function that returns twice. An
+always_inline one is expanded whatever its size and control flow, as clang
+expands it, the x86 intrinsics' wrappers above all; one without an inline
+attribute is the small class (#2541 step 1, [the unit inlining
+design](tier1-unit-inlining.md)): a summary of at most 256 instructions, each
+call expanded at an inliner cost of at most 64. The checker records each
+function's always_inline and noinline attributes (`CheckProgram.object_inline`);
+a function with noinline, or with both, is no candidate. The emission lowers
+every part before any part's code (`CheckEmitRun.tier1_inline`: the lanes meet
+between the halves, a growing team's code waits for every lowering, a board's
+share runs two epochs), so that a body's lane reads any callee's typed stream.
 
-The unit of the caller and the callees its calls reach (up to 64) goes through
-`ir_optimize_inline` with no cost threshold and with `control_flow` (#2541), as
-clang inlines an always_inline function whatever its size and its control flow:
-a helper's blocks are spliced at the call, its returns joined in a phi
-([the inlining guide](ir-inlining.md)'s "Callees with control flow"), and
-copies of 64-, 32- and 16-byte vectors take the
-target's widths ([the inlining guide](ir-inlining.md)'s "SIMD callees and
-by-value vectors"). SROA, with its `simd` and `flagged` options ([the field
-splitting guide](ir-scalar-replacement.md)'s "#1282's options"), then makes the
-by-value vectors' slots typed vector slots, which promotion makes values: a
-wrapper's arguments, its own parameter objects and its result's bytes all leave
-memory. Tier 1's own entry and return of a function that takes or returns a
-vector by value, which its frame emitter stores into and reloads from frame
-objects, are unchanged. The typed stream's lowering copies an aggregate
-parameter that a vector register holds whole by one vector load and store
-rather than eight `i64`s (`ir_typed_vector_whole`), in a function with vectors
-and at a target with AVX-512, so that its object is one field.
+Between the halves the first lane to need it runs the unit stage: the
+candidates' call graph from their typed streams' direct calls
+(`Tier0Function.call_targets`), whose cycles' members (Tarjan's components, a
+self call too) are no candidates. Each other candidate has a summary, built once
+for the unit by the first lane to need it: its typed stream lowered at its own
+target, its calls of candidates expanded from their summaries (built first),
+and Tier 1's passes from promotion to the verified optimizer
+(`check_tier1_passes`, below), whose function and analysis stay in that lane's
+arenas of the run until the run ends. A lane claims a summary by a
+compare-and-swap of its state word, and a lane that needs one another lane is
+building waits for it; summaries depend only on their callees', which form no
+cycle, so no wait waits on itself. A candidate's own code goes on from its
+summary at selection: its lowering, passes and optimization are moved, not
+repeated. A summary is a function of its body and its callees' summaries, so
+the objects are the same by any lane count.
 
-Any failure of the inlining or of SROA keeps the body as it was lowered: inlining
-is an optimization, never a refusal. `--tier1-report`'s `inlined` sums the
-calls expanded into the bodies Tier 1 compiled; `--tier1-no-inline` keeps every
-call, for comparison. `test-ir-inline` runs the inliner's SIMD and by-value
-fixtures, the latter on the IR's interpreter before and after inlining, SROA and
-promotion, and #2541's generated units of callees with control flow;
-`test-checker-driver`'s inlining fixture builds a program of intrinsics, a
-struct helper, helpers with control flow (two returns, a loop, a switch, a
-vector by value chosen by a branch, a local array, nested calls) and a noinline
-function by each path, with and without inlining, against clang -O0's.
+A caller copies its direct callees' summaries: the unit of the caller and those
+callees (up to 64) goes through `ir_optimize_inline` with `control_flow`
+(#2541), each callee's class's cost limit (`IrInlineUnit.limits`), the caller
+alone rewritten (`IrInlineUnit.only`) and its inputs, verified as they were
+made, not verified again (`IrInlineOptions.trusted`). A helper's blocks are
+spliced at the call, its returns joined in a phi ([the inlining
+guide](ir-inlining.md)'s "Callees with control flow"), and copies of 64-, 32-
+and 16-byte vectors take the target's widths ([the inlining guide](ir-inlining.md)'s
+"SIMD callees and by-value vectors"). A callee whose target has a feature its
+caller's lacks stays a call. SROA, with its `simd` and `flagged` options ([the
+field splitting guide](ir-scalar-replacement.md)'s "#1282's options"), then
+splits the slots of a body with vectors, as without inlining, or of an
+expansion that copied an aggregate argument or result into a slot of its own:
+the by-value vectors' slots become typed vector slots, which promotion makes
+values, so that a wrapper's arguments, its own parameter objects and its
+result's bytes all leave memory. A body's other aggregates are split no more
+than they would be without inlining (on sqlite3.c that splitting was 0.05% of
+the code for a quarter of the expansion's time). Tier 1's own entry and return
+of a function that takes or returns a vector by value, which its frame emitter
+stores into and reloads from frame objects, are unchanged. The typed stream's
+lowering copies an aggregate parameter that a vector register holds whole by
+one vector load and store rather than eight `i64`s (`ir_typed_vector_whole`), in
+a function with vectors and at a target with AVX-512, so that its object is one
+field.
+
+The passes from promotion to the optimizer are one function,
+`check_tier1_passes` (in `c_check_tier1.c`), which a body's own pipeline and a
+summary both run: promotion, the 128-bit integers' halves, the wide vectors'
+pieces, truth simplification, threading, if-conversion, `--tier1-schedule=pre`'s
+order and `ir_optimize_verified`, whose function and analysis selection reads.
+Any failure of the inlining or of SROA keeps the body as it was lowered, and an
+expansion that promotion refuses or finds past its limits is promoted from the
+unexpanded lowering instead: inlining is an optimization, never a refusal.
+`--tier1-report`'s `inlined` sums the calls expanded into the bodies Tier 1
+compiled; `--tier1-no-inline` keeps every call, for comparison. `test-ir-inline`
+runs the inliner's SIMD and by-value fixtures, the latter on the IR's
+interpreter before and after inlining, SROA and promotion, #2541's generated
+units of callees with control flow, and the per-callee limits and caller-only
+rewrite; `test-checker-driver`'s inlining fixture builds a program of
+intrinsics, a struct helper, helpers with control flow (two returns, a loop, a
+switch, a vector by value chosen by a branch, a local array, nested calls), the
+small class's (two returns, a loop that calls one, a recursive pair, which stays
+calls) and a noinline function by each path, with and without inlining, against
+clang -O0's, and compares its objects by one and eight lanes by each path. A
+fixture that measures a frame across a call (a backtrace's depth, a value kept
+in a callee-saved register across it) marks its callee noinline.
 
 ### The vectors wider than the target's registers
 
