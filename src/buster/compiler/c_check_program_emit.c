@@ -3029,7 +3029,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
-        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
+        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, lanes != NULL && lanes->tier1, output, scratch);
         check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
