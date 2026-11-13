@@ -605,20 +605,22 @@ static bool node_machine_plain_kind(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
 }
 
-// The pointer type of function type `function`, type_pointer's: the unit's column's (NodeMachine.function_pointers), one
-// load once the type's first designator has filled it. A type past the column, or a qualified one (which type_pointer
-// takes unqualified), asks type_pointer each time.
-static TypeId node_machine_function_pointer(NodeMachine* machine, TypeId function)
+// The pointer type to type `type`, type_pointer's: the unit's columns' (NodeMachine.pointers and const_pointers), one load
+// once the type's first array, function or address has filled it. A type of qualifiers but none or const alone, or one
+// past the columns, asks type_pointer each time.
+static TypeId node_machine_pointer(NodeMachine* machine, TypeId type)
 {
-    const uint32_t index = type_index(function);
-    const bool column = index < machine->type_count && function == (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-    TypeId pointer = column ? machine->function_pointers[index] : 0;
+    const uint32_t index = type_index(type);
+    const uint32_t qualifiers = type_qualifiers(type);
+    const bool column = index < machine->type_count && (qualifiers == 0 || qualifiers == BUSTER_TYPE_CONST);
+    TypeId* pointers = qualifiers == 0 ? machine->pointers : machine->const_pointers;
+    TypeId pointer = column ? pointers[index] : 0;
     if (pointer == 0)
     {
-        pointer = type_pointer(machine->types, function);
+        pointer = type_pointer(machine->types, type);
         if (column)
         {
-            machine->function_pointers[index] = pointer;
+            pointers[index] = pointer;
         }
     }
     return pointer;
@@ -669,7 +671,7 @@ static inline __attribute__((always_inline)) bool node_machine_operand_value(Nod
     *conversion = (CheckConversion){ .type = type };
     if (type_kind_is_array(kind))
     {
-        const TypeId pointer = (flags & BUSTER_CHECK_REGISTER_NAME) == 0 ? type_pointer(types, type_element(types, plain)) : 0;
+        const TypeId pointer = (flags & BUSTER_CHECK_REGISTER_NAME) == 0 ? node_machine_pointer(machine, type_element(types, plain)) : 0;
         taken = pointer != 0;
         result = pointer;
         category = CHECK_RVALUE;
@@ -679,7 +681,7 @@ static inline __attribute__((always_inline)) bool node_machine_operand_value(Nod
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
-        const TypeId pointer = node_machine_function_pointer(machine, plain);
+        const TypeId pointer = node_machine_pointer(machine, plain);
         taken = pointer != 0;
         result = pointer;
         category = CHECK_RVALUE;
@@ -706,10 +708,54 @@ static inline __attribute__((always_inline)) bool node_machine_operand_value(Nod
     return taken;
 }
 
+// Builtin integer type code `code`'s signedness in this unit: node_machine_integer_signed's, but plain char's the unit's
+// (TypeTable.char_unsigned, -funsigned-char), which the bake's table of the builtin types alone doesn't know.
+static inline bool node_machine_integer_sign(const NodeMachine* machine, uint32_t code)
+{
+    return code == BUSTER_TYPE_CODE_CHAR ? !machine->types->char_unsigned : node_machine_integer_signed[code];
+}
+
+// An integer constant's bits, `bits`, of a type of `from` bits (signed where `is_signed`), converted to a type of `to` bits,
+// as check_action_convert_plain converts them: both of at most 64 bits.
+static inline uint64_t node_machine_convert_bits(uint64_t bits, uint32_t from, bool is_signed, uint32_t to)
+{
+    const uint64_t from_mask = from == 64 ? UINT64_MAX : (UINT64_C(1) << from) - 1;
+    const uint64_t to_mask = to == 64 ? UINT64_MAX : (UINT64_C(1) << to) - 1;
+    uint64_t value = bits & from_mask;
+    value |= is_signed && ((value >> (from - 1)) & 1) != 0 && to > from ? ~from_mask : 0;
+    return value & to_mask;
+}
+
+// The width of the type of operand `operand` where it is a builtin integer type of at most 64 bits but bool, unqualified
+// (node_machine_integer_widths'), and else 0.
+static inline uint32_t node_machine_operand_width(const NodeMachineOperand* operand)
+{
+    const uint32_t code = type_index(operand->type);
+    return (operand->type & BUSTER_TYPE_QUALIFIERS) == 0 && code < BUSTER_NODE_MACHINE_KINDS ? node_machine_integer_widths[code] : 0;
+}
+
+// Whether operand `operand` is a null pointer constant (check_action_null), where the columns can tell: one with the null
+// pointer's flag, or an integer constant zero of node_machine_operand_width's types in an integer constant expression's
+// form (a GNU one's too, where the unit takes GNU constants). Another is no null pointer here, which leaves its node to
+// the action where it would be one: a nullptr_t's, a zero of an enumeration or of a wider type.
+static bool node_machine_null(const NodeMachine* machine, const NodeMachineOperand* operand)
+{
+    const uint32_t forms = BUSTER_CHECK_ICE | ((machine->graph->extensions & BUSTER_CHECK_EXTENSION_GNU_CONSTANT) != 0 ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+    const uint32_t width = node_machine_operand_width(operand);
+    const uint64_t mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    const bool zero = operand->constant_kind == CHECK_CONSTANT_INTEGER && (operand->flags & forms) != 0 && width != 0 && (operand->integer & mask) == 0;
+    return (operand->flags & BUSTER_CHECK_NULL_POINTER) != 0 || zero;
+}
+
+// node_machine_argument's test of a pointer conversion, which the store rule takes too.
+static bool node_machine_pointer_assignable(const NodeMachine* machine, TypeId to, TypeId from);
+
 // T's member access, `.` or `->` at record `r` (node `node`) of record `a`, by check_action_member's steps where the record is
 // a complete struct or union at the node's position without an address space and the member is no bit-field, and its base
-// is no constant: whether it typed the node.
-static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a)
+// is no constant or (for `.`) an address constant, a static object's: whether it typed the node.
+// Always inlined into node_machine_rule, its one caller, as main's T had it before the rules for the action's nodes
+// grew T's loop past clang's threshold (#2619).
+static inline __attribute__((always_inline)) bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a)
 {
     TypeTable* types = machine->types;
     const CheckGraph* graph = machine->graph;
@@ -732,12 +778,18 @@ static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node,
         record = taken ? type_strip_aligned(types, type_element(types, record)) : record;
     }
     const uint8_t kind = type_kind(types, record);
-    taken = taken && space == 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && base.constant_kind == CHECK_CONSTANT_NONE;
+    // A `.` of an address constant, a static object's member (its base held whole by the columns, so with no bit offset).
+    const bool address = !arrow && base.constant_kind == CHECK_CONSTANT_ADDRESS && (machine->columns->standings[a] & BUSTER_NODE_MACHINE_WIDE) == 0;
+    taken = taken && space == 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && (base.constant_kind == CHECK_CONSTANT_NONE || address);
     taken = taken && node_machine_complete(machine, record, node);
     uint64_t offset = 0;
     uint32_t qualifiers = 0;
     const uint32_t member = taken ? type_lookup_member(types, record, graph->members[node], &offset, &qualifiers) : 0;
     taken = taken && member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN && (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0;
+    // check_action_member's address constant: the base's offset and the member's bytes (its bits, a whole number of bytes,
+    // as no bit-field's are), where they don't overflow.
+    int64_t addend = 0;
+    taken = taken && (!address || (offset % 8 == 0 && offset / 8 <= INT64_MAX && !__builtin_add_overflow(node_machine_record_offset(machine, a), (int64_t)(offset / 8), &addend)));
     if (taken)
     {
         const TypeId type = type_qualify(types, types->members.type[member], qualifiers);
@@ -746,7 +798,9 @@ static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node,
         flags |= arrow && (base.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
         flags |= !arrow ? base.flags & BUSTER_CHECK_REGISTER : 0;
         const CheckCategory category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
-        node_machine_record(machine, r, type, category, check_value_source_flags(op, flags), CHECK_CONSTANT_NONE, 0, 0);
+        node_machine_record(machine, r, type, category, check_value_source_flags(op, flags), address ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_NONE,
+                            address ? machine->columns->objects[a] : 0, (uint64_t)addend);
+        machine->columns->standings[r] |= addend != 0 ? BUSTER_NODE_MACHINE_OFFSET : 0;
         const CheckConversion none = { 0 };
         node_machine_conversions(machine, r, &conversion, &none, offset);
     }
@@ -756,7 +810,9 @@ static bool node_machine_member(NodeMachine* machine, uint32_t r, uint32_t node,
 // T's truth test, `!` or a condition at record `r` of record `a`, by check_action_logic's steps for an operand the common
 // conversions take and the action takes as a scalar: whether it typed the node. An integer constant of a type of at most
 // 64 bits is true by its low bits; another constant is made whole for check_action_truth.
-static bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a)
+// Always inlined into node_machine_rule, its one caller, as main's T had it before the rules for the action's nodes
+// grew T's loop past clang's threshold (#2619).
+static inline __attribute__((always_inline)) bool node_machine_truth(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a)
 {
     NodeMachineOperand operand;
     CheckConversion conversion;
@@ -819,7 +875,9 @@ static bool node_machine_operand_truth(const NodeMachine* machine, const NodeMac
 // T's logical operator, `&&` or `||` at record `r` of records `a` and `b`, by check_action_logic's steps for operands the
 // common conversions take, both scalars without a fault (the machine refuses a node of a floating-point environment
 // before, whose promotion the action would make): whether it typed the node. The action is its twin, as for the rules.
-static bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+// Always inlined into node_machine_rule, its one caller, as main's T had it before the rules for the action's nodes
+// grew T's loop past clang's threshold (#2619).
+static inline __attribute__((always_inline)) bool node_machine_logic(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
 {
     TypeTable* types = machine->types;
     NodeMachineOperand left;
@@ -897,7 +955,11 @@ static bool node_machine_store_rule(NodeMachine* machine, uint32_t r, uint32_t n
         const uint8_t target_kind = check_action_kind(types, target);
         taken = target_kind != BUSTER_TYPE_KIND_ATOMIC && check_action_kind(types, source.type) != BUSTER_TYPE_KIND_ATOMIC && target_kind != BUSTER_TYPE_KIND_VOID;
         target = taken ? type_conversion_operand(types, target) : target;
-        taken = taken && node_machine_assignable(machine, target, source.type);
+        // Besides node_machine_assignable's, a pointer takes a null pointer constant and a pointer node_machine_pointer_assignable
+        // takes (check_action_assignable_mode's branches), converted whole below.
+        taken = taken && (node_machine_assignable(machine, target, source.type) ||
+                          (check_action_kind(types, target) == BUSTER_TYPE_KIND_POINTER &&
+                           (node_machine_null(machine, &source) || node_machine_pointer_assignable(machine, target, source.type))));
     }
     const uint32_t source_code = type_index(source.type);
     const uint32_t target_code = type_index(target);
@@ -912,7 +974,8 @@ static bool node_machine_store_rule(NodeMachine* machine, uint32_t r, uint32_t n
     // constant.
     const bool columns = (source.constant_kind == CHECK_CONSTANT_NONE || (constant && source_width != 0 && target_width != 0) ||
                           (source.constant_kind == CHECK_CONSTANT_ADDRESS && pointer)) &&
-                         !(pointer && (source.flags & BUSTER_CHECK_NULL_POINTER) != 0) && (machine->columns->standings[source.record] & BUSTER_NODE_MACHINE_WIDE) == 0;
+                         !(pointer && (source.flags & BUSTER_CHECK_NULL_POINTER) != 0) && !(pointer && target != source.type) &&
+                         (machine->columns->standings[source.record] & BUSTER_NODE_MACHINE_WIDE) == 0;
     if (taken)
     {
         const uint32_t inherited = store ? machine->columns->value_flags[a] & BUSTER_CHECK_INHERITED : 0;
@@ -934,7 +997,7 @@ static bool node_machine_store_rule(NodeMachine* machine, uint32_t r, uint32_t n
                 const uint64_t source_mask = source_width == 64 ? UINT64_MAX : (UINT64_C(1) << source_width) - 1;
                 const uint64_t target_mask = target_width == 64 ? UINT64_MAX : (UINT64_C(1) << target_width) - 1;
                 uint64_t bits = source.integer & source_mask;
-                bits |= node_machine_integer_signed[source_code] && (bits >> (source_width - 1)) != 0 && target_width > source_width ? ~source_mask : 0;
+                bits |= node_machine_integer_sign(machine, source_code) && (bits >> (source_width - 1)) != 0 && target_width > source_width ? ~source_mask : 0;
                 node_machine_record_from(machine, r, source.record, target, CHECK_RVALUE, flags, CHECK_CONSTANT_INTEGER, true, bits & target_mask);
             }
             else
@@ -970,7 +1033,7 @@ static bool node_machine_address_rule(NodeMachine* machine, uint32_t r, uint32_t
     const CheckConstantKind constant_kind = (CheckConstantKind)((standing >> 2) & 0x07u);
     uint32_t flags = machine->columns->value_flags[a];
     const TypeId pointer = (flags & (BUSTER_CHECK_VECTOR_ELEMENT | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER)) == 0 &&
-                           (category == CHECK_LVALUE || category == CHECK_FUNCTION) ? type_pointer(machine->types, machine->columns->value_types[a]) : 0;
+                           (category == CHECK_LVALUE || category == CHECK_FUNCTION) ? node_machine_pointer(machine, machine->columns->value_types[a]) : 0;
     if (pointer != 0)
     {
         // check_action_address_provenance: an automatic object's address is no constant.
@@ -1011,8 +1074,8 @@ static bool node_machine_dereference(NodeMachine* machine, uint32_t r, uint32_t 
 
 // T's pointer arithmetic, a subscript or a pointer plus or minus an integer at record `r` (node `node`) of records `a` and
 // `b`, by check_action_pointer_arithmetic's steps where the common conversions take both operands, one is a pointer to a
-// complete object type and the other an integer (no bit-field's), the pointer is no constant and neither has a fault:
-// whether it typed the node.
+// complete object type and the other an integer (no bit-field's), the pointer is no constant or an address constant, and
+// neither has a fault: whether it typed the node.
 static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
 {
     TypeTable* types = machine->types;
@@ -1026,10 +1089,18 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
     const NodeMachineOperand* pointer = reverse ? &right : &left;
     const NodeMachineOperand* index = reverse ? &left : &right;
     const uint32_t slot = reverse ? 0 : 1;
+    // A pointer that is an address constant (a static array's decay, say) held whole by the columns gives one with an index
+    // that is an integer constant of node_machine_operand_width's types (check_action_address_index's), and none with an
+    // index that has no constant.
+    const bool address = pointer->constant_kind == CHECK_CONSTANT_ADDRESS && (machine->columns->standings[pointer->record] & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                         (index->constant_kind == CHECK_CONSTANT_NONE ||
+                          (index->constant_kind == CHECK_CONSTANT_INTEGER && node_machine_operand_width(index) != 0 &&
+                           (machine->columns->standings[index->record] & BUSTER_NODE_MACHINE_WIDE) == 0));
     // Either operand's fault, which check_action_inherit would carry, and an index's bit-field width leave the node to the
     // action.
     taken = taken && lp != rp && (lp || reverse) && check_action_is_integer(types, index->type) && (index->flags & BUSTER_CHECK_BIT_FIELD) == 0 &&
-            pointer->constant_kind == CHECK_CONSTANT_NONE && node_machine_record_fault(machine, a) == CHECK_FAULT_NONE && node_machine_record_fault(machine, b) == CHECK_FAULT_NONE;
+            (pointer->constant_kind == CHECK_CONSTANT_NONE || address) && node_machine_record_fault(machine, a) == CHECK_FAULT_NONE &&
+            node_machine_record_fault(machine, b) == CHECK_FAULT_NONE;
     if (taken)
     {
         const TypeId element = type_element(types, type_strip_aligned(types, pointer->type));
@@ -1050,7 +1121,24 @@ static bool node_machine_pointer_rule(NodeMachine* machine, uint32_t r, uint32_t
         flags |= subscript && (machine->columns->value_flags[raw] & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) == BUSTER_CHECK_REGISTER &&
                  type_kind_is_array(check_action_kind(types, machine->columns->value_types[raw])) ? BUSTER_CHECK_REGISTER : 0;
         const TypeId type = subscript ? type_element(types, pointer->type) : pointer->type;
-        node_machine_record(machine, r, type, subscript ? CHECK_LVALUE : CHECK_RVALUE, check_value_source_flags(op, flags), CHECK_CONSTANT_NONE, 0, 0);
+        // An address constant's element at a constant index: its object, its offset moved by the index's elements, the
+        // low 64 bits (a wrap is no reason to drop the constant, as the action has it), where its element has no runtime
+        // size.
+        const bool constant = address && index->constant_kind == CHECK_CONSTANT_INTEGER && !check_action_runtime_size(types, type_element(types, pointer->type));
+        uint64_t addend = 0;
+        if (constant)
+        {
+            const uint32_t width = node_machine_operand_width(index);
+            const uint64_t mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+            const uint64_t stored = index->integer & mask;
+            const bool negative = node_machine_integer_sign(machine, type_index(index->type)) && width < 64 && ((stored >> (width - 1)) & 1) != 0;
+            const uint64_t delta = (negative ? stored | ~mask : stored) * check_action_pointer_stride(types, pointer->type);
+            const uint64_t base = (uint64_t)node_machine_record_offset(machine, pointer->record);
+            addend = op == CHECK_OP_SUBTRACT ? base - delta : base + delta;
+        }
+        node_machine_record(machine, r, type, subscript ? CHECK_LVALUE : CHECK_RVALUE, check_value_source_flags(op, flags), constant ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_NONE,
+                            constant ? machine->columns->objects[pointer->record] : 0, addend);
+        machine->columns->standings[r] |= addend != 0 ? BUSTER_NODE_MACHINE_OFFSET : 0;
         node_machine_conversions(machine, r, conversions, conversions + 1, 0);
     }
     return taken;
@@ -1351,8 +1439,16 @@ static bool node_machine_call_rule(NodeMachine* machine, uint32_t r, uint32_t no
     }
     if (taken)
     {
+        // The value's type and flags alone, into the columns, but where an argument's fault came with them.
         value.flags = check_value_source_flags(CHECK_OP_CALL, value.flags);
-        node_machine_put_value(machine, r, &value);
+        if (value.fault == CHECK_FAULT_NONE)
+        {
+            node_machine_record(machine, r, value.type, CHECK_RVALUE, value.flags, CHECK_CONSTANT_NONE, 0, 0);
+        }
+        else
+        {
+            node_machine_put_value(machine, r, &value);
+        }
         const CheckConversion none = { 0 };
         node_machine_conversions(machine, r, &callee_conversion, &none, 0);
     }
@@ -1530,6 +1626,330 @@ static __attribute__((noinline)) bool node_machine_update_pointer_rule(NodeMachi
     return taken;
 }
 
+// T's integer constant fold: unary +, - or ~, or a binary arithmetic, shift, bitwise or comparison operator `op` at
+// record `r` of records `a` and `b` (UINT32_MAX for a unary one), each an rvalue integer constant its columns hold whole,
+// of an unqualified builtin integer type of at most 64 bits but bool, by check_action_arithmetic's steps: the operator's
+// row's conversions and result type (unary + takes -'s, the same promotion), its flags from the operands' (their
+// inherited ones and the integer constant expression's forms) and check_action_fold_integer's value, where the fold
+// faults nothing (a signed overflow, a division by zero, a shift out of range or of a negative value, which the action
+// takes): whether it typed the node.
+static __attribute__((noinline)) bool node_machine_fold(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+{
+    const bool unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT;
+    const uint32_t right = unary ? a : b;
+    const uint8_t o = op == CHECK_OP_POSITIVE ? (uint8_t)NODE_MACHINE_ROW_NEGATIVE : node_machine_row_operators[op];
+    const uint8_t constant = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER);
+    const bool shaped = o != NODE_MACHINE_ROW_NONE && right < r && (unary ? b == UINT32_MAX : b != UINT32_MAX);
+    const TypeId type_a = shaped ? machine->columns->value_types[a] : 0;
+    const TypeId type_b = shaped ? machine->columns->value_types[right] : 0;
+    const uint32_t code_a = type_index(type_a);
+    const uint32_t code_b = type_index(type_b);
+    const uint32_t flags_a = shaped ? machine->columns->value_flags[a] : 0;
+    const uint32_t flags_b = shaped ? machine->columns->value_flags[right] : 0;
+    const bool constants = shaped && machine->columns->standings[a] == constant && machine->columns->standings[right] == constant &&
+                           ((type_a | type_b) & BUSTER_TYPE_QUALIFIERS) == 0 && code_a < BUSTER_NODE_MACHINE_KINDS && code_b < BUSTER_NODE_MACHINE_KINDS &&
+                           node_machine_integer_widths[code_a] != 0 && node_machine_integer_widths[code_b] != 0 && ((flags_a | flags_b) & BUSTER_CHECK_BIT_FIELD) == 0;
+    const NodeMachineRow* row = constants ? &node_machine_rows[o][code_a][unary ? 0 : code_b] : NULL;
+    const uint32_t converted_a = row != NULL ? row->converted[0] : 0;
+    const uint32_t converted_b = row != NULL ? (unary ? converted_a : row->converted[1]) : 0;
+    const uint32_t width = node_machine_integer_widths[converted_a];
+    const uint32_t right_width = node_machine_integer_widths[converted_b];
+    bool taken = row != NULL && row->result != 0 && width != 0 && right_width != 0;
+    if (taken)
+    {
+        const bool is_signed = node_machine_integer_sign(machine, converted_a);
+        const bool right_signed = node_machine_integer_sign(machine, converted_b);
+        const uint64_t mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        const uint64_t right_mask = right_width == 64 ? UINT64_MAX : (UINT64_C(1) << right_width) - 1;
+        const uint64_t x = node_machine_convert_bits(machine->columns->payloads[a], node_machine_integer_widths[code_a], node_machine_integer_sign(machine, code_a), width);
+        const uint64_t y = unary ? 0 : node_machine_convert_bits(machine->columns->payloads[b], node_machine_integer_widths[code_b], node_machine_integer_sign(machine, code_b),
+                                                                 right_width);
+        const uint64_t sign = UINT64_C(1) << (width - 1);
+        const bool xn = is_signed && (x & sign) != 0;
+        const bool yn = right_signed && ((y >> (right_width - 1)) & 1) != 0;
+        const uint64_t xm = xn ? (0 - x) & mask : x;
+        const uint64_t ym = yn ? (0 - y) & right_mask : y;
+        uint64_t answer = 0;
+        bool fault = false;
+        switch (op)
+        {
+            case CHECK_OP_POSITIVE: answer = x; break;
+            case CHECK_OP_NEGATIVE:
+            {
+                answer = (0 - x) & mask;
+                fault = is_signed && x == sign;
+            } break;
+            case CHECK_OP_BIT_NOT: answer = ~x & mask; break;
+            case CHECK_OP_ADD:
+            {
+                answer = (x + y) & mask;
+                fault = is_signed && (~(x ^ y) & (x ^ answer) & sign) != 0;
+            } break;
+            case CHECK_OP_SUBTRACT:
+            {
+                answer = (x - y) & mask;
+                fault = is_signed && ((x ^ y) & (x ^ answer) & sign) != 0;
+            } break;
+            case CHECK_OP_MULTIPLY:
+            {
+                answer = (x * y) & mask;
+                const uint64_t limit = (sign - 1) + (xn != yn);
+                fault = is_signed && ym != 0 && xm > limit / ym;
+            } break;
+            case CHECK_OP_DIVIDE:
+            case CHECK_OP_REMAINDER:
+            {
+                fault = y == 0 || (is_signed && x == sign && y == mask);
+                const uint64_t magnitude = fault ? 0 : op == CHECK_OP_DIVIDE ? xm / ym : xm % ym;
+                const bool negative = op == CHECK_OP_DIVIDE ? xn != yn : xn;
+                answer = (negative ? 0 - magnitude : magnitude) & mask;
+            } break;
+            case CHECK_OP_SHIFT_LEFT:
+            case CHECK_OP_SHIFT_RIGHT:
+            {
+                fault = yn || y >= width;
+                const uint32_t shift = fault ? 0 : (uint32_t)y;
+                if (op == CHECK_OP_SHIFT_LEFT)
+                {
+                    answer = (x << shift) & mask;
+                    // Clang's C constant evaluator admits a nonnegative value shifted into the sign bit (the action's).
+                    fault = fault || (is_signed && (xn || x > mask >> shift));
+                }
+                else
+                {
+                    answer = (x >> shift) | (xn ? mask ^ (mask >> shift) : 0);
+                }
+            } break;
+            case CHECK_OP_LESS: answer = xn != yn ? xn : x < y; break;
+            case CHECK_OP_LESS_EQUAL: answer = xn != yn ? xn : x <= y; break;
+            case CHECK_OP_GREATER: answer = xn != yn ? yn : x > y; break;
+            case CHECK_OP_GREATER_EQUAL: answer = xn != yn ? yn : x >= y; break;
+            case CHECK_OP_EQUAL: answer = x == y; break;
+            case CHECK_OP_NOT_EQUAL: answer = x != y; break;
+            case CHECK_OP_BIT_AND: answer = x & y; break;
+            case CHECK_OP_BIT_OR: answer = x | y; break;
+            case CHECK_OP_BIT_XOR: answer = x ^ y; break;
+            default: fault = true; break;
+        }
+        taken = !fault;
+        if (taken)
+        {
+            const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
+            const bool ice = (flags_a & BUSTER_CHECK_ICE) != 0 && (flags_b & BUSTER_CHECK_ICE) != 0;
+            const bool gnu_ice = !ice && (flags_a & forms) != 0 && (flags_b & forms) != 0;
+            const uint32_t flags = ((flags_a | flags_b) & BUSTER_CHECK_INHERITED) | (ice ? BUSTER_CHECK_ICE : gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+            node_machine_record(machine, r, BUSTER_TYPE_BUILTIN(row->result), CHECK_RVALUE, check_value_source_flags(op, flags), CHECK_CONSTANT_INTEGER, 0, answer);
+            machine->columns->converted[2 * r] = BUSTER_TYPE_BUILTIN(row->converted[0]);
+            machine->columns->converted[2 * r + 1] = unary ? 0 : BUSTER_TYPE_BUILTIN(row->converted[1]);
+            machine->columns->conversion_flags[2 * r] = row->conversion_flags[0];
+            machine->columns->conversion_flags[2 * r + 1] = unary ? 0 : row->conversion_flags[1];
+            machine->columns->member_offsets[r] = 0;
+        }
+    }
+    return taken;
+}
+
+// Whether type code `code` is a builtin integer type's, bool's and the 128-bit ones' too.
+static inline bool node_machine_integer_code(uint32_t code)
+{
+    return code >= BUSTER_TYPE_CODE_BOOL && code <= BUSTER_TYPE_CODE_UINT128;
+}
+
+// T's cast at record `r` (node `node`) of record `a` to void, a builtin integer type or a pointer, of a value of a builtin
+// integer type or a pointer as the common conversions take it (an array or a function decayed, an lvalue of
+// node_machine_plain_kind converted), held whole by the columns, by check_action_cast's steps: whether it typed the node.
+// With no constant, check_action_convert_plain and check_action_cast_provenance change its type, category, flags and
+// constant kind alone (and a conversion to bool its integer, to 0), on the columns; a constant is made whole for them.
+static __attribute__((noinline)) bool node_machine_cast(NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
+{
+    TypeTable* types = machine->types;
+    const TypeId written = machine->graph->types != NULL ? machine->graph->types[node] : 0;
+    NodeMachineOperand source;
+    CheckConversion conversion;
+    bool taken = written != 0 && type_is_valid(types, written) && (machine->columns->standings[a] & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                 node_machine_operand_value(machine, a, &source, &conversion);
+    const TypeId target = taken ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const uint8_t target_kind = taken ? type_kind(types, target) : BUSTER_TYPE_KIND_NONE;
+    const bool target_integer = node_machine_integer_code(type_index(target)) && target_kind == BUSTER_TYPE_KIND_INTEGER;
+    const bool target_pointer = target_kind == BUSTER_TYPE_KIND_POINTER;
+    const bool target_void = target_kind == BUSTER_TYPE_KIND_VOID;
+    const bool source_integer = taken && (source.type & BUSTER_TYPE_QUALIFIERS) == 0 && node_machine_integer_code(type_index(source.type)) &&
+                                type_kind(types, source.type) == BUSTER_TYPE_KIND_INTEGER;
+    const bool source_pointer = taken && check_action_kind(types, source.type) == BUSTER_TYPE_KIND_POINTER;
+    taken = taken && (target_integer || target_pointer || target_void) && (source_integer || source_pointer);
+    if (taken)
+    {
+        const uint32_t extensions = machine->graph->extensions;
+        const bool ice = target_integer && (source.flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_FLOAT_LITERAL)) != 0;
+        const bool gnu_ice = target_integer && (source.flags & BUSTER_CHECK_GNU_ICE_FORM) != 0;
+        const bool void_pointer = target_pointer && check_action_kind(types, type_element(types, target)) == BUSTER_TYPE_KIND_VOID;
+        conversion.flags |= BUSTER_CHECK_CONVERT_CAST;
+        conversion.type = target;
+        if (source.constant_kind == CHECK_CONSTANT_NONE)
+        {
+            const TypeId from = source_pointer ? type_unqualified(type_strip_aligned(types, type_element(types, source.type))) : 0;
+            const TypeId to = target_pointer ? type_unqualified(type_strip_aligned(types, type_element(types, target))) : 0;
+            const bool restricted = (source_pointer || target_pointer) && !(source_pointer && target_pointer && from == to);
+            const bool null = void_pointer && (source.flags & BUSTER_CHECK_NULL_POINTER) != 0;
+            uint32_t flags = source.flags | (restricted ? BUSTER_CHECK_CONST_READ_RESTRICTED : 0);
+            flags &= ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM |
+                       BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
+            flags |= (flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0 ? 0 : ice ? BUSTER_CHECK_ICE : gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0;
+            flags |= null ? BUSTER_CHECK_NULL_POINTER : 0;
+            flags &= target_void ? ~(uint32_t)BUSTER_CHECK_MODIFICATION : ~0u;
+            const bool bool_target = target == BUSTER_TYPE_BOOL;
+            node_machine_record_from(machine, r, source.record, target, CHECK_RVALUE, check_value_source_flags(CHECK_OP_CAST, flags), CHECK_CONSTANT_NONE, bool_target, 0);
+        }
+        else
+        {
+            CheckValue value;
+            node_machine_operand_whole(machine, &source, &value);
+            const bool null = void_pointer && check_action_null(types, &value, extensions);
+            check_action_conversion(types, &value, target, 0, &conversion, node);
+            check_action_cast_provenance(&value, ice, gnu_ice, null, target_void, true);
+            value.flags = check_value_source_flags(CHECK_OP_CAST, value.flags);
+            node_machine_put_value(machine, r, &value);
+        }
+        const CheckConversion none = { 0 };
+        node_machine_conversions(machine, r, &conversion, &none, 0);
+    }
+    return taken;
+}
+
+// T's equality of a pointer and a null pointer constant, `==` or `!=` at record `r` of records `a` and `b`, by
+// check_action_pointer_compare's steps: the pointer's type is the operands' common one (check_action_pointer_common's
+// first branches), and the null pointer constant converts to it. Both operands as the common conversions take them, held
+// whole by the columns, and no fold (the pointer no address constant without an object, which the action compares with
+// the null pointer's): whether it typed the node.
+static __attribute__((noinline)) bool node_machine_null_compare(NodeMachine* machine, uint32_t r, CheckOp op, uint32_t a, uint32_t b)
+{
+    TypeTable* types = machine->types;
+    NodeMachineOperand left;
+    NodeMachineOperand right;
+    CheckConversion conversions[2];
+    bool taken = (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && b < r && ((machine->columns->standings[a] | machine->columns->standings[b]) & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                 node_machine_operand_value(machine, a, &left, conversions) && node_machine_operand_value(machine, b, &right, conversions + 1);
+    const bool left_pointer = taken && check_action_kind(types, left.type) == BUSTER_TYPE_KIND_POINTER;
+    const bool right_pointer = taken && check_action_kind(types, right.type) == BUSTER_TYPE_KIND_POINTER;
+    const bool left_common = left_pointer && node_machine_null(machine, &right);
+    const bool right_common = !left_common && right_pointer && taken && node_machine_null(machine, &left);
+    const NodeMachineOperand* pointer = left_common ? &left : &right;
+    taken = (left_common || right_common) && !(pointer->constant_kind == CHECK_CONSTANT_ADDRESS && machine->columns->objects[pointer->record] == 0);
+    if (taken)
+    {
+        // The null pointer constant's conversion, where its type isn't the pointer's.
+        const TypeId common = pointer->type;
+        conversions[0].flags |= left.type == common ? 0 : BUSTER_CHECK_CONVERT_NULL;
+        conversions[1].flags |= right.type == common ? 0 : BUSTER_CHECK_CONVERT_NULL;
+        conversions[0].type = common;
+        conversions[1].type = common;
+        const uint32_t flags = (left.flags | right.flags) & BUSTER_CHECK_INHERITED;
+        node_machine_record(machine, r, BUSTER_TYPE_INT, CHECK_RVALUE, check_value_source_flags(op, flags), CHECK_CONSTANT_NONE, 0, 0);
+        node_machine_conversions(machine, r, conversions, conversions + 1, 0);
+    }
+    return taken;
+}
+
+// T's sizeof or _Alignof at record `r` (node `node`), of a type name or of record `a` (UINT32_MAX for a type name's), by
+// check_action_query's steps for a type complete at the node that is no function, void or variably modified type, and
+// an operand no bit-field: whether it typed the node.
+static __attribute__((noinline)) bool node_machine_query(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a)
+{
+    TypeTable* types = machine->types;
+    const TypeId named = machine->graph->types != NULL ? machine->graph->types[node] : 0;
+    const bool operand = named == 0;
+    bool taken = operand ? a < r && (machine->columns->standings[a] & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                           !(node_machine_record_category(machine, a) == CHECK_LVALUE && (machine->columns->value_flags[a] & BUSTER_CHECK_BIT_FIELD) != 0) :
+                           a == UINT32_MAX && type_is_valid(types, named);
+    const TypeId queried = taken ? (operand ? machine->columns->value_types[a] : named) : 0;
+    const TypeId plain = taken ? type_strip_aligned(types, queried) : 0;
+    const TypeId target = taken && op == CHECK_OP_ALIGNOF && type_kind(types, plain) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? type_element(types, plain) : queried;
+    const uint8_t kind = taken ? check_action_kind(types, target) : BUSTER_TYPE_KIND_NONE;
+    taken = taken && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VOID && node_machine_complete(machine, target, node) && !check_action_runtime_size(types, target);
+    if (taken)
+    {
+        const uint64_t answer = op == CHECK_OP_SIZEOF ? type_size(types, target) : type_alignment(types, target);
+        node_machine_record(machine, r, BUSTER_TYPE_ULONG, CHECK_RVALUE, BUSTER_CHECK_ICE, CHECK_CONSTANT_INTEGER, 0, answer);
+        const CheckConversion first = { .type = operand ? machine->columns->value_types[a] : 0 };
+        const CheckConversion none = { 0 };
+        node_machine_conversions(machine, r, &first, &none, 0);
+    }
+    return taken;
+}
+
+// T's comma at record `r` of records `a` and `b`, by check_action_comma_provenance's steps outside a constant evaluation:
+// the right operand's value as the common conversions take it, without its forms but an ICE_UNEVALUATED where both
+// operands have one, and with the left's inherited flags; both held whole by the columns (no fault to carry): whether it
+// typed the node.
+static __attribute__((noinline)) bool node_machine_comma(NodeMachine* machine, uint32_t r, uint32_t a, uint32_t b)
+{
+    NodeMachineOperand left;
+    NodeMachineOperand right;
+    CheckConversion conversions[2];
+    const bool taken = b < r && ((machine->columns->standings[a] | machine->columns->standings[b]) & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                       node_machine_operand_value(machine, a, &left, conversions) && node_machine_operand_value(machine, b, &right, conversions + 1);
+    if (taken)
+    {
+        const uint32_t allowed = BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_GNU_ICE_FORM;
+        uint32_t flags = right.flags & ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
+        flags |= (left.flags & allowed) != 0 && (right.flags & allowed) != 0 ? BUSTER_CHECK_ICE_UNEVALUATED : 0;
+        flags |= left.flags & BUSTER_CHECK_INHERITED;
+        node_machine_record_from(machine, r, right.record, right.type, CHECK_RVALUE, check_value_source_flags(CHECK_OP_COMMA, flags), right.constant_kind, false, 0);
+        node_machine_conversions(machine, r, conversions, conversions + 1, 0);
+    }
+    return taken;
+}
+
+// T's conditional at record `r` (node `node`) of records `a` (the condition), `b` and `c` (the arms), by
+// check_action_conditional's steps where the condition is a scalar and the arms are of builtin arithmetic types that the
+// add's row takes (whose conversions are the usual arithmetic ones the conditional makes) or either is void, each as the
+// common conversions take it and held whole by the columns: whether it typed the node. The values are made whole for the
+// action's own conversions and check_action_conditional_provenance.
+static __attribute__((noinline)) bool node_machine_conditional(NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a, uint32_t b, uint32_t c)
+{
+    TypeTable* types = machine->types;
+    NodeMachineOperand condition;
+    NodeMachineOperand left;
+    NodeMachineOperand right;
+    CheckConversion conversions[3];
+    bool taken = b < r && c < r && ((machine->columns->standings[a] | machine->columns->standings[b] | machine->columns->standings[c]) & BUSTER_NODE_MACHINE_WIDE) == 0 &&
+                 node_machine_operand_value(machine, a, &condition, conversions) && node_machine_operand_value(machine, b, &left, conversions + 1) &&
+                 node_machine_operand_value(machine, c, &right, conversions + 2) && check_action_is_scalar(types, condition.type);
+    const uint32_t code_left = type_index(left.type);
+    const uint32_t code_right = type_index(right.type);
+    const bool arithmetic = taken && ((left.type | right.type) & BUSTER_TYPE_QUALIFIERS) == 0 && code_left < BUSTER_NODE_MACHINE_KINDS &&
+                            code_right < BUSTER_NODE_MACHINE_KINDS && node_machine_row_kind(code_left) && node_machine_row_kind(code_right);
+    const NodeMachineRow* row = arithmetic ? &node_machine_rows[NODE_MACHINE_ROW_ADD][code_left][code_right] : NULL;
+    const bool void_arm = taken && !arithmetic &&
+                          (check_action_kind(types, left.type) == BUSTER_TYPE_KIND_VOID || check_action_kind(types, right.type) == BUSTER_TYPE_KIND_VOID);
+    taken = (row != NULL && row->result != 0) || void_arm;
+    if (taken)
+    {
+        CheckValue values[3];
+        node_machine_operand_whole(machine, &condition, values);
+        node_machine_operand_whole(machine, &left, values + 1);
+        node_machine_operand_whole(machine, &right, values + 2);
+        TypeId common = BUSTER_TYPE_VOID;
+        if (row != NULL)
+        {
+            check_action_promote(types, values + 1, conversions + 1, node);
+            check_action_promote(types, values + 2, conversions + 2, node);
+            common = BUSTER_TYPE_BUILTIN(row->converted[0]);
+        }
+        check_action_conversion(types, values + 1, common, values[1].type == common ? 0 : BUSTER_CHECK_CONVERT_ARITHMETIC, conversions + 1, node);
+        check_action_conversion(types, values + 2, common, values[2].type == common ? 0 : BUSTER_CHECK_CONVERT_ARITHMETIC, conversions + 2, node);
+        bool truth = false;
+        const bool known = check_action_truth(types, values, &truth);
+        CheckValue value;
+        memset(&value, 0, sizeof(value));
+        check_action_conditional_provenance(types, &value, common, values, values + 1, values + 2, known, truth);
+        value.flags = check_value_source_flags(CHECK_OP_CONDITIONAL, value.flags);
+        node_machine_put_value(machine, r, &value);
+        node_machine_conversions(machine, r, conversions, conversions + 1, 0);
+    }
+    return taken;
+}
+
 // T's direct rules for the operators whose type a lookup gives, each by its action's own steps for the common case, the
 // action taking the rest: whether one typed record `r` (node `node`, operator `op`, operands' records `a` and `b`).
 static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
@@ -1537,7 +1957,25 @@ static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, C
     bool typed = false;
     if (op == CHECK_OP_CAST)
     {
-        typed = node_machine_discard(machine, r, node, a);
+        typed = node_machine_discard(machine, r, node, a) || node_machine_cast(machine, r, node, a);
+    }
+    else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+    {
+        typed = node_machine_query(machine, r, node, op, a);
+    }
+    else if (op == CHECK_OP_COMMA)
+    {
+        typed = node_machine_comma(machine, r, a, b);
+    }
+    else if (op == CHECK_OP_CONDITIONAL)
+    {
+        typed = node_machine_conditional(machine, r, node, a, b, node_machine_operand(machine, r, 2));
+    }
+    else if (op == CHECK_OP_POSITIVE || (node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && op != CHECK_OP_ADD && op != CHECK_OP_SUBTRACT))
+    {
+        // An operator of the rows that the row didn't type: its integer constants' fold, or a pointer's equality with a null
+        // pointer constant.
+        typed = node_machine_fold(machine, r, op, a, b) || node_machine_null_compare(machine, r, op, a, b);
     }
     else if (op == CHECK_OP_ARROW || op == CHECK_OP_MEMBER)
     {
@@ -1565,7 +2003,7 @@ static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, C
     }
     else if (op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
     {
-        typed = node_machine_pointer_rule(machine, r, node, op, a, b);
+        typed = node_machine_pointer_rule(machine, r, node, op, a, b) || (op != CHECK_OP_SUBSCRIPT && node_machine_fold(machine, r, op, a, b));
     }
     else if (op == CHECK_OP_CALL)
     {
@@ -1739,7 +2177,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             {
                 refusal = NODE_MACHINE_REFUSED_CALLEE;
             }
-            else if (!machine->scalar && a != UINT32_MAX && c == UINT32_MAX &&
+            else if (!machine->scalar && (a != UINT32_MAX || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && (c == UINT32_MAX || op == CHECK_OP_CONDITIONAL) &&
                      ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
             {
                 machine->row_nodes += 1;
