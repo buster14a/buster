@@ -130,11 +130,17 @@ struct IrTypedPlan
     // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
     uint8_t vector_copies;
     // The direct U64 symbol addresses the function takes at least twice (GLOBAL_ADDRESS entries, #2574), each defined once
-    // in the preheader after the jump tables' (ir_typed_plan_hoisted): hoisted_symbols[k] in order of first use; and the
-    // entries that take one, hoisted_takes of them in entry order, each's symbol's k in hoisted_numbers.
+    // (ir_typed_plan_hoisted): hoisted_symbols[k] in order of first use; and the entries that take one, hoisted_takes of
+    // them in entry order, each's symbol's k in hoisted_numbers. Each definition's block (#2593, ir_typed_plan_places):
+    // node n's (0 the preheader, after its jump tables', or b + 1 source block b's start, after its reloads) are
+    // hoisted_starts[hoisted_start_offsets[n]] to before hoisted_start_offsets[n + 1]. The emission writes each
+    // definition's value in hoisted_values[k] as it emits it.
     uint32_t* hoisted_symbols;
     uint32_t* hoisted_entries;
     uint32_t* hoisted_numbers;
+    uint32_t* hoisted_values;
+    uint32_t* hoisted_start_offsets;
+    uint32_t* hoisted_starts;
     uint32_t hoisted_count;
     uint32_t hoisted_takes;
     uint32_t error_entry;
@@ -1283,9 +1289,7 @@ static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* si
     }
 }
 
-// The plan's depth slots (IrTypedPlan.depth_slots): each (depth, type) a block's incoming shape has, depth by depth and
-// each depth's types in IR type order. Returns false if scratch has no room for the map.
-// A GLOBAL_ADDRESS entry whose address the preheader may compute once (#2574): a U64 of a symbol accessed directly, as
+// A GLOBAL_ADDRESS entry whose address the function may compute once (#2574): a U64 of a symbol accessed directly, as
 // a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for. The tables' own entries
 // stay theirs.
 static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
@@ -1295,10 +1299,11 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
            (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT));
 }
 
-// The symbols whose addresses the preheader computes once (IrTypedPlan.hoisted_symbols, #2574): each one the function
+// The symbols whose addresses the function computes once (IrTypedPlan.hoisted_symbols, #2574): each one the function
 // takes at least twice outside its jump tables' entries, which #1740's column hoists already. The address is then one
-// value over the function, which Tier 1's allocation can keep in a register around a loop that reads it (Lua's dispatch
-// table, read by every handler's goto) or recompute where it is read, as for any address with a recipe. One byte compare
+// value, which Tier 1's allocation can keep in a register around a loop that reads it (Lua's dispatch table, read by
+// every handler's goto) or recompute where it is read, as for any address with a recipe; ir_typed_plan_places decides
+// where it is defined, or that its takes stay their own. One byte compare
 // per entry finds the GLOBAL_ADDRESS entries, and most functions, with fewer than two, stop there; the others' takes
 // are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
 // order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
@@ -1385,6 +1390,341 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
     return ok;
 }
 
+// The successors of the typed CFG's node `node` (#2593): 0 the preheader, b + 1 source block b and block_count + 1 the
+// dispatch block, as the emission's branches make them (ir_lower_emit.c), written to `out` where it isn't null; returns
+// how many. `table` is the next jump table's index, which a walk of the nodes in order advances past each table's jump.
+static uint32_t ir_typed_successors(const Tier0Function* input, const IrTypedPlan* plan, uint32_t node, uint32_t* table, uint32_t* out)
+{
+    uint32_t count = 0;
+    const bool dispatch = plan->indirect != 0 && node == plan->block_count + 1;
+    const uint32_t block = node - 1;
+    const uint32_t end = node != 0 && !dispatch ? plan->block_firsts[block + 1] : 0;
+    const bool body = node != 0 && !dispatch && plan->block_firsts[block] < end;
+    const uint8_t kind = body ? input->kinds[end - 1] : BUSTER_TYPED_RETURN;
+    const uint32_t target = body ? (uint32_t)input->values[end - 1] : 0;
+    // A jump of a jump table goes to its table's labels; a goto * to the dispatch block, which goes to the labels of no
+    // table, or to every label where none is of no table (ir_typed_labels and the dispatch's br_indirect).
+    while (body && kind == BUSTER_TYPED_JUMP_INDIRECT && *table < input->table_count && input->table_jumps[*table] < end - 1)
+    {
+        *table += 1;
+    }
+    const bool tabled = body && kind == BUSTER_TYPED_JUMP_INDIRECT && *table < input->table_count && input->table_jumps[*table] == end - 1;
+    uint32_t untabled = 0;
+    for (uint32_t k = 0; dispatch && input->table_count != 0 && k < input->label_count; k += 1)
+    {
+        untabled += input->label_tables[k] == 0;
+    }
+    if (node == 0)
+    {
+        if (out != 0)
+        {
+            out[count] = 1;
+        }
+        count += 1;
+    }
+    else if (dispatch || tabled)
+    {
+        const uint32_t owner = tabled ? *table + 1 : 0;
+        for (uint32_t k = 0; k < input->label_count; k += 1)
+        {
+            const bool listed = (dispatch && untabled == 0) || (input->table_count != 0 && input->label_tables[k] == owner);
+            if (listed && out != 0)
+            {
+                out[count] = plan->entry_blocks[input->label_entries[k]] + 1;
+            }
+            count += listed;
+        }
+    }
+    else if (body && kind == BUSTER_TYPED_JUMP_INDIRECT)
+    {
+        if (out != 0)
+        {
+            out[count] = plan->block_count + 1;
+        }
+        count += 1;
+    }
+    else if (node != 0 && !dispatch && kind != BUSTER_TYPED_RETURN && (body || plan->block_firsts[block] < input->count))
+    {
+        // A branch's target and then its next block, a jump's target, or a block that falls into the next.
+        const bool branch = kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE;
+        const bool jump = kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_JUMP_VALUE;
+        if (out != 0)
+        {
+            out[0] = branch || jump ? plan->entry_blocks[target] + 1 : node + 1;
+        }
+        if (out != 0 && branch)
+        {
+            out[1] = node + 1;
+        }
+        count += branch ? 2 : 1;
+    }
+    return count;
+}
+
+// Whether every path from node `from` passes a node that takes the symbol (`reads`, stamped `stamp`) before it leaves
+// the function: a depth-first walk of the nodes it reaches without passing one, which fails where it finds a node
+// without successors, or where it spends the shared `budget` of edges.
+static bool ir_typed_anticipated(const uint32_t* offsets, const uint32_t* successors, const uint32_t* reads, uint32_t* seen, uint32_t* stack, uint32_t from, uint32_t stamp, uint64_t* budget)
+{
+    bool anticipated = reads[from] == stamp;
+    bool open = !anticipated;
+    uint32_t depth = 0;
+    seen[from] = stamp;
+    stack[depth] = from;
+    depth += open;
+    while (open && depth != 0)
+    {
+        depth -= 1;
+        const uint32_t node = stack[depth];
+        open = offsets[node] != offsets[node + 1];
+        for (uint32_t e = offsets[node]; open && e < offsets[node + 1]; e += 1)
+        {
+            const uint32_t next = successors[e];
+            open = *budget != 0;
+            *budget -= open;
+            if (open && seen[next] != stamp && reads[next] != stamp)
+            {
+                seen[next] = stamp;
+                stack[depth] = next;
+                depth += 1;
+            }
+        }
+    }
+    return anticipated || open;
+}
+
+// Where each hoisted address is defined (#2593). The preheader computed every one at the function's entry, so a path
+// that never read it, as yy_find_shift_action's early return, computed it anyway, and one live across a call took a
+// callee-saved register that the prologue then saved. Over the typed CFG (ir_typed_successors) and its dominators and
+// natural loops (dominators.c's; the loops only where an edge goes back in node order), each symbol's definition goes
+// to the nearest common dominator of its reachable takes' blocks, P, and then:
+//
+// - where P is inside a loop, to the immediate dominator of its outermost loop's header, outside it, as loop-invariant
+//   code motion hoists it, if some take is inside that loop: Lua's luaV_execute keeps disptab in its register over the
+//   dispatch loop, defined before it. Where none is (yy_action, read on two of the loop's exits alone) the takes stay
+//   their own;
+// - otherwise at P, where some take is inside a loop, or where every path from P takes it before leaving the function
+//   (ir_typed_anticipated): sqlite3GetToken's aiClass, read by its switch. A path that takes it nowhere (powerOfTen's
+//   aBase, sqlite3VdbeMemSetText's destructor compared on two branches) leaves the takes their own, as before #2574,
+//   which #2601's sharing in Tier 1's selection still joins within a block.
+//
+// The definition is at P's start: where Tier 1 keeps no register for it from there to a read, it leaves the definition
+// out (tier1_emit_cfg_dead_definition), which a definition at P's end, whose register an edge then seems to read,
+// defeats (sqlite3_str_vappendf's and patternCompare's loops: 0.8 M more on speedtest1). P must precede every take in
+// the emission's source order, which a backward goto can break: P then rises to its dominators until it does, the
+// preheader at worst. A take in an unreachable block stays its own; a symbol with fewer than two reachable takes, or
+// whose loops are irreducible, leaves its takes their own. The dominators' matrices past their limit leave every
+// definition in the preheader, as #2574 did. The other rules measured are in docs/ir.md. Scalar past the dominators'
+// analysis, which has its own vector path: it visits each block's last entry once, and each symbol's takes and walks,
+// in the functions with a hoisted symbol alone. The dominators' columns go on `output`, popped before return. False
+// where an arena is short.
+static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, Arena* output, Arena* scratch, bool vector)
+{
+    bool ok = true;
+    const uint32_t symbols = plan->hoisted_count;
+    const uint32_t nodes = plan->block_count + 1 + (plan->indirect != 0);
+    uint32_t* blocks = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+    plan->hoisted_values = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+    plan->hoisted_start_offsets = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 2) : 0;
+    plan->hoisted_starts = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+    ok = symbols == 0 || (blocks != 0 && plan->hoisted_values != 0 && plan->hoisted_start_offsets != 0 && plan->hoisted_starts != 0);
+    // The CFG's two CSR views: the successors by ir_typed_successors, counted and then filled, and the predecessors by a
+    // counting sort of them.
+    uint32_t* offsets = ok && symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
+    uint32_t* predecessor_offsets = offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 2) : 0;
+    ok = ok && (symbols == 0 || predecessor_offsets != 0);
+    uint32_t edges = 0;
+    uint32_t table = 0;
+    bool cyclic = false;
+    for (uint32_t n = 0; predecessor_offsets != 0 && n < nodes; n += 1)
+    {
+        offsets[n] = edges;
+        edges += ir_typed_successors(input, plan, n, &table, 0);
+    }
+    uint32_t* successors = predecessor_offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1) : 0;
+    uint32_t* predecessors = successors != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1) : 0;
+    ok = ok && (symbols == 0 || predecessors != 0);
+    if (predecessors != 0)
+    {
+        offsets[nodes] = edges;
+        table = 0;
+        memset(predecessor_offsets, 0, ((uint64_t)nodes + 2) * sizeof(uint32_t));
+        for (uint32_t n = 0; n < nodes; n += 1)
+        {
+            ir_typed_successors(input, plan, n, &table, successors + offsets[n]);
+            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
+            {
+                cyclic |= successors[e] <= n;
+                predecessor_offsets[successors[e] + 2] += 1;
+            }
+        }
+        for (uint32_t n = 0; n < nodes; n += 1)
+        {
+            predecessor_offsets[n + 2] += predecessor_offsets[n + 1];
+        }
+        for (uint32_t n = 0; n < nodes; n += 1)
+        {
+            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
+            {
+                predecessors[predecessor_offsets[successors[e] + 1]] = n;
+                predecessor_offsets[successors[e] + 1] += 1;
+            }
+        }
+    }
+    const uint64_t mark = output->length;
+    Dominators dominators = { 0 };
+    DominatorStatus analyzed = DOMINATOR_INVALID;
+    if (predecessors != 0)
+    {
+        const DominatorCfg graph = {
+            .block_count = nodes,
+            .edge_count = edges,
+            .entry = 0,
+            .successor_offsets = offsets,
+            .successors = successors,
+            .predecessor_offsets = predecessor_offsets,
+            .predecessors = predecessors,
+        };
+        DominatorOptions options = dominators_options();
+        options.path = vector ? DOMINATOR_AUTO : DOMINATOR_SCALAR;
+        options.outputs = cyclic ? BUSTER_DOMINATOR_LOOPS : 0;
+        analyzed = dominators_analyze(output, scratch, &graph, options, &dominators);
+        ok = analyzed != DOMINATOR_NO_MEMORY;
+    }
+    const bool placed = ok && analyzed == DOMINATOR_OK;
+    // Each symbol's takes, by a counting sort of their numbers; per node, the stamp of the symbol whose takes it holds,
+    // and of the walk that reached it.
+    uint32_t* firsts = placed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 2) : 0;
+    uint32_t* order = firsts != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes + 1) : 0;
+    uint32_t* reads = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
+    uint32_t* seen = reads != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
+    uint32_t* stack = seen != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
+    ok = ok && (!placed || stack != 0);
+    if (stack != 0)
+    {
+        memset(firsts, 0, ((uint64_t)symbols + 2) * sizeof(uint32_t));
+        memset(reads, 0, ((uint64_t)nodes + 1) * sizeof(uint32_t));
+        memset(seen, 0, ((uint64_t)nodes + 1) * sizeof(uint32_t));
+        for (uint32_t t = 0; t < plan->hoisted_takes; t += 1)
+        {
+            firsts[plan->hoisted_numbers[t] + 2] += 1;
+        }
+        for (uint32_t k = 0; k < symbols; k += 1)
+        {
+            firsts[k + 2] += firsts[k + 1];
+        }
+        for (uint32_t t = 0; t < plan->hoisted_takes; t += 1)
+        {
+            order[firsts[plan->hoisted_numbers[t] + 1]] = t;
+            firsts[plan->hoisted_numbers[t] + 1] += 1;
+        }
+    }
+    // The walks' budget: eight visits of each edge.
+    uint64_t budget = 8 * ((uint64_t)edges + 1);
+    for (uint32_t k = 0; ok && k < symbols; k += 1)
+    {
+        uint32_t place = 0;
+        bool kept = !placed;
+        if (placed)
+        {
+            // The nearest common dominator of the reachable takes' nodes, by climbing the deeper one in reverse postorder.
+            uint32_t low = UINT32_MAX;
+            uint32_t reachable = 0;
+            uint32_t ancestor = BUSTER_DOMINATOR_NONE;
+            bool looped = false;
+            for (uint32_t x = firsts[k]; x < firsts[k + 1]; x += 1)
+            {
+                const uint32_t node = plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1;
+                if (dominators.rpo_index[node] != BUSTER_DOMINATOR_NONE)
+                {
+                    uint32_t other = ancestor == BUSTER_DOMINATOR_NONE ? node : ancestor;
+                    ancestor = node;
+                    while (ancestor != other)
+                    {
+                        ancestor = dominators.rpo_index[ancestor] > dominators.rpo_index[other] ? dominators.idom[ancestor] : ancestor;
+                        other = dominators.rpo_index[other] > dominators.rpo_index[ancestor] ? dominators.idom[other] : other;
+                    }
+                    low = node < low ? node : low;
+                    reachable += 1;
+                    reads[node] = k + 1;
+                    looped |= dominators.block_loop != 0 && dominators.block_loop[node] != BUSTER_DOMINATOR_NONE;
+                }
+            }
+            // Its outermost loop, and whether any loop on the way is irreducible.
+            uint32_t loop = reachable >= 2 && dominators.block_loop != 0 ? dominators.block_loop[ancestor] : BUSTER_DOMINATOR_NONE;
+            bool irreducible = false;
+            bool climbing = loop != BUSTER_DOMINATOR_NONE;
+            while (climbing)
+            {
+                irreducible |= dominators.loop_irreducible[loop] != 0;
+                const uint32_t parent = dominators.loop_parent[loop];
+                climbing = parent != BUSTER_DOMINATOR_NONE;
+                loop = climbing ? parent : loop;
+            }
+            bool inside = false;
+            for (uint32_t x = firsts[k]; loop != BUSTER_DOMINATOR_NONE && x < firsts[k + 1]; x += 1)
+            {
+                inside |= dominators_loop_contains(&dominators, loop, plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1);
+            }
+            kept = reachable >= 2 && (loop != BUSTER_DOMINATOR_NONE ? inside && !irreducible :
+                                                                      looped || ir_typed_anticipated(offsets, successors, reads, seen, stack, ancestor, k + 1, &budget));
+            place = loop != BUSTER_DOMINATOR_NONE ? dominators.idom[dominators.loop_header[loop]] : ancestor;
+            while (kept && place > low)
+            {
+                place = dominators.idom[place];
+            }
+        }
+        blocks[k] = kept ? place : BUSTER_DOMINATOR_NONE;
+    }
+    // The takes that stay their own drop out of the lists, in place: their entries, and the symbols they leave without a
+    // definition, renumbered in order.
+    uint32_t* numbers = ok && symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+    ok = ok && (symbols == 0 || numbers != 0);
+    uint32_t count = 0;
+    for (uint32_t k = 0; numbers != 0 && k < symbols; k += 1)
+    {
+        const bool kept = blocks[k] != BUSTER_DOMINATOR_NONE;
+        numbers[k] = kept ? count : BUSTER_DOMINATOR_NONE;
+        plan->hoisted_symbols[count] = plan->hoisted_symbols[k];
+        blocks[count] = blocks[k];
+        count += kept;
+    }
+    uint32_t takes = 0;
+    for (uint32_t t = 0; numbers != 0 && t < plan->hoisted_takes; t += 1)
+    {
+        const uint32_t k = numbers[plan->hoisted_numbers[t]];
+        // A take in an unreachable block stays its own.
+        const bool own = k == BUSTER_DOMINATOR_NONE || (placed && dominators.rpo_index[plan->entry_blocks[plan->hoisted_entries[t]] + 1] == BUSTER_DOMINATOR_NONE);
+        plan->hoisted_entries[takes] = plan->hoisted_entries[t];
+        plan->hoisted_numbers[takes] = k;
+        takes += !own;
+    }
+    // The start lists, a counting sort of the definitions by their blocks.
+    if (numbers != 0)
+    {
+        plan->hoisted_count = count;
+        plan->hoisted_takes = takes;
+        memset(plan->hoisted_start_offsets, 0, ((uint64_t)nodes + 2) * sizeof(uint32_t));
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            plan->hoisted_start_offsets[blocks[k] + 2] += 1;
+        }
+        for (uint32_t n = 0; n < nodes; n += 1)
+        {
+            plan->hoisted_start_offsets[n + 2] += plan->hoisted_start_offsets[n + 1];
+        }
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            plan->hoisted_starts[plan->hoisted_start_offsets[blocks[k] + 1]] = k;
+            plan->hoisted_start_offsets[blocks[k] + 1] += 1;
+        }
+    }
+    arena_pop_to(output, mark);
+    return ok;
+}
+
+// The plan's depth slots (IrTypedPlan.depth_slots): each (depth, type) a block's incoming shape has, depth by depth and
+// each depth's types in IR type order. Returns false if scratch has no room for the map.
 static bool ir_typed_plan_depth_slots(IrTypedPlan* plan, Arena* scratch)
 {
     const uint64_t cells = (uint64_t)plan->maximum_spill_depth * IR_TYPE_COUNT;
@@ -1729,6 +2069,20 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
         }
     }
     return count;
+}
+
+// The hoisted symbols' addresses that node `node` defines (#2593, IrTypedPlan.hoisted_starts), each a symbol_addr and its
+// ptrtoint, whose value its takes then read: the preheader's after its jump tables', a source block's after its reloads.
+static __attribute__((always_inline)) inline void ir_typed_hoisted_starts(IrTypedSink* sink, const IrTypedPlan* plan, uint32_t node)
+{
+    const uint32_t first = plan->hoisted_count != 0 ? plan->hoisted_start_offsets[node] : 0;
+    const uint32_t end = plan->hoisted_count != 0 ? plan->hoisted_start_offsets[node + 1] : 0;
+    for (uint32_t x = first; x < end; x += 1)
+    {
+        const uint32_t k = plan->hoisted_starts[x];
+        const uint32_t address = ir_typed_emit(sink, IR_SYMBOL_ADDR, IR_PTR, plan->hoisted_symbols[k], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        plan->hoisted_values[k] = ir_typed_emit(sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
 }
 
 // Expose the existing count/fill output contracts before the compiler makes inlining decisions. All construction
@@ -2191,7 +2545,6 @@ static bool ir_typed_debug_scalars(const Tier0Function* input, const IrTypedPlan
 static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features,
                                           bool pieces, bool sources)
 {
-    (void)vector;
 
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -2366,7 +2719,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             plan.error = "no scratch memory for the depth slots";
             plan.error_code = IR_ERROR_MEMORY;
         }
-        if (plan.error == 0 && !ir_typed_plan_hoisted(input, &plan, scratch))
+        if (plan.error == 0 && !(ir_typed_plan_hoisted(input, &plan, scratch) && ir_typed_plan_places(input, &plan, output, scratch, vector)))
         {
             plan.error = "no scratch memory for the hoisted symbol addresses";
             plan.error_code = IR_ERROR_MEMORY;
