@@ -2371,6 +2371,56 @@ rather than 1,192 ms.
 About 5.5 ms of the growth remains in the reader. The largest parts are the expressions' coded walk (#1038), the
 binding answers' other per-event loops, the declarations' steps, the intrinsics' setup (#893) and the controls.
 
+### What grew back by 13 November, and a rare column read in place (#1489)
+
+#529's, #1489's and #1671's changes took `check-input` below the build before #1049. By 13 November it had grown
+again. Measured in the same rounds on the 9700X (5 rounds, CPU 2, one lock grant a compile):
+
+| build | `check-input` |
+| --- | ---: |
+| `aca9e53a`, before #1049 | 45.16 ms |
+| `829eb71a`, after #1671's cuts (7 November) | 43.64 ms |
+| main `b7a95eed` (13 November) | 46.17 ms |
+
+The issue's own figure for `0eca996a` stands: its build measured 59.39 ms in a separate set of rounds that day.
+
+**Where it grew.** Builds of four of the 649 first-parent commits between the two mains measure 43.58 ms at
+`829eb71a`, 44.42 ms 81 commits on, 44.81 ms 243 commits on, and 46.24 ms at `b7a95eed`. Profiles of `cycles:u` and
+`instructions:u`, mapped to inlined frames, find most of it in the declaration steps' own code:
+
+- `check_input_declarator_step` has 6 M more instructions, `check_input_declaration` 4.3 M and `check_input_specifiers`
+  3 M, out of 1,351 M for the whole compile.
+- The binding answers have 5.4 M more, 2.1 M of them `-Wunused-but-set-variable`'s marks (#2409).
+
+These are the tests and record fields of the new diagnostics' and recoveries' paths (#1447). They are spread over the
+steps, so no one of them is worth more than about 0.3 ms. #2694 tracks them, beside #1671's restructuring.
+
+**The rare column.** The first 81 commits also took the stage from 4,171 page faults to 4,850. A profile of
+`page-faults` put 679 of them in `check_input_bind_checked`. #1453's `__private_extern__` test read
+`declaration_storage` with a plain load at every declaration. That column is a rare one, 4 bytes a token, and the loads
+touched nearly all its base pages, though few entries are written. The test now reads through `BUSTER_CHECK_RARE`, as
+the column's other readers do ("The rare columns read only where written", above). Against main `32560e46`, in 9
+rounds and 5 of `perf stat`:
+
+| | main | this change |
+| --- | ---: | ---: |
+| `check-input` | 46.03 ms | 45.72 ms |
+| its page faults | 4,900 | 4,364 |
+| task-clock | 122.72 ms | 122.57 ms |
+| instructions:u | 1,354.95 M | 1,355.29 M |
+
+The objects and the diagnostics are the same bytes. So are the `-Wall -Wextra` diagnostics of `sqlite3.c` and of the
+compiler's own main.c, on both paths, with this change and the two below. The faults map the zero page, so they cost
+little time, and the mask adds 0.34 M instructions. Two other changes were measured and left out, since neither was
+faster in time or cycles:
+- The set-only marks kept only for local declarations added 0.04 M instructions: the sparse lookup that skips the
+  others costs what it saves.
+- The unused declarations' four token columns kept as one of flag bits took 0.16 M instructions off, but its rounds'
+  cycles came out 0.45% above main's.
+
+The [measurement record](https://github.com/buster14a/buster-performance/tree/ecbcca3dcf12818d5b7319aec7faefdc376b258c/docs/measurements/check-input-1489-regrowth-2026-11-13)
+has the method, the receipts and the profiles.
+
 ## The compiler's own code and a profile (#880)
 
 [#880](https://github.com/buster14a/buster/issues/880) found the 9700X's front end starved: op cache misses 2 to 2.6
