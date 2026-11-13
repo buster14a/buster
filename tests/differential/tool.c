@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -198,7 +199,7 @@ static int fixture_generate(bool yarpgen, const char* scenario, bool seeded, boo
     return result;
 }
 
-static int fixture_compile(const char* output, const char* source, bool buster, bool tier1, bool multifile, bool second_source)
+static int fixture_compile(const char* output, const char* source, bool buster, bool tier1, bool multifile, bool second_source, bool slow_probe)
 {
     char scenario[64] = "probe";
     FILE* file = source ? fopen(source, "r") : 0;
@@ -214,6 +215,22 @@ static int fixture_compile(const char* output, const char* source, bool buster, 
             }
         }
         valid = fclose(file) == 0 && valid;
+    }
+    if (valid && slow_probe && strcmp(source, "probe.c") == 0)
+    {
+        // Only the selected preflight sleeps: its successful compile must survive a one-second fixture watchdog.
+        struct timespec remaining =
+        {
+            .tv_sec = 1,
+            .tv_nsec = 100000000,
+        };
+        int waited = 0;
+        do
+        {
+            waited = nanosleep(&remaining, &remaining);
+        }
+        while (waited != 0 && errno == EINTR);
+        valid = waited == 0;
     }
     int result = 0;
     if (!valid)
@@ -339,6 +356,7 @@ int main(int argc, char** argv)
     bool out_dir = false;
     bool multifile = false;
     bool second_source = false;
+    bool slow_probe = false;
     const char* output = 0;
     const char* source = 0;
     const char* scenario = "pass";
@@ -355,6 +373,7 @@ int main(int argc, char** argv)
         seeded |= strncmp(argv[i], "--seed=", 7) == 0;
         c_mode |= strcmp(argv[i], "--std=c") == 0;
         out_dir |= strcmp(argv[i], "--out-dir=.") == 0;
+        slow_probe |= strcmp(argv[i], "--fixture-slow-probe") == 0;
         if (strcmp(argv[i], "--scenario") == 0 && i + 1 < argc)
         {
             scenario = argv[++i];
@@ -429,7 +448,7 @@ int main(int argc, char** argv)
     }
     else if (buster || clang)
     {
-        result = fixture_compile(output, source, buster, tier1, multifile, second_source);
+        result = fixture_compile(output, source, buster, tier1, multifile, second_source, slow_probe);
     }
     else if (argc == 1)
     {
