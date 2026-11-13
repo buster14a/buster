@@ -882,7 +882,14 @@ unit's front end (6.6 s for the checker's unit), its split and its largest
 changed part.
 
 **What it costs.** Develop's executable runs the compile path 1% to 2% slower
-than Release's (above) and writes the same outputs; its debug
+than Release's (above) and writes the same outputs. The gap is the import
+limit (#2624, [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/develop-runtime-2624-2026-11-13)):
+with CI's toolchain on the 9700X, Develop ran 3.0% more instructions than
+Release on `-c sqlite3.c` and 3.2% on the checker's unit; the splitter's
+fixes from #2559's step 5 at `--import 300` closed it (cycles within 0.1
+points of Release's), but cost 13% on a clean build and 13% to 15% on an
+edit, and at `--import 100` they gained nothing. Develop keeps the edit loop's
+side of that trade, `--import 100`, until the owner says otherwise; its debug
 information has functions and lines, not variables, so `perf` and backtraces
 work and a debugger's `print` doesn't (Debug is for that). Release and Debug are
 untouched: their commands are the same, and so are their executables, byte for
