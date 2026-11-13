@@ -1767,6 +1767,8 @@ struct CheckInputSpecifierJob
 // compare per identifier leaf.
 #define BUSTER_CHECK_DECLARATION_AUTO_GROUP 0x08u
 #define BUSTER_CHECK_DECLARATION_DEDUCED 0x10u
+// At a continuation comma (never a deduced declaration's name), carry an invalid recovered base type (#2509).
+#define BUSTER_CHECK_DECLARATION_INVALID_TYPE_GROUP 0x10u
 #define BUSTER_CHECK_DECLARATION_CONSTEXPR 0x20u
 #define BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP 0x40u
 // A deduced declarator's type (DEDUCED) is __auto_type's, whose errors name `__auto_type` (#147).
@@ -11304,6 +11306,15 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_free_standing = free_standing;
     reader->specifier_names = false;
     const TypeId base = !prepared ? 0 : continuation ? BUSTER_CHECK_RARE(reader, declaration_bases, first) : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
+    bool invalid_specifiers = continuation && (BUSTER_CHECK_RARE(reader, declaration_flags, first) & BUSTER_CHECK_DECLARATION_INVALID_TYPE_GROUP) != 0;
+    if (__builtin_expect(!continuation && parser->recovered_types != NULL, 0))
+    {
+        const uint8_t* const recovered_types = parser->recovered_types;
+        for (uint32_t token = first; !invalid_specifiers && token < i && token < count; token += 1)
+        {
+            invalid_specifiers = recovered_types[token] != 0;
+        }
+    }
     reader->specifier_free_standing = false;
     reader->specifier_owner = BUSTER_CHECK_NONE;
     // A typeof whose undeclared names were recovered (#1447): its declarator decides (below).
@@ -11436,7 +11447,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         uint32_t group_end = BUSTER_CHECK_NONE;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
         reader->declarator_swift_deferrable = false;
-        bool invalid = reader->declarator_invalid;
+        bool invalid = reader->declarator_invalid || invalid_specifiers;
         bool group_invalid = reader->declarator_group_invalid && !reader->declarator_names;
         // A bound's or the specifiers' undeclared names make the declaration invalid as its last declarator alone, and
         // not a typedef's (#1447): another stops as before.
@@ -12264,7 +12275,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     // convention or attributes: their columns, zero where nothing is written, then take no pages (#572).
                     const uint8_t flags = (uint8_t)(is_typedef | (is_inline << 1) | (thread_local << 2) |
                                                     (c23_auto ? BUSTER_CHECK_DECLARATION_AUTO_GROUP : 0) |
-                                                    (constexpr_decl ? BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP : 0));
+                                                    (constexpr_decl ? BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP : 0) |
+                                                    (invalid_specifiers ? BUSTER_CHECK_DECLARATION_INVALID_TYPE_GROUP : 0));
                     const uint32_t stored_class = private_extern ? C_NAME_PRIVATE_EXTERN : storage;
                     if (BUSTER_CHECK_RARE(reader, declaration_storage, i) != stored_class)
                     {
