@@ -6425,10 +6425,13 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         view->meanings.meanings = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, view->meanings.capacity);
         result->to_view = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
         result->to_original = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, total);
+        uint8_t* recovered_types = original->recovered_types != NULL ? check_prefix_column(output, total, sizeof(uint8_t)) : NULL;
+        view->recovered_types = recovered_types;
         uint32_t* positions = original->tokens.pragma_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, original->tokens.pragma_count) : NULL;
         valid = view->tokens.kinds != NULL && view->tokens.names != NULL && view->tokens.sources != NULL && view->tokens.flags != NULL &&
                 view->tree.roles != NULL && view->tree.parents != NULL && view->tree.depths != NULL && view->postorder != NULL && view->sizes != NULL &&
                 view->diagnostics != NULL && view->meanings.meanings != NULL && result->to_view != NULL && result->to_original != NULL &&
+                (original->recovered_types == NULL || recovered_types != NULL) &&
                 (original->tokens.pragma_count == 0 || positions != NULL);
         uint32_t written = 0;
         // The left-out statement whose `}` is still to come, after its kept operands (CHECK_DRIVER_CAST_OPERAND): its last
@@ -6558,6 +6561,12 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         if (valid)
         {
             result->to_view[count] = written;
+            // A later reading's token edits retain the invalid type's provenance at the mapped specifier (#2509).
+            for (uint32_t token = 0; recovered_types != NULL && token < written; token += 1)
+            {
+                const uint32_t source = result->to_original[token];
+                recovered_types[token] = source < count ? original->recovered_types[source] : 0;
+            }
             for (uint32_t i = 0; i < original->tokens.pragma_count; i += 1)
             {
                 const uint32_t position = original->tokens.pragma_positions[i];
