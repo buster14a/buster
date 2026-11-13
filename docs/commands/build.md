@@ -979,11 +979,13 @@ empty file's windows and 60 of `hello.c`'s.
   goes in `.text.buster_start` right before the shift source's first
   function, so that the shift moves that unit's code there too.
 - **Where:** a static link by lld (`start order: TRUE` in the configure
-  step's status line). The sanitizers', fuzzing and `BUSTER_HOST_RUNTIME`'s
-  dynamic links, and the other linkers, keep their layout and compile without
-  `-ffunction-sections`. `-ffunction-sections` alone made `.text` 6 KB longer
-  (0.02%): a jump to another function's section can't take the assembler's
-  short form.
+  step's status line). Every static build compiles with
+  `-ffunction-sections`, whatever its linker, so that switching
+  `BUSTER_LINKER` relinks alone; a static link by mold or GNU ld lays the
+  sections out without the script. The sanitizers', fuzzing and
+  `BUSTER_HOST_RUNTIME`'s dynamic links compile without it.
+  `-ffunction-sections` alone made `.text` 6 KB longer (0.02%): a jump to
+  another function's section can't take the assembler's short form.
 - **A stale list:** a function that is gone, renamed or no longer an object's
   matches nothing and stays out; a link whose list matches nothing at all
   fails (the script's `ASSERT`), which a changed object path would make.

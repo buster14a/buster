@@ -63,9 +63,14 @@ include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
-# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link by lld, every unit's functions in
-# sections of their own, and the ones small compiles run (cmake/BusterStartOrder.txt) placed together before .text.
+# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, every unit's functions in sections of
+# their own, whatever the linker, so that switching it relinks alone; and with lld, the ones small compiles run
+# (cmake/BusterStartOrder.txt) placed together before .text.
 set(buster_start_order FALSE)
+if(buster_static)
+    list(APPEND buster_host_flags -ffunction-sections)
+    list(APPEND buster_flags -ffunction-sections)
+endif()
 if(buster_static AND buster_lld)
     set(buster_start_order TRUE)
     include(cmake/BusterStartOrder.cmake)
@@ -74,8 +79,6 @@ if(buster_static AND buster_lld)
     set(start_order_symbols "${CMAKE_BINARY_DIR}/start-order.symbols")
     buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
-    list(APPEND buster_host_flags -ffunction-sections)
-    list(APPEND buster_flags -ffunction-sections)
     list(APPEND buster_linker_flags "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
 endif()
 message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}, start order: ${buster_start_order}")
