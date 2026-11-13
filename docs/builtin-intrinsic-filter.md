@@ -54,35 +54,61 @@ the gathers' 32-bit reads:
 
 The units of a command that share a table look each spelling up once.
 
-- **One pass.** The set-up reads each operand's code once. It counts the
-  distinct rows (a bit per row) and the call-shaped operands of rows together,
-  which size the tables as before.
-- **The vector path** takes the 64-token mask's operands without testing each
-  again, and gathers their names' codes 16 at once
-  (`check_input_intrinsic_unresolved`). A miss's code never changes, so most
-  operands need nothing more. The others go to an out-of-line handler
-  (`check_input_intrinsic_take`), which reads each one's code again. There, a
-  name not yet looked up is queued for the eight-lane filter and search and
-  marked pending, and the operands that meet a pending name wait for it. After
-  at most 8 names or 64 waiting operands, the batch is looked up and its
-  waiting operands are counted.
-- **The scalar path**, its twin, tests each token and looks each name up by
-  the unfiltered exact search. Both give every name its exact code and the
-  same counts, and no code is left pending.
+- **The fill (#2654).** Before the operand pass, `check_input_intrinsic_fill`
+  gives every id from the table's watermark (`InternTable.intrinsic_known`) to
+  its count a code, in id order, which is the order of the records.
+  - **The vector path** reads 16 spans at once, gathers each spelling's first
+    and last four bytes, and computes the filter's key, hash and bit in the
+    lanes. A spelling of under four bytes is read from its first byte and
+    masked to its length where four bytes from it lie within the written
+    records; the table's last such records take the scalar test.
+  - **The scalar path**, its twin, tests each id
+    (`check_input_intrinsic_candidate`).
+  - **Candidates** go to the exact table, and every other id is a miss's.
+  - **Later units** of a command fill only the ids that came since.
+- **The exact table** (`builtin_intrinsic_table`, `c_builtin_intrinsic_catalog.c`)
+  holds each row in one of 8,192 slots: its row plus one, and a 16-bit tag of a
+  hash of the whole name. A lookup hashes the name once and compares the names of
+  the rows whose tag matches, where the binary search made about twelve
+  compares. It is baked into the executable (`bake-tables`); an executable that
+  isn't baked makes it at first use, before a command's lanes start. The binary
+  search stays its oracle.
+- **One pass over the operands.** The set-up reads each operand's code once. It
+  counts the distinct rows (a bit per row) and the call-shaped operands of rows
+  together, which size the tables as before.
+  - **The vector path** takes the 64-token mask's operands without testing
+    each again, and gathers their names' codes 16 at once
+    (`check_input_intrinsic_unresolved`). Only a row's go on, to an out-of-line
+    handler (`check_input_intrinsic_take`).
+  - **The scalar path**, its twin, tests each token. Both give every name its
+    exact code and the same counts.
 - **Storage.** Only a unit with a row's name allocates: the tables, and the
-  name cache, made from the memo, 32 codes at once on the vector path. A name
-  the memo hasn't looked up keeps `UINT32_MAX`, which its readers look up
-  themselves, as before. The other names' entries are the exact answers the
-  scan would have written.
+  name cache, made from the memo, 32 codes at once on the vector path. Every id
+  the table has when the set-up runs has its exact answer there; a later one
+  keeps `UINT32_MAX`, which its readers look up themselves, as before.
 
-`test-checker`'s intrinsic memo test runs synthetic units on both paths
-against an oracle that looks every operand up by the exact search. The units
-mix operands, calls, other identifiers, deferred tokens, rows and their near
-misses. They run on fresh tables, and on shared tables that grow past their
-first room between units. One unit makes more than 64 operands wait for a
-batch of two names. Every run must give the oracle's counts, leave each code
-exact and none pending, and give each cache entry its exact answer or
-`UINT32_MAX`. A reset table must drop its codes.
+The tests:
+
+- **The memo test** (`test-checker`) runs synthetic units on both paths
+  against an oracle that looks every operand up by the exact search.
+  - **The units** mix operands, calls, other identifiers, deferred tokens, rows
+    and their near misses.
+  - **The tables** are fresh ones, and shared ones that grow past their first
+    room between units.
+  - **Every run** must give the oracle's counts, leave each code exact, and
+    give each cache entry its exact answer or `UINT32_MAX`. A reset table must
+    drop its codes.
+- **The fill test** (`test-checker`) builds tables of every catalogue name, a
+  near miss of each, and short names, the last of them under four bytes.
+  - **The 16-lane filter** must pass exactly the ids its scalar twin passes.
+  - **Both paths**, filled in one step and in two, must give every id the
+    binary search's code.
+- **`test-builtin-intrinsic-catalog`** checks the exact table against the
+  binary search:
+  - every row, and each row's near misses;
+  - library, short and empty names, and the bounded slices;
+  - every name ending at a guard page;
+  - a second build gives the same slots.
 
 ## Reproduction and regression coverage
 
