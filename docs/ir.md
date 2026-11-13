@@ -1115,8 +1115,14 @@ change of #2618 for recomputed values' definitions ([the allocation
 guide](tier1-allocation.md)'s rematerialization), speedtest1 runs 2,991.47 M
 instructions instead of 2,993.98 M; the split alone is 1.02 M of it
 (`jsonTranslateBlobToText` −0.89 M, `sqlite3FindFunction` −0.12 M), and Lua's
-scripts run the same instructions. The variants measured on the way, as
-speedtest1's instructions against main's (Lua's the same in each):
+scripts run the same instructions. On the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/8c36fd81893877b48bd17f6494d3f826cfc8eb01/docs/measurements/tier1-hoist-split-2618-2026-11-13),
+a hold of the lock per round), speedtest1's user instructions fall 0.09% at
+each of six layouts and its user cycles are 0.9976 (95% interval 0.9895 to
+1.0058); Lua's time is 0.9990 (0.9916 to 1.0065), with one object different;
+`sqlite3.c`'s `--tier1 -c` takes the same time, with 0.06% more instructions.
+The variants measured on the way, as speedtest1's instructions against main's
+(Lua's the same in each):
 
 | Variant | speedtest1 |
 | --- | ---: |
